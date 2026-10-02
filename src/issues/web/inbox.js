@@ -4,6 +4,7 @@ let inboxTasks = [],
   inboxDetail = null,
   inboxAt = 0,
   inboxLoading = null,
+  inboxCountLoading = null,
   inboxSignature = "",
   inboxBusy = false,
   inboxSearchTimer,
@@ -162,6 +163,20 @@ async function inboxSnapshot(force = false) {
 async function refreshInboxBadge() {
   if (document.hidden) return;
   try {
+    if (model.route.view !== "inbox" && !model.detail) {
+      if (!inboxCountLoading) {
+        const snapshotAt = inboxAt;
+        inboxCountLoading = inboxApi({ action: "count" })
+          .then((value) => {
+            // A full notice read may have refreshed the badge while this ran.
+            if (inboxAt === snapshotAt && model.route.view !== "inbox" && !model.detail)
+              updateInboxBadge(value.unread);
+          })
+          .finally(() => (inboxCountLoading = null));
+      }
+      await inboxCountLoading;
+      return;
+    }
     const tasks = await inboxSnapshot();
     if (model.route.view === "issues" && model.detail)
       await loadRelatedNotices(

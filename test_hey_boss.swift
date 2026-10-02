@@ -13,6 +13,12 @@ func audit() {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WEB_INBOX_ONLY"] == "1" {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-web-inbox-"+UUID().uuidString)
+        try! FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
+        defer { try? FileManager.default.removeItem(at:root) }
+        auditWebInbox(root:root); return
+    }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_ARTIFACT_EDITOR_PREVIEW"] {
         app.setActivationPolicy(.regular)
         let launch = ArtifactLaunch(project: "named:Editor visual test", file: path)
@@ -2336,6 +2342,8 @@ func auditWebInbox(root:URL) {
     let listReply=request("inbox_list")
     let summaries=listReply["tasks"] as! [[String:Any]]
     precondition(summaries.count==1 && summaries[0]["question"]==nil && summaries[0]["attachment"]==nil)
+    let countReply=request("inbox_list",nil,["count_only":true])
+    precondition(countReply["unread"] as? Int==1 && countReply["tasks"]==nil, "Unread badges must not receive notice rows")
     precondition((request("inbox_view",id)["task"] as! [String:Any])["status"] as? String=="pending")
     _=request("inbox_link",id,["issue":["project":"github.com/example/repo","number":8]])
     var row=try! store.database.get(id)
@@ -2382,6 +2390,11 @@ func auditWebInbox(root:URL) {
     precondition(try! winnerEncoder.encode(store.database.get("question"))==winners)
     precondition(request("inbox_clear",nil,["task_ids":clearedIDs])["cleared"] as? Int==0)
     precondition((try! store.database.pendingCount())==1)
+    try! store.database.execute("INSERT INTO dialogs VALUES('damaged','pending','invalid JSON')")
+    let finalCount=request("inbox_list",nil,["count_only":true])
+    let finalList=request("inbox_list")
+    precondition(finalCount["unread"] as? Int==finalList["unread"] as? Int && finalCount["unread"] as? Int==1)
+    precondition(finalCount["tasks"]==nil && (try! JSONSerialization.data(withJSONObject:finalCount)).count<100)
     print("Passed: web Inbox summaries, Markdown, creation links, relationship-only link/unlink, archived linking, read receipts, question read safety, invalid answers, winning answer preservation, cancellation, review comments and finish")
 }
 

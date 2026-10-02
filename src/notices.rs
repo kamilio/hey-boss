@@ -34,6 +34,7 @@ impl IssueReference {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     List,
+    Count,
     Clear {
         task_ids: Vec<String>,
     },
@@ -86,7 +87,7 @@ pub enum Action {
 impl Action {
     pub fn payload(&self) -> Result<Value> {
         let (command, id) = match self {
-            Self::List => ("inbox_list", None),
+            Self::List | Self::Count => ("inbox_list", None),
             Self::Clear { .. } => ("inbox_clear", None),
             Self::View { task_id } => ("inbox_view", Some(task_id)),
             Self::Read { task_id } => ("inbox_read", Some(task_id)),
@@ -103,6 +104,7 @@ impl Action {
         }
         let mut value = json!({"command":command,"sync":false,"task_id":id});
         match self {
+            Self::Count => value["count_only"] = json!(true),
             Self::Clear { task_ids } => {
                 if task_ids.is_empty() || task_ids.len() > 10000 {
                     return Err(Error::invalid("Select 1–10000 notices to clear"));
@@ -238,12 +240,24 @@ pub fn execute(action: &Action) -> Result<Value> {
             reply["error"].as_str().unwrap_or("Inbox action failed"),
         ));
     }
-    let mut result: Value = serde_json::from_str(reply["result"].as_str().ok_or_else(|| {
+    let result: Value = serde_json::from_str(reply["result"].as_str().ok_or_else(|| {
         Error::new(
             "inbox_unavailable",
             "Update the desktop app to use web Inbox",
         )
     })?)?;
+    project_response(action, result)
+}
+
+fn project_response(action: &Action, mut result: Value) -> Result<Value> {
+    if matches!(action, Action::Count) {
+        // Older desktop daemons ignore count_only and return their full list.
+        // Keep the web response compact while desktop/CLI upgrades converge.
+        let unread = result["unread"]
+            .as_u64()
+            .ok_or_else(|| Error::invalid("Invalid Inbox unread count"))?;
+        return Ok(json!({"ok":true,"unread":unread}));
+    }
     if let Some(task) = result.get_mut("task") {
         let body = if task["kind"] == "update" || task["kind"] == "alert" {
             task["question"].as_str()
@@ -269,6 +283,26 @@ pub fn execute(action: &Action) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unread_count_uses_a_compact_backward_compatible_inbox_request() {
+        let action: Action = serde_json::from_value(json!({"action":"count"})).unwrap();
+        let payload = action.payload().unwrap();
+        assert_eq!(payload["command"], "inbox_list");
+        assert_eq!(payload["count_only"], true);
+        for reply in [
+            json!({"unread":4}),
+            json!({"unread":4,"changed":false,"tasks":[{"title":"Legacy notice","iconData":"x".repeat(200000)}]}),
+        ] {
+            assert_eq!(
+                project_response(&action, reply).unwrap(),
+                json!({"ok":true,"unread":4})
+            );
+        }
+        for reply in [json!({}), json!({"unread":-1}), json!({"unread":"4"})] {
+            assert!(project_response(&action, reply).is_err());
+        }
+    }
+
     #[test]
     fn clear_accepts_only_a_bounded_explicit_snapshot() {
         let action: Action =
