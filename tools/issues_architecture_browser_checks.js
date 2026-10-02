@@ -51,9 +51,8 @@ async page => {
       await page.keyboard.press('Enter');
       check(await page.locator('#pr-url').isVisible(), mode + ': keyboard reveals PR form');
       check(await page.locator('#comment-body').inputValue() === 'An unsent finding survives opening supporting details.', mode + ': disclosures preserve comment draft');
-      await page.locator('#history-toggle').click();
-      await page.locator('#activity-timeline .timeline-item').first().waitFor();
-      check(await page.locator('#history-toggle').getAttribute('aria-expanded') === 'true', mode + ': activity loads in discussion');
+      await page.locator('#comments .issue-activity').first().waitFor();
+      check(await page.locator('#comments .issue-activity').first().isVisible(), mode + ': activity loads directly in discussion');
       await page.locator('.progress-history summary').click();
       await page.locator('.progress-history-list li').nth(19).waitFor();
       check(await page.locator('.progress-history-more').isVisible(), mode + ': status history pagination works');
