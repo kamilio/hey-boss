@@ -102,11 +102,15 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         )? {
             db.execute("DELETE FROM project_name_collisions WHERE legacy=0", [])?;
         }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='project_collision_scope')", [], |r| r.get::<_, bool>(0))? {
+            db.execute_batch("CREATE INDEX project_collision_scope ON project_name_collisions(project_id,name COLLATE NOCASE,rejected_id)")?;
+        }
         return Ok(());
     }
     db.execute_batch("BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS project_name_keys(name TEXT PRIMARY KEY COLLATE NOCASE,project_id TEXT NOT NULL UNIQUE REFERENCES projects(id));
         CREATE TABLE IF NOT EXISTS project_name_collisions(rejected_id TEXT PRIMARY KEY,name TEXT NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id),legacy INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS project_collision_scope ON project_name_collisions(project_id,name COLLATE NOCASE,rejected_id);
         INSERT OR IGNORE INTO project_name_keys SELECT name,id FROM (
             SELECT p.name,p.id,row_number() OVER (PARTITION BY p.name COLLATE NOCASE ORDER BY
                 (SELECT count(*) FROM issues i WHERE i.project_id=p.id AND i.deleted_at IS NULL) DESC,
@@ -142,18 +146,58 @@ pub(super) fn canonical(db: &Connection, project: Project) -> Result<Project> {
     Ok(by_name(db, &project.name)?.unwrap_or(project))
 }
 
-pub(super) fn warnings(db: &Connection) -> Result<Value> {
-    let mut stmt = db.prepare("SELECT name,project_id,rejected_id,legacy FROM project_name_collisions ORDER BY name COLLATE NOCASE,rejected_id")?;
-    let rows = stmt.query_map([], |r| {
+/// Batch legacy visibility checks while preserving every kind of saved work.
+pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<String>> {
+    if projects.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let mut query = db.prepare(
+        "SELECT selected.value FROM json_each(?1) selected WHERE
+        EXISTS(SELECT 1 FROM issues WHERE project_id=selected.value)
+        OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=selected.value)
+        OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=selected.value)
+        OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=selected.value)
+        OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=selected.value)",
+    )?;
+    Ok(query
+        .query_map([serde_json::to_string(projects)?], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
+pub(super) fn warnings(db: &Connection, project: Option<&str>) -> Result<Value> {
+    let filter = if project.is_some() {
+        "project_id=?1"
+    } else {
+        "?1 IS NULL"
+    };
+    let mut stmt = db.prepare(&format!("SELECT name,project_id,rejected_id,legacy FROM project_name_collisions WHERE {filter} ORDER BY name COLLATE NOCASE,rejected_id"))?;
+    let rows = stmt.query_map([project], |r| {
         let name: String = r.get(0)?;
         let legacy: bool = r.get(3)?;
         Ok(json!({"name":name,"project_id":r.get::<_,String>(1)?,"rejected_id":r.get::<_,String>(2)?,"legacy":r.get::<_,bool>(3)?,
             "message":if legacy { format!("Project {name} had multiple identities. One destination is listed; saved history is preserved.") } else { format!("Project {name} already exists. Another identity was detected; no new project was created.") }}))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut metadata_ids: Vec<_> = rows
+        .iter()
+        .flat_map(|w| {
+            [
+                w["rejected_id"].as_str().unwrap(),
+                w["project_id"].as_str().unwrap(),
+            ]
+        })
+        .filter(|id| super::super::identity::is_git_metadata_project(id))
+        .collect();
+    metadata_ids.sort_unstable();
+    metadata_ids.dedup();
+    let saved = saved_work(db, &metadata_ids)?;
+    let visible_identity =
+        |id: &str| !super::super::identity::is_git_metadata_project(id) || saved.contains(id);
     let mut visible = Vec::with_capacity(rows.len());
     for w in rows {
-        if !empty_git_metadata(db, w["rejected_id"].as_str().unwrap())?
-            && !empty_git_metadata(db, w["project_id"].as_str().unwrap())?
+        if visible_identity(w["rejected_id"].as_str().unwrap())
+            && visible_identity(w["project_id"].as_str().unwrap())
             && !super::super::identity::is_home_project(&Project {
                 id: w["rejected_id"].as_str().unwrap().into(),
                 name: w["name"].as_str().unwrap().into(),
