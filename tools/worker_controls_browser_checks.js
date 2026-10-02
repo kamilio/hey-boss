@@ -74,7 +74,13 @@ async page => {
   check(await add().isEnabled(),'Conflicting saves show an error and leave controls usable');conflict=false;
   await page.locator('[data-host="remote"] .machine-controls [data-machine-action="project"]').click();await page.locator('#machine-editor').waitFor({state:'visible'});
   await page.locator('#machine-git').fill('git@github.com:acme/new-project.git');
-  check(await page.locator('#machine-path').inputValue()==='~/Workspace/new-project','Machine checkout setup still suggests a project path');
+  check(await page.locator('#machine-path').inputValue()===''&&(await page.locator('#machine-path').getAttribute('placeholder')).includes('~/Workspace/new-project'),'New projects default to automatic reuse with the clone destination shown');
+  check(!await page.locator('#machine-path').evaluate(e=>e.required),'Automatic checkout does not require an explicit path');
+  await page.locator('#machine-path').fill('/custom/separate-clone');await page.locator('#machine-workspace').fill('~/Other');
+  check(await page.locator('#machine-path').inputValue()==='/custom/separate-clone','Changing workspace preserves a deliberately selected checkout');
+  await page.locator('#machine-path').fill('');await page.locator('#machine-editor-save').click();await page.locator('#machine-editor').waitFor({state:'hidden'});
+  check(requests.at(-1).machine_update.path==='','Saving automatic checkout sends no forced destination');
+  await page.locator('[data-host="remote"] .machine-controls [data-machine-action="project"]').click();await page.locator('#machine-editor').waitFor({state:'visible'});
   check((await page.locator('#machine-editor-status').innerText()).includes('offline'),'Offline project setup explains deferred application');
   await page.locator('#machine-editor-cancel').click();
   await page.getByRole('button',{name:'Add worker for atlas',exact:true}).click();await page.locator('#machine-editor').waitFor({state:'visible'});
