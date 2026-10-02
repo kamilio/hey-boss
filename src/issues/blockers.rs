@@ -22,7 +22,8 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%' AND instr(sql,'''blockers'',')=0)",
         [], |r| r.get(0),
     )?;
-    if present && !stale_capture {
+    let indexed: bool = db.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='index' AND name IN ('issue_dependency_sources','issue_active_graph')", [], |r|r.get(0))?;
+    if present && !stale_capture && indexed {
         return Ok(());
     }
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -37,6 +38,8 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
             ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';",
         )?;
     }
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_dependency_sources ON issues(project_id,number) WHERE deleted_at IS NULL AND blockers<>'[]';
+        CREATE INDEX IF NOT EXISTS issue_active_graph ON issues(project_id,number,state,deleted_at) WHERE state<>'closed' AND deleted_at IS NULL;")?;
     // Existing capture triggers have a fixed column list. Replace them in
     // this transaction before normalization writes enter the sync journal.
     let triggers = tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%'")?
@@ -77,6 +80,41 @@ struct Graph {
 }
 impl Graph {
     fn load(db: &Connection, project: &str) -> Result<Self> {
+        Self::load_selected(db, project, None)
+    }
+
+    fn load_active(db: &Connection, project: &str) -> Result<Self> {
+        let numbers = db.query_collect("SELECT number FROM issues WHERE project_id=?1 AND state<>'closed' AND deleted_at IS NULL", [project], |r| -> rusqlite::Result<i64> { r.get(0) })?;
+        Self::load_for(db, project, &numbers)
+    }
+
+    /// Views need the requested issues, their direct dependents, and each one's
+    /// forward dependency closure. Unrelated completed history adds no work.
+    fn load_for(db: &Connection, project: &str, numbers: &[i64]) -> Result<Self> {
+        let numbers = db.query_collect(
+            "WITH RECURSIVE requested(number) AS (SELECT value FROM json_each(?2)),
+            roots(number) AS (
+                SELECT number FROM requested
+                UNION SELECT i.number FROM issues i CROSS JOIN json_each(i.blockers) b
+                    WHERE i.project_id=?1 AND i.deleted_at IS NULL AND i.blockers<>'[]'
+                        AND b.value IN (SELECT number FROM requested)
+                UNION SELECT parent_number FROM issue_subtasks WHERE project_id=?1
+                    AND child_number IN (SELECT number FROM requested)
+            ), reachable(number) AS (
+                SELECT number FROM roots
+                UNION SELECT b.value FROM reachable r CROSS JOIN issues i
+                    ON i.project_id=?1 AND i.number=r.number CROSS JOIN json_each(i.blockers) b
+                UNION SELECT s.child_number FROM reachable r CROSS JOIN issue_subtasks s
+                    ON s.project_id=?1 AND s.parent_number=r.number
+            ) SELECT number FROM reachable",
+            params![project, serde_json::to_string(numbers)?],
+            |row| -> rusqlite::Result<i64> { row.get(0) },
+        )?;
+        Self::load_selected(db, project, Some(&numbers))
+    }
+
+    fn load_selected(db: &Connection, project: &str, numbers: Option<&[i64]>) -> Result<Self> {
+        let selected = numbers.map(serde_json::to_string).transpose()?;
         let mut graph = Self {
             satisfied: RefCell::new(BTreeMap::new()),
             prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
@@ -86,8 +124,16 @@ impl Graph {
             dependents: BTreeMap::new(),
             active_cache: RefCell::new(BTreeMap::new()),
         };
-        let mut stmt = db.prepare("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for row in stmt.query_map([project], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?)))? {
+        let (source, filter) = if selected.is_some() {
+            (
+                "json_each(?2) selected CROSS JOIN issues",
+                "AND number=selected.value",
+            )
+        } else {
+            ("issues", "AND ?2 IS NULL")
+        };
+        let mut stmt = db.prepare(&format!("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version FROM {source} WHERE project_id=?1 {filter} ORDER BY sort_order,number"))?;
+        for row in stmt.query_map(params![project,selected], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?)))? {
             let (n, issue, links) = row?;
             let parsed_links: Vec<i64> = serde_json::from_str(&links)?;
             if issue["deleted_at"].is_null() {
@@ -98,8 +144,16 @@ impl Graph {
             graph.links.insert(n, parsed_links);
             graph.issues.insert(n, issue);
         }
-        let mut stmt = db.prepare("SELECT r.parent_number,r.child_number FROM issue_subtasks r JOIN issues i ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 ORDER BY i.sort_order,i.number")?;
-        for row in stmt.query_map([project], |r| {
+        let (source, filter) = if selected.is_some() {
+            (
+                "json_each(?2) selected CROSS JOIN issue_subtasks r",
+                "AND r.parent_number=selected.value",
+            )
+        } else {
+            ("issue_subtasks r", "AND ?2 IS NULL")
+        };
+        let mut stmt = db.prepare(&format!("SELECT r.parent_number,r.child_number FROM {source} JOIN issues i ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 {filter} ORDER BY i.sort_order,i.number"))?;
+        for row in stmt.query_map(params![project, selected], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })? {
             let (parent, child) = row?;
@@ -359,7 +413,7 @@ pub(super) fn validate_new_links(db: &Connection, project: &str, links: &[i64]) 
             "Use up to 100 different positive blocker issue numbers",
         ));
     }
-    let graph = Graph::load(db, project)?;
+    let graph = Graph::load_for(db, project, links)?;
     let mut any_unfinished = false;
     for &target in links {
         if graph
@@ -393,7 +447,9 @@ pub(crate) fn validate_links(
             "Use up to 100 different positive blocker issue numbers",
         ));
     }
-    let graph = Graph::load(db, project)?;
+    let mut targets = links.to_vec();
+    targets.push(number);
+    let graph = Graph::load_for(db, project, &targets)?;
     for &target in links {
         if graph
             .issues
@@ -415,14 +471,14 @@ pub(super) fn validate_subtask(
     parent: i64,
     child: i64,
 ) -> Result<()> {
-    Graph::load(db, project)?.validate_edge(parent, child)
+    Graph::load_for(db, project, &[parent, child])?.validate_edge(parent, child)
 }
 pub(super) fn has_dependencies(db: &Connection, project: &str, number: i64) -> Result<bool> {
-    Ok(Graph::load(db, project)?.has_active(number))
+    Ok(Graph::load_for(db, project, &[number])?.has_active(number))
 }
 
 pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Result<Vec<Value>> {
-    let mut graph = Graph::load(db, project)?;
+    let mut graph = Graph::load_for(db, project, &[number])?;
     let active = graph.active(number);
     graph.load_prs(db, project, &active.keys().copied().collect())?;
     Ok(active
@@ -434,7 +490,7 @@ pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Re
 /// Validate an incoming fleet relationship inside its savepoint, before the
 /// batch reconciler can release a claim acquired while the replica was offline.
 pub(crate) fn validate_subtask_claims(db: &Connection, project: &str) -> Result<()> {
-    Graph::load(db, project)?.validate_subtask_claims()
+    Graph::load_active(db, project)?.validate_subtask_claims()
 }
 
 /// One graph snapshot per mutation. Reads never take a writer lock; only actual
@@ -479,7 +535,7 @@ fn reconcile_graph(
     upgrading: bool,
     rework: bool,
 ) -> Result<()> {
-    let graph = Graph::load(db, project)?;
+    let graph = Graph::load_active(db, project)?;
     for (&number, issue) in &graph.issues {
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;
@@ -602,9 +658,7 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
     }) {
         return Ok(());
     }
-    let mut graph = Graph::load(db, project)?;
-    let mut references = BTreeSet::new();
-    for number in ["issue", "parent_issue", "child_issue"]
+    let numbers: Vec<i64> = ["issue", "parent_issue", "child_issue"]
         .iter()
         .filter_map(|key| result[*key]["number"].as_i64())
         .chain(
@@ -613,7 +667,13 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
                 .flat_map(|key| result[*key].as_array().into_iter().flatten())
                 .filter_map(|issue| issue["number"].as_i64()),
         )
-    {
+        .collect();
+    if numbers.is_empty() {
+        return Ok(());
+    }
+    let mut graph = Graph::load_for(db, project, &numbers)?;
+    let mut references = BTreeSet::new();
+    for number in numbers {
         references.extend(graph.links.get(&number).into_iter().flatten().copied());
         references.extend(graph.active(number).into_keys());
         references.extend(
@@ -710,6 +770,106 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_dependency_graph_matches_full_history_for_cycles_and_deleted_ancestors() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-archive-graph-parity-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let db = crate::issues::Store::open(&path).unwrap().into_database();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',20); INSERT INTO agents VALUES('human:test','{}',0);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<12)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                SELECT 'named:test',x,'Task','','open','human:test',0,0,1,'[]',20-x FROM n;
+            UPDATE issues SET state='ready' WHERE number IN (2,7,8);
+            UPDATE issues SET state='closed' WHERE number IN (3,4,9,11,12);
+            UPDATE issues SET blockers='[2]' WHERE number=1;
+            UPDATE issues SET blockers='[1]' WHERE number IN (6,9);
+            UPDATE issues SET blockers='[8]' WHERE number=7;
+            UPDATE issues SET blockers='[7]' WHERE number=8;
+            UPDATE issues SET blockers='[999]' WHERE number=10;
+            UPDATE issues SET deleted_at=1 WHERE number=6;
+            INSERT INTO issue_subtasks VALUES('named:test',2,3,0,'human:test'),('named:test',3,4,0,'human:test'),('named:test',4,5,0,'human:test'),('named:test',11,6,0,'human:test');").unwrap();
+        for numbers in [
+            vec![1],
+            vec![5],
+            vec![6],
+            vec![7, 8],
+            vec![9, 10, 11],
+            vec![999],
+        ] {
+            let full = Graph::load(&db, "named:test").unwrap();
+            let scoped = Graph::load_for(&db, "named:test", &numbers).unwrap();
+            assert!(scoped.issues.len() < full.issues.len());
+            for number in numbers {
+                assert_eq!(
+                    scoped.active(number),
+                    full.active(number),
+                    "active #{number}"
+                );
+                assert_eq!(
+                    scoped.links.get(&number),
+                    full.links.get(&number),
+                    "links #{number}"
+                );
+                assert_eq!(
+                    scoped.dependents.get(&number),
+                    full.dependents.get(&number),
+                    "dependents #{number}"
+                );
+                assert_eq!(
+                    scoped.reference(number, "linked"),
+                    full.reference(number, "linked")
+                );
+                for (dependent, _) in full.dependents.get(&number).into_iter().flatten() {
+                    assert_eq!(scoped.active(*dependent), full.active(*dependent));
+                }
+            }
+        }
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_dependency_reads_do_not_scan_unrelated_closed_issue_headers() {
+        let mut work = Vec::new();
+        for count in [128, 8192] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-archive-graph-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let db = crate::issues::Store::open(&path).unwrap().into_database();
+            db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',10000); INSERT INTO agents VALUES('human:test','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,blockers) VALUES
+                ('named:test',1,'Active','','blocked','human:test',0,0,1,'[]','[2]'),
+                ('named:test',2,'Prerequisite','','ready','human:test',0,0,1,'[]','[]'),
+                ('named:test',3,'Child','','open','human:test',0,0,1,'[]','[]');
+                INSERT INTO issue_subtasks VALUES('named:test',2,3,0,'human:test');").unwrap();
+            db.execute("WITH RECURSIVE n(x) AS (VALUES(4) UNION ALL SELECT x+1 FROM n WHERE x<?1+3) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,closed_at,version,labels) SELECT 'named:test',x,'Old closed task','','closed','human:test',0,0,0,1,'[]' FROM n", [count]).unwrap();
+            drop(db);
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            assert!(has_dependencies(&db, "named:test", 1).unwrap());
+            reconcile(&db, "named:test", Some("human:test"), 1).unwrap();
+            let mut result = json!({"issues":[{"number":1},{"number":3}]});
+            enrich(&db, "named:test", &mut result).unwrap();
+            assert_eq!(result["issues"][0]["blocked_by"][0]["number"], 2);
+            assert_eq!(result["issues"][1]["blocking"][0]["number"], 2);
+            drop(db);
+            let measurement = transport.join().unwrap();
+            eprintln!(
+                "{count} closed headers: {} RPCs, {} VM steps",
+                measurement.0, measurement.1
+            );
+            work.push(measurement);
+            owner.stop();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        assert_eq!(work[0], work[1], "Old unrelated task headers added work");
+    }
 
     #[test]
     fn project_cycle_validation_does_not_rewalk_every_dependency_chain() {
