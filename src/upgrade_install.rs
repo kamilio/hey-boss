@@ -54,17 +54,48 @@ fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()
 }
 fn restart_desktop(binary: &Path) -> io::Result<()> {
     restart_hey_gh_daemon();
-    let uid = unsafe { libc::getuid() };
     refresh_fleet_controller(
         binary,
         &home()?.join("Library/LaunchAgents/local.hey-boss-fleet-controller.plist"),
     )?;
-    output(
-        Command::new("/bin/launchctl")
-            .args(["kickstart", "-k"])
-            .arg(format!("gui/{uid}/local.hey-boss")),
+    reload_desktop_registration(
+        Path::new("/bin/launchctl"),
+        &home()?.join("Library/LaunchAgents/local.hey-boss.plist"),
     )?;
     Ok(())
+}
+fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Result<()> {
+    let domain = format!("gui/{}", unsafe { libc::getuid() });
+    // An atomically replaced ad-hoc signed app needs a fresh launch registration.
+    // kickstart retains launchd's old constraints and can reject the new bundle.
+    // The job may already be unloaded after a failed upgrade; still bootstrap it.
+    let _ = Command::new(launchctl)
+        .args(["bootout", &format!("{domain}/local.hey-boss")])
+        .output();
+    let mut last = None;
+    for delay in [0, 100, 200, 400, 800, 1000, 2000, 2000, 2000] {
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        let result = Command::new(launchctl)
+            .args(["bootstrap", &domain])
+            .arg(registration)
+            .output()?;
+        if result.status.success() {
+            return Ok(());
+        }
+        let retry = result.status.code() == Some(5);
+        last = Some(result);
+        if !retry {
+            break;
+        }
+    }
+    let failure = last.unwrap();
+    Err(error(format!(
+        "Desktop service reload failed ({}): {}",
+        failure.status,
+        String::from_utf8_lossy(&failure.stderr)
+    )))
 }
 fn restart_companion() -> io::Result<()> {
     restart_hey_gh_daemon();
@@ -367,6 +398,45 @@ fn publish_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_bundle_replacement_reloads_registration_and_propagates_bootstrap_errors() {
+        for failure in ["none", "temporary", "permanent"] {
+            let temp = Temp::new().unwrap();
+            let launchctl = temp.0.join("launchctl test");
+            let registration = launchctl.with_extension("plist");
+            fs::write(&registration, "existing registration").unwrap();
+            let domain = format!("gui/{}", unsafe { libc::getuid() });
+            script(&launchctl, &format!(r#"
+case "$1" in
+  bootout)
+    test "$#" = 2 && test "$2" = '{domain}/local.hey-boss' || exit 19
+    echo bootout >> "$0.calls"
+    exit 113;;
+  bootstrap)
+    test "$#" = 3 && test "$2" = '{domain}' && test "$3" = "$0.plist" || exit 19
+    test -f "$0.calls" || exit 20
+    echo bootstrap >> "$0.calls"
+    if test '{failure}' = permanent; then echo denied >&2; exit 77; fi
+    if test '{failure}' = temporary && ! test -f "$0.retried"; then touch "$0.retried"; exit 5; fi;;
+  *) echo obsolete-kickstart >&2; exit 21;;
+esac
+"#));
+            let result = reload_desktop_registration(&launchctl, &registration);
+            if failure == "permanent" {
+                assert!(result.unwrap_err().to_string().contains("denied"));
+            } else {
+                result.unwrap();
+            }
+            let calls = fs::read_to_string(launchctl.with_extension("calls")).unwrap();
+            assert_eq!(calls, if failure == "temporary" {
+                "bootout\nbootstrap\nbootstrap\n"
+            } else {
+                "bootout\nbootstrap\n"
+            });
+            assert_eq!(fs::read_to_string(&registration).unwrap(), "existing registration");
+        }
+    }
+
     #[test]
     fn existing_standalone_companions_follow_package_upgrades_without_duplicates() {
         let temp = Temp::new().unwrap();
