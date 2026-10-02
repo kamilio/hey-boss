@@ -80,14 +80,45 @@ pub(super) fn assign(
         || !matches!(issue.state.as_str(), "open" | "ready")
     {
         return Err(Error::conflict(
-            "Assignment requires an open, non-draft issue",
+            "Assignment requires an open or Ready, non-draft issue",
         ));
     }
-    if issue.assignee.as_deref() != Some(WATCHER) {
-        ownership(issue, actor, actor.id == "human:boss")?;
+    let own_ready_handoff = target == "github"
+        && issue.state == "ready"
+        && issue.assignee.as_deref() == Some("human:boss")
+        && db.query_row(
+            "SELECT coalesce((SELECT action='ready' AND actor=?3 AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','assigned','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1),0)",
+            params![project.id, issue.number, actor.id], |r| r.get::<_, bool>(0),
+        )?;
+    if !own_ready_handoff && ownership(issue, actor, actor.id == "human:boss").is_err() {
+        return Err(Error::conflict(format!(
+            "Issue #{} is claimed by {}; only its owner or Boss can change assignment. The agent that handed off its own claim may run `hey-boss issue assign {} github` after Ready. For another owner's Ready handoff, ask Boss to assign GitHub in the web UI; do not reopen or unassign it",
+            issue.number,
+            issue.assignee.as_deref().unwrap(),
+            issue.number
+        )));
+    }
+    if own_ready_handoff {
+        // A Ready handoff delegates only this agent's completed claim. Never
+        // release a later reservation or interrupt a foreign/unclaimed attempt.
+        let reserved: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?4) OR EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND (actor_id<>?3 OR claimed_at IS NULL))",
+            params![project.id, issue.number, actor.id, actor.machine], |r| r.get(0),
+        )?;
+        if reserved {
+            return Err(Error::conflict(
+                "Ready handoff blocked by a fleet reservation or unfinished/unclaimed worker attempt; ownership and reservation preserved. Inspect `hey-boss issue allocation NUMBER --supervisor` before retrying",
+            ));
+        }
     }
     let other_run:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND actor_id<>?3)",params![project.id,issue.number,actor.id],|r|r.get(0))?;
-    let retain_claim = target == "github" && live_claim(db, issue.assignee.as_deref())?;
+    let claim_owner = if own_ready_handoff {
+        Some(actor.id.as_str())
+    } else {
+        issue.assignee.as_deref()
+    };
+    let retain_claim = target == "github" && live_claim(db, claim_owner)?;
+    let retained_owner = retain_claim.then(|| claim_owner.unwrap().to_owned());
     if other_run && !retain_claim {
         return Err(Error::conflict(
             "An agent is still running; stop it before changing its assignment",
@@ -129,7 +160,7 @@ pub(super) fn assign(
     }
     let previous = issue.assignee.clone();
     issue.assignee = match target {
-        "github" if retain_claim => previous.clone(),
+        "github" if retain_claim => retained_owner,
         "github" => Some(WATCHER.into()),
         "boss" => Some("human:boss".into()),
         _ => None,
@@ -182,7 +213,7 @@ pub(super) fn assign(
         )?;
     }
     let mut data = json!({"target":target,"previous_assignee":previous,"assignee":issue.assignee});
-    if retain_claim && previous.as_deref() == Some(&actor.id) {
+    if retain_claim && (own_ready_handoff || previous.as_deref() == Some(&actor.id)) {
         // Assignment runs on the supervisor, including companion handoffs.
         // Scope the acknowledgement to this attempt, not a reusable session ID.
         if let Some(run) = live_issue_run(db, &project.id, issue.number, &actor.id)? {
@@ -750,7 +781,7 @@ pub(super) fn own_handoff(
     job: &crate::issues::worker::Job,
     issue: &Issue,
 ) -> Result<bool> {
-    if issue.state != "open"
+    if !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
         || issue.title != job.issue["title"]
         || issue.body != job.issue["body"]
@@ -758,7 +789,7 @@ pub(super) fn own_handoff(
     {
         return Ok(false);
     }
-    Ok(db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id],|r|r.get(0))?)
+    Ok(db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND (json_extract(data,'$.previous_assignee')=?3 OR (json_extract(data,'$.previous_assignee')='human:boss' AND json_extract(data,'$.github_handoff.run')=?4)) FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id],|r|r.get(0))?)
 }
 
 fn delivered_to(db: &Connection, run: &str, status: &Value) -> Result<bool> {
@@ -782,7 +813,7 @@ pub(super) fn release_worker(
     // A deliberate handoff can end with a blocked/interrupted result while
     // waiting for external input. Consume only that run's exact snapshot;
     // later evidence and events never delivered to the worker stay runnable.
-    let handed_off = db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee')=?3 AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|r.get::<_,bool>(0))?;
+    let handed_off = db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee') IN (?3,'human:boss') AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|r.get::<_,bool>(0))?;
     let handed_off = handed_off
         && own_handoff(
             db,

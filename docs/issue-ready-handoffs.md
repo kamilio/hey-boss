@@ -43,6 +43,18 @@ for offline replay. `fleet capabilities` reports `issue_ready`; older peers must
 be upgraded. The web Ready action sends the displayed snapshot and retains retry
 IDs after uncertain errors.
 
+After handing off your claimed task, run `hey-boss issue assign NUMBER github`
+to transfer its automatic Boss assignment to the GitHub watcher. This atomic,
+version-guarded transfer preserves Ready, dependent usability, and your running
+attempt. It requires an open attached GitHub PR and the same actor that handed
+off the claim, with no intervening ownership change, foreign reservation, or
+foreign/unclaimed attempt. Comments and label edits do not revoke the handoff.
+Another owner's handoff requires Boss to assign GitHub in the web UI. Do not
+reopen, unassign, impersonate Boss, or use `--force` to enable the watcher.
+Companions use the existing `issue_assignment` tunnel capability and never save
+an offline assignment. For uncertain responses, retry the identical command with
+the same `--request-id`; upgrade the supervisor if it still rejects your own handoff.
+
 Labels, including `PR ready` and `rework needed`, are metadata: a label-only
 batch preserves lifecycle and ownership. It advances the issue version, so an
 older Ready guard must be refreshed. Dependency reconciliation uses lifecycle,

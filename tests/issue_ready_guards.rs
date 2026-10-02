@@ -227,6 +227,85 @@ fn ready_guard_preserves_own_running_attempt_and_unknown_ci() {
     let response = f.store.execute(&request).unwrap();
     assert_eq!(run(), before);
     assert_eq!(response["issue"]["pull_requests"][0]["status"], "unknown");
+    let assigned = f.run(json!({"action":"assign","number":1,"target":"github","if_version":response["issue"]["version"]}));
+    assert_eq!(assigned["issue"]["state"], "ready");
+    assert_eq!(assigned["issue"]["assignee"], "codex:owner");
+    assert_eq!(assigned["issue"]["assignment"]["kind"], "github");
+    assert_eq!(
+        run(),
+        before,
+        "Watcher handoff must not stop the running attempt"
+    );
+}
+
+#[test]
+fn ready_github_handoff_preserves_dependencies_and_rejects_races() {
+    let mut f = Fixture::new();
+    f.run(json!({"action":"create","title":"Dependent","body":"","labels":[]}));
+    f.run(json!({"action":"set_blockers","number":2,"blockers":[1],"force":false}));
+    f.run(json!({"action":"claim","number":1,"force":false}));
+    let ready = f.handoff();
+    let response = f.store.execute(&ready).unwrap();
+    let mut assign = Fixture::request(
+        json!({"action":"assign","number":1,"target":"github","if_version":response["issue"]["version"]}),
+    );
+    assign.request_id = Some("watch-once".into());
+    for sql in [
+        "INSERT INTO fleet_allocations VALUES('named:Ready QA',1,'foreign')",
+        "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,job,machine,owner_pid,owner_start) VALUES('foreign','named:Ready QA',1,'codex:other','running',0,0,'{}','foreign',1,'test')",
+        "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,job,machine,owner_pid,owner_start) VALUES('unclaimed','named:Ready QA',1,'codex:owner','starting',0,0,'{}','local',1,'test')",
+    ] {
+        f.sql(sql);
+        f.reject(&assign, "reservation");
+        f.sql("DELETE FROM fleet_allocations; DELETE FROM worker_runs");
+    }
+    f.run(json!({"action":"edit","number":1,"add_labels":["reviewed"],"remove_labels":[]}));
+    f.reject(&assign, "refresh");
+    let version = f.view()["issue"]["version"].clone();
+    assign.operation = serde_json::from_value(
+        json!({"action":"assign","number":1,"target":"github","if_version":version}),
+    )
+    .unwrap();
+    let result = f.store.execute_supervisor(&assign).unwrap();
+    assert_eq!(result["issue"]["state"], "ready");
+    assert_eq!(result["issue"]["assignee"], "watcher:github");
+    assert_eq!(
+        f.run(json!({"action":"view","number":2}))["issue"]["state"],
+        "open"
+    );
+    assert_eq!(f.store.execute_supervisor(&assign).unwrap(), result);
+}
+
+#[test]
+fn ready_github_handoff_requires_the_original_owner_and_latest_handoff() {
+    for mode in ["foreign", "unowned", "reassigned", "other-target", "no-pr"] {
+        let mut f = Fixture::new();
+        if mode != "unowned" {
+            f.run(json!({"action":"claim","number":1,"force":false}));
+        }
+        let ready = f.handoff();
+        f.store.execute(&ready).unwrap();
+        if mode == "reassigned" {
+            f.sql("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Ready QA',1,'human:boss','assigned',1,'{\"assignee\":\"human:boss\"}')");
+        }
+        if mode == "no-pr" {
+            f.run(json!({"action":"remove_pull_request","number":1,"url":"https://github.com/example/repo/pull/1"}));
+        }
+        let mut assign = Fixture::request(
+            json!({"action":"assign","number":1,"target":if mode == "other-target" {"unassigned"} else {"github"},"if_version":f.view()["issue"]["version"]}),
+        );
+        if mode == "foreign" {
+            assign.actor.as_mut().unwrap().id = "codex:other".into();
+        }
+        f.reject(
+            &assign,
+            if mode == "no-pr" {
+                "open GitHub pull request"
+            } else {
+                "Ready handoff"
+            },
+        );
+    }
 }
 
 #[test]

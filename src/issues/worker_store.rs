@@ -2317,6 +2317,44 @@ mod tests {
     }
 
     #[test]
+    fn ready_then_github_handoff_keeps_worker_alive_and_finishes() {
+        for state in ["completed", "blocked", "interrupted", "failed"] {
+            for late in [false, true] {
+                let mut f = HandoffFixture::new(true);
+                f.apply(Operation::Ready {
+                    number: 1,
+                    force: false,
+                    guard: None,
+                    clear_manual_hold: false,
+                    keep_draft: false,
+                });
+                f.apply(Operation::Assign {
+                    number: 1,
+                    target: "github".into(),
+                    if_version: f.issue().version,
+                });
+                assert_eq!(f.issue().state, "ready");
+                assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
+                assert!(!f.store.worker_cancelled(&f.job).unwrap());
+                if late {
+                    watch_event(&mut f, "late");
+                }
+                f.store = Store::open(&f.root.join("issues.db")).unwrap();
+                assert!(!f.store.worker_cancelled(&f.job).unwrap());
+                f.store
+                    .worker_finish(&f.job, state, "Ready PR watched")
+                    .unwrap();
+                assert_eq!(f.state(), state);
+                assert_eq!(f.issue().state, if late { "open" } else { "ready" });
+                assert_eq!(
+                    f.issue().assignee.as_deref(),
+                    if late { None } else { Some("watcher:github") }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn explicit_ready_handoff_keeps_worker_alive_and_finishes_once() {
         let mut f = HandoffFixture::new(true);
         f.apply(Operation::Ready {
