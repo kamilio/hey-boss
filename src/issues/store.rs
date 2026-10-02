@@ -1907,8 +1907,8 @@ impl Store {
                 } else {
                     assignee.as_deref()
                 };
-                let mut stmt = tx.prepare(&list_query(search.is_some(), owner, *unassigned))?;
-                let rows = stmt.query_map(
+                let mut found = tx.query_collect::<_, _, rusqlite::Error>(
+                    &list_query(search.is_some(), owner, *unassigned),
                     params![
                         project.id,
                         state,
@@ -1921,7 +1921,6 @@ impl Store {
                     ],
                     |row| Ok((row_issue(row)?, row.get::<_, i64>("comment_count")?)),
                 )?;
-                let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
                 let more = !*all && found.len() > *limit as usize;
                 if !*all {
                     found.truncate(*limit as usize);
@@ -3523,7 +3522,7 @@ mod contention_tests {
         }
         for (count, commands) in measurements {
             assert!(
-                commands < 80,
+                commands <= 25,
                 "{count} listed issues used {commands} owner RPCs"
             );
         }

@@ -220,12 +220,11 @@ impl Graph {
             children: BTreeMap::new(),
             open: BTreeMap::new(),
         };
-        let mut statement = db
-            .prepare("SELECT child_number,parent_number FROM issue_subtasks WHERE project_id=?1")?;
-        for pair in statement.query_map([project], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })? {
-            let (child, parent) = pair?;
+        for (child, parent) in db.query_collect::<_, _, rusqlite::Error>(
+            "SELECT child_number,parent_number FROM issue_subtasks WHERE project_id=?1",
+            [project],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )? {
             graph.parents.insert(child, parent);
         }
         if graph.parents.is_empty() {
@@ -238,17 +237,22 @@ impl Graph {
             .copied()
             .collect();
         let nodes = serde_json::to_string(&nodes)?;
-        let mut statement=db.prepare("SELECT number,title,state,assignee,deleted_at,version,sort_order,closed_at,labels FROM json_each(?2) requested CROSS JOIN issues WHERE project_id=?1 AND number=requested.value ORDER BY sort_order,number")?;
-        for issue in statement.query_map(params![project,nodes], |r|Ok(json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"deleted_at":r.get::<_,Option<i64>>(4)?,"version":r.get::<_,i64>(5)?,"sort_order":r.get::<_,i64>(6)?,"closed_at":r.get::<_,Option<i64>>(7)?,"labels":r.get::<_,String>(8)?,"pull_requests":[]})))? {
-            let mut issue=issue?;let number=issue["number"].as_i64().unwrap();
-            issue["labels"]=serde_json::from_str(issue["labels"].as_str().unwrap())?;
-            if let Some(parent)=graph.parents.get(&number) {graph.children.entry(*parent).or_default().push(number);}
-            graph.issues.insert(number,issue);
+        let issues = db.query_collect::<_, _, Error>("SELECT number,title,state,assignee,deleted_at,version,sort_order,closed_at,labels FROM json_each(?2) requested CROSS JOIN issues WHERE project_id=?1 AND number=requested.value ORDER BY sort_order,number",params![project,nodes], |r| {
+            let labels: String = r.get(8)?;
+            Ok(json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"deleted_at":r.get::<_,Option<i64>>(4)?,"version":r.get::<_,i64>(5)?,"sort_order":r.get::<_,i64>(6)?,"closed_at":r.get::<_,Option<i64>>(7)?,"labels":serde_json::from_str::<Value>(&labels)?,"pull_requests":[]}))
+        })?;
+        for issue in issues {
+            let number = issue["number"].as_i64().unwrap();
+            if let Some(parent) = graph.parents.get(&number) {
+                graph.children.entry(*parent).or_default().push(number);
+            }
+            graph.issues.insert(number, issue);
         }
-        let mut statement=db.prepare("SELECT issue_number,url,added_by,created_at,purpose,status,checked_at,error FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY created_at,url")?;
-        for pr in statement.query_map(params![project,nodes],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"checked_at":r.get::<_,Option<i64>>(6)?,"error":r.get::<_,Option<String>>(7)?}))))? {
-            let (number,pr)=pr?;
-            if let Some(issue)=graph.issues.get_mut(&number){issue["pull_requests"].as_array_mut().unwrap().push(pr);}
+        let prs = db.query_collect::<_, _, rusqlite::Error>("SELECT issue_number,url,added_by,created_at,purpose,status,checked_at,error FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY created_at,url",params![project,nodes],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"checked_at":r.get::<_,Option<i64>>(6)?,"error":r.get::<_,Option<String>>(7)?}))))?;
+        for (number, pr) in prs {
+            if let Some(issue) = graph.issues.get_mut(&number) {
+                issue["pull_requests"].as_array_mut().unwrap().push(pr);
+            }
         }
         Ok(graph)
     }
@@ -466,6 +470,10 @@ mod tests {
             "Responses without issues must not load a graph"
         );
         assert_eq!(steps, 0);
+        assert!(
+            issue_commands <= 4,
+            "Subtask reads repeated statement metadata requests: {issue_commands} RPCs"
+        );
         assert!(
             issue_steps < 5000,
             "Subtask metadata scanned unrelated issues: {issue_steps} query VM steps"
