@@ -1000,16 +1000,33 @@ pub(super) fn execute(
     }
 }
 pub(super) fn pull_requests(db: &Connection, p: &str, n: i64) -> Result<Vec<Value>> {
-    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error,(SELECT json_extract(e.data,'$.origin') FROM events e WHERE e.project_id=issue_pull_requests.project_id AND e.issue_number=issue_pull_requests.issue_number AND e.action='pr_attached' AND json_valid(e.data) AND json_extract(e.data,'$.url')=issue_pull_requests.url AND json_type(e.data,'$.origin')='object' ORDER BY e.id DESC LIMIT 1) FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-    Ok(stmt.query_map(params![p,n],|r|{
+    Ok(pull_requests_for_issues(db, p, &[n])?
+        .remove(&n)
+        .unwrap_or_default())
+}
+pub(super) fn pull_requests_for_issues(
+    db: &Connection,
+    project: &str,
+    numbers: &[i64],
+) -> Result<HashMap<i64, Vec<Value>>> {
+    let mut by_issue = HashMap::<i64, Vec<Value>>::new();
+    if numbers.is_empty() {
+        return Ok(by_issue);
+    }
+    let mut stmt=db.prepare("SELECT url,added_by,created_at,purpose,status,checked_at,error,(SELECT json_extract(e.data,'$.origin') FROM events e WHERE e.project_id=issue_pull_requests.project_id AND e.issue_number=issue_pull_requests.issue_number AND e.action='pr_attached' AND json_valid(e.data) AND json_extract(e.data,'$.url')=issue_pull_requests.url AND json_type(e.data,'$.origin')='object' ORDER BY e.id DESC LIMIT 1),issue_number FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY issue_number,created_at,url")?;
+    for row in stmt.query_map(params![project,serde_json::to_string(numbers)?],|r|{
         let origin_raw: Option<String> = r.get(7)?;
         let origin = origin_raw.as_deref().and_then(|s| serde_json::from_str::<Value>(s).ok());
         let mut row = json!({"url":r.get::<_,String>(0)?,"added_by":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"purpose":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?,"checked_at":r.get::<_,Option<i64>>(5)?,"error":r.get::<_,Option<String>>(6)?});
         if let Some(origin) = origin {
             row["origin"] = origin;
         }
-        Ok(row)
-    })?.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok((r.get::<_,i64>(8)?,row))
+    })? {
+        let (number, row) = row?;
+        by_issue.entry(number).or_default().push(row);
+    }
+    Ok(by_issue)
 }
 pub(super) fn claim_lock(
     db: &Connection,
