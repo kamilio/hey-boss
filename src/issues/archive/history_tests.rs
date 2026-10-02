@@ -134,6 +134,94 @@ fn maintenance_preserves_grace_for_late_history_and_skips_failed_items() {
 }
 
 #[test]
+fn maintenance_makes_progress_beyond_its_failure_bookkeeping_limit() {
+    let mut f = Fixture::new();
+    f.db.execute_batch(
+        "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<140)
+        INSERT INTO requests(project_id,actor,request_id,payload,response,created_at)
+        SELECT 'named:Archive','human:boss','bad-'||id,'{}','invalid json',id FROM n;
+        INSERT INTO requests(project_id,actor,request_id,payload,response,created_at)
+        VALUES('named:Archive','human:boss','healthy','{}','{}',141);",
+    )
+    .unwrap();
+    let mut maintenance = Maintenance::default();
+    let _owner = crate::database::Owner::start(&f.root.join("issues.db"))
+        .unwrap()
+        .unwrap();
+    f.db = crate::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    for _ in 0..300 {
+        maintenance.run(&f.db, GRACE_MS + 1000).unwrap();
+    }
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NOT NULL FROM requests WHERE request_id='healthy'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap(),
+        "Many bad records must not starve healthy records"
+    );
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM requests WHERE response='invalid json' AND archive_key IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        140
+    );
+    // Repaired records behind the cursor must be retried after wrapping.
+    f.db.execute(
+        "UPDATE requests SET response='{}' WHERE archive_key IS NULL",
+        [],
+    )
+    .unwrap();
+    for _ in 0..300 {
+        if maintenance.run(&f.db, GRACE_MS + 61_001).unwrap() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM requests WHERE archive_key IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn selecting_one_receipt_does_not_sort_a_shared_migration_timestamp_backlog() {
+    let mut measurements = Vec::new();
+    for count in [128, 8192] {
+        let f = Fixture::new();
+        f.db.execute_batch(&format!(
+            "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+            INSERT INTO requests(project_id,actor,request_id,payload,response,created_at)
+            SELECT 'named:Archive','human:boss',printf('receipt-%08d',id),'{{}}','{{}}',1 FROM n;"
+        ))
+        .unwrap();
+        let mut owner = crate::database::Owner::start(&f.root.join("issues.db"))
+            .unwrap()
+            .unwrap();
+        let (db, transport) =
+            crate::database::tests::measured_connection(&f.root.join("issues.db"));
+        Maintenance::default().run(&db, GRACE_MS + 1).unwrap();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        eprintln!("{count} same-age receipts: {commands} RPCs, {steps} VM steps");
+        measurements.push(steps);
+    }
+    assert!(
+        measurements[1] <= measurements[0] + 2000,
+        "Archive selection sorted unrelated receipt headers: {measurements:?}"
+    );
+}
+
+#[test]
 fn issue_archival_preserves_existing_read_responses_and_dependency_readiness() {
     let mut f = Fixture::new();
     let operations = vec![

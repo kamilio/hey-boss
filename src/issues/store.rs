@@ -1271,7 +1271,7 @@ impl Store {
                 // their grace period here rather than guessing from a response.
                 if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='request_archive_candidates')", [], |r| r.get::<_,bool>(0))? {
                     tx.execute("UPDATE requests SET created_at=?1 WHERE created_at=0", [super::worker::now()])?;
-                    tx.execute_batch("CREATE INDEX request_archive_candidates ON requests(created_at) WHERE archive_key IS NULL")?;
+                    tx.execute_batch("CREATE INDEX request_archive_candidates ON requests(created_at,project_id,actor,request_id) WHERE archive_key IS NULL")?;
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_pending ON worker_runs(finished_at,id) WHERE archive_pending=1 AND finished_at IS NOT NULL;
