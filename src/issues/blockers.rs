@@ -324,7 +324,7 @@ pub(crate) fn validate_subtask_claims(db: &Connection, project: &str) -> Result<
 
 /// One graph snapshot per mutation. Reads never take a writer lock; only actual
 /// transitions advance versions and enter the fleet journal.
-pub(super) fn reconcile(
+pub(crate) fn reconcile(
     db: &Connection,
     project: &str,
     actor: Option<&str>,

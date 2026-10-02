@@ -126,12 +126,14 @@ pub(super) fn put_row(db: &Connection, table: &str, row: &Value) -> Result<()> {
 struct RowWriter<'a> {
     db: &'a Connection,
     plans: BTreeMap<String, RowPlan>,
+    changed_projects: BTreeSet<String>,
 }
 impl<'a> RowWriter<'a> {
     fn new(db: &'a Connection) -> Self {
         Self {
             db,
             plans: BTreeMap::new(),
+            changed_projects: BTreeSet::new(),
         }
     }
     fn put(&mut self, table: &str, row: &Value) -> Result<()> {
@@ -241,7 +243,7 @@ impl<'a> RowWriter<'a> {
         {
             return Err(invalid(&format!("Schema mismatch for {table}")));
         }
-        execute(
+        let changed = execute(
             db,
             &plan.sql,
             &plan
@@ -250,6 +252,32 @@ impl<'a> RowWriter<'a> {
                 .map(|c| row[c].clone())
                 .collect::<Vec<_>>(),
         )?;
+        self.changed(table, &row, changed);
+        Ok(())
+    }
+    fn delete(&mut self, table: &str, row: &Value) -> Result<()> {
+        let (clause, values) = key_where(table, row)?;
+        let changed = execute(
+            self.db,
+            &format!("DELETE FROM {table} WHERE {clause}"),
+            &values,
+        )?;
+        self.changed(table, row, changed);
+        Ok(())
+    }
+    fn changed(&mut self, table: &str, row: &Value, count: usize) {
+        if count > 0
+            && matches!(table, "issues" | "issue_subtasks")
+            && let Some(project) = row["project_id"].as_str()
+        {
+            self.changed_projects.insert(project.to_owned());
+        }
+    }
+    fn reconcile(&self) -> Result<()> {
+        let now = crate::issues::worker::now();
+        for project in &self.changed_projects {
+            crate::issues::blockers::reconcile(self.db, project, None, now)?;
+        }
         Ok(())
     }
 }
@@ -877,8 +905,7 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
             return Err(invalid("Conflicting inserted row"));
         }
         if after.is_null() {
-            let (clause, values) = key_where(table, &before)?;
-            execute(db, &format!("DELETE FROM {table} WHERE {clause}"), &values)?;
+            writer.delete(table, &before)?;
         } else {
             writer.put(table, &after)?;
         }
@@ -965,12 +992,7 @@ pub(super) fn accept_changes(db: &Connection, node: &str, changes: &[Value]) -> 
         receipt["seq"] = change["seq"].clone();
         results.push(receipt);
     }
-    if changes
-        .iter()
-        .any(|c| matches!(c["table_name"].as_str(), Some("issues" | "issue_subtasks")))
-    {
-        crate::issues::blockers::reconcile_all(db)?;
-    }
+    writer.reconcile()?;
     // Project the final graph, including earlier receipts in the same batch.
     for (change, receipt) in changes.iter().zip(&mut results) {
         if change["table_name"] == "issue_subtasks" {
@@ -1348,11 +1370,7 @@ fn apply_graph(
     for (project, child) in desired.keys() {
         let key = json!({"project_id":project,"child_number":child});
         if !pending.contains_key(&pending_key("issue_subtasks", &key)?) {
-            execute(
-                db,
-                "DELETE FROM issue_subtasks WHERE project_id=? AND child_number=?",
-                &[json!(project), json!(child)],
-            )?;
+            writer.delete("issue_subtasks", &key)?;
         }
     }
     for ((project, child), row) in desired {
@@ -1587,22 +1605,13 @@ pub(super) fn apply_pull(
             } else {
                 let row = row_json(change, "before_json")?;
                 if table != "issue_subtasks" && !pending.contains_key(&pending_key(table, &row)?) {
-                    let (clause, args) = key_where(table, &row)?;
-                    execute(db, &format!("DELETE FROM {table} WHERE {clause}"), &args)?;
+                    writer.delete(table, &row)?;
                 }
             }
         }
     }
     apply_graph(&mut writer, &pending, payload, acknowledged)?;
-    if payload["tables"]["issues"].is_array()
-        || payload["changes"].as_array().is_some_and(|changes| {
-            changes
-                .iter()
-                .any(|c| matches!(c["table_name"].as_str(), Some("issues" | "issue_subtasks")))
-        })
-    {
-        crate::issues::blockers::reconcile_all(db)?;
-    }
+    writer.reconcile()?;
     db.execute("DELETE FROM fleet_allocations", [])?;
     for row in payload["allocations"]
         .as_array()
@@ -3929,6 +3938,162 @@ mod tests {
             .unwrap()[0]["subtask_scheduling"],
             "explicit"
         );
+    }
+
+    #[test]
+    fn replication_reconciliation_does_not_scan_unrelated_projects() {
+        let mut measurements = Vec::new();
+        for incoming in [false, true] {
+            let mut work = Vec::new();
+            for other_projects in [4, 100] {
+                let f = Fixture::new();
+                f.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO projects(id,name,next_number) SELECT 'named:unrelated-'||x,'Unrelated '||x,65 FROM n", [other_projects]).unwrap();
+                f.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) SELECT p.id,n.x,'Unrelated','','open','human:fixture',0,0,1,'[]',n.x FROM projects p CROSS JOIN n WHERE p.id LIKE 'named:unrelated-%';
+                    INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers) VALUES('named:Native fleet',2,'Dependent','','blocked','human:fixture',0,0,1,'[]',2,'[1]');
+                    INSERT INTO fleet_allocations VALUES('named:Native fleet',1,'peer');").unwrap();
+                install_capture(
+                    &f.db,
+                    if incoming { "controller" } else { "agent" },
+                    if incoming { "main" } else { "peer" },
+                )
+                .unwrap();
+                f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+                let before = current_row(
+                    &f.db,
+                    "issues",
+                    &json!({"project_id":"named:Native fleet","number":1}),
+                )
+                .unwrap();
+                let mut after = before.clone();
+                after["state"] = json!("closed");
+                after["closed_by"] = json!("human:fixture");
+                after["closed_at"] = json!(123);
+                let change = json!({"seq":1,"table_name":"issues","before_json":before.to_string(),"after_json":after.to_string()});
+                let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+                let (db, transport) = crate::database::tests::measured_connection(&f.path);
+                if incoming {
+                    assert_eq!(
+                        accept_changes(&db, "peer", &[change.clone()]).unwrap()[0]["state"],
+                        "applied"
+                    );
+                } else {
+                    apply_pull(
+                        &db,
+                        "peer",
+                        &json!({"cursor":1,"changes":[change],"allocations":[],"ranges":[]}),
+                        &[],
+                    )
+                    .unwrap();
+                }
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                eprintln!(
+                    "One issue update, incoming={incoming}, {other_projects} unrelated projects: {commands} RPCs, {steps} query VM steps"
+                );
+                work.push((commands, steps));
+                if incoming {
+                    let (db, transport) = crate::database::tests::measured_connection(&f.path);
+                    assert_eq!(
+                        accept_changes(&db, "peer", &[change]).unwrap()[0]["state"],
+                        "applied"
+                    );
+                    drop(db);
+                    let (commands, _) = transport.join().unwrap();
+                    eprintln!("Receipt replay: {commands} RPCs");
+                    work.push((commands, 0));
+                }
+                owner.stop();
+                assert_eq!(rows(&f.db, "SELECT state FROM issues WHERE project_id='named:Native fleet' AND number=2", &[]).unwrap()[0]["state"], "open");
+                assert_eq!(rows(&f.db, "SELECT count(*) count FROM issues WHERE project_id LIKE 'named:unrelated-%' AND (state<>'open' OR version<>1)", &[]).unwrap()[0]["count"], 0);
+            }
+            measurements.push((incoming, work));
+        }
+        for (incoming, work) in measurements {
+            let stride = if incoming { 2 } else { 1 };
+            assert_eq!(
+                work[0], work[stride],
+                "Unrelated projects added reconciliation work"
+            );
+            if incoming {
+                assert!(
+                    work[1].0 <= 3 && work[3].0 <= 3,
+                    "Replay repeated reconciliation: {work:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replicated_issue_deletions_reconcile_dependents_in_each_changed_project() {
+        let f = Fixture::new();
+        f.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Second','Second',4);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers)
+            SELECT id,2,'Dependent','','open','human:fixture',0,0,1,'[]',2,'[3]' FROM projects;
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT id,3,'Completed prerequisite','','closed','human:fixture',0,0,1,'[]',3 FROM projects;").unwrap();
+        let changes: Vec<_> = rows(&f.db, "SELECT * FROM issues WHERE number=3", &[]).unwrap().iter().enumerate().map(|(index,row)| json!({"seq":index+1,"table_name":"issues","before_json":row.to_string(),"after_json":null})).collect();
+        install_capture(&f.db, "agent", "peer").unwrap();
+        f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+        apply_pull(
+            &f.db,
+            "peer",
+            &json!({"cursor":2,"changes":changes,"allocations":[],"ranges":[]}),
+            &[],
+        )
+        .unwrap();
+        assert!(
+            rows(&f.db, "SELECT * FROM issues WHERE number=3", &[])
+                .unwrap()
+                .is_empty()
+        );
+        let dependents = rows(&f.db, "SELECT state FROM issues WHERE number=2", &[]).unwrap();
+        assert_eq!(dependents.len(), 2);
+        assert!(
+            dependents.iter().all(|row| row["state"] == "blocked"),
+            "Missing prerequisites remain unresolved: {dependents:?}"
+        );
+    }
+
+    #[test]
+    fn graph_only_pulls_reconcile_deferred_receipted_and_removed_relationships() {
+        for source in ["deferred", "receipt", "snapshot"] {
+            let f = Fixture::new();
+            f.db.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('named:Native fleet',2,'Child','','open','human:fixture',0,0,1,'[]',2)").unwrap();
+            let relationship = json!({"project_id":"named:Native fleet","parent_number":1,"child_number":2,"created_at":0,"created_by":"human:fixture"});
+            let mut payload = json!({"cursor":1,"allocations":[],"ranges":[]});
+            let mut receipts = Vec::new();
+            if source == "deferred" {
+                f.db.execute(
+                    "INSERT INTO fleet_deferred_subtasks VALUES('named:Native fleet',2,?1)",
+                    [relationship.to_string()],
+                )
+                .unwrap();
+            } else {
+                f.db.execute_batch("INSERT INTO issue_subtasks VALUES('named:Native fleet',1,2,0,'human:fixture'); UPDATE issues SET state='blocked' WHERE number=1").unwrap();
+                if source == "receipt" {
+                    receipts.push(json!({"seq":99,"state":"applied","canonical_subtask":{"project_id":"named:Native fleet","child_number":2,"row":null}}));
+                } else {
+                    payload["tables"] = json!({"issue_subtasks":[]});
+                }
+            }
+            install_capture(&f.db, "agent", "peer").unwrap();
+            f.db.execute("DELETE FROM fleet_outbox", []).unwrap();
+            apply_pull(&f.db, "peer", &payload, &receipts).unwrap();
+            assert_eq!(
+                rows(&f.db, "SELECT state FROM issues WHERE number=1", &[]).unwrap()[0]["state"],
+                if source == "deferred" {
+                    "blocked"
+                } else {
+                    "open"
+                },
+                "{source}"
+            );
+            assert!(
+                rows(&f.db, "SELECT * FROM fleet_deferred_subtasks", &[])
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
