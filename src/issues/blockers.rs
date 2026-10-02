@@ -117,7 +117,7 @@ impl Graph {
         let selected = numbers.map(serde_json::to_string).transpose()?;
         let mut graph = Self {
             satisfied: RefCell::new(BTreeMap::new()),
-            prs_enabled: db.query_row("SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)", [project], |r| r.get(0))?,
+            prs_enabled: false,
             issues: BTreeMap::new(),
             children: BTreeMap::new(),
             links: BTreeMap::new(),
@@ -132,9 +132,10 @@ impl Graph {
         } else {
             ("issues", "AND ?2 IS NULL")
         };
-        let mut stmt = db.prepare(&format!("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version FROM {source} WHERE project_id=?1 {filter} ORDER BY sort_order,number"))?;
-        for row in stmt.query_map(params![project,selected], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?)))? {
-            let (n, issue, links) = row?;
+        let mut stmt = db.prepare(&format!("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version,EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1) FROM {source} WHERE project_id=?1 {filter} ORDER BY sort_order,number"))?;
+        for row in stmt.query_map(params![project,selected], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?, r.get::<_,bool>(11)?)))? {
+            let (n, issue, links, prs_enabled) = row?;
+            graph.prs_enabled = prs_enabled;
             let parsed_links: Vec<i64> = serde_json::from_str(&links)?;
             if issue["deleted_at"].is_null() {
                 for &target in &parsed_links {
