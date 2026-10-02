@@ -22,9 +22,7 @@
   const assigneeName = (id) => {
     if (!id) return "Unassigned";
     if (id === "human:boss") return graph?.boss?.name || boot?.boss?.name || "Boss";
-    if (id.startsWith("codex:")) return `Codex · ${id.slice(6, 14)}`;
-    if (id.startsWith("claude:")) return `Claude · ${id.slice(7, 15)}`;
-    return id.replace(/^human:/, "").split("@")[0];
+    return HeyBossUI.actorLabel(id);
   };
   const allNodes = () => new Map([...graph.nodes, ...graph.external_nodes].map((node) => [node.id, fullBodies.get(node.id) || node]));
   function relationships(node, nodes, links) {
@@ -227,7 +225,7 @@
         const hasChildren = (children.get(node.id) || []).some((n) => visible.has(n.id)), expanded = Boolean(query) || !collapsed.has(node.id);
         const resource = node.kind === "issue" ? node.available === false ? `<span class="resource">${esc(issueContext(node))}</span>` : `<a class="resource" href="${esc(issueUrl(node))}">Open ${esc(issueContext(node))}</a>` : node.kind === "pr" ? `<a class="resource" href="${esc(node.reference)}" target="_blank" rel="noopener noreferrer">Open PR ↗</a>` : node.kind === "notification" ? `<a class="resource" href="/#${esc(new URLSearchParams({view:"inbox",notice:node.reference}).toString())}">Open notification</a>` : "";
         const rel = relationships(node, nodes, incidents.get(node.id) || []);
-        return `<li class="node${query && node.id === searchHit ? " highlight" : ""}" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(HeyBossMap.displayTitle(node))}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(HeyBossMap.displayTitle(node))}</span><div class="meta">${HeyBossMap.kindIcon(node.kind)}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(node.assignee)}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${issueMetadata(node)}${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(HeyBossMap.displayTitle(node))}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
+        return `<li class="node${query && node.id === searchHit ? " highlight" : ""}" id="${esc(node.id)}"><div class="node-row">${hasChildren ? `<button class="toggle" data-toggle="${esc(node.id)}" aria-expanded="${expanded}" aria-controls="children-${esc(node.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(HeyBossMap.displayTitle(node))}">${expanded ? "▾" : "▸"}</button>` : '<span class="spacer" aria-hidden="true"></span>'}<div class="node-content"><span class="node-title">${esc(HeyBossMap.displayTitle(node))}</span><div class="meta">${HeyBossMap.kindIcon(node.kind)}${node.state ? `<span class="state">${esc(node.state)}</span>` : ""}${node.assignee ? `<span class="assignee" title="${esc(assigneeName(node.assignee))}">Assigned to ${esc(assigneeName(node.assignee))}</span>` : ""}${node.alias ? `<code>${esc(node.alias)}</code>` : ""}${resource}${node.automatic ? '<span>automatic</span>' : ""}</div>${issueMetadata(node)}${node.has_body || node.body ? node.kind === "issue" ? `<details class="resource-details" data-body-details="${esc(node.id)}" ${openBodies.has(node.id) ? "open" : ""}><summary>Issue details</summary>${bodyContent(node)}</details>` : bodyContent(node) : ""}${rel ? `<ul class="relationships" aria-label="Relationships for ${esc(HeyBossMap.displayTitle(node))}">${rel}</ul>` : ""}</div></div>${hasChildren ? `<div id="children-${esc(node.id)}" ${expanded ? "" : "hidden"}>${expanded ? tree(node.id) : ""}</div>` : ""}</li>`;
       }).join("")}</ul>`;
     };
     $("#outline").innerHTML = tree() || `<p class="empty">${query ? "No matching topics or relationships." : 'No topics yet.<br>Add the first with <code>hey-boss mm add \'Topic\' --id topic</code>'}</p>`;
@@ -265,6 +263,7 @@
       if (!response.ok || !value.ok) throw new Error(value.error?.message || "Cannot load mindmap");
       if (ticket !== generation) return;
       if (graph?.project.id !== value.project.id) { selected = null; mapSearchCamera = null; mapQuery = ""; }
+      HeyBossUI.rememberActors(value);
       graph = value; renderingIndex = null; fullBodies.clear(); bodyVersions.clear(); loadingBodies.clear(); bodyErrors.clear();
       if (!initializedProjects.has(graph.project.id)) {
         if (graph.nodes.length > 200) graph.nodes.filter((node) => !node.parent_id).forEach((node) => collapsed.add(node.id));

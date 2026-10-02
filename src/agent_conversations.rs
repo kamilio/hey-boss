@@ -121,7 +121,7 @@ fn runs_for_project(runs: &[Value], projects: &HashSet<String>) -> Vec<Value> {
         .map(compact_run)
         .collect()
 }
-const COMPACT_RUN_FIELDS: [&str; 13] = [
+const COMPACT_RUN_FIELDS: [&str; 14] = [
     "id",
     "kind",
     "next_at",
@@ -132,6 +132,7 @@ const COMPACT_RUN_FIELDS: [&str; 13] = [
     "title",
     "session_id",
     "actor_id",
+    "model",
     "state",
     "started_at",
     "finished_at",
@@ -408,6 +409,12 @@ pub(crate) fn window_page(
         return Err(Error::invalid(
             "Saved conversation is outside Codex storage",
         ));
+    }
+    if result["run"].is_object()
+        && cursor == 0
+        && let Some((_, Some(model))) = creation_context_at(&path)
+    {
+        result["run"]["model"] = json!(model);
     }
     let file = std::fs::File::open(path)?;
     let size = file.metadata()?.len();
@@ -783,6 +790,8 @@ mod tests {
             );
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE agents(id TEXT PRIMARY KEY,metadata TEXT);")
+                .unwrap();
             db.execute_batch("CREATE TABLE projects(id TEXT,name TEXT,hidden_at INTEGER); INSERT INTO projects VALUES('Atlas','Atlas',NULL); CREATE TABLE worker_runs(id TEXT,project_id TEXT,session_id TEXT,issue_number INTEGER,job TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,actor_id TEXT); INSERT INTO worker_runs VALUES('run','Atlas','aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',1,'{}','completed',1,2,'codex:fixture');").unwrap();
             Self { root, db, path }
         }
@@ -801,7 +810,7 @@ mod tests {
     #[test]
     fn assigned_standalone_session_reads_saved_messages_without_worker_history() {
         let f = Fixture::new();
-        f.db.execute_batch("CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); CREATE TABLE agents(id TEXT,metadata TEXT); DELETE FROM worker_runs; INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL);").unwrap();
+        f.db.execute_batch("CREATE TABLE issues(project_id TEXT,number INTEGER,title TEXT,assignee TEXT,deleted_at INTEGER,origin TEXT); CREATE TABLE artifacts(project_id TEXT,title TEXT,origin TEXT); DELETE FROM worker_runs; INSERT INTO issues VALUES('Atlas',4,'Repair','codex:exact',NULL,NULL);").unwrap();
         let actor = json!({"id":"codex:exact","kind":"codex","session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","machine":"remote","host":"mac.local","pid":null,"process_start":null,"cwd":"/work","source":"test"});
         f.db.execute(
             "INSERT INTO agents VALUES('codex:exact',?1)",
@@ -1217,12 +1226,13 @@ mod tests {
     fn compact_overview_retains_assignment_identity() {
         let runs = runs_for_project(
             &[
-                json!({"id":"run","project_id":"Atlas","actor_id":"worker:run","session_id":"session","expanded_prompt":"private"}),
+                json!({"id":"run","project_id":"Atlas","actor_id":"worker:run","session_id":"session","model":"gpt-6-astra","expanded_prompt":"private"}),
             ],
             &HashSet::from(["Atlas".into()]),
         );
         assert_eq!(runs[0]["actor_id"], "worker:run");
         assert_eq!(runs[0]["session_id"], "session");
+        assert_eq!(runs[0]["model"], "gpt-6-astra");
         assert!(runs[0].get("expanded_prompt").is_none());
     }
 }

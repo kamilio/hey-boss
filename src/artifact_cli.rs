@@ -392,6 +392,8 @@ pub fn run(options: &Options) -> Result<()> {
     };
     if creating && let Some(actor) = actor.as_mut() {
         issues::identity::creation_context(actor);
+    } else if let Some(actor) = actor.as_mut() {
+        issues::identity::model_context(actor);
     }
     let request = issues::Request {
         version: 1,

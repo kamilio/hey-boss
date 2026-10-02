@@ -10,7 +10,7 @@ const HeyBossArtifacts = (() => {
     return `${mobile?"/project-resource":kind==="issue"?"/":"/mm"}#${params}`;
   };
   let mobile = false;
-  const author=value=>value==="human:boss"?"Boss":value.startsWith("human:")?value.slice(6):value.startsWith("codex:")?"Codex":value.startsWith("claude:")?"Claude":value;
+  const author=value=>HeyBossUI.actorLabel(value);
   async function rpc(context,operation,reading,requestID) {
     const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||HeyBossUI.requestId())};
     let response;try { response = await fetch(mobile?"/api/artifact-requests":"/api/action",{method:"POST",headers:{"Content-Type":"application/json",...(mobile?{}:{"X-Hey-Boss-CSRF":context.csrf})},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)}); } catch(e) {throw failure("Connection interrupted. "+(reading?"Reconnect and try again.":"Retry this pending save with the same content after reconnecting."),!reading);}
@@ -27,6 +27,7 @@ const HeyBossArtifacts = (() => {
       }
     }
     if (!value.ok) throw Object.assign(failure(value.error?.message||"Could not save; your draft is preserved.",operation.action==="artifact"&&operation.operation.command==="delete"&&value.error?.code==="io_error"),{code:value.error?.code});
+    HeyBossUI.rememberActors(value);
     return value;
   }
   const api=(context,operation,requestID)=>rpc(context,{action:"artifact",operation},reads.has(operation.command),requestID);
@@ -415,7 +416,7 @@ const HeyBossArtifacts = (() => {
       mode("reading");
       const content=doc.body_html||'<p class="artifact-muted">This document is empty. Choose Edit to start writing.</p>';
       const previous=$("#artifact-reading"),reuse=previous&&previous.dataset.artifact===doc.id&&readingHTML===content;
-      const comment=c=>`<p class="artifact-comment-meta"><strong title="${esc(c.author)}">${esc(author(c.author))}</strong><time datetime="${esc(c.created_at)}" title="${esc(new Date(c.created_at).toLocaleString())}">${esc(date(c.created_at))}</time></p><div class="markdown">${c.body_html}</div>`;
+      const comment=c=>`<p class="artifact-comment-meta"><strong title="${esc(author(c.author))}">${esc(author(c.author))}</strong><time datetime="${esc(c.created_at)}" title="${esc(new Date(c.created_at).toLocaleString())}">${esc(date(c.created_at))}</time></p><div class="markdown">${c.body_html}</div>`;
       const replies=new Map();
       for(const c of v.comments)if(c.parent){if(!replies.has(c.parent))replies.set(c.parent,[]);replies.get(c.parent).push(c);}
       const threads=v.comments.filter(c=>!c.parent).map(c=>{

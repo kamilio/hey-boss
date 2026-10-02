@@ -1,6 +1,25 @@
 "use strict";
 // Shared, dependency-free browser components. Page clients own data and mutations.
 const HeyBossUI = (() => {
+  const actorModels = new Map();
+  const validModel = value => typeof value === "string" && value.trim() && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : null;
+  function rememberActors(value) {
+    let changed = false;
+    for (const [id, model] of Object.entries(value?.actor_models || {})) {
+      if (validModel(model) && actorModels.get(id) !== model) { actorModels.set(id, model); changed = true; }
+    }
+    while (actorModels.size > 2000) actorModels.delete(actorModels.keys().next().value);
+    return changed;
+  }
+  function actorLabel(id, model, bossName = "Boss") {
+    if (!id) return "Unassigned";
+    if (id === "human:boss") return bossName;
+    if (id === "watcher:github") return "GitHub watcher";
+    const kind = id.split(":")[0];
+    const agent = {codex:"Codex", claude:"Claude", worker:"Agent", agent:"Agent"}[kind];
+    if (agent) return `${agent} · ${validModel(model) || validModel(actorModels.get(id)) || "model unknown"}`;
+    return id.replace(/^human:/, "").split("@")[0];
+  }
   // .test over HTTP is not a secure context. getRandomValues remains available;
   // randomUUID and SubtleCrypto do not. Keep retry IDs cryptographically random.
   function requestId() {
@@ -280,5 +299,5 @@ function date(at) {
     tip.style.bottom = below ? "auto" : window.innerHeight - rect.top + 6 + "px";
     tip.style.maxHeight = Math.max(80, (below ? window.innerHeight - rect.bottom : rect.top) - 22) + "px";
   }, true);
-  return {infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  return {actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

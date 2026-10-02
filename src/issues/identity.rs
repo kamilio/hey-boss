@@ -256,6 +256,15 @@ pub fn creation_context(actor: &mut Actor) {
     }
 }
 
+/// Capture the calling model for claims, comments and other writes as well.
+pub fn model_context(actor: &mut Actor) {
+    if actor.kind == "codex"
+        && let Some(session) = actor.session_id.as_deref()
+    {
+        actor.model = crate::agent_conversations::creation_context(session).1;
+    }
+}
+
 fn ancestor_session<'a>(
     launchers: &[crate::Launcher],
     agents: &'a [crate::agents::Agent],

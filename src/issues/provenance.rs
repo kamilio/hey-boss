@@ -152,7 +152,7 @@ pub(crate) fn assigned_run(
     }
     let stale = super::identity::presence(&actor, &super::identity::machine()?) == "stale";
     Ok(Some(
-        json!({"id":format!("session:{session}"),"project_id":project,"project_name":name,"number":number,"title":title,"session_id":session,"actor_id":agent,"host":actor.host,"machine":actor.machine,"state":if stale {"stopped"} else {"running"},"started_at":null,"finished_at":if stale {Some(0)} else {None},"standalone":true}),
+        json!({"id":format!("session:{session}"),"project_id":project,"project_name":name,"number":number,"title":title,"session_id":session,"actor_id":agent,"model":actor.model,"host":actor.host,"machine":actor.machine,"state":if stale {"stopped"} else {"running"},"started_at":null,"finished_at":if stale {Some(0)} else {None},"standalone":true}),
     ))
 }
 
@@ -188,7 +188,7 @@ pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
         let saved: Option<Value> = db.query_row(&format!("SELECT r.project_id,p.name,r.title,r.origin FROM {table} r JOIN projects p ON p.id=r.project_id WHERE json_extract(origin,'$.session_id')=?1 AND p.hidden_at IS NULL LIMIT 1"),[session],|r|{
             let raw:String=r.get(3)?;
             let origin:Value=serde_json::from_str(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(3,rusqlite::types::Type::Text,Box::new(e)))?;
-            Ok(json!({"id":run,"project_id":r.get::<_,String>(0)?,"project_name":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"session_id":session,"state":"completed","started_at":origin["created_at"],"finished_at":origin["created_at"],"actor_id":origin["actor_id"],"standalone":true}))
+            Ok(json!({"id":run,"project_id":r.get::<_,String>(0)?,"project_name":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"session_id":session,"state":"completed","started_at":origin["created_at"],"finished_at":origin["created_at"],"actor_id":origin["actor_id"],"model":origin["model"],"standalone":true}))
         }).optional()?;
         if saved.is_some() {
             return Ok(saved);

@@ -583,7 +583,11 @@ fn worker_runs(db: &Connection, workers: &[&str]) -> Result<HashMap<String, Vec<
             events_by_run.entry(run_id).or_default().push((id, event));
         }
     }
+    let models = super::actor_labels::models(db, runs.iter().map(|(_, run)| run))?;
     for (_, run) in &mut runs {
+        run["model"] = models.get(run["actor_id"].as_str().unwrap_or_default())
+            .or_else(|| models.get(&format!("codex:{}", run["session_id"].as_str().unwrap_or_default())))
+            .cloned().unwrap_or(Value::Null);
         if let Some(s) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(s)?;
         }
