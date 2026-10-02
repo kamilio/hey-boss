@@ -1510,3 +1510,119 @@ fn large_status_response_is_complete_over_the_local_socket() {
     assert_eq!(machine["hostname"].as_str().unwrap().len(), 65536);
     supervisor.terminate();
 }
+
+#[test]
+fn completed_installation_reloads_companion_without_dropping_pending_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    let f = Fixture::new();
+    f.issue();
+    let binary = f.root.join("installed-cli");
+    fs::write(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' 'hey-boss 0.1.0 (build replacement)'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut companion = Service(
+        f.command(&["fleet", "companion", "--stdio"])
+            .env("HEY_BOSS_FLEET_BINARY", &binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = companion.0.stdin.take().unwrap();
+    let output = companion.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let next = || loop {
+        let frame = received.recv_timeout(Duration::from_secs(8)).unwrap();
+        if frame["kind"] != "starting" && frame["kind"] != "progress" {
+            break frame;
+        }
+    };
+    let hello = next();
+    assert_eq!(hello["kind"], "hello");
+    let loaded = hello["build"]
+        .as_str()
+        .unwrap()
+        .split("(build ")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches(')');
+    let db = hey_boss::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    let before: i64 = db
+        .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
+        .unwrap();
+    assert!(before > 0);
+    // A missing receipt, an incomplete swap, and a receipt for another build
+    // must leave the current sync process usable.
+    for receipt in [None, Some(loaded), Some("different")] {
+        if let Some(build) = receipt {
+            fs::write(
+                f.root.join("upgrade-receipt.json"),
+                serde_json::json!({"source":{"build":build}}).to_string(),
+            )
+            .unwrap();
+        }
+        writeln!(input, "{{\"version\":1,\"kind\":\"ping\"}}").unwrap();
+        input.flush().unwrap();
+        assert_eq!(next()["kind"], "heartbeat");
+        assert!(companion.0.try_wait().unwrap().is_none());
+    }
+    fs::write(f.root.join("upgrade-receipt.json"), "invalid receipt").unwrap();
+    writeln!(input, "{{\"version\":1,\"kind\":\"ping\"}}").unwrap();
+    input.flush().unwrap();
+    assert_eq!(next()["kind"], "heartbeat");
+    fs::write(
+        f.root.join("upgrade-receipt.json"),
+        "{\"source\":{\"build\":\"replacement\"}}",
+    )
+    .unwrap();
+    fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+    writeln!(input, "{{\"version\":1,\"kind\":\"ping\"}}").unwrap();
+    input.flush().unwrap();
+    assert_eq!(next()["kind"], "heartbeat");
+    fs::write(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' 'hey-boss 0.1.0 (build replacement)'\n",
+    )
+    .unwrap();
+    writeln!(input, "{{\"version\":1,\"kind\":\"ping\"}}").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let outcome = loop {
+        if let Some(status) = companion.0.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    // stdin remains open: software replacement, rather than peer EOF, ended it.
+    drop(companion);
+    drop(input);
+    reader.join().unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    assert!(
+        outcome.is_some_and(|status| status.success()),
+        "Companion kept executing the obsolete build: {outcome:?}"
+    );
+}
