@@ -38,6 +38,29 @@ type Reservation = (
     Option<String>,
 );
 
+#[derive(PartialEq)]
+struct ReservationState {
+    reservation: Reservation,
+    assignee_enabled: bool,
+}
+
+fn reservation_states(
+    db: &crate::database::Connection,
+    machine: &str,
+    projects: &[&str],
+) -> Result<std::collections::HashMap<String, ReservationState>> {
+    Ok(db.query_collect(
+        "SELECT c.project_id,c.next_at,c.owner_pid,c.owner_start,c.pid,c.process_start,c.worker_id,
+            EXISTS(SELECT 1 FROM issue_workers w WHERE w.id=c.worker_id AND w.stop_requested=0 AND json_extract(w.config,'$.enabled')=1 AND (json_array_length(w.config,'$.projects')=0 OR EXISTS(SELECT 1 FROM json_each(w.config,'$.projects') WHERE value=c.project_id)))
+         FROM json_each(?1) selected CROSS JOIN project_chiefs c ON c.project_id=selected.value AND c.machine=?2",
+        params![serde_json::to_string(projects)?,machine],
+        |r| -> rusqlite::Result<_> {Ok((r.get::<_,String>(0)?,ReservationState {
+            reservation:(r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?),
+            assignee_enabled:r.get(7)?,
+        }))},
+    )?.into_iter().collect())
+}
+
 pub(in crate::issues) fn migrate(db: &crate::database::Connection) -> Result<()> {
     let columns = db
         .prepare("SELECT name FROM pragma_table_info('project_chiefs')")?
@@ -135,6 +158,16 @@ impl Store {
         worker_id: Option<&str>,
     ) -> Result<Option<Job>> {
         let candidates = self.chief_candidates(worker_id)?;
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let mut projects: Vec<_> = candidates
+            .iter()
+            .map(|(project, _, _, _)| project.as_str())
+            .collect();
+        projects.sort_unstable();
+        projects.dedup();
+        let mut reservations = reservation_states(&self.db, machine, &projects)?;
         let standalone: bool = self.db.query_row(
             "SELECT role='standalone' FROM fleet_meta WHERE id=1",
             [],
@@ -145,12 +178,15 @@ impl Store {
                 continue;
             }
             // Empty/disabled/not-due projects do not acquire a writer lock.
-            let old: Option<Reservation> = self.db.query_row(
-                "SELECT next_at,owner_pid,owner_start,pid,process_start,worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
-                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
-            if let Some((next, owner, start, pid, process_start, assigned_worker)) = &old {
-                if let Some(assigned) = assigned_worker.as_deref().filter(|assigned| standalone && *assigned != worker_id)
-                    && self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE id=?1 AND stop_requested=0 AND json_extract(config,'$.enabled')=1 AND (json_array_length(config,'$.projects')=0 OR EXISTS(SELECT 1 FROM json_each(config,'$.projects') WHERE value=?2)))", params![assigned,project], |r| r.get::<_,bool>(0))? {
+            let old = reservations.get(&project);
+            if let Some(old) = old {
+                let (next, owner, start, pid, process_start, assigned_worker) = &old.reservation;
+                if standalone
+                    && old.assignee_enabled
+                    && assigned_worker
+                        .as_deref()
+                        .is_some_and(|assigned| assigned != worker_id)
+                {
                     continue;
                 }
                 if owner.zip(start.as_deref()).is_some_and(|(pid, start)| {
@@ -181,10 +217,15 @@ impl Store {
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             // An optimistic comparison makes concurrent schedulers contend only for due work.
-            let current: Option<Reservation> = tx.query_row(
-                "SELECT next_at,owner_pid,owner_start,pid,process_start,worker_id FROM project_chiefs WHERE project_id=?1 AND machine=?2",
-                params![project,machine], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional()?;
-            if current != old {
+            let current = reservation_states(&tx, machine, &[&project])?.remove(&project);
+            if current.as_ref() != old {
+                // Include assignee eligibility in the atomic comparison, then
+                // refresh this pass so later workers do not retry stale state.
+                if let Some(current) = current {
+                    reservations.insert(project.clone(), current);
+                } else {
+                    reservations.remove(&project);
+                }
                 continue;
             }
             let enabled: bool = tx.query_row(
@@ -668,6 +709,148 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn idle_chief_reservations_batch_project_and_assignee_checks() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir()
+                .join(format!("hb-chief-idle-{}", worker::random_id().unwrap()));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("CREATE TABLE issue_worker_runtime(worker_id TEXT PRIMARY KEY,owner_pid INTEGER,owner_start TEXT)").unwrap();
+            let config = serde_json::to_string(&worker::Settings {
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for n in 0..count {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)",params![format!("worker-{n}"),config]).unwrap();
+            }
+            for n in 0..8 {
+                let project = format!("named:Project-{n}");
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO projects(id,name,next_number) VALUES(?1,?1,1)",
+                        [&project],
+                    )
+                    .unwrap();
+                store.db.execute("INSERT INTO project_settings(project_id,prompt,version,chief_enabled) VALUES(?1,'',1,1)",[&project]).unwrap();
+                store.db.execute("INSERT INTO project_chiefs(project_id,machine,cwd,worker_id,next_at) VALUES(?1,'unit','','worker-0',9000000000000)",[&project]).unwrap();
+            }
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let start = Instant::now();
+            assert!(store.reserve_chief("unit", None).unwrap().is_none());
+            let elapsed = start.elapsed();
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            std::fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "Idle Chief reservation, {count} workers / 8 projects: {commands} RPCs, {steps} query VM steps, {elapsed:?}"
+            );
+            measurements.push(commands);
+        }
+        assert!(
+            measurements.iter().all(|commands| *commands <= 10),
+            "Idle reservation reads repeat across candidates: {measurements:?}"
+        );
+    }
+
+    #[test]
+    fn chief_reservation_rechecks_assignee_and_refreshes_changed_preflight() {
+        struct Change {
+            db: crate::database::Connection,
+            begins: std::cell::Cell<usize>,
+            error: std::cell::RefCell<Option<String>>,
+            resume: bool,
+        }
+        unsafe extern "C" fn change_before_write(
+            kind: u32,
+            context: *mut std::ffi::c_void,
+            statement: *mut std::ffi::c_void,
+            _: *mut std::ffi::c_void,
+        ) -> std::ffi::c_int {
+            if kind != rusqlite::ffi::SQLITE_TRACE_STMT {
+                return 0;
+            }
+            let state = unsafe { &*context.cast::<Change>() };
+            let sql =
+                unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast())) };
+            if sql.to_bytes() == b"BEGIN IMMEDIATE" {
+                state.begins.set(state.begins.get() + 1);
+                if state.begins.get() == 1 {
+                    let sql = if state.resume {
+                        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('true')) WHERE id='owner'"
+                    } else {
+                        "UPDATE project_chiefs SET next_at=9000000000000"
+                    };
+                    if let Err(error) = state.db.execute(sql, []) {
+                        *state.error.borrow_mut() = Some(error.to_string());
+                    }
+                }
+            }
+            0
+        }
+        for resume in [false, true] {
+            let (root, mut store, _) = launch_fixture();
+            store.db.execute_batch("UPDATE project_chiefs SET owner_pid=NULL,owner_start=NULL,pid=NULL,process_start=NULL,next_at=0,state='idle'; UPDATE issue_workers SET config=json_set(config,'$.enabled',json('false')) WHERE id='owner'").unwrap();
+            let config = serde_json::to_string(&worker::Settings {
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for n in 0..3 {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)",params![format!("replacement-{n}"),config]).unwrap();
+            }
+            let change = Change {
+                db: crate::database::Connection::open(root.join("issues.db")).unwrap(),
+                begins: std::cell::Cell::new(0),
+                error: std::cell::RefCell::new(None),
+                resume,
+            };
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    store.db.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_STMT,
+                    Some(change_before_write),
+                    (&change as *const Change).cast_mut().cast(),
+                );
+            }
+            let result = store.reserve_chief("unit", None);
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(store.db.handle(), 0, None, std::ptr::null_mut());
+            }
+            let assigned = store
+                .db
+                .query_row(
+                    "SELECT worker_id FROM project_chiefs WHERE project_id='named:Chief'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap();
+            let begins = change.begins.get();
+            let error = change.error.borrow_mut().take();
+            drop(change);
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(error.is_none(), "Concurrent update failed: {error:?}");
+            assert!(
+                result.unwrap().is_none(),
+                "A resumed assignee or postponed Chief must keep its reservation"
+            );
+            assert_eq!(
+                begins, 1,
+                "Later candidates reused stale reservation state and took the writer again"
+            );
+            assert_eq!(assigned, "owner");
+        }
+    }
 
     #[test]
     fn exited_chief_drains_buffered_events_before_reporting_failure() {
