@@ -82,6 +82,7 @@ struct Request: Decodable {
     let link_label: String?
     let task_id: String?
     let task_ids: [String]?
+    let count_only: Bool?
     let document_name: String?
     let attachment: DocumentAttachment?
     let comments_enabled: Bool?
@@ -356,6 +357,13 @@ final class Database {
             if let raw = sqlite3_column_text(stmt,0), let row = try JSONSerialization.jsonObject(with: Data(String(cString:raw).utf8)) as? [String:Any] { rows.append(row) }
         }
     }
+    func inboxUnreadCount() throws -> Int {
+        // Match list visibility without projecting archived records or icons.
+        let stmt = try statement("SELECT count(*) FROM dialogs WHERE status='pending' AND json_valid(body)")
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
+        return Int(sqlite3_column_int64(stmt,0))
+    }
     func transaction(_ action: () throws -> Void) throws {
         try execute("BEGIN IMMEDIATE")
         do { try action(); try execute("COMMIT") }
@@ -601,6 +609,11 @@ final class Store {
         reply.send(["task_id":task?.taskID ?? "inbox", "status":"ok","result":String(decoding:data,as:UTF8.self)])
     }
     func processInbox(_ request: Request, _ reply: Reply) throws {
+        if request.command == "inbox_list" && request.count_only == true {
+            let data = try JSONSerialization.data(withJSONObject:["unread":database.inboxUnreadCount()])
+            reply.send(["task_id":"inbox", "status":"ok", "result":String(decoding:data,as:UTF8.self)])
+            return
+        }
         if request.command == "inbox_list" { try inboxReply(reply,rows:database.inboxRows()); return }
         if request.command == "inbox_clear" {
             guard let ids = request.task_ids, !ids.isEmpty, ids.count <= 10000,
