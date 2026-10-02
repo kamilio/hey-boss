@@ -1259,40 +1259,56 @@ pub(super) fn incremental(db: &Connection, node: &str, cursor: i64) -> Result<Va
 fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Value> {
     let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
     let mut changes = journal(db, cursor)?;
-    let mut ids = BTreeMap::new();
-    let mut lookup = db.prepare_cached("SELECT origin,origin_id FROM fleet_row_ids WHERE table_name=?1 AND local_id=?2 ORDER BY rowid LIMIT 1")?;
-    for change in &mut changes {
+    let mut needed = BTreeSet::new();
+    let mut appends = Vec::new();
+    for (index, change) in changes.iter().enumerate() {
         let table = change["table_name"].as_str().unwrap();
         if !append(table) || !change["after_json"].is_string() {
             continue;
         }
         let row = row_json(change, "after_json")?;
-        let mut needed = vec![(
-            table,
+        needed.insert((
+            table.to_owned(),
             row["id"]
                 .as_i64()
                 .ok_or_else(|| invalid("Missing append identity"))?,
-        )];
+        ));
         if table == "events" {
             let data: Value = serde_json::from_str(row["data"].as_str().unwrap())?;
             if let Some(comment) = data["comment_id"].as_i64() {
-                needed.push(("comments", comment));
+                needed.insert(("comments".to_owned(), comment));
             }
         }
-        for (table, local) in needed {
-            let key = (table.to_owned(), local);
-            if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(key) {
-                let identity = lookup
-                    .query_row(rusqlite::params![table, local], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-                    })
-                    .optional()?;
-                if let Some(identity) = identity {
-                    entry.insert(identity);
-                }
-            }
+        appends.push((index, table.to_owned(), row));
+    }
+    let mut ids = BTreeMap::new();
+    if !needed.is_empty() {
+        // Drive indexed lookups from this journal's keys, including missing local
+        // identities only once. Multiple origins retain the first recorded row.
+        for row in rows(
+            db,
+            "SELECT r.table_name,r.local_id,r.origin,r.origin_id
+             FROM json_each(?1) requested CROSS JOIN fleet_row_ids r
+             WHERE r.rowid=(SELECT rowid FROM fleet_row_ids
+                 WHERE table_name=json_extract(requested.value,'$[0]')
+                   AND local_id=json_extract(requested.value,'$[1]')
+                 ORDER BY rowid LIMIT 1)",
+            &[json!(serde_json::to_string(&needed)?)],
+        )? {
+            ids.insert(
+                (
+                    row["table_name"].as_str().unwrap().to_owned(),
+                    row["local_id"].as_i64().unwrap(),
+                ),
+                (
+                    row["origin"].as_str().unwrap().to_owned(),
+                    row["origin_id"].as_i64().unwrap(),
+                ),
+            );
         }
-        change["append"] = canonical_append(&own, table, row, &ids)?;
+    }
+    for (index, table, row) in appends {
+        changes[index]["append"] = canonical_append(&own, &table, row, &ids)?;
     }
     allocation_payload(
         db,
@@ -3022,6 +3038,80 @@ mod tests {
             state_get(&f.db, "journal_floor", Value::Null).unwrap(),
             Value::Null
         );
+    }
+
+    #[test]
+    fn incremental_identity_reads_are_batched_and_preserve_first_origin() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            f.capture();
+            f.db.execute_batch(&format!(
+                "WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                 INSERT INTO comments(id,project_id,issue_number,author,body,created_at)
+                 SELECT id,'named:Native fleet',1,'human:fixture','Comment',1 FROM n;
+                 INSERT INTO fleet_row_ids SELECT 'first','comments',id+1000,id FROM comments WHERE id%2=0;
+                 INSERT INTO fleet_row_ids SELECT 'later','comments',id+2000,id FROM comments WHERE id%2=0;
+                 INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                 SELECT project_id,issue_number,author,'comment_resolved',2,json_object('comment_id',id) FROM comments;
+                 WITH RECURSIVE n(id) AS (VALUES(100000) UNION ALL SELECT id+1 FROM n WHERE id<129999)
+                 INSERT INTO fleet_row_ids SELECT 'unrelated','events',id,id FROM n;"
+            )).unwrap();
+            let expected = incremental(&f.db, "agent", 0).unwrap();
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            let started = std::time::Instant::now();
+            let actual = incremental(&db, "agent", 0).unwrap();
+            let elapsed = started.elapsed();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            eprintln!(
+                "{count} comments and resolutions: {commands} RPCs, {steps} VM steps in {elapsed:?}"
+            );
+            assert_eq!(actual, expected);
+            assert_eq!(actual["changes"].as_array().unwrap().len(), count * 2);
+            for change in actual["changes"].as_array().unwrap() {
+                let row = &change["append"]["row"];
+                if change["table_name"] == "comments" {
+                    let local = row_json(change, "after_json").unwrap()["id"]
+                        .as_i64()
+                        .unwrap();
+                    assert_eq!(
+                        change["append"]["origin"],
+                        if local % 2 == 0 { "first" } else { "main" }
+                    );
+                    assert_eq!(row["id"], if local % 2 == 0 { local + 1000 } else { local });
+                } else {
+                    let local_data: Value = serde_json::from_str(
+                        row_json(change, "after_json").unwrap()["data"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    let local = local_data["comment_id"].as_i64().unwrap();
+                    let data: Value = serde_json::from_str(row["data"].as_str().unwrap()).unwrap();
+                    assert_eq!(
+                        data["comment_id"],
+                        if local % 2 == 0 { local + 1000 } else { local }
+                    );
+                    if local % 2 == 0 {
+                        assert_eq!(data["comment_origin"], "first");
+                    }
+                }
+            }
+            measurements.push((count, commands, steps));
+        }
+        for (count, commands, steps) in measurements {
+            assert!(
+                commands < 25,
+                "{count} comments required {commands} owner RPCs"
+            );
+            assert!(
+                steps < count as i64 * 200 + 2000,
+                "Unrelated identities were scanned: {steps} steps"
+            );
+        }
     }
 
     #[test]
