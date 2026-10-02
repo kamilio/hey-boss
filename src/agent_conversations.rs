@@ -82,6 +82,7 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                             | "active"
                             | "free"
                             | "eligible"
+                            | "desired_concurrency"
                             | "retry_at"
                             | "error"
                     )
@@ -103,6 +104,9 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                         | "desired_revision"
                         | "applied_revision"
                         | "configuration_error"
+                        | "projects"
+                        | "workspace"
+                        | "project_retries"
                 )
             });
         }
@@ -1252,17 +1256,27 @@ mod tests {
 
     #[test]
     fn compact_overview_preserves_worker_configuration_status() {
-        let original = json!({"machines":[{"host":"local","desired_revision":"new","applied_revision":"old","configuration_error":"Checkout unavailable","workers":[{"id":"worker","managed":true,"retiring":false,"intent":"pause","active":1,"free":1,"eligible":0,"retry_at":123,"error":"Retrying","runs":[]}]}]});
+        let original = json!({"machines":[{"host":"local","workspace":"~/projects","projects":{"github.com/acme/atlas":{"git":"git@github.com:acme/atlas.git","path":"~/projects/atlas"}},"desired_revision":"new","applied_revision":"old","configuration_error":"Checkout unavailable","workers":[{"id":"worker","managed":true,"retiring":false,"intent":"pause","active":1,"free":1,"eligible":0,"desired_concurrency":2,"retry_at":123,"error":"Retrying","runs":[]}]}]});
         let result = compact(original.clone(), &HashSet::new()).unwrap();
         for key in [
             "desired_revision",
             "applied_revision",
             "configuration_error",
+            "projects",
+            "workspace",
         ] {
             assert_eq!(result["machines"][0][key], original["machines"][0][key]);
         }
         for key in [
-            "managed", "retiring", "intent", "active", "free", "eligible", "retry_at", "error",
+            "managed",
+            "retiring",
+            "intent",
+            "active",
+            "free",
+            "eligible",
+            "retry_at",
+            "error",
+            "desired_concurrency",
         ] {
             assert_eq!(
                 result["machines"][0]["workers"][0][key],

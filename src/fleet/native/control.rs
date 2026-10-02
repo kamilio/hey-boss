@@ -185,6 +185,13 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
             json!({"kind":"ack","configuration_error":"Worker restart in progress; configuration will retry"}),
         );
     };
+    let retries = &message["project_retries"];
+    super::projects::retry(ctx, retries)?;
+    let mut reply = configure_companion_locked(ctx, message)?;
+    reply["project_retries"] = retries.clone();
+    Ok(reply)
+}
+fn configure_companion_locked(ctx: &Context, message: &Value) -> Result<Value> {
     let previous = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
     let workers = retain_pending_changes(&previous, message)?;
     let retiring: Vec<_> = workers
@@ -683,6 +690,21 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkout_retry_waits_for_control_lock_then_acknowledges_attempt() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        super::super::replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        let message = json!({"revision":"new","workers":[],"projects":{},"project_retries":{"atlas":"attempt"}});
+        let lock = ctx.lock("fleet-worker-control.lock", true).unwrap();
+        let busy = configure_companion(&ctx, &message).unwrap();
+        assert!(busy.get("project_retries").is_none());
+        drop(lock);
+        let applied = configure_companion(&ctx, &message).unwrap();
+        assert_eq!(applied["project_retries"], message["project_retries"]);
+        assert_eq!(applied["revision"], "new");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn failed_project_setup_keeps_removal_intent_without_starting_new_workers() {
         let (root, ctx, store) = super::super::context::tests::test_context();

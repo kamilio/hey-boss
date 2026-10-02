@@ -279,6 +279,7 @@ impl Supervisor {
                     .cloned()
                     .unwrap_or(json!("~/Workspace"));
                 if host == "local" {
+                    machine["project_retries"] = self.machine("local")["project_retries"].clone();
                     machine["applied_revision"] = applied["revision"].clone();
                     machine["configuration_error"] = applied["error"].clone();
                 }
@@ -294,6 +295,7 @@ impl Supervisor {
                         workers.push(json!({"id":definition["id"],"intent":definition["intent"],"config":definition["config"],"managed":true,"pid":null,"runs":[],"chiefs":[]}));
                     }
                     if let Some(worker) = workers.iter_mut().find(|w| w["id"] == definition["id"]) {
+                        worker["desired_concurrency"] = definition["config"]["concurrency"].clone();
                         worker["retiring"] = json!(
                             definition["retiring"] == true
                                 || !config["document"]["machines"][host]["workers"]
@@ -1088,7 +1090,7 @@ impl Supervisor {
         self.event(host, "connected", "Companion connected");
         send(
             &mut *input.lock().unwrap(),
-            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         peer.set(node.to_owned()).unwrap();
         let mut last_message = Instant::now();
@@ -1199,6 +1201,9 @@ impl Supervisor {
                     let updated =
                         super::projects::revision(&self.ctx.node, &current, &current_projects);
                     if updated != revision
+                        || self.machine(host)["project_retries"]
+                            .as_object()
+                            .is_some_and(|r| !r.is_empty())
                         || !self.machine(host)["configuration_error"].is_null()
                         || message["local_config"]
                             .as_array()
@@ -1209,7 +1214,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut *input.lock().unwrap(),
-                            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1247,6 +1252,7 @@ impl Supervisor {
                             json!({"applied_revision":revision,"configuration_error":null}),
                         )?;
                     }
+                    self.ack_project_retries(host, &message["project_retries"])?;
                     if let Some(error) = message.get("configuration_error") {
                         self.update(host, json!({"configuration_error":error}))?;
                         self.event(
@@ -1454,7 +1460,10 @@ impl Supervisor {
             .filter(|w| matches!(w["intent"].as_str(), Some("drain" | "stop")))
             .cloned()
             .collect();
+        let retries = self.machine("local")["project_retries"].clone();
+        super::projects::retry(&self.ctx, &retries)?;
         let prepared = super::projects::prepare(&self.ctx, &projects, &desired);
+        self.ack_project_retries("local", &retries)?;
         let (desired, failures) = match prepared {
             Ok(workers) => {
                 let failures = control::configure_workers(&self.ctx, workers.as_array().unwrap())?;
@@ -1787,6 +1796,21 @@ impl Supervisor {
         stream.write_all(&bytes)?;
         Ok(())
     }
+    fn ack_project_retries(&self, host: &str, completed: &Value) -> Result<()> {
+        if completed.as_object().is_none_or(|r| r.is_empty()) {
+            return Ok(());
+        }
+        let _configuration = self.configuration.lock().unwrap();
+        let mut pending = self.machine(host)["project_retries"].clone();
+        if let Some(pending) = pending.as_object_mut() {
+            for (project, token) in completed.as_object().into_iter().flatten() {
+                if pending.get(project) == Some(token) {
+                    pending.remove(project);
+                }
+            }
+        }
+        self.update(host, json!({"project_retries":pending}))
+    }
     fn configuration_request(&self, request: &Value) -> Result<Value> {
         let _configuration = self.configuration.lock().unwrap();
         if let Some(host) = request["machine_update"]["host"].as_str()
@@ -1794,6 +1818,34 @@ impl Supervisor {
             && !self.ctx.inventory()?.iter().any(|m| m["host"] == host)
         {
             return Err(invalid("Machine is not in the configured inventory"));
+        }
+        if let Some(retry) = request.get("retry_project") {
+            if ["text", "worker_update", "machine_update"]
+                .iter()
+                .any(|key| request.get(key).is_some())
+            {
+                return Err(invalid("Choose a retry or configuration edit"));
+            }
+            let host = retry["host"]
+                .as_str()
+                .ok_or_else(|| invalid("Choose a machine"))?;
+            let project = retry["project"]
+                .as_str()
+                .ok_or_else(|| invalid("Choose a project"))?;
+            let saved = configuration::load(&self.ctx)?;
+            if saved["document"]["machines"][host]["projects"]
+                .get(project)
+                .is_none()
+            {
+                return Err(invalid("Project is no longer configured on this machine"));
+            }
+            let mut pending = self.machine(host)["project_retries"].clone();
+            if !pending.is_object() {
+                pending = json!({});
+            }
+            pending[project] = json!(id()?);
+            self.update(host, json!({"project_retries":pending}))?;
+            return Ok(json!({"ok":true}));
         }
         configuration::request(&self.ctx, request)
     }
@@ -2238,6 +2290,31 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn checkout_retries_queue_without_editing_configuration_and_ack_only_matching_requests() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(&app.ctx.desired, "machines: {peer: {workers: [], projects: {github.com/acme/atlas: {git: 'git@github.com:acme/atlas.git', path: '~/projects/atlas'}}}}\n").unwrap();
+        let original = std::fs::read(&app.ctx.desired).unwrap();
+        let request = json!({"retry_project":{"host":"peer","project":"github.com/acme/atlas"}});
+        app.configuration_request(&request).unwrap();
+        let first = app.machine("peer")["project_retries"].clone();
+        assert!(first["github.com/acme/atlas"].is_string());
+        app.configuration_request(&request).unwrap();
+        app.ack_project_retries("peer", &first).unwrap();
+        let second = app.machine("peer")["project_retries"].clone();
+        assert_ne!(first, second);
+        app.ack_project_retries("peer", &second).unwrap();
+        assert_eq!(app.machine("peer")["project_retries"], json!({}));
+        assert_eq!(std::fs::read(&app.ctx.desired).unwrap(), original);
+        assert!(
+            app.configuration_request(
+                &json!({"retry_project":{"host":"peer","project":"missing"}})
+            )
+            .is_err()
+        );
     }
 
     #[test]

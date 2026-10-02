@@ -17,13 +17,17 @@ async function edit(update){const config=await rpc({kind:'configuration'});const
 try{
   writeFileSync(env.HEY_BOSS_FLEET_DESIRED,'machines: {local: {workers: []}}\n');writeFileSync(env.HEY_BOSS_FLEET_CONFIG,'{"ssh_hosts":[]}');
   const source=join(root,'source');mkdirSync(source);git(['init','--quiet',source]);writeFileSync(join(source,'README.md'),'Synthetic checkout\n');git(['-C',source,'add','README.md']);git(['-C',source,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--quiet','-m','Initial fixture']);
-  writeFileSync(env.GIT_CONFIG_GLOBAL,'[url "'+source+'"]\n\tinsteadOf = https://github.com/acme/worker-fixture.git\n');
+  writeFileSync(env.GIT_CONFIG_GLOBAL,'[url "'+join(root,'unavailable-source')+'"]\n\tinsteadOf = https://github.com/acme/worker-fixture.git\n');
   const supervisor=spawn(binary,['fleet','supervisor'],{env,stdio:['ignore','pipe','pipe']});children.push(supervisor);let output='';supervisor.stdout.on('data',b=>output+=b);supervisor.stderr.on('data',b=>output+=b);
   await until(()=>existsSync(join(root,'fleet.sock')),'Supervisor startup failed: '+output);
   const project='github.com/acme/worker-fixture',workspace=join(root,'Workspace'),checkout=join(workspace,'worker-fixture');
   const saved=await edit({host:'local',action:'project',git:'https://github.com/acme/worker-fixture.git',workspace});
   assert.equal(saved.document.machines.local.workspace,workspace);
-  await until(()=>existsSync(join(checkout,'README.md')),'Machine did not clone the project');
+  await until(async()=>{const s=await rpc({kind:'status'});return s.machines?.find(m=>m.host==='local')?.configuration_error;},'Failed clone did not report setup error');
+  writeFileSync(env.GIT_CONFIG_GLOBAL,'[url "'+source+'"]\n\tinsteadOf = https://github.com/acme/worker-fixture.git\n');
+  const retry=await rpc({kind:'configuration',retry_project:{host:'local',project}});assert.equal(retry.ok,true,JSON.stringify(retry));
+  await until(()=>existsSync(join(checkout,'README.md')),'Explicit retry did not clone the project');
+  await until(async()=>{const s=await rpc({kind:'status'});const m=s.machines?.find(m=>m.host==='local');return m&&!m.configuration_error&&!Object.keys(m.project_retries||{}).length;},'Successful retry did not clear setup error and pending status');
   assert.equal(readFileSync(join(checkout,'README.md'),'utf8'),'Synthetic checkout\n');
   await edit({host:'local',action:'add',id:'synthetic-worker',concurrency:1});
   const running=await until(async()=>{const s=await rpc({kind:'status'});const w=s.machines?.find(m=>m.host==='local')?.workers?.find(w=>w.id==='synthetic-worker');if(w?.pid>0){workerPids.add(w.pid);return w;}},'Worker did not start');
