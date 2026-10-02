@@ -2,10 +2,6 @@
 
 {{subtask}}
 
-{{dependencies}}
-
-{{plan_document}}
-
 {{github}}
 
 {{workspace}}

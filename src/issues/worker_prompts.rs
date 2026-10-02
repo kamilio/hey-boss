@@ -9,6 +9,11 @@ macro_rules! prompts {
         #[derive(Debug, Clone, Default, Serialize, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         pub struct PromptOverrides {
+            // Accept old saved sections without applying or exposing them.
+            #[serde(skip_serializing)]
+            pub dependencies: Option<String>,
+            #[serde(skip_serializing)]
+            pub plan_document: Option<String>,
             $(#[serde(skip_serializing_if = "Option::is_none")] pub $key: Option<String>,)*
         }
         impl PromptOverrides {
@@ -30,7 +35,7 @@ macro_rules! prompts {
 }
 
 prompts! {
-    (layout, DEFAULT_LAYOUT_PROMPT, "Prompt sequence", "Arrange or omit {{task}}, {{subtask}}, {{dependencies}}, {{plan_document}}, {{github}}, {{workspace}}, {{delivery}}, {{handoff}}, {{resume}}. Empty sections disappear. Task selects Implementation or Plan; workspace and delivery follow the workflow settings."),
+    (layout, DEFAULT_LAYOUT_PROMPT, "Prompt sequence", "Arrange or omit {{task}}, {{subtask}}, {{github}}, {{workspace}}, {{delivery}}, {{handoff}}, {{resume}}. Empty sections disappear. Task selects Implementation or Plan; workspace and delivery follow the workflow settings."),
     (plan, DEFAULT_PLAN_PROMPT, "Planning", ""),
     (worktree, DEFAULT_WORKTREE_PROMPT, "Dedicated worktree", ""),
     (checkout, DEFAULT_CHECKOUT_PROMPT, "Existing checkout", ""),
@@ -38,9 +43,7 @@ prompts! {
     (main, DEFAULT_MAIN_PROMPT, "Push to main", ""),
     (handoff, DEFAULT_HANDOFF_PROMPT, "Ready handoff", "PR tasks that unblock dependencies before merge."),
     (subtask, DEFAULT_SUBTASK_PROMPT, "Subtask context", "Subtasks. Variables: {{subtask_position}}, {{subtask_total}}, {{parent_number}}, {{parent_title}}, {{parent_state}}, {{previous_subtask}}, {{next_subtask}}."),
-    (dependencies, DEFAULT_DEPENDENCIES_PROMPT, "Prerequisites", "Tasks with dependencies. Variable: {{dependencies}}."),
     (resume, DEFAULT_RESUME_PROMPT, "Resume", "Resumed tasks."),
-    (plan_document, DEFAULT_PLAN_DOCUMENT_PROMPT, "Plan document", "Tasks with a linked plan. Variable: {{plan_path}}."),
     (github, DEFAULT_GITHUB_PROMPT, "GitHub status", "Tasks with GitHub status, and live GitHub updates."),
     (steering, DEFAULT_STEERING_PROMPT, "New instructions", "Live instructions. Variables: {{scope}}, {{instruction}}."),
     (dependency_update, DEFAULT_DEPENDENCY_UPDATE_PROMPT, "Dependency updates", "Live dependency changes. Variable: {{instruction}}."),
