@@ -90,11 +90,11 @@ fn copy_rows(
     cold: &Connection,
     staging: &str,
     table: &str,
-    project: &str,
-    number: i64,
+    issue: (&str, i64),
     actors: &mut BTreeSet<String>,
     digest: &mut Sha256,
 ) -> Result<()> {
+    let (project, number) = issue;
     let mut cursor: Option<SqlValue> = None;
     loop {
         let (sql, args) = if let Some(cursor) = &cursor {
@@ -241,8 +241,7 @@ pub(crate) fn archive_issue(
             &copy,
             &staging,
             table,
-            project,
-            number,
+            (project, number),
             &mut actors,
             &mut digest,
         )?;
@@ -671,8 +670,8 @@ fn restore_rows(
             if let Some(encoded) = pending.take() {
                 bytes += String::len(&encoded);
                 batch.push(local_record(
-                    &archive,
-                    &key,
+                    archive,
+                    key,
                     table,
                     serde_json::from_str::<Value>(&encoded)?,
                 )?);
@@ -688,8 +687,8 @@ fn restore_rows(
                 }
                 bytes += encoded.len();
                 batch.push(local_record(
-                    &archive,
-                    &key,
+                    archive,
+                    key,
                     table,
                     serde_json::from_str::<Value>(&encoded)?,
                 )?);
