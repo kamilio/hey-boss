@@ -3,7 +3,7 @@ use crate::{
     database::Connection,
     issues::{Error, Result},
 };
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,13 +72,39 @@ pub(crate) fn apply(db: &Connection, assignments: &[Assignment]) -> Result<()> {
         {
             return Err(Error::invalid("Invalid Chief assignment"));
         }
-        let existing: Option<(String,String,i64,bool)> = db.query_row("SELECT node,worker_id,generation,revoking FROM fleet_chief_ownership WHERE project_id=?1", [&a.project_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        if let Some((node, worker, generation, revoking)) = existing {
-            if generation > a.generation {
+    }
+    if projects.is_empty() {
+        return Ok(());
+    }
+    // Every pull carries ownership, including unchanged projects. Read only
+    // this batch's keys once within the caller's synchronization transaction.
+    let existing = db
+        .prepare(
+            "SELECT a.project_id,a.node,a.worker_id,a.generation,a.revoking
+         FROM json_each(?1) selected CROSS JOIN fleet_chief_ownership a
+         WHERE a.project_id=selected.value",
+        )?
+        .query_map([serde_json::to_string(&projects)?], |r| {
+            let project: String = r.get(0)?;
+            Ok((
+                project.clone(),
+                Assignment {
+                    project_id: project,
+                    node: r.get(1)?,
+                    worker_id: r.get(2)?,
+                    generation: r.get(3)?,
+                    revoking: r.get(4)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+    for a in assignments {
+        if let Some(old) = existing.get(&a.project_id) {
+            if old.generation > a.generation {
                 continue;
             }
-            if generation == a.generation {
-                if (node, worker, revoking) != (a.node.clone(), a.worker_id.clone(), a.revoking) {
+            if old.generation == a.generation {
+                if old != a {
                     return Err(Error::invalid("Conflicting Chief assignment generation"));
                 }
                 continue;
@@ -237,6 +263,65 @@ pub(crate) fn reconcile(db: &Connection, machines: &[Value]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn unchanged_assignment_batches_use_bounded_database_round_trips() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-chief-owner-batch-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        drop(crate::issues::Store::open(&path).unwrap());
+        let setup = Connection::open(&path).unwrap();
+        setup.execute_batch("WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<4096)
+            INSERT INTO fleet_chief_ownership SELECT 'unrelated-'||id,'elsewhere','worker',1,0 FROM ids;").unwrap();
+        let assignments = (0..256)
+            .map(|i| Assignment {
+                project_id: format!("selected-{i}"),
+                node: "node".into(),
+                worker_id: "worker".into(),
+                generation: 2,
+                revoking: i % 2 == 0,
+            })
+            .collect::<Vec<_>>();
+        apply(&setup, &assignments).unwrap();
+        setup
+            .execute_batch(
+                "CREATE TABLE assignment_writes(project TEXT);
+            CREATE TRIGGER ownership_write_audit AFTER UPDATE ON fleet_chief_ownership
+            BEGIN INSERT INTO assignment_writes VALUES(NEW.project_id); END;",
+            )
+            .unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let mut measurements = Vec::new();
+        for count in [1, 256] {
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let tx =
+                crate::database::Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                    .unwrap();
+            apply(&tx, &assignments[..count]).unwrap();
+            tx.commit().unwrap();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            eprintln!("{count} unchanged Chief assignments: {commands} RPCs, {steps} query steps");
+            measurements.push((count, commands, steps));
+        }
+        owner.stop();
+        let writes: i64 = setup
+            .query_row("SELECT count(*) FROM assignment_writes", [], |r| r.get(0))
+            .unwrap();
+        drop(setup);
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(writes, 0);
+        for (count, commands, steps) in measurements {
+            assert!(commands <= 5, "{count} assignments used {commands} RPCs");
+            assert!(
+                steps < count as i64 * 50 + 100,
+                "Unrelated ownership rows were scanned: {steps} steps for {count} assignments"
+            );
+        }
+    }
+
     fn machine(node: &str) -> Value {
         json!({"node":node,"state":"connected","chief_ownership":[],"workers":[{"id":format!("worker-{node}"),"pid":123,"config":{"enabled":true,"projects":["project"]},"chief_projects":["project"],"chiefs":[]}]})
     }
@@ -363,6 +448,48 @@ mod tests {
         apply(&b, std::slice::from_ref(&next)).unwrap();
         assert!(!allowed(&a, "project", "selected").unwrap());
         assert!(allowed(&b, "project", "selected").unwrap());
+        let sibling = Assignment {
+            project_id: "sibling".into(),
+            ..next.clone()
+        };
+        {
+            let tx =
+                crate::database::Transaction::new_unchecked(&a, TransactionBehavior::Immediate)
+                    .unwrap();
+            assert!(
+                apply(
+                    &tx,
+                    &[
+                        sibling.clone(),
+                        Assignment {
+                            node: "conflicting".into(),
+                            ..next.clone()
+                        }
+                    ]
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            read(&a).unwrap(),
+            vec![next.clone()],
+            "A rejected batch must roll back earlier writes"
+        );
+        assert!(apply(&a, &[sibling.clone(), sibling.clone()]).is_err());
+        assert_eq!(read(&a).unwrap(), vec![next.clone()]);
+        apply(
+            &a,
+            &[
+                Assignment {
+                    generation: 1,
+                    node: "stale".into(),
+                    ..next.clone()
+                },
+                sibling.clone(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(read(&a).unwrap(), vec![next, sibling]);
         drop(a);
         drop(b);
         std::fs::remove_dir_all(root).unwrap();
