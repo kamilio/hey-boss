@@ -130,6 +130,8 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("requests", "created_at", "INTEGER NOT NULL DEFAULT 0"),
     ("requests", "archive_key", "TEXT"),
+    ("worker_runs", "archive_key", "TEXT"),
+    ("worker_runs", "events_archive_key", "TEXT"),
     (
         "issues",
         "attempt_hold",
@@ -1225,6 +1227,7 @@ impl Store {
                     tx.execute_batch("CREATE INDEX request_archive_candidates ON requests(created_at) WHERE archive_key IS NULL")?;
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_candidates ON worker_runs(finished_at,id) WHERE archive_key IS NULL AND finished_at IS NOT NULL")?;
                 tx.commit()?;
                 Ok(())
             };

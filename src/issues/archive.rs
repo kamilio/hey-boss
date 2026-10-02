@@ -1,5 +1,8 @@
 //! Cold payloads are published durably before a hot record can reference them.
 
+mod runs;
+pub(crate) use runs::{archive_runs, worker_event_tails, worker_payload};
+
 use super::{Error, Result, Store};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -210,7 +213,7 @@ pub(crate) fn maintain(db: &crate::database::Connection, now: i64) -> Result<usi
     if version != Store::schema_version() {
         return Ok(0);
     }
-    archive_receipts(db, now)
+    Ok(archive_receipts(db, now)? + archive_runs(db, now)?)
 }
 
 #[cfg(test)]
@@ -489,5 +492,109 @@ mod tests {
         .unwrap();
         assert_eq!(archive_receipts(&db, GRACE_MS + 2).unwrap(), 0);
         writer.rollback().unwrap();
+    }
+
+    #[test]
+    fn finished_runs_archive_payloads_and_logs_without_changing_retry_state() {
+        let f = Fixture::new();
+        let db = Store::open(&f.0.join("issues.db")).unwrap().into_database();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('p','Project',2); INSERT INTO agents VALUES('a','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',1,'Task','','open','a',0,0,1,'[]');
+            INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_count,retry_allowed,expanded_prompt) VALUES
+            ('old','p',1,'{\"issue\":{\"title\":\"Task\",\"number\":1,\"body\":\"Full context\"},\"resume_session\":\"session\",\"config\":{\"cwd\":\"/work\",\"prompt\":\"Original instructions\"}}','a','failed',1,'start','local',1,100,100,3,0,'Expanded prompt');
+            INSERT INTO worker_events(id,run_id,created_at,text) VALUES(10,'old',10,'First'),(20,'old',20,'Second'),(30,'old',100,'Third');").unwrap();
+        let job: String = db
+            .query_row("SELECT job FROM worker_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(archive_runs(&db, GRACE_MS + 99).unwrap(), 0);
+        assert_eq!(archive_runs(&db, GRACE_MS + 100).unwrap(), 1);
+        assert_eq!(archive_runs(&db, GRACE_MS + 101).unwrap(), 0);
+        assert_eq!(
+            worker_payload(&db, "old", "p").unwrap(),
+            ("Expanded prompt".into(), job)
+        );
+        let compact: Value = serde_json::from_str(
+            &db.query_row("SELECT job FROM worker_runs", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(compact["issue"]["title"], "Task");
+        assert_eq!(compact["config"]["cwd"], "/work");
+        assert_eq!(compact["resume_session"], "session");
+        assert!(compact["issue"]["body"].is_null());
+        assert_eq!(
+            db.query_row("SELECT retry_count FROM worker_runs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM worker_events", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let events = worker_event_tails(&db, &["old"]).unwrap();
+        assert_eq!(
+            events["old"]
+                .iter()
+                .map(|(_, v)| v["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Third", "Second", "First"]
+        );
+        // SQLite rowids must not be reused after moving the last run's logs.
+        db.execute(
+            "INSERT INTO worker_events(run_id,created_at,text) VALUES('old',101,'Late')",
+            [],
+        )
+        .unwrap();
+        assert!(db.last_insert_rowid() > 30);
+        let events = worker_event_tails(&db, &["old"]).unwrap();
+        assert_eq!(
+            events["old"]
+                .iter()
+                .map(|(_, v)| v["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Late", "Third", "Second", "First"]
+        );
+        // A later prompt revision can move back through the hot store without
+        // dropping log entries that belonged to the previous archive copy.
+        db.execute("UPDATE worker_runs SET archive_key=NULL,expanded_prompt='Revised',job=?1,updated_at=102", [worker_payload(&db, "old", "p").unwrap().1]).unwrap();
+        assert_eq!(archive_runs(&db, GRACE_MS + 102).unwrap(), 1);
+        assert_eq!(worker_payload(&db, "old", "p").unwrap().0, "Revised");
+        let events = worker_event_tails(&db, &["old"]).unwrap();
+        assert_eq!(
+            events["old"]
+                .iter()
+                .map(|(_, v)| v["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Late", "Third", "Second", "First"]
+        );
+    }
+
+    #[test]
+    fn active_runs_recent_logs_and_recent_changes_stay_hot() {
+        let f = Fixture::new();
+        let db = Store::open(&f.0.join("issues.db")).unwrap().into_database();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('p','Project',2); INSERT INTO agents VALUES('a','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',1,'Task','','open','a',0,0,1,'[]');
+            INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at) VALUES
+            ('running','p',1,'{}','a','running',1,'start','local',1,1,NULL),
+            ('updated','p',1,'{}','a','completed',1,'start','local',1,101,1),
+            ('logged','p',1,'{}','a','completed',1,'start','local',1,1,1);
+            INSERT INTO worker_events(run_id,created_at,text) VALUES('logged',101,'Recent observation');").unwrap();
+        assert_eq!(archive_runs(&db, GRACE_MS + 100).unwrap(), 0);
+        assert!(!f.path().exists());
+        assert_eq!(archive_runs(&db, GRACE_MS + 101).unwrap(), 1);
+        assert_eq!(archive_runs(&db, GRACE_MS + 101).unwrap(), 1);
+        assert_eq!(archive_runs(&db, GRACE_MS + 101).unwrap(), 0);
+        assert!(
+            db.query_row(
+                "SELECT archive_key IS NULL FROM worker_runs WHERE id='running'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
     }
 }

@@ -14,7 +14,7 @@ impl Store {
     /// event and exact comment still match the last failed run. Later human
     /// changes, approval requests, dependencies and live agents are preserved.
     pub(crate) fn worker_release_automatic_holds(&mut self, machine: &str) -> Result<()> {
-        const CANDIDATES: &str = "SELECT r.job,r.id FROM issues i
+        const CANDIDATES: &str = "SELECT r.project_id,r.id FROM issues i
          JOIN worker_runs r ON r.id=(SELECT id FROM worker_runs WHERE project_id=i.project_id AND issue_number=i.number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
          JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=i.project_id AND issue_number=i.number ORDER BY id DESC LIMIT 1)
          WHERE i.state='blocked' AND i.manual_blocked=1 AND i.deleted_at IS NULL AND i.assignee IS NULL
@@ -37,8 +37,9 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for (job, id) in read(&tx)? {
-            let job: Job = serde_json::from_str(&job)?;
+        for (project, id) in read(&tx)? {
+            let (_, full_job) = crate::issues::archive::worker_payload(&tx, &id, &project)?;
+            let job: Job = serde_json::from_str(&full_job)?;
             if super::super::blockers::has_dependencies(&tx, &job.project.id, job.number())? {
                 continue;
             }
@@ -190,19 +191,19 @@ fn status(db: &Connection, project: &Project) -> Result<Value> {
         "summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"retry_at":r.get::<_,Option<i64>>(14)?,"retry_count":r.get::<_,i64>(15)?
     })))?;
     let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let ids: Vec<_> = runs.iter().map(|run| run["id"].as_str().unwrap()).collect();
+    let mut tails = crate::issues::archive::worker_event_tails(db, &ids)?;
     for run in &mut runs {
         if let Some(goal) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(goal)?;
         }
-        let mut events = db.prepare(
-            "SELECT created_at,text FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 12",
-        )?;
         run["events"] = json!(
-            events
-                .query_map([run["id"].as_str().unwrap()], |r| Ok(
-                    json!({"at":r.get::<_,i64>(0)?,"text":r.get::<_,String>(1)?})
-                ))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+            tails
+                .remove(run["id"].as_str().unwrap())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>()
         );
     }
     let mut stmt = db.prepare(&format!("SELECT i.number FROM issues i WHERE i.project_id=?1 AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL
@@ -250,15 +251,7 @@ pub(super) fn execute(
             );
         }
         Operation::WorkerRun { run_id } => {
-            let result: Option<(String, String)> = db
-                .query_row(
-                    "SELECT expanded_prompt,job FROM worker_runs WHERE id=?1 AND project_id=?2",
-                    params![run_id, project.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let (prompt, job) =
-                result.ok_or_else(|| Error::new("not_found", "Worker run was not found"))?;
+            let (prompt, job) = crate::issues::archive::worker_payload(db, run_id, &project.id)?;
             return Ok(
                 json!({"ok":true,"project":project,"prompt":prompt,"config":serde_json::from_str::<Job>(&job)?.config}),
             );
@@ -339,10 +332,11 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let saved: Option<(String, Option<String>, bool, bool)> = tx.query_row(
-            "SELECT r.job,r.session_id,r.finished_at IS NOT NULL,r.stop_requested FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",
+            "SELECT r.project_id,r.session_id,r.finished_at IS NOT NULL,r.stop_requested FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND p.hidden_at IS NULL",
             [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-        let (text, session, finished, stopping) =
+        let (project, session, finished, stopping) =
             saved.ok_or_else(|| Error::conflict("This agent is no longer available"))?;
+        let (_, text) = crate::issues::archive::worker_payload(&tx, id, &project)?;
         let job: Job = serde_json::from_str(&text)?;
         let issue = get_issue(&tx, &job.project.id, job.number(), false)?;
         let repeated = stopping && issue.assignee.as_deref() == Some("human:boss");
@@ -380,8 +374,8 @@ impl Store {
 
     pub(crate) fn worker_prompt(&self, job: &Job, text: &str) -> Result<()> {
         self.db.execute(
-            "UPDATE worker_runs SET expanded_prompt=?2,job=?3 WHERE id=?1",
-            params![job.id, text, serde_json::to_string(job)?],
+            "UPDATE worker_runs SET expanded_prompt=?2,job=?3,archive_key=NULL,updated_at=?4 WHERE id=?1",
+            params![job.id, text, serde_json::to_string(job)?,now()],
         )?;
         Ok(())
     }
