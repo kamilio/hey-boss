@@ -83,6 +83,7 @@ const HeyBossUI = (() => {
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const paths = {
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   bolt: '<path d="m13 2-9 12h7l-1 8 10-12h-7l1-8Z"/>',
   info: '<circle cx="12" cy="12" r="10" fill="currentColor" stroke="none"/><path d="M12 11v6M12 7v.5" stroke="var(--solid)" stroke-width="2"/>',
   success:
@@ -287,7 +288,16 @@ function date(at) {
   function infoTip(id, label, text) {
     return `<span class="info-tip"><button type="button" class="info-tip-button" popovertarget="${esc(id)}" aria-label="${esc(label)}" aria-describedby="${esc(id)}">${icon("info")}</button><span id="${esc(id)}" class="info-tip-content" popover role="tooltip">${esc(text)}</span></span>`;
   }
+  if (typeof window !== "undefined") window.addEventListener("resize", () => {
+    $("#navigation-more-links:popover-open")?.hidePopover();
+  });
   if (typeof document !== "undefined") document.addEventListener("beforetoggle", event => {
+    if (event.target.id === "navigation-more-links" && event.newState === "open") {
+      const rect = $("#navigation-more").getBoundingClientRect();
+      event.target.style.top = rect.bottom + 6 + "px";
+      event.target.style.left = Math.max(12, Math.min(rect.right - 176, window.innerWidth - 188)) + "px";
+      return;
+    }
     const tip = event.target;
     if (event.newState !== "open" || !tip.classList.contains("info-tip-content")) return;
     const rect = tip.previousElementSibling.getBoundingClientRect();
