@@ -790,6 +790,84 @@ impl Supervisor {
         );
         replica::allocate(db, node, &workers)
     }
+    fn heartbeat_pull(
+        &self,
+        db: &crate::database::Connection,
+        host: &str,
+        node: &str,
+        workers: &Value,
+        message: &Value,
+    ) -> Result<(Value, Vec<Value>, Vec<Value>)> {
+        let write = crate::database::Transaction::new_unchecked(
+            db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let receipts = replica::accept_changes(
+            &write,
+            node,
+            message["changes"]
+                .as_array()
+                .ok_or_else(|| invalid("Missing companion journal"))?,
+        )?;
+        replica::refresh_allocation_deadlines(
+            &write,
+            node,
+            message["workers"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+        self.allocate_work(
+            &write,
+            node,
+            workers.as_array().unwrap(),
+            message["workers"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+        write.commit()?;
+        // A separate read transaction uses the owner reader connection. Combining
+        // COMMIT and BEGIN in one Batch retains the writer lease during the pull.
+        let read = db.read_transaction()?;
+        let mut payload = match message["cursor"].as_i64() {
+            Some(cursor) => replica::incremental(&read, node, cursor)?,
+            None => replica::snapshot(&read, node)?,
+        };
+        for (change, receipt) in message["changes"].as_array().unwrap().iter().zip(&receipts) {
+            if receipt["state"] == "conflict"
+                && !matches!(
+                    change["table_name"].as_str(),
+                    Some("comments" | "events")
+                )
+            {
+                let table = change["table_name"].as_str().unwrap();
+                let row: Value = serde_json::from_str(
+                    change["after_json"]
+                        .as_str()
+                        .or(change["before_json"].as_str())
+                        .ok_or_else(|| invalid("Missing conflict row"))?,
+                )?;
+                let canonical = replica::current_row(&read, table, &row)?;
+                if !canonical.is_null() {
+                    if !payload["tables"][table].is_array() {
+                        payload["tables"][table] = json!([]);
+                    }
+                    payload["tables"][table]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(canonical);
+                }
+            }
+        }
+        let signals = replica::rows(
+            &read,
+            "SELECT * FROM fleet_signals WHERE host=? AND state='pending' ORDER BY created_at",
+            &[json!(host)],
+        )?;
+        read.commit()?;
+        Ok((payload, receipts, signals))
+    }
     fn channel_inner(self: &Arc<Self>, host: &str, child: &mut Child) -> Result<()> {
         let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
         let output = child.stdout.take().unwrap();
@@ -1026,74 +1104,13 @@ impl Supervisor {
                             workers.as_array_mut().unwrap().push(definition(discovered));
                         }
                     }
-                    let (payload, receipts, signals) = {
-                        let db = self.ctx.db()?;
-                        db.execute_batch("BEGIN IMMEDIATE")?;
-                        let receipts = replica::accept_changes(
-                            &db,
-                            node,
-                            message["changes"]
-                                .as_array()
-                                .ok_or_else(|| invalid("Missing companion journal"))?,
-                        )?;
-                        replica::refresh_allocation_deadlines(
-                            &db,
-                            node,
-                            message["workers"]
-                                .as_array()
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[]),
-                        )?;
-                        self.allocate_work(
-                            &db,
-                            node,
-                            workers.as_array().unwrap(),
-                            message["workers"]
-                                .as_array()
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[]),
-                        )?;
-                        db.execute_batch("COMMIT; BEGIN")?;
-                        let mut payload = match message["cursor"].as_i64() {
-                            Some(cursor) => replica::incremental(&db, node, cursor)?,
-                            None => replica::snapshot(&db, node)?,
-                        };
-                        for (change, receipt) in
-                            message["changes"].as_array().unwrap().iter().zip(&receipts)
-                        {
-                            if receipt["state"] == "conflict"
-                                && !matches!(
-                                    change["table_name"].as_str(),
-                                    Some("comments" | "events")
-                                )
-                            {
-                                let table = change["table_name"].as_str().unwrap();
-                                let row: Value = serde_json::from_str(
-                                    change["after_json"]
-                                        .as_str()
-                                        .or(change["before_json"].as_str())
-                                        .ok_or_else(|| invalid("Missing conflict row"))?,
-                                )?;
-                                let canonical = replica::current_row(&db, table, &row)?;
-                                if !canonical.is_null() {
-                                    if !payload["tables"][table].is_array() {
-                                        payload["tables"][table] = json!([]);
-                                    }
-                                    payload["tables"][table]
-                                        .as_array_mut()
-                                        .unwrap()
-                                        .push(canonical);
-                                }
-                            }
-                        }
-                        let signals = replica::rows(
-                            &db,
-                            "SELECT * FROM fleet_signals WHERE host=? AND state='pending' ORDER BY created_at",
-                            &[json!(host)],
-                        )?;
-                        db.execute_batch("COMMIT")?;
-                        (payload, receipts, signals)
-                    };
+                    let (payload, receipts, signals) = self.heartbeat_pull(
+                        &self.ctx.db()?,
+                        host,
+                        node,
+                        &workers,
+                        &message,
+                    )?;
                     pull::send_pull(
                         &mut *input.lock().unwrap(),
                         payload,
@@ -2024,6 +2041,51 @@ mod tests {
             }),
         };
         (directory, app)
+    }
+
+    #[test]
+    fn heartbeat_pull_snapshot_releases_writer_and_keeps_a_coherent_read() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Before',1)").unwrap();
+        replica::install_capture(&db, "controller", &app.ctx.node).unwrap();
+        drop(db);
+        let mut owner = crate::database::Owner::start(&app.ctx.path).unwrap().unwrap();
+        let path = app.ctx.path.clone();
+        let (entered, reading) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (db, transport) = crate::database::tests::pause_before_query(
+            &path, "SELECT * FROM fleet_allocations", entered, resume,
+        );
+        let pull = std::thread::spawn(move || {
+            app.heartbeat_pull(&db, "peer", "peer-node", &json!([]), &json!({"changes":[],"workers":[]}))
+                .map_err(|error| error.to_string())
+        });
+        reading.recv_timeout(Duration::from_secs(3)).expect("Pull did not reach its snapshot");
+        let (committed, progress) = mpsc::channel();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            let db = crate::database::Connection::connect(&writer_path).unwrap();
+            let result = db.execute("UPDATE projects SET next_number=2 WHERE id='project'", [])
+                .map_err(|error| error.to_string());
+            committed.send(result.clone()).unwrap();
+            result
+        });
+        let wrote_during_snapshot = progress.recv_timeout(Duration::from_secs(1));
+        // Always release the gate before assertions so a regression cannot hang.
+        release.send(()).unwrap();
+        let (payload, receipts, signals) = pull.join().unwrap().unwrap();
+        let write_result = writer.join().unwrap();
+        transport.join().unwrap();
+        assert_eq!(write_result.unwrap(), 1);
+        let db = crate::database::Connection::connect(&path).unwrap();
+        assert_eq!(db.query_row("SELECT next_number FROM projects WHERE id='project'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        drop(db);
+        owner.stop();
+        assert_eq!(payload["tables"]["projects"][0]["next_number"], 1);
+        assert!(receipts.is_empty());
+        assert!(signals.is_empty());
+        wrote_during_snapshot.expect("Outbound snapshot retained the shared writer").unwrap();
     }
 
     #[test]
