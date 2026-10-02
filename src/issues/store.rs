@@ -932,6 +932,18 @@ pub struct Store {
     attachment_root: std::path::PathBuf,
 }
 
+fn validate_sidecar_metadata(metadata: &fs::Metadata) -> Result<()> {
+    // A concurrent last SQLite connection can unlink a sidecar after the path
+    // lookup but before stat reads its link count. Zero links means that inode
+    // is already detached; only multiple links create an aliasing hazard.
+    if !metadata.is_file() || metadata.nlink() > 1 {
+        return Err(Error::invalid(
+            "Issue database sidecar must be a regular file without hard links",
+        ));
+    }
+    Ok(())
+}
+
 // Publish without replacing a concurrent creator, and without a transient
 // second hard link that another opener could mistake for an unsafe DB alias.
 fn publish_database(staged: &Path, path: &Path) -> std::io::Result<()> {
@@ -1014,12 +1026,7 @@ impl Store {
             let mut sidecar = path.as_os_str().to_os_string();
             sidecar.push(suffix);
             match fs::symlink_metadata(Path::new(&sidecar)) {
-                Ok(metadata) if !metadata.is_file() || metadata.nlink() != 1 => {
-                    return Err(Error::invalid(
-                        "Issue database sidecar must be a regular file without hard links",
-                    ));
-                }
-                Ok(_) => {}
+                Ok(metadata) => validate_sidecar_metadata(&metadata)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
@@ -3189,6 +3196,32 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn sidecar_validation_handles_unlinked_regular_files_without_accepting_aliases() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-sidecar-metadata-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("wal");
+        let file = fs::File::create(&path).unwrap();
+        validate_sidecar_metadata(&file.metadata().unwrap()).unwrap();
+        fs::hard_link(&path, root.join("alias")).unwrap();
+        assert!(validate_sidecar_metadata(&file.metadata().unwrap()).is_err());
+        fs::remove_file(root.join("alias")).unwrap();
+        fs::remove_file(&path).unwrap();
+        let removed = file.metadata().unwrap();
+        assert_eq!(removed.nlink(), 0);
+        assert!(validate_sidecar_metadata(&fs::metadata(&root).unwrap()).is_err());
+        std::os::unix::fs::symlink(&path, root.join("symbolic")).unwrap();
+        assert!(
+            validate_sidecar_metadata(&fs::symlink_metadata(root.join("symbolic")).unwrap())
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+        validate_sidecar_metadata(&removed).unwrap();
+    }
 
     #[test]
     fn discovery_rechecks_names_and_activity_after_its_read_snapshot() {
