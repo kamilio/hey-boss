@@ -311,14 +311,29 @@ pub(crate) fn queue(
     Ok(serde_json::json!({"ok":true,"queued":true,"changed":changed>0,"project_id":project}))
 }
 
-const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0),c.queued FROM project_chiefs c JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE c.worker_id=?1 AND p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
+const STATUS_QUERY: &str = "SELECT c.project_id,p.name,c.machine,c.state,c.pid,c.session_id,c.started_at,c.finished_at,c.next_at,c.summary,c.last_event,c.worker_id,COALESCE(s.chief_enabled,0),c.queued FROM json_each(?1) selected CROSS JOIN project_chiefs c ON c.worker_id=selected.value CROSS JOIN projects p ON p.id=c.project_id LEFT JOIN project_settings s ON s.project_id=c.project_id WHERE p.hidden_at IS NULL ORDER BY c.state='running' DESC,c.started_at DESC,c.project_id,c.machine";
 
 pub(in crate::issues) fn status(
     db: &crate::database::Connection,
     worker: Option<&str>,
 ) -> Result<Vec<Value>> {
-    let mut stmt = db.prepare(STATUS_QUERY)?;
-    Ok(stmt.query_map([worker], |r| {
+    let Some(worker) = worker else {
+        return Ok(Vec::new());
+    };
+    Ok(status_for(db, &[worker])?
+        .remove(worker)
+        .unwrap_or_default())
+}
+
+pub(in crate::issues) fn status_for(
+    db: &crate::database::Connection,
+    workers: &[&str],
+) -> Result<std::collections::HashMap<String, Vec<Value>>> {
+    let mut by_worker = std::collections::HashMap::<String, Vec<Value>>::new();
+    if workers.is_empty() {
+        return Ok(by_worker);
+    }
+    let chiefs = db.query_collect(STATUS_QUERY, [serde_json::to_string(workers)?], |r| -> rusqlite::Result<_> {
         let project: String = r.get(0)?;
         let machine: String = r.get(2)?;
         let state: String = r.get(3)?;
@@ -335,7 +350,14 @@ pub(in crate::issues) fn status(
             "queued":r.get::<_,bool>(13)? || running && next<=worker::now(),
             "next_at":next,"summary":r.get::<_,String>(9)?,"last_event":r.get::<_,String>(10)?
         }))
-    })?.collect::<rusqlite::Result<Vec<_>>>()?)
+    })?;
+    for chief in chiefs {
+        by_worker
+            .entry(chief["worker_id"].as_str().unwrap().into())
+            .or_default()
+            .push(chief);
+    }
+    Ok(by_worker)
 }
 
 fn event_activity(event: &Value) -> Option<String> {
@@ -1221,7 +1243,7 @@ mod tests {
             assert!(status(&store.db, None).unwrap().is_empty());
             let mut stmt = store.db.prepare(STATUS_QUERY).unwrap();
             let projects = stmt
-                .query_map(["selected"], |r| r.get::<_, String>(0))
+                .query_map([r#"["selected"]"#], |r| r.get::<_, String>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();

@@ -157,10 +157,10 @@ pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cw
 // Resolve the bounded set of IDs first. An outer worker_id/OR filter scans all
 // attempts even when the history subquery is indexed.
 const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at,r.actor_id,
- CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count
- FROM worker_runs r JOIN projects p ON p.id=r.project_id JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number
- WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL
- UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=?1 AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
+ CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count,r.worker_id
+ FROM json_each(?1) selected CROSS JOIN worker_runs r JOIN projects p ON p.id=r.project_id JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number
+ WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=selected.value AND finished_at IS NULL
+ UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=selected.value AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
  ORDER BY r.finished_at IS NOT NULL,r.started_at DESC,r.id DESC";
 fn directory(db: &Connection, p: &Project) -> Result<String> {
     let mut stmt = db.prepare(PROJECT_DIRECTORIES)?;
@@ -245,6 +245,9 @@ impl Store {
             };
             migrate_runtime(&tx)?;
             let mut workers = worker_overview_for(&tx, ids)?;
+            let ids: Vec<_> = workers.iter().map(|w| w["id"].as_str().unwrap()).collect();
+            let mut runs = worker_runs(&tx, &ids)?;
+            let mut chiefs = super::super::chief::status_for(&tx, &ids)?;
             let chief_projects = tx.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL")?.query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             // Queue counts depend on these sets, not the worker ID or capacity.
             // Cache only within this transaction so each poll sees fresh data.
@@ -272,14 +275,18 @@ impl Store {
                         *entry.insert(worker_queue(&tx, &config)?["eligible"].as_i64().unwrap())
                     }
                 };
-                let Value::Object(mut activity) =
-                    worker_activity(&tx, worker["id"].as_str(), &config)?
-                else {
-                    unreachable!("worker activity is an object")
+                let id = worker["id"].as_str().unwrap();
+                let active = worker["active"].as_i64().unwrap();
+                let Value::Object(activity) = json!({
+                    "free":(config.concurrency as i64-active).max(0),
+                    "runs":runs.remove(id).unwrap_or_default(),
+                    "chiefs":chiefs.remove(id).unwrap_or_default(),
+                    "eligible":eligible,
+                }) else {
+                    unreachable!("worker activity is an object");
                 };
                 // The machine protocol exposes capacity and activity, while
                 // queue diagnostics belong to the public status response.
-                activity.insert("eligible".into(), json!(eligible));
                 worker.as_object_mut().unwrap().extend(activity);
             }
             tx.commit()?;
@@ -505,11 +512,26 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
         [&selected],
         |r| r.get(0),
     )?;
-    let mut stmt = db.prepare(STATUS_RUNS)?;
-    let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?,"retry_at":r.get::<_,Option<i64>>(17)?,"retry_count":r.get::<_,i64>(18)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let runs = worker_runs(db, &selected.into_iter().collect::<Vec<_>>())?
+        .remove(selected.unwrap_or_default())
+        .unwrap_or_default();
+    let chiefs = super::super::chief::status(db, selected)?;
+    Ok(
+        json!({"active":active,"free":(config.concurrency as i64-active).max(0),"runs":runs,"chiefs":chiefs}),
+    )
+}
+
+fn worker_runs(db: &Connection, workers: &[&str]) -> Result<HashMap<String, Vec<Value>>> {
+    if workers.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut runs=db.query_collect(STATUS_RUNS, [serde_json::to_string(workers)?],|r| -> rusqlite::Result<_> { Ok((r.get::<_,String>(19)?,json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?,"retry_at":r.get::<_,Option<i64>>(17)?,"retry_count":r.get::<_,i64>(18)?}))) })?;
     let mut events_by_run: HashMap<String, Vec<(i64, Value)>> = HashMap::new();
     if !runs.is_empty() {
-        let ids: Vec<_> = runs.iter().map(|run| run["id"].as_str().unwrap()).collect();
+        let ids: Vec<_> = runs
+            .iter()
+            .map(|(_, run)| run["id"].as_str().unwrap())
+            .collect();
         // Drive the indexed tail lookup from only the displayed runs. Ranking
         // a worker's entire event history would make old runs slow every poll.
         for (run_id, id, event) in db.query_collect(
@@ -529,7 +551,7 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
             events_by_run.entry(run_id).or_default().push((id, event));
         }
     }
-    for run in &mut runs {
+    for (_, run) in &mut runs {
         if let Some(s) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(s)?;
         }
@@ -546,10 +568,11 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
                 .collect::<Vec<_>>()
         );
     }
-    let chiefs = super::super::chief::status(db, selected)?;
-    Ok(
-        json!({"active":active,"free":(config.concurrency as i64-active).max(0),"runs":runs,"chiefs":chiefs}),
-    )
+    let mut by_worker = HashMap::<String, Vec<Value>>::new();
+    for (worker, run) in runs {
+        by_worker.entry(worker).or_default().push(run);
+    }
+    Ok(by_worker)
 }
 
 fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
@@ -1288,6 +1311,85 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fleet_activity_reads_are_batched_across_selected_workers() {
+        let mut measurements = Vec::new();
+        for count in [1, 16, 128] {
+            let root =
+                std::env::temp_dir().join(format!("hb-fleet-activity-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Activity','Activity',10000); INSERT INTO agents VALUES('agent','{}',0);
+                INSERT INTO project_settings(project_id,prompt,prs_enabled,version,chief_enabled) VALUES('named:Activity','',0,1,1)").unwrap();
+            let mut ids = std::collections::HashSet::new();
+            for index in 0..count {
+                let id = format!("worker-{index}");
+                ids.insert(id.clone());
+                let config = Settings {
+                    concurrency: if index % 2 == 0 { 1 } else { 4 },
+                    directory: root.to_string_lossy().into(),
+                    ..Settings::default()
+                };
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,?3)",params![id,serde_json::to_string(&config).unwrap(),index]).unwrap();
+                store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<23) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) SELECT 'named:Activity',?1*23+x,'Task','','open','agent',0,0,1,'[]' FROM n",[index]).unwrap();
+                store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<23) INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at,goal) SELECT ?1||'-run-'||x,'named:Activity',?2*23+x,'{\"issue\":{\"title\":\"Task\"}}','agent',CASE WHEN x<=2 THEN 'running' ELSE 'completed' END,1,'start','unit',x,0,?1,CASE WHEN x<=2 THEN NULL ELSE x END,'{\"phase\":\"kept\"}' FROM n",params![id,index]).unwrap();
+                store.db.execute("INSERT INTO project_chiefs(project_id,machine,cwd,worker_id,state,next_at,queued) VALUES('named:Activity',?1,'',?1,'blocked',9000000000000,?2)",params![id,index%2==0]).unwrap();
+            }
+            store.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<15) INSERT INTO worker_events(run_id,created_at,text) SELECT r.id,n.x%3,r.id||':'||n.x FROM worker_runs r CROSS JOIN n").unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let started = std::time::Instant::now();
+            let workers = store.fleet_workers_for(Some(&ids)).unwrap();
+            let elapsed = started.elapsed();
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            assert_eq!(workers.len(), count as usize);
+            for worker in workers {
+                let id = worker["id"].as_str().unwrap();
+                let index = id.strip_prefix("worker-").unwrap().parse::<i64>().unwrap();
+                assert_eq!(worker["active"], 2);
+                assert_eq!(worker["free"], if index % 2 == 0 { 0 } else { 2 });
+                assert_eq!(worker["chief_projects"], json!(["named:Activity"]));
+                let runs = worker["runs"].as_array().unwrap();
+                let expected: Vec<_> = [2, 1]
+                    .into_iter()
+                    .chain((4..=23).rev())
+                    .map(|n| format!("{id}-run-{n}"))
+                    .collect();
+                assert_eq!(
+                    runs.iter()
+                        .map(|run| run["id"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                for run in runs {
+                    let run_id = run["id"].as_str().unwrap();
+                    assert_eq!(run["goal"], json!({"phase":"kept"}));
+                    let events = run["events"].as_array().unwrap();
+                    assert_eq!(events.len(), 12);
+                    assert_eq!(events[0]["text"], format!("{run_id}:15"));
+                    assert_eq!(events[11]["text"], format!("{run_id}:4"));
+                }
+                let chiefs = worker["chiefs"].as_array().unwrap();
+                assert_eq!(chiefs.len(), 1);
+                assert_eq!(chiefs[0]["worker_id"], id);
+                assert_eq!(chiefs[0]["queued"], index % 2 == 0);
+            }
+            eprintln!(
+                "Fleet activity, {count} workers: {commands} RPCs, {steps} query VM steps, {elapsed:?}"
+            );
+            measurements.push(commands);
+        }
+        assert!(
+            measurements.iter().all(|commands| *commands <= 24),
+            "Fleet activity still queries each worker separately: {measurements:?}"
+        );
+    }
+
     #[test]
     fn legacy_runtime_index_repairs_old_stores_and_tracks_late_markers() {
         let root = std::env::temp_dir().join(format!("hb-runtime-index-{}", random_id().unwrap()));
@@ -2959,9 +3061,7 @@ mod tests {
             let sql =
                 unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast())) }
                     .to_string_lossy();
-            if sql.starts_with("SELECT count(*) FROM worker_runs WHERE worker_id")
-                && !state.started.replace(true)
-            {
+            if sql == STATUS_RUNS && !state.started.replace(true) {
                 // Commit from a different WAL connection between overview and details.
                 let result = state.writer.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id) VALUES('concurrent','named:Snapshot QA',1,'{\"issue\":{\"title\":\"Task\"}}','agent','running',1,'start','unit',1,1,'worker-b')", []);
                 if result.is_err() {
@@ -3100,7 +3200,7 @@ mod tests {
                 SELECT 'archived-'||x,?1,49,'{}','agent','completed',1,'start','machine',-x,0,'worker',(x*7919)%10000 FROM n", [&p.id]).unwrap();
             let mut stmt = db.prepare(STATUS_RUNS).unwrap();
             let ids = stmt
-                .query_map(["worker"], |r| r.get::<_, String>(0))
+                .query_map([r#"["worker"]"#], |r| r.get::<_, String>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
