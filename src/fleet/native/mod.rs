@@ -1,4 +1,5 @@
 //! Native fleet implementation. Protocol-v1 and durable filenames stay stable.
+mod archive;
 mod authority;
 mod auto_workers;
 mod companion;

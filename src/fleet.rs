@@ -304,7 +304,10 @@ fn database(path: &std::path::Path) -> std::io::Result<()> {
         let result = (|| -> Result<Value, Box<dyn std::error::Error>> {
             let request: Value = serde_json::from_slice(&bytes)?;
             if let Some(destination) = request["backup"].as_str() {
-                connection.backup("main", destination, None)?;
+                crate::issues::archive::backup_store(
+                    &connection,
+                    std::path::Path::new(destination),
+                )?;
                 return Ok(
                     serde_json::json!({"ok":true,"columns":[],"rows":[],"transaction":!connection.is_autocommit()}),
                 );
