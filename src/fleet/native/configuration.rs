@@ -525,9 +525,16 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
             worker["intent"] = json!("drain");
             worker["retiring"] = json!(true);
         }
-        Some("project") => {
+        Some("project" | "edit-project") => {
             let git = update["git"].as_str().unwrap_or("").trim();
             let id = super::projects::identity(git)?;
+            if update["action"] == "edit-project"
+                && (update["project"] != id || machine["projects"].get(&id).is_none())
+            {
+                return Err(invalid(
+                    "Keep the same repository when editing a checkout; add a project for another repository",
+                ));
+            }
             let workspace = update["workspace"]
                 .as_str()
                 .unwrap_or("~/Workspace")
@@ -611,6 +618,24 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn editing_checkout_preserves_workers_and_rejects_identity_changes() {
+        let mut doc = parse("machines: {local: {workers: [{id: w, intent: pause, config: {projects: [github.com/acme/atlas], directory: /custom/atlas}}], projects: {github.com/acme/atlas: {git: 'git@github.com:acme/atlas.git', path: '~/old/atlas'}}}}\n").unwrap();
+        let workers = doc["machines"]["local"]["workers"].clone();
+        let update = json!({"host":"local","action":"edit-project","project":"github.com/acme/atlas","git":"https://github.com/acme/atlas.git","path":"~/new/atlas","workspace":"~/new"});
+        machine_update(&mut doc, &update).unwrap();
+        assert_eq!(doc["machines"]["local"]["workers"], workers);
+        assert_eq!(
+            doc["machines"]["local"]["projects"]["github.com/acme/atlas"]["path"],
+            "~/new/atlas"
+        );
+        let before = doc.clone();
+        let mut invalid = update.clone();
+        invalid["git"] = json!("https://github.com/acme/other.git");
+        assert!(machine_update(&mut doc, &invalid).is_err());
+        assert_eq!(doc, before);
+    }
 
     #[test]
     fn adding_a_worker_to_one_project_does_not_include_other_machine_projects() {

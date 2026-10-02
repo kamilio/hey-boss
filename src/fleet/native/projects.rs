@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     os::unix::process::CommandExt,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
@@ -94,6 +95,21 @@ pub(super) fn revision(node: &str, workers: &Value, projects: &Value) -> String 
         context::hash(&json!({"controller":node,"workers":workers,"projects":projects}))
     }
 }
+fn clone_failure(stderr: &str) -> &'static str {
+    if stderr.contains("Permission denied (publickey)") {
+        "Git clone failed: the background service could not authenticate with SSH. Its SSH agent may differ from your terminal’s."
+    } else if stderr.contains("No space left on device") {
+        "Git clone failed: this machine ran out of disk space."
+    } else if stderr.contains("Could not resolve hostname")
+        || stderr.contains("Could not resolve host")
+    {
+        "Git clone failed: this machine could not resolve the repository host."
+    } else if stderr.contains("Repository not found") || stderr.contains("repository not found") {
+        "Git clone failed: the repository was not found or is not accessible to the background service."
+    } else {
+        "Git clone failed in the background service. Check the repository URL, checkout path, and access on this machine."
+    }
+}
 fn clone_repository(git: &str, target: &Path) -> Result<()> {
     if !target.exists() {
         let parent = target
@@ -120,7 +136,7 @@ fn clone_repository(git: &str, target: &Path) -> Result<()> {
                 )
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stderr(Stdio::piped());
             unsafe {
                 command.pre_exec(|| {
                     if libc::setsid() < 0 {
@@ -131,13 +147,24 @@ fn clone_repository(git: &str, target: &Path) -> Result<()> {
                 });
             }
             let mut child = command.spawn()?;
+            let mut stderr = child.stderr.take().unwrap();
+            let errors = std::thread::spawn(move || {
+                let mut kept = Vec::new();
+                let mut buffer = [0; 4096];
+                while let Ok(n) = stderr.read(&mut buffer) {
+                    if n == 0 {
+                        break;
+                    }
+                    let count = n.min(8192usize.saturating_sub(kept.len()));
+                    kept.extend_from_slice(&buffer[..count]);
+                }
+                String::from_utf8_lossy(&kept).into_owned()
+            });
             let start = Instant::now();
             loop {
                 if let Some(status) = child.try_wait()? {
                     if !status.success() {
-                        return Err(invalid(
-                            "Git clone failed. Check repository access and Git authentication on this machine.",
-                        ));
+                        return Err(invalid(clone_failure(&errors.join().unwrap_or_default())));
                     }
                     break;
                 }
@@ -186,6 +213,31 @@ fn checkout(home: &Path, project: &str, spec: &Checkout) -> Result<PathBuf> {
     Ok(target)
 }
 
+// Called under the worker configuration lock, never while a clone is running.
+pub(super) fn retry(ctx: &Context, projects: &Value) -> Result<()> {
+    let Some(projects) = projects.as_object().filter(|p| !p.is_empty()) else {
+        return Ok(());
+    };
+    let path = ctx.state.join("project-checkouts.json");
+    let mut receipts = ctx.read_json(&path, json!({}))?;
+    let previous = receipts.clone();
+    for (id, token) in projects {
+        if receipts[id]["retry_request"] == *token {
+            continue;
+        }
+        if !receipts[id].is_object() {
+            receipts[id] = json!({});
+        }
+        let receipt = receipts[id].as_object_mut().unwrap();
+        receipt.remove("retry_at");
+        receipt.insert("retry_request".into(), token.clone());
+    }
+    if receipts != previous {
+        ctx.atomic_json(&path, &receipts)?;
+    }
+    Ok(())
+}
+
 pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Result<Value> {
     let specs: BTreeMap<String, Checkout> = serde_json::from_value(if projects.is_null() {
         json!({})
@@ -210,6 +262,7 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
             || receipts[&id]["error"].is_string()
         {
             if receipts[&id]["key"] == key
+                && !path.join(".git").exists()
                 && receipts[&id]["retry_at"].as_f64().unwrap_or(0.0) > context::now()
             {
                 return Err(invalid(
@@ -220,7 +273,7 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
             }
             if let Err(error) = checkout(&ctx.home, &id, &spec) {
                 let error = format!("{id}: {error}");
-                receipts[&id] = json!({"key":key,"error":error,"retry_at":context::now()+30.0});
+                receipts[&id] = json!({"key":key,"error":error,"retry_at":context::now()+30.0,"retry_request":receipts[&id]["retry_request"]});
                 ctx.atomic_json(&receipt_path, &receipts)?;
                 return Err(invalid(&error));
             }
@@ -229,7 +282,7 @@ pub(super) fn prepare(ctx: &Context, projects: &Value, workers: &Value) -> Resul
                 name: id.rsplit('/').next().unwrap().into(),
             };
             crate::issues::Store::open(&ctx.path)?.notification_project(&detected, None)?;
-            receipts[&id] = json!({"key":key});
+            receipts[&id] = json!({"key":key,"retry_request":receipts[&id]["retry_request"]});
         }
         paths.insert(id, path);
     }
@@ -353,9 +406,45 @@ mod tests {
             "/custom/right"
         );
         assert!(resolved[2]["config"]["directories"].is_null());
+        let receipt = ctx.state.join("project-checkouts.json");
+        let mut saved = ctx.read_json(&receipt, json!({})).unwrap();
+        saved["github.com/acme/right"]["error"] = json!("Previous clone failed");
+        saved["github.com/acme/right"]["retry_at"] = json!(context::now() + 300.0);
+        ctx.atomic_json(&receipt, &saved).unwrap();
         assert_eq!(prepare(&ctx, &projects, &workers).unwrap(), resolved);
+        assert!(
+            ctx.read_json(&receipt, json!({})).unwrap()["github.com/acme/right"]["error"].is_null()
+        );
         drop(store);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn retry_clears_only_selected_backoff() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        let receipt = ctx.state.join("project-checkouts.json");
+        ctx.atomic_json(&receipt, &json!({"atlas":{"key":"same","error":"failed","retry_at":context::now()+300.0},"other":{"retry_at":123}})).unwrap();
+        retry(&ctx, &json!({"atlas":"attempt-1"})).unwrap();
+        let saved = ctx.read_json(&receipt, json!({})).unwrap();
+        assert!(saved["atlas"]["retry_at"].is_null());
+        assert_eq!(saved["atlas"]["error"], "failed");
+        assert_eq!(saved["other"]["retry_at"], 123);
+        let mut failed_again = saved.clone();
+        failed_again["atlas"]["retry_at"] = json!(9999999999u64);
+        ctx.atomic_json(&receipt, &failed_again).unwrap();
+        retry(&ctx, &json!({"atlas":"attempt-1"})).unwrap();
+        assert_eq!(ctx.read_json(&receipt, json!({})).unwrap(), failed_again);
+        retry(&ctx, &json!({"atlas":"attempt-2"})).unwrap();
+        assert!(ctx.read_json(&receipt, json!({})).unwrap()["atlas"]["retry_at"].is_null());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn checkout_errors_explain_service_failures_without_echoing_git_output() {
+        assert!(clone_failure("git@host: Permission denied (publickey).").contains("SSH agent"));
+        assert!(clone_failure("fatal: No space left on device").contains("disk space"));
+        assert!(clone_failure("Could not resolve hostname github.com").contains("resolve"));
+        assert!(!clone_failure("unexpected private output").contains("private output"));
     }
     #[test]
     fn project_urls_and_home_paths_are_validated() {
