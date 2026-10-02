@@ -296,3 +296,22 @@ fn setup_preserves_working_registered_openpgp_signing() {
     assert_eq!(config, fs::read(f.root.join(".gitconfig")).unwrap());
     assert!(!f.root.join(".ssh").exists());
 }
+
+#[test]
+fn service_path_finds_github_cli_without_changing_worker_environment() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join(".local/bin")).unwrap();
+    fs::rename(f.root.join("bin/gh"), f.root.join(".local/bin/gh")).unwrap();
+    let result = f
+        .command(env!("CARGO_BIN_EXE_hey-boss"))
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .args(["environment", "setup", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
