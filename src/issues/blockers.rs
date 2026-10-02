@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+thread_local! {
+    static DESCENDANT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) fn migrate(db: &mut Connection) -> Result<()> {
     let present: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name='blockers')",
@@ -146,15 +151,48 @@ impl Graph {
         let unfinished = self.issues.get(&n).is_none_or(|i| {
             i["deleted_at"].is_null()
                 && i["state"] != "closed"
-                && !(i["state"] == "ready" && self.active(n).is_empty())
+                && !(i["state"] == "ready" && !self.has_active(n))
         });
         self.satisfied.borrow_mut().insert(n, !unfinished);
         unfinished
+    }
+    fn has_active(&self, n: i64) -> bool {
+        if let Some(cached) = self.active_cache.borrow().get(&n) {
+            return !cached.is_empty();
+        }
+        let mut seen = BTreeSet::new();
+        let mut todo = self.children.get(&n).cloned().unwrap_or_default();
+        while let Some(child) = todo.pop() {
+            #[cfg(test)]
+            DESCENDANT_VISITS.with(|count| count.set(count.get() + 1));
+            let Some(issue) = self.issues.get(&child) else {
+                continue;
+            };
+            if !issue["deleted_at"].is_null() || !seen.insert(child) {
+                continue;
+            }
+            if self.unfinished(child) {
+                return true;
+            }
+            // A satisfied Ready child already checked its whole subtree.
+            // Closed children satisfy links, but unfinished descendants still
+            // block their ancestors. Keep traversing through those children.
+            if issue["state"] == "closed" {
+                todo.extend(self.children.get(&child).into_iter().flatten());
+            }
+        }
+        self.links
+            .get(&n)
+            .into_iter()
+            .flatten()
+            .any(|&blocker| self.unfinished(blocker))
     }
     fn descendants(&self, n: i64) -> BTreeSet<i64> {
         let mut found = BTreeSet::new();
         let mut todo = self.children.get(&n).cloned().unwrap_or_default();
         while let Some(child) = todo.pop() {
+            #[cfg(test)]
+            DESCENDANT_VISITS.with(|count| count.set(count.get() + 1));
             if self
                 .issues
                 .get(&child)
@@ -194,7 +232,7 @@ impl Graph {
                 continue;
             }
             let blocked = issue["manual_blocked"] == true
-                || (issue["draft"] != true && !self.active(number).is_empty());
+                || (issue["draft"] != true && self.has_active(number));
             if (issue["state"] == "blocked") != blocked {
                 return Err(Error::new(
                     "subtask_claim_conflict",
@@ -317,7 +355,7 @@ pub(super) fn validate_subtask(
     Graph::load(db, project)?.validate_edge(parent, child)
 }
 pub(super) fn has_dependencies(db: &Connection, project: &str, number: i64) -> Result<bool> {
-    Ok(!Graph::load(db, project)?.active(number).is_empty())
+    Ok(Graph::load(db, project)?.has_active(number))
 }
 
 pub(super) fn reopen_blockers(db: &Connection, project: &str, number: i64) -> Result<Vec<Value>> {
@@ -383,10 +421,8 @@ fn reconcile_graph(
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;
         }
-        let blockers = graph.active(number);
-        let state = if issue["manual_blocked"] == true
-            || (issue["draft"] != true && !blockers.is_empty())
-        {
+        let has_blockers = graph.has_active(number);
+        let state = if issue["manual_blocked"] == true || (issue["draft"] != true && has_blockers) {
             "blocked"
         } else if issue["state"] == "ready" {
             "ready"
@@ -396,6 +432,8 @@ fn reconcile_graph(
         if issue["state"] == state {
             continue;
         }
+        // Full blocker identities are needed only for transition evidence.
+        let blockers = graph.active(number);
         if (rework || graph.prs_enabled)
             && state == "blocked"
             && !blockers.is_empty()
@@ -609,6 +647,142 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_predicates_match_ready_completion_closure() {
+        for mode in 0..8 {
+            for combination in 0..1024 {
+                let states: BTreeMap<_, _> = (1..=5)
+                    .map(|n| {
+                        (
+                            n,
+                            ["open", "blocked", "ready", "closed"]
+                                [(combination >> ((n - 1) * 2)) & 3],
+                        )
+                    })
+                    .collect();
+                let deleted = mode & 1 != 0;
+                let cycle = mode & 4 != 0;
+                let descendants: BTreeMap<i64, Vec<i64>> = [
+                    (1, if deleted { vec![] } else { vec![2, 3] }),
+                    (2, vec![3]),
+                    (3, vec![]),
+                    (4, if cycle { vec![4, 5] } else { vec![5] }),
+                    (5, if cycle { vec![4, 5] } else { vec![] }),
+                ]
+                .into();
+                let links: BTreeMap<i64, Vec<i64>> =
+                    [(3, vec![if mode & 2 != 0 { 6 } else { 4 }]), (5, vec![2])].into();
+                // Least fixed point: Ready is satisfied only after all of its
+                // prerequisites are satisfied. Cycles and missing nodes stay pending.
+                let mut finished: BTreeSet<_> = states
+                    .iter()
+                    .filter_map(|(&n, &state)| {
+                        (state == "closed" || (deleted && n == 2)).then_some(n)
+                    })
+                    .collect();
+                loop {
+                    let before = finished.len();
+                    for (&n, &state) in &states {
+                        if state == "ready"
+                            && descendants[&n]
+                                .iter()
+                                .chain(links.get(&n).into_iter().flatten())
+                                .all(|n| finished.contains(n))
+                        {
+                            finished.insert(n);
+                        }
+                    }
+                    if before == finished.len() {
+                        break;
+                    }
+                }
+                let mut children: BTreeMap<_, _> =
+                    [(1, vec![2]), (2, vec![3]), (4, vec![5])].into();
+                if cycle {
+                    children.insert(5, vec![4]);
+                }
+                let graph = Graph {
+                    satisfied: RefCell::default(), prs_enabled:false,
+                    issues: states.iter().map(|(&n,&state)| (n,json!({"state":state,"deleted_at":if deleted && n==2 {json!(1)} else {Value::Null}}))).collect(),
+                    children, links:links.clone(), dependents:BTreeMap::new(), active_cache:RefCell::default(),
+                };
+                for n in 1..=5 {
+                    assert_eq!(
+                        graph.unfinished(n),
+                        !finished.contains(&n),
+                        "mode={mode}, states={states:?}, issue={n}"
+                    );
+                    let mut expected: BTreeMap<_, _> = descendants[&n]
+                        .iter()
+                        .filter(|n| !finished.contains(n))
+                        .map(|&n| (n, "subtask"))
+                        .collect();
+                    for &linked in links.get(&n).into_iter().flatten() {
+                        if !finished.contains(&linked) {
+                            expected.insert(linked, "linked");
+                        }
+                    }
+                    assert_eq!(
+                        graph.has_active(n),
+                        !expected.is_empty(),
+                        "mode={mode}, states={states:?}, issue={n}"
+                    );
+                    assert_eq!(
+                        graph.active(n),
+                        expected,
+                        "mode={mode}, states={states:?}, issue={n}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_nested_lifecycle_does_not_enumerate_every_transitive_blocker() {
+        let mut work = Vec::new();
+        for count in [128, 1024] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-dependency-predicate-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            drop(crate::issues::Store::open(&path).unwrap());
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',2000); INSERT INTO agents VALUES('human:test','{}',0)").unwrap();
+            // A valid four-way tree stays inside the eight-level depth limit.
+            db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) SELECT 'named:test',x,'Task','',CASE WHEN x<=(?1-2)/4+1 THEN 'blocked' ELSE 'open' END,'human:test',0,0,1,'[]',x FROM n", [count]).unwrap();
+            db.execute("INSERT INTO issue_subtasks SELECT project_id,(number-2)/4+1,number,0,'human:test' FROM issues WHERE number>1", []).unwrap();
+            DESCENDANT_VISITS.set(0);
+            let started = std::time::Instant::now();
+            reconcile(&db, "named:test", Some("human:test"), 1).unwrap();
+            let visits = DESCENDANT_VISITS.get();
+            eprintln!(
+                "Unchanged {count}-issue nested graph: {visits} descendant visits in {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                db.query_row("SELECT sum(version) FROM issues", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                count
+            );
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            work.push((count, visits));
+            drop(db);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        assert!(
+            work.iter()
+                .all(|(count, visits)| *visits <= *count as usize),
+            "Repeated transitive blocker enumeration remains: {work:?}"
+        );
+    }
 
     #[test]
     fn dependency_work_does_not_grow_with_unreferenced_pr_history() {
