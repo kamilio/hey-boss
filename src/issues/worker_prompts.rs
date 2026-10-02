@@ -14,6 +14,9 @@ macro_rules! prompts {
             pub dependencies: Option<String>,
             #[serde(skip_serializing)]
             pub plan_document: Option<String>,
+            // Accept legacy saved settings, but never apply or expose Chief wrappers.
+            #[serde(skip_serializing)]
+            pub chief_wrapper: Option<String>,
             $(#[serde(skip_serializing_if = "Option::is_none")] pub $key: Option<String>,)*
         }
         impl PromptOverrides {
@@ -49,7 +52,6 @@ prompts! {
     (dependency_update, DEFAULT_DEPENDENCY_UPDATE_PROMPT, "Dependency updates", "Live dependency changes. Variable: {{instruction}}."),
     (prompt_update, DEFAULT_PROMPT_UPDATE_PROMPT, "Prompt updates", "Changed project instructions. Variable: {{instructions}}."),
     (goal_continue, DEFAULT_GOAL_CONTINUE_PROMPT, "Continue a goal", "A goal turn ends before a completion report."),
-    (chief_wrapper, DEFAULT_CHIEF_WRAPPER_PROMPT, "Chief context", "Chief launches. Variables: {{project}}, {{prompt}}."),
 }
 
 pub fn render(text: &str, mut value: impl FnMut(&str) -> Option<String>) -> String {

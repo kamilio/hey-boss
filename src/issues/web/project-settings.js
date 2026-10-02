@@ -3,12 +3,12 @@ const workflowPromptKeys = ["plan", "worktree", "checkout", "prs", "main"];
 let projectPromptDefaults = {};
 function addPromptEditors(sections) {
   workflowPromptKeys.splice(5);
-  for (const id of ["layout", "context", "runtime", "chief-context"]) $("#project-" + id + "-prompts").replaceChildren();
+  for (const id of ["layout", "context", "runtime"]) $("#project-" + id + "-prompts").replaceChildren();
   for (const section of sections || []) {
     const key = section.key;
     if (workflowPromptKeys.includes(key)) continue;
     workflowPromptKeys.push(key);
-    const group = key === "layout" ? "layout" : key === "chief_wrapper" ? "chief-context" : ["steering", "dependency_update", "prompt_update", "goal_continue"].includes(key) ? "runtime" : "context";
+    const group = key === "layout" ? "layout" : ["steering", "dependency_update", "prompt_update", "goal_continue"].includes(key) ? "runtime" : "context";
     const branch = document.createElement("section");
     branch.className = "workflow-branch settings-section";
     branch.dataset.branch = key;
@@ -32,7 +32,7 @@ function addPromptEditors(sections) {
     $("#project-" + group + "-prompts").append(branch);
   }
 }
-let chiefDefaultPrompt = "", chiefPreviewTemplate = "", projectSettingsTab = "instructions";
+let chiefDefaultPrompt = "", projectSettingsTab = "instructions";
 let chiefRunPending = false, chiefRunRequest = null;
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
@@ -146,7 +146,6 @@ $("#project-settings-trigger").onclick = async () => {
     $("#project-chief").checked = value.chief_enabled;
     $("#project-chief-prompt").value = value.chief_prompt;
     chiefDefaultPrompt = value.chief_default_prompt;
-    chiefPreviewTemplate = value.chief_preview_template;
     $("#project-chief-instructions").open = true;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
@@ -243,7 +242,7 @@ function previewProjectInstructions() {
   projectPreviewTimer = setTimeout(async () => {
     try {
       const value = projectSettingsTab === "chief" ? {
-        prompt: (draft.prompt_overrides.chief_wrapper ?? projectPromptDefaults.chief_wrapper ?? chiefPreviewTemplate).replace(/{{\s*(project|prompt)\s*}}/g, (_, key) => key === "project" ? project : draft.chief_prompt),
+        prompt: draft.chief_prompt,
         use_goal: false,
       } : await api(
         {
@@ -322,7 +321,7 @@ function updateWorkflowBranches() {
   const allowed = $("#project-worktree").checked;
   $("#project-preview-workspace option[value=worktree]").disabled = !allowed;
   if (!allowed) $("#project-preview-workspace").value = "checkout";
-  const active = chief ? ["chief_wrapper"] : plan ? ["plan", "layout"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main", "layout"];
+  const active = chief ? [] : plan ? ["plan", "layout"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main", "layout"];
   $("#project-preview-workspace").disabled = plan || chief || projectSettingsSaving || !projectSettingsOriginal;
   $("#project-preview-workspace-help").textContent = plan ? "Plan tasks use their own prompt without workspace or delivery instructions." : "Preview only. Each worker chooses its own workspace.";
   for (const key of workflowPromptKeys) {

@@ -82,7 +82,7 @@
       if(workflow==="chief") {
         const settings=await api({action:"project_settings"});
         if(run!==sequence||!$("#assembled-output"))return;
-        const text=data.chief_wrapper.replace(/{{(project|prompt)}}/g,(_,key)=>key==="project"?$("#project").value:settings.chief_prompt);
+        const text=settings.chief_prompt;
         $("#assembled-output").innerHTML=panel("Chief input",text,counts(text),"expanded");return;
       }
       const config={projects:[$("#project").value],prs_enabled:workflow==="worktree",worktree_enabled:workflow==="worktree"};

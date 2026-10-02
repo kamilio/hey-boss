@@ -35,15 +35,6 @@ pub(crate) fn artifact_task(issue: &Value) -> Option<&'static str> {
         None
     }
 }
-/// Shared by Chief launches and the review pane. Values are expanded once.
-pub fn chief_instructions(project: &str, prompt: &str, overrides: &PromptOverrides) -> String {
-    prompts::render(overrides.get("chief_wrapper"), |key| match key {
-        "project" => Some(project.into()),
-        "prompt" => Some(prompt.into()),
-        _ => None,
-    })
-}
-
 // Old saved templates still load, but delivery instructions now belong to the workflow.
 pub(crate) fn base_prompt(text: &str) -> String {
     let mut output = String::new();
@@ -2785,17 +2776,6 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Dependencies unblock at Ready"));
-    }
-    #[test]
-    fn chief_wrapper_is_editable_and_substitutions_are_literal() {
-        let overrides = PromptOverrides {
-            chief_wrapper: Some("{{prompt}}\n{{project}}".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            chief_instructions("named:test", "Keep {{project}}", &overrides),
-            "Keep {{project}}\nnamed:test"
-        );
     }
     #[test]
     fn configured_prompts_keep_their_instructions_and_add_pr_handoff_context() {

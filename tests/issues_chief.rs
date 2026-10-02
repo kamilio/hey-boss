@@ -171,6 +171,13 @@ fn chief_runs_without_issues_starts_fresh_and_cleans_up() {
     fs::write(&fake, r#"#!/bin/sh
 sleep 0.2
 printf '%s\n' "$*" >> launches.txt
+previous=''
+for argument do
+  if [ "$previous" = --output-last-message ]; then final_message="$argument"; fi
+  previous="$argument"
+done
+printf '%s' "$previous" > prompt.txt
+printf '%s' "$final_message" > final-path.txt
 if [ "$1" != exec ]; then exit 9; fi
 if [ "$2" = resume ] && [ "$3" = missing-thread ]; then
   printf '%s\n' '{"type":"error","message":"No saved session found"}'
@@ -179,6 +186,8 @@ fi
 printf '%s\n' '{"type":"thread.started","thread_id":"chief-saved-thread"}'
 if [ -f dead-parent ]; then sleep 120 & exit 7; fi
 if [ -f malformed ]; then printf 'not-json\n'; exit 0; fi
+if [ -f truncated ]; then printf '{"type":"item.completed"'; exit 0; fi
+if [ -f partial ]; then cat partial; fi
 if [ -f failed-completion ]; then printf '%s\n' '{"type":"turn.failed","error":{"message":"Failed despite later text"}}'; fi
 if [ -f hold ]; then
   echo $$ > chief.pid
@@ -188,10 +197,35 @@ if [ -f fail ]; then
   printf '%s\n' '{"type":"turn.failed","error":{"message":"Synthetic connection failure"}}'
   exit 1
 fi
+if [ -f command-event.jsonl ]; then cat command-event.jsonl; fi
+if [ -f final-message.txt ]; then
+  cat final-message.txt > "$final_message"
+  cat final-event.jsonl
+  printf '%s\n' '{"type":"turn.completed"}'
+  exit 0
+fi
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"Organized the project."}}' '{"type":"turn.completed"}'
 "#).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
-    f.cli(&["settings", "set", "--no-chief"]);
+    let event = json!({"type":"item.completed","item":{"type":"command_execution","command":"audit","aggregated_output":"\"\\\n".repeat(400_000)}});
+    fs::write(f.0.join("command-event.jsonl"), format!("{event}\n")).unwrap();
+    let final_text = "Organized the project. ".repeat(60_000);
+    fs::write(f.0.join("final-message.txt"), &final_text).unwrap();
+    fs::write(
+        f.0.join("final-event.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"item.completed","item":{"type":"agent_message","text":final_text}})
+        ),
+    )
+    .unwrap();
+    f.cli(&[
+        "settings",
+        "set",
+        "--no-chief",
+        "--chief-prompt",
+        "{{project}}",
+    ]);
     let start = |enable: bool| {
         let mut command = f.command();
         let log = fs::OpenOptions::new()
@@ -222,11 +256,29 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     };
     let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
     db.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    db.execute(
+        "UPDATE project_settings SET prompt_overrides=?1",
+        [json!({"chief_wrapper":"Legacy {{project}} wrapper: {{prompt}}"}).to_string()],
+    )
+    .unwrap();
     let finished = || {
         db.query_row("SELECT count(*) FROM project_chiefs WHERE state='idle' AND session_id='chief-saved-thread' AND owner_pid IS NULL",[],|r|r.get::<_,i64>(0)).unwrap() == 1
     };
     let mut worker = start(true);
     wait_for(&f, &mut worker, "initial pass", finished);
+    assert_eq!(
+        fs::read_to_string(f.0.join("prompt.txt")).unwrap(),
+        f.cli(&["settings", "show"])["chief_prompt"]
+            .as_str()
+            .unwrap(),
+        "Chief receives exactly its configured prompt"
+    );
+    let summary: String = db
+        .query_row("SELECT summary FROM project_chiefs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(summary, final_text.chars().take(4000).collect::<String>());
+    assert!(!Path::new(&fs::read_to_string(f.0.join("final-path.txt")).unwrap()).exists());
+    fs::remove_file(f.0.join("final-message.txt")).unwrap();
     assert_eq!(
         f.cli(&["settings", "show"])["chief_enabled"],
         true,
@@ -305,7 +357,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
     );
     drop(worker);
     fs::remove_file(f.0.join("fail")).unwrap();
-    for mode in ["dead-parent", "malformed", "failed-completion"] {
+    for mode in ["dead-parent", "malformed", "truncated", "failed-completion"] {
         let previous: i64 = db
             .query_row("SELECT finished_at FROM project_chiefs", [], |r| r.get(0))
             .unwrap();
@@ -326,6 +378,14 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         fs::remove_file(f.0.join(mode)).unwrap();
     }
     fs::write(f.0.join("hold"), "").unwrap();
+    fs::write(
+        f.0.join("partial"),
+        format!(
+            "{{\"type\":\"item.completed\",\"item\":{{\"aggregated_output\":\"{}",
+            "x".repeat(2 * 1024 * 1024)
+        ),
+    )
+    .unwrap();
     db.execute("UPDATE project_chiefs SET next_at=0", [])
         .unwrap();
     let mut worker = start(false);
@@ -393,6 +453,7 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"O
         || unsafe { libc::kill(pid as i32, 0) } != 0,
     );
     drop(worker);
+    assert!(!Path::new(&fs::read_to_string(f.0.join("final-path.txt")).unwrap()).exists());
     assert!(
         db.query_row(
             "SELECT owner_pid IS NULL AND pid IS NULL FROM project_chiefs",
