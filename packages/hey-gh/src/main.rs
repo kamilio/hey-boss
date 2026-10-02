@@ -1,8 +1,9 @@
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{Args as ClapArgs, CommandFactory, FromArgMatches, Parser, Subcommand};
 use hey_gh::{ApiClient, Client, Config, Freshness};
 use serde_json::Value;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
+mod comment_cli;
 mod log_summary;
 mod logging;
 mod read_deadline;
@@ -11,7 +12,7 @@ mod skill_install;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Cached GitHub PR reports and a durable incremental local API"
+    about = "Cached GitHub PR reports, comment posting, and an incremental local API"
 )]
 struct Args {
     #[arg(long, global = true, default_value = "http://127.0.0.1:8787")]
@@ -66,8 +67,13 @@ enum Command {
         #[arg(long, default_value_t = 256)]
         queue_capacity: usize,
     },
-    /// Status of all your open PRs, or gh-style list/view/checks commands.
+    /// PR status, cached reads, and comment posting.
     Pr(PrArgs),
+    /// Post a GitHub issue comment.
+    Issue {
+        #[command(subcommand)]
+        action: IssueAction,
+    },
     /// Fetch detailed CI for a PR without GraphQL or comment requests.
     Ci {
         repository: String,
@@ -168,6 +174,8 @@ struct PrArgs {
 
 #[derive(Subcommand, Clone)]
 enum PrAction {
+    /// Post a comment (at most 2 lines and 300 characters).
+    Comment(comment_cli::CommentArgs),
     /// List your open PRs across repositories (or restrict with -R).
     List {
         #[arg(short = 'L', long)]
@@ -190,9 +198,44 @@ enum PrAction {
     },
 }
 
+#[derive(Subcommand)]
+enum IssueAction {
+    /// Post a comment (at most 2 lines and 300 characters).
+    Comment(comment_cli::CommentArgs),
+}
+
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    // Global read flags remain parseable so misuse gets an explicit rejection,
+    // but are not advertised as options for a write command.
+    let mut command = Args::command();
+    for parent in ["pr", "issue"] {
+        let hidden: Vec<_> = command
+            .get_arguments()
+            .chain(command.find_subcommand(parent).unwrap().get_arguments())
+            .filter(|arg| {
+                matches!(
+                    arg.get_id().as_str(),
+                    "server" | "cursor" | "timeout" | "refresh" | "cached_only" | "json" | "wait"
+                )
+            })
+            .cloned()
+            .map(|arg| arg.hide(true))
+            .collect();
+        command = command.mut_subcommand(parent, |group| {
+            group.mut_subcommand("comment", |comment| {
+                let comment = comment.args(hidden).next_line_help(true);
+                if parent == "issue" {
+                    comment.mut_arg("selector", |arg| {
+                        arg.required(true).help("GitHub issue NUMBER or URL.")
+                    })
+                } else {
+                    comment
+                }
+            })
+        });
+    }
+    let args = Args::from_arg_matches(&command.get_matches()).unwrap_or_else(|error| error.exit());
     let log_directory = match &args.command {
         Some(Command::Serve {
             listen, log_dir, ..
@@ -220,6 +263,33 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     if args.timeout.is_some() {
         read_deadline::validate(args.command.as_ref(), args.cursor.as_deref())?;
+    }
+    match &args.command {
+        Some(Command::Pr(options)) if matches!(options.action, Some(PrAction::Comment(_))) => {
+            if options.refresh
+                || options.cached_only
+                || options.json.is_some()
+                || options.wait != 0
+                || args.cursor.is_some()
+                || options.legacy_repository.is_some()
+                || options.legacy_number.is_some()
+            {
+                return Err("read options cannot be used when posting a comment".into());
+            }
+            let Some(PrAction::Comment(comment)) = &options.action else {
+                unreachable!()
+            };
+            return comment_cli::post("pr", comment, args.repo.as_deref()).await;
+        }
+        Some(Command::Issue {
+            action: IssueAction::Comment(comment),
+        }) => {
+            if args.cursor.is_some() {
+                return Err("--cursor cannot be used when posting a comment".into());
+            }
+            return comment_cli::post("issue", comment, args.repo.as_deref()).await;
+        }
+        _ => {}
     }
     if let Some(Command::Logs {
         tail,
@@ -449,7 +519,10 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         )?,
         Command::Snapshot => serde_json::to_value(api.bootstrap().await?)?,
         Command::Status => serde_json::to_value(api.status().await?)?,
-        Command::Serve { .. } | Command::Install { .. } | Command::Logs { .. } => unreachable!(),
+        Command::Serve { .. }
+        | Command::Install { .. }
+        | Command::Logs { .. }
+        | Command::Issue { .. } => unreachable!(),
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     if !complete {

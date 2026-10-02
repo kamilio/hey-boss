@@ -344,7 +344,7 @@ An expired cursor returns `cursor_expired` (HTTP 410): run `hey-gh pr` without a
 cursor, replace local state, and adopt its new cursor. Source-feed cursors from
 `hey-gh snapshot` are a different API and cannot be used as PR cursors.
 
-This is a read-only subset of the `gh pr` command surface, not a full drop-in
+This is a subset of the `gh pr` command surface, not a full drop-in
 replacement. It supports `-R/--repo`, `--json` projections, `-L/--limit`,
 `--state open`, and `--author @me` for the account list. JSON retains an extended
 cursor envelope instead of gh's bare array. Rich GitHub subcollections retain
@@ -355,6 +355,17 @@ GraphQL-only `reviewDecision`/`mergeStateStatus` and separate policy fields are
 null there. `pr checks` returns the full CI report; use `pr view --json ci` for
 field selection. The legacy `hey-gh pr OWNER/REPO NUMBER` syntax still works.
 Use `hey-gh prs OWNER/REPO --state all` for every author's historical PRs.
+
+Post comments with `hey-gh pr comment 123 -R OWNER/REPO --body-file comment.md`
+or `hey-gh issue comment 123 -R OWNER/REPO --body 'Fixed the retry.'`.
+`--body-file -` reads stdin. PR comments also accept a URL or branch and default
+to the current branch; issue comments require a number or URL. Comments must
+contain text and stay within 2 lines and 300 Unicode characters after trimming.
+The CLI uses the shared comment guidance and rejects invalid text before running
+`gh`. Posting uses the existing `gh` login directly, without a daemon, cache,
+automatic retry, or length override. Read options are rejected for comments.
+After an uncertain failure, check GitHub before retrying. Cached comment reads
+converge through the existing background monitoring.
 
 `pr list --limit N` truncates the initial display with `totalCount` and
 `truncated=true`; it is not a complete consumer bootstrap. Omit it when building

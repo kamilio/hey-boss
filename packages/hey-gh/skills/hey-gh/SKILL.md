@@ -1,14 +1,21 @@
 ---
 name: hey-gh
-description: Read GitHub PR activity, comments, CI status, and conflicts with cached hey-gh commands and resumable incremental updates.
+description: Post GitHub comments and read PR activity, CI status, and conflicts with cached hey-gh commands and resumable incremental updates.
 ---
 
 # hey-gh command card
 
-Use `hey-gh` for read-only GitHub PR monitoring. It shares a persistent cache,
+Use `hey-gh` for posting GitHub comments and GitHub PR monitoring. Reads share a persistent cache,
 request queue, and rate-limit backoff through a local daemon; authentication uses
 the existing `gh` login. If the daemon is unavailable, start `hey-gh serve` in a
 background terminal. Use `hey-gh COMMAND --help` for options.
+
+Comments: max 300 characters and 2 lines. Write so user can understand it, who is gonna read this? Do not sound like a robot.
+
+```sh
+hey-gh pr comment 123 -R OWNER/REPO --body-file comment.md
+hey-gh issue comment 123 -R OWNER/REPO --body-file comment.md
+```
 
 ```sh
 hey-gh pr                                  # All your authored open PRs + cursor
@@ -142,4 +149,4 @@ and registrations persist.
 
 Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`; napi-rs Node
 bindings use `api.prStatus({ cursor, waitSeconds: 30 })`. These share the daemon.
-`hey-gh` implements a read-only subset of `gh pr` with an extended JSON envelope.
+`hey-gh` implements cached `gh pr` reads with an extended JSON envelope and validated comment posting.

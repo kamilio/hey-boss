@@ -38,20 +38,12 @@ pub(super) fn validate(request: &Request) -> Result<()> {
     if *allow_long_comment {
         return Ok(());
     }
-    let body = body.trim();
-    if body.chars().take(301).count() > 300
-        || body
-            .lines()
-            .flat_map(|line| line.split(['\r', '\u{85}', '\u{2028}', '\u{2029}']))
-            .take(3)
-            .count()
-            > 2
-    {
+    if hey_gh::comments::too_long(body) {
         return Err(Error::new(
             "comment_too_long",
             format!(
                 "{} Agent comments must be at most 2 lines and 300 characters. To override, retry with --allow-long-comment (API: allow_long_comment: true).",
-                include_str!("comment-rejection.md").trim()
+                hey_gh::comments::GUIDANCE.trim()
             ),
         ));
     }
