@@ -953,68 +953,100 @@ fn execute_single(
     Ok(graph)
 }
 fn live(db: &Connection, node: &mut Value, mode: BodyMode) -> Result<()> {
-    if node["kind"] == "issue" {
-        let project = node["reference_project"].as_str().unwrap().to_owned();
-        let name: Option<String> = db
-            .query_row("SELECT name FROM projects WHERE id=?1", [&project], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        node["reference_project_name"] = json!(name.unwrap_or_else(|| project.to_owned()));
-        let number = node["reference"].as_str().unwrap().parse().unwrap();
-        if mode == BodyMode::None {
-            // octet_length reads the column's byte count from metadata and also
-            // handles bodies beginning with NUL, unlike SQL text length/substr.
-            let issue = db.query_row(
-                "SELECT title,state,assignee,version,octet_length(body)>0,labels FROM issues WHERE project_id=?1 AND number=?2 AND deleted_at IS NULL",
-                params![project,number],
-                |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?,r.get::<_,String>(5)?)),
-            ).optional()?;
-            if let Some((title, state, assignee, version, has_body, labels)) = issue {
-                node["title"] = json!(title);
+    live_batch(db, std::slice::from_mut(node), mode)
+}
+
+fn live_nodes(
+    db: &Connection,
+    nodes: &mut [Value],
+    mode: BodyMode,
+    budget: &mut ReadBudget,
+) -> Result<()> {
+    // Full issue bodies can each occupy 1 MiB. Check the output budget between
+    // batches instead of loading every full body before rejecting a large map.
+    let batch_size = if mode == BodyMode::Full {
+        16
+    } else {
+        nodes.len().max(1)
+    };
+    for batch in nodes.chunks_mut(batch_size) {
+        live_batch(db, batch, mode)?;
+        for node in batch {
+            budget.charge(node)?;
+        }
+    }
+    Ok(())
+}
+
+fn live_batch(db: &Connection, nodes: &mut [Value], mode: BodyMode) -> Result<()> {
+    let references: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n["kind"] == "issue")
+        .map(|n| {
+            (
+                n["reference_project"].as_str().unwrap(),
+                n["reference"].as_str().unwrap().parse::<i64>().unwrap(),
+            )
+        })
+        .collect();
+    let mut issues = BTreeMap::new();
+    if !references.is_empty() {
+        let body = match mode {
+            BodyMode::None => "''",
+            // 513 UTF-8 characters occupy at most 2052 bytes. BLOB substr keeps
+            // NULs; a partial final character lies beyond the 512-char preview.
+            BodyMode::Preview => "coalesce(substr(CAST(i.body AS BLOB),1,2052),x'')",
+            BodyMode::Full => "i.body",
+        };
+        let mut query = db.prepare(&format!("SELECT json_extract(selected.value,'$[0]'),json_extract(selected.value,'$[1]'),p.name,i.title,{body},i.state,i.assignee,i.version,octet_length(i.body)>0,i.labels
+            FROM json_each(?1) selected
+            LEFT JOIN projects p ON p.id=json_extract(selected.value,'$[0]')
+            LEFT JOIN issues i ON i.project_id=json_extract(selected.value,'$[0]') AND i.number=json_extract(selected.value,'$[1]') AND i.deleted_at IS NULL"))?;
+        for row in query.query_map([serde_json::to_string(&references)?], |r| {
+            let project: String = r.get(0)?;
+            let name = r.get::<_, Option<String>>(2)?.unwrap_or_else(|| project.clone());
+            let issue = if let Some(title) = r.get::<_, Option<String>>(3)? {
+                let body = if mode == BodyMode::Preview {
+                    String::from_utf8_lossy(&r.get::<_, Vec<u8>>(4)?).into_owned()
+                } else { r.get::<_, String>(4)? };
+                Some((json!({"title":title,"body":body,"state":r.get::<_,String>(5)?,"assignee":r.get::<_,Option<String>>(6)?,"resource_version":r.get::<_,i64>(7)?,"has_body":r.get::<_,bool>(8)?}), r.get::<_,String>(9)?))
+            } else { None };
+            Ok(((project, r.get::<_,i64>(1)?), (name, issue)))
+        })? { let (key, value) = row?; issues.insert(key, value); }
+    }
+    for node in nodes {
+        if node["kind"] == "issue" {
+            let key = (
+                node["reference_project"].as_str().unwrap().to_owned(),
+                node["reference"].as_str().unwrap().parse::<i64>().unwrap(),
+            );
+            let (name, issue) = &issues[&key];
+            node["reference_project_name"] = json!(name);
+            if let Some((issue, labels)) = issue {
+                for field in [
+                    "title",
+                    "body",
+                    "state",
+                    "assignee",
+                    "resource_version",
+                    "has_body",
+                ] {
+                    node[field] = issue[field].clone();
+                }
                 node["labels"] =
-                    serde_json::from_str(&labels).map_err(|e| Error::invalid(e.to_string()))?;
-                node["body"] = json!("");
-                node["has_body"] = json!(has_body);
-                node["state"] = json!(state);
-                node["assignee"] = json!(assignee);
-                node["resource_version"] = json!(version);
+                    serde_json::from_str(labels).map_err(|e| Error::invalid(e.to_string()))?;
             } else {
                 node["available"] = json!(false);
                 node["state"] = json!("unavailable");
             }
-            project_body(node, mode);
+        } else if node["kind"] == "notification" {
+            node["available"] = json!(false);
+            node["state"] = json!("unavailable");
+        }
+        project_body(node, mode);
+        if node["kind"] == "issue" {
             issue_display_title(node);
-            return Ok(());
         }
-        match get_issue(
-            db,
-            node["reference_project"].as_str().unwrap(),
-            number,
-            false,
-        ) {
-            Ok(issue) => {
-                node["title"] = json!(issue.title);
-                node["labels"] = json!(issue.labels);
-                node["has_body"] = json!(!issue.body.is_empty());
-                node["body"] = json!(issue.body);
-                node["state"] = json!(issue.state);
-                node["assignee"] = json!(issue.assignee);
-                node["resource_version"] = json!(issue.version);
-            }
-            Err(error) if error.code == "not_found" => {
-                node["available"] = json!(false);
-                node["state"] = json!("unavailable");
-            }
-            Err(error) => return Err(error),
-        }
-    } else if node["kind"] == "notification" {
-        node["available"] = json!(false);
-        node["state"] = json!("unavailable");
-    }
-    project_body(node, mode);
-    if node["kind"] == "issue" {
-        issue_display_title(node);
     }
     Ok(())
 }
@@ -1033,11 +1065,9 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
     let mut budget = ReadBudget::default();
     let mut nodes = Vec::new();
     for node in stmt.query_map(params![p.id, focus], projected_row)? {
-        let mut node = node?;
-        live(db, &mut node, mode)?;
-        budget.charge(&node)?;
-        nodes.push(node);
+        nodes.push(node?);
     }
+    live_nodes(db, &mut nodes, mode, &mut budget)?;
     let mut stmt=db.prepare("SELECT l.source,l.target,l.kind,l.description,l.created_at FROM mindmap_links l JOIN mindmap_nodes s ON s.id=l.source JOIN mindmap_nodes t ON t.id=l.target WHERE (s.project_id=?1 OR t.project_id=?1) AND (?2 IS NULL OR l.source=?2 OR l.target=?2) ORDER BY l.created_at,l.source,l.target,l.kind")?;
     let mut links = Vec::new();
     for link in stmt.query_map(params![p.id,focus],|r|Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"description":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?,"automatic":false})))? {
@@ -1051,18 +1081,59 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
         for field in ["from", "to"] {
             let key = link[field].as_str().unwrap();
             if known.insert(key.to_owned()) {
-                let mut node = get_projected(db, key, mode)?;
-                live(db, &mut node, mode)?;
-                budget.charge(&node)?;
-                external.push(node);
+                external.push(get_projected(db, key, mode)?);
             }
         }
     }
-    let explicit_prs: HashMap<&str, &str> = nodes
+    let references: BTreeSet<_> = nodes
+        .iter()
+        .filter(|n| n["kind"] == "issue" && n["available"] == true)
+        .map(|n| {
+            (
+                n["reference_project"].as_str().unwrap(),
+                n["reference"].as_str().unwrap().parse::<i64>().unwrap(),
+            )
+        })
+        .collect();
+    let mut attached_prs: BTreeMap<(String, i64), Vec<String>> = BTreeMap::new();
+    if !references.is_empty() {
+        let mut query = db.prepare("SELECT pr.project_id,pr.issue_number,pr.url FROM json_each(?1) selected
+            JOIN issue_pull_requests pr ON pr.project_id=json_extract(selected.value,'$[0]') AND pr.issue_number=json_extract(selected.value,'$[1]')
+            ORDER BY pr.created_at,pr.url")?;
+        for row in query.query_map([serde_json::to_string(&references)?], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, i64>(1)?),
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (key, url) = row?;
+            attached_prs.entry(key).or_default().push(url);
+        }
+    }
+    let mut explicit_prs: HashMap<String, String> = nodes
         .iter()
         .filter(|n| n["kind"] == "pr")
-        .map(|n| (n["reference"].as_str().unwrap(), id(n)))
+        .map(|n| {
+            (
+                n["reference"].as_str().unwrap().to_owned(),
+                id(n).to_owned(),
+            )
+        })
         .collect();
+    if focus.is_some() && !attached_prs.is_empty() {
+        let urls: BTreeSet<_> = attached_prs
+            .values()
+            .flatten()
+            .map(|url| url.trim_end_matches('/'))
+            .collect();
+        let mut query = db.prepare("SELECT reference,id FROM mindmap_nodes WHERE project_id=?1 AND kind='pr' AND reference_project='' AND reference IN (SELECT value FROM json_each(?2))")?;
+        for row in query.query_map(params![p.id, serde_json::to_string(&urls)?], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (url, id) = row?;
+            explicit_prs.insert(url, id);
+        }
+    }
     let mut automatic = Vec::new();
     let mut automatic_links = HashSet::new();
     for node in &nodes {
@@ -1070,22 +1141,13 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
             continue;
         }
         if node["kind"] == "issue" && node["available"] == true {
-            let mut stmt=db.prepare("SELECT url FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at,url")?;
-            let urls = stmt.query_map(
-                params![
-                    node["reference_project"].as_str().unwrap(),
-                    node["reference"].as_str().unwrap().parse::<i64>().unwrap()
-                ],
-                |r| r.get::<_, String>(0),
-            )?;
-            for url in urls {
-                let url = url?;
+            let key = (
+                node["reference_project"].as_str().unwrap().to_owned(),
+                node["reference"].as_str().unwrap().parse::<i64>().unwrap(),
+            );
+            for url in attached_prs.get(&key).into_iter().flatten() {
                 let url = url.trim_end_matches('/');
-                let explicit = if focus.is_some() {
-                    db.query_row("SELECT id FROM mindmap_nodes WHERE project_id=?1 AND kind='pr' AND reference_project='' AND reference=?2",params![p.id,url],|row|row.get::<_,String>(0)).optional()?
-                } else {
-                    explicit_prs.get(url).map(|id| (*id).to_owned())
-                };
+                let explicit = explicit_prs.get(url).cloned();
                 let target = explicit.unwrap_or_else(|| format!("auto:{}:{url}", id(node)));
                 if !automatic_links.insert((id(node).to_owned(), target.clone())) {
                     continue;
@@ -1095,10 +1157,7 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
                     budget.charge(&automatic_node)?;
                     automatic.push(automatic_node);
                 } else if known.insert(target.clone()) {
-                    let mut endpoint = get_projected(db, &target, mode)?;
-                    live(db, &mut endpoint, mode)?;
-                    budget.charge(&endpoint)?;
-                    external.push(endpoint);
+                    external.push(get_projected(db, &target, mode)?);
                 }
                 let link = json!({"from":node["id"],"to":target,"kind":"pull-request","description":null,"automatic":true});
                 budget.charge(&link)?;
@@ -1127,7 +1186,7 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
         for attachment in attachments {
             let (project, number, name) = attachment?;
             let saved: Option<String> = db.query_row("SELECT id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=?2 ORDER BY (project_id=?3) DESC,(project_id=?1) DESC,project_id,id LIMIT 1",params![project,number.to_string(),p.id],|r|r.get(0)).optional()?;
-            let mut issue = if let Some(saved) = saved {
+            let issue = if let Some(saved) = saved {
                 get_projected(db, &saved, mode)?
             } else {
                 json!({"id":format!("auto-issue:{project}:{number}"),"project_id":project,"project_name":name,"parent_id":null,"position":0,"kind":"issue","title":format!("Issue #{number}"),"body":"","reference":number.to_string(),"reference_project":project,"automatic":true,"resource_only":true,"available":true})
@@ -1138,12 +1197,11 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
                 links.push(link);
             }
             if known.insert(id(&issue).to_owned()) {
-                live(db, &mut issue, mode)?;
-                budget.charge(&issue)?;
                 external.push(issue);
             }
         }
     }
+    live_nodes(db, &mut external, mode, &mut budget)?;
     nodes.extend(automatic);
     super::artifacts::enrich_nodes(db, &mut nodes)?;
     super::artifacts::enrich_nodes(db, &mut external)?;
@@ -1153,4 +1211,92 @@ fn graph(db: &Connection, p: &Project, mode: BodyMode, focus: Option<&str>) -> R
     Ok(
         json!({"ok":true,"project":p,"version":version(db,&p.id)?,"body_mode":mode,"nodes":nodes,"external_nodes":external,"links":links}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_batches_live_issue_fields_and_attached_pull_requests() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-map-live-{}",
+                crate::issues::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let store = crate::issues::Store::open(&path).unwrap();
+            store.db.execute_batch(&format!("
+                INSERT INTO projects(id,name,next_number) VALUES('named:Map','Map',1),('named:Tasks','Tasks',1);
+                INSERT INTO agents VALUES('creator','{{}}',0);
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,deleted_at)
+                SELECT 'named:Tasks',id,'Live '||id,'','open','creator',0,0,7,'[\"work\"]',CASE WHEN id%8=0 THEN 1 END FROM n;
+                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,reference,reference_project,created_at,updated_at,display_label)
+                SELECT 'node-'||number,'named:Map',number,'issue','Placeholder','',CAST(number AS TEXT),'named:Tasks',0,0,CASE WHEN number%4=1 THEN 'Custom '||number END FROM issues;
+                INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+                SELECT project_id,number,'https://github.com/example/repo/pull/'||number,'creator',number FROM issues;
+            ")).unwrap();
+            let body = format!("\0{}", "🧭".repeat(600));
+            store
+                .db
+                .execute("UPDATE issues SET body=?1", [&body])
+                .unwrap();
+            let project = Project {
+                id: "named:Map".into(),
+                name: "Map".into(),
+            };
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            for mode in [BodyMode::None, BodyMode::Preview, BodyMode::Full] {
+                let expected = graph(&store.db, &project, mode, None).unwrap();
+                let (db, transport) = crate::database::tests::measured_connection(&path);
+                let actual = graph(&db, &project, mode, None).unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(actual["links"].as_array().unwrap().len(), count - count / 8);
+                for node in actual["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|n| n["kind"] == "issue")
+                {
+                    let number: usize = node["reference"].as_str().unwrap().parse().unwrap();
+                    assert_eq!(node["reference_project_name"], "Tasks");
+                    assert_eq!(node["available"], number % 8 != 0);
+                    if number % 8 == 0 {
+                        continue;
+                    }
+                    assert_eq!(node["original_title"], format!("Live {number}"));
+                    assert_eq!(
+                        node["title"],
+                        if number % 4 == 1 {
+                            format!("Custom {number}")
+                        } else {
+                            format!("Live {number}")
+                        }
+                    );
+                    assert_eq!(node["labels"], json!(["work"]));
+                    assert_eq!(node["resource_version"], 7);
+                    assert_eq!(
+                        node["body"],
+                        match mode {
+                            BodyMode::None => String::new(),
+                            BodyMode::Preview => body.chars().take(512).collect(),
+                            BodyMode::Full => body.clone(),
+                        }
+                    );
+                }
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                eprintln!("{count} issue nodes ({mode:?}): {commands} RPCs/{steps} steps");
+                measurements.push((count, commands));
+            }
+            drop(store);
+            owner.stop();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+        for (count, commands) in measurements {
+            assert!(commands < 30, "{count} issue nodes used {commands} RPCs");
+        }
+    }
 }
