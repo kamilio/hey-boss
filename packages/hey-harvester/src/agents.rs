@@ -90,6 +90,27 @@ pub fn git_info(cwd: &str) -> Option<GitInfo> {
 
 /// Repository identity does not require the branch/revision used by agent views.
 pub fn git_repository_info(cwd: &str) -> Option<GitInfo> {
+    // Outside a checkout, even starting Git can dominate a lightweight read.
+    // Preserve explicitly selected repositories and resolve symlink/relative
+    // directories the same way `git -C` does before inspecting their parents.
+    if ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none())
+    {
+        let directory = if cwd.is_empty() {
+            std::env::current_dir().ok()?
+        } else {
+            std::fs::canonicalize(cwd).ok()?
+        };
+        if !directory.ancestors().any(|root| {
+            root.join(".git").exists()
+                // A standalone Git directory can select core.worktree without
+                // a .git entry. Let Git validate these possible repositories.
+                || root.join("HEAD").symlink_metadata().is_ok()
+        }) {
+            return None;
+        }
+    }
     let locations = git_output(
         cwd,
         &[
