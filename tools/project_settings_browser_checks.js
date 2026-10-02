@@ -33,11 +33,13 @@ async (page) => {
   check(await page.locator('#project-preview-choices').innerText() === 'Existing checkout · Pull requests', 'Workflow preview uses unsaved edits');
   await tab('Workflow').press('End');
   check(await tab('Chief').getAttribute('aria-selected') === 'true', 'End selects last tab');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Chief for fixture: Fixture chief');
-  await page.locator('#project-prompt-chief_wrapper').fill('{{prompt}} — {{project}}');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Fixture chief — fixture');
-  await page.locator('[data-reset-prompt="chief_wrapper"]').click();
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Chief for fixture: Fixture chief');
+  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Fixture chief');
+  check(await page.locator('#project-prompt-chief_wrapper').count() === 0, 'Chief has no wrapper editor');
+  check(await page.evaluate(() => !!window.fixtureSettings.prompt_overrides.chief_wrapper), 'Legacy saved wrapper is present but ignored by the preview');
+  if (!await page.locator('#project-chief-prompt').isVisible()) await page.locator('#project-chief-instructions summary').click();
+  await page.locator('#project-chief-prompt').fill('Fixture chief {{project}}');
+  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Fixture chief {{project}}');
+  check(true, 'Chief preview preserves literal template syntax');
   check(await page.locator('.settings-preview').isVisible(), 'Chief preview visible');
   await tab('Chief').press('ArrowRight');
   check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Arrow wraps around');
@@ -52,7 +54,7 @@ async (page) => {
   await open();
   check(await page.locator('#project-prompt-layout').inputValue() === '{{delivery}}\n\n{{task}}', 'Sequence survives reopening');
   await page.locator('[data-reset-prompt="layout"]').click();
-  check(await page.locator('#project-prompt-layout').inputValue() === '' && (await page.locator('#project-prompt-layout').getAttribute('placeholder')).includes('{{dependencies}}'), 'Reset restores the default sequence');
+  check(await page.locator('#project-prompt-layout').inputValue() === '' && (await page.locator('#project-prompt-layout').getAttribute('placeholder')).includes('{{workspace}}'), 'Reset restores the default sequence');
   await tab('Chief').click();
   await page.locator('#project-chief-prompt').fill('');
   await page.locator('#project-chief-instructions summary').click();
@@ -69,7 +71,7 @@ async (page) => {
   await page.locator('#project-prompt').fill('Edited implementation');
   await tab('Chief').click();
   await page.locator('#project-chief-prompt').fill('Edited chief');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Chief for fixture: Edited chief');
+  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited chief');
   await page.evaluate(() => { window.failSave = true; });
   await tab('Workflow').click();
   await page.getByRole('button', {name:'Save',exact:true}).click();
@@ -81,7 +83,8 @@ async (page) => {
   await page.evaluate(() => { window.failSave = false; });
   await open();
   check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Reopening starts at first tab');
-  for (const width of [1280, 390, 320]) {
+  for (const theme of ['light','dark']) for (const width of [1280, 768, 390, 320]) {
+    await page.emulateMedia({colorScheme:theme});
     await page.setViewportSize({width,height:800});
     for (const name of ['Instructions','Planning','Workflow','Chief']) {
       await tab(name).click();
@@ -93,9 +96,14 @@ async (page) => {
       check(await page.locator('#project-settings-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1), `${name} fits at ${width}px`);
       check(await page.getByRole('button', {name:'Save',exact:true}).evaluate(el => {const r=el.getBoundingClientRect();return r.bottom<=innerHeight && r.top>=0;}), `Save visible for ${name} at ${width}px`);
     }
-    await tab('Workflow').click();
+    await tab('Chief').click();
     await page.waitForFunction(() => document.querySelector('#project-instructions-preview').getAttribute('aria-busy') === 'false');
-    await page.screenshot({path:`output/playwright/settings-tabs-${width}.png`});
+    check(await page.locator('#project-instructions-preview').textContent() === await page.locator('#project-chief-prompt').inputValue(), 'Chief preview equals configured prompt');
+    await page.screenshot({path:`output/playwright/chief-settings-${theme}-${width}.png`});
+    if (width < 800) {
+      await page.locator('.settings-preview').scrollIntoViewIfNeeded();
+      await page.screenshot({path:`output/playwright/chief-preview-${theme}-${width}.png`});
+    }
   }
   await page.getByRole('button', {name:'Cancel',exact:true}).click();
   await page.evaluate(() => { window.failLoad = true; });

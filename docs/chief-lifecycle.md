@@ -23,3 +23,17 @@ failed/malformed completion, inherited stdout, ownership, and disabling Chief.
 Its 15-second waits identify the stage, persisted Chief state, worker exit, and
 bounded log tails. Shutdown has a five-second graceful limit and cleans up the
 fixture's owned Chief process group before a forced worker stop.
+
+Every pass uses a fresh `codex exec` session and receives exactly the configured
+Chief prompt. No project prefix, workflow wrapper, or extra instructions are
+appended. CLI tools remain available through the normal environment. Project
+settings and the admin preview show that same prompt.
+
+The event observer buffers at most 1 MiB per JSONL line. Larger telemetry is
+drained through its newline and skipped, then observation continues. Small events
+retain JSON validation; EOF during any partial event remains an error. The queue
+holds one event, and cancellation stops and joins the reader even during a drain.
+
+Codex writes its final response through `--output-last-message`; Chief reads only
+a 4,000-character summary from that file and removes it after the attempt. This
+also preserves completion when the final response exceeds the observation buffer.

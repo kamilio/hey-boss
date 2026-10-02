@@ -3,8 +3,9 @@ use crate::issues::{Error, Result, Store, worker};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde_json::Value;
 use std::{
-    io::{BufRead, BufReader, Read},
+    io::{BufReader, Read},
     os::fd::{AsFd, AsRawFd, OwnedFd},
+    os::unix::fs::OpenOptionsExt,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -16,6 +17,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "chief_events.rs"]
+mod events;
 
 pub(in crate::issues) const DEFAULT_PROMPT: &str =
     include_str!("prompts/chief.md").trim_ascii_end();
@@ -236,13 +240,6 @@ impl Store {
             if !enabled || !crate::chief_ownership::allowed(&tx, &project, &worker_id)? {
                 continue;
             }
-            let overrides: String = tx.query_row(
-                "SELECT prompt_overrides FROM project_settings WHERE project_id=?1",
-                [&project],
-                |r| r.get(0),
-            )?;
-            let overrides: worker::PromptOverrides = serde_json::from_str(&overrides)?;
-            let prompt = worker::chief_instructions(&project, &prompt, &overrides);
             let started = worker::now();
             tx.execute("INSERT INTO project_chiefs(project_id,machine,cwd,owner_pid,owner_start,next_at,state,worker_id,started_at,last_event) VALUES(?1,?2,?3,?4,?5,?6,'running',?7,?8,'Launching Chief') ON CONFLICT(project_id,machine) DO UPDATE SET session_id=NULL,queued=0,cwd=excluded.cwd,owner_pid=excluded.owner_pid,owner_start=excluded.owner_start,pid=NULL,process_start=NULL,next_at=excluded.next_at,state='running',summary='',worker_id=excluded.worker_id,started_at=excluded.started_at,finished_at=NULL,last_event=excluded.last_event",params![project,machine,cwd,owner,start,started+INTERVAL_MS,worker_id,started])?;
             tx.commit()?;
@@ -551,8 +548,65 @@ fn exited_with_open_stream(pid: u32, output: &OwnedFd) -> std::io::Result<bool> 
     Ok(poll.revents & libc::POLLHUP == 0)
 }
 
+// Polling the owned pipe lets cancellation join the reader even if a descendant
+// retains stdout. No event-size timeout or extra successful-exit delay is added.
+struct EventOutput {
+    stdout: std::process::ChildStdout,
+    cancelled: Arc<AtomicBool>,
+}
+impl Read for EventOutput {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(std::io::Error::other("Chief reader stopped"));
+            }
+            let mut fd = libc::pollfd {
+                fd: self.stdout.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut fd, 1, 200) };
+            if ready > 0 {
+                return self.stdout.read(bytes);
+            }
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+struct FinalMessage(PathBuf);
+impl FinalMessage {
+    fn create() -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("hb-chief-final-{}", worker::random_id()?));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        Ok(Self(path))
+    }
+    fn summary(&self) -> Result<String> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.0)?
+            .take(16_000)
+            .read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).chars().take(4000).collect())
+    }
+}
+impl Drop for FinalMessage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<String> {
     let binary = worker::codex_binary()?;
+    let final_message = FinalMessage::create()?;
     let mut paths = vec![
         std::env::current_exe()?.parent().unwrap().to_owned(),
         binary.parent().unwrap().to_owned(),
@@ -565,6 +619,8 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
     crate::codex_permissions::apply(&mut command);
     command
         .args(["--json", "--skip-git-repo-check"])
+        .arg("--output-last-message")
+        .arg(&final_message.0)
         .arg(&job.prompt)
         .current_dir(&job.cwd)
         .process_group(0)
@@ -587,6 +643,9 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
     let pid = child.id();
     let start = crate::agents::process_identity(pid)
         .ok_or_else(|| Error::new("worker_error", "Chief exited during launch"));
+    let reader_stop = Arc::new(AtomicBool::new(false));
+    let mut reader_handle = None;
+    let mut reaped = false;
     let outcome = (|| -> Result<String> {
         let start = start.as_ref().map_err(Clone::clone)?;
         store.db.execute(
@@ -595,31 +654,22 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
         )?;
         let stdout = child.stdout.take().unwrap();
         let output = stdout.as_fd().try_clone_to_owned()?;
-        let (send, receive) = mpsc::sync_channel(128);
-        let reader = thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
+        let (send, receive) = mpsc::sync_channel(1);
+        let cancelled = reader_stop.clone();
+        reader_handle = Some(thread::spawn(move || {
+            let mut reader = BufReader::new(EventOutput { stdout, cancelled });
             loop {
-                let mut line = Vec::new();
-                match Read::take(&mut reader, 1024 * 1024 + 1).read_until(b'\n', &mut line) {
-                    Ok(0) => break,
-                    Err(error) => {
-                        let _ = send.send(Err(error.to_string()));
-                        break;
-                    }
-                    Ok(_) => {
-                        let value = if line.len() > 1024 * 1024 || line.last() != Some(&b'\n') {
-                            Err("Chief returned an oversized or incomplete event".into())
-                        } else {
-                            serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())
-                        };
-                        let failed = value.is_err();
-                        if send.send(value).is_err() || failed {
-                            break;
-                        }
-                    }
+                let event = match events::read_event(&mut reader) {
+                    Ok(Some(event)) => Ok(event),
+                    Ok(None) => break,
+                    Err(error) => Err(error),
+                };
+                let failed = event.is_err();
+                if send.send(event).is_err() || failed {
+                    break;
                 }
             }
-        });
+        }));
         let mut thread_started = false;
         let mut completed = false;
         let mut failed = false;
@@ -643,7 +693,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                 ));
             }
             match receive.recv_timeout(Duration::from_millis(200)) {
-                Ok(Err(error)) => return Err(Error::new("worker_error", error)),
+                Ok(Err(error)) => return Err(error),
                 Ok(Ok(event)) => {
                     if let Some(activity) = event_activity(&event) {
                         store.db.execute("UPDATE project_chiefs SET last_event=?3 WHERE project_id=?1 AND machine=?2", params![job.project,job.machine,activity])?;
@@ -686,14 +736,20 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if child.try_wait()?.is_some() {
+                        reaped = true;
                         break;
                     }
                     thread::sleep(Duration::from_millis(200));
                 }
             }
         }
-        let _ = reader.join();
         let status = child.wait()?;
+        if status.success() && completed && !failed && thread_started {
+            let final_summary = final_message.summary()?;
+            if !final_summary.trim().is_empty() {
+                summary = final_summary;
+            }
+        }
         if !status.success() || !completed || failed || !thread_started || summary.trim().is_empty()
         {
             return Err(Error::new(
@@ -707,11 +763,22 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
         }
         Ok(summary)
     })();
+    reader_stop.store(true, Ordering::Release);
     if let Ok(start) = &start {
         let _ = worker::stop_group(pid, start);
     }
+    // Until wait/try_wait reaps our child, its process-group ID cannot be reused.
+    // Reclaim descendants retaining stdout even when the group leader exited.
+    if !reaped {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
     let _ = child.kill();
     let _ = child.wait();
+    if let Some(reader) = reader_handle {
+        let _ = reader.join();
+    }
     outcome
 }
 

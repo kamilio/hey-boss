@@ -1893,7 +1893,6 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
         "dependency_update",
         "prompt_update",
         "goal_continue",
-        "chief_wrapper",
     ] {
         assert!(settings["prompt_defaults"][key].is_string(), "{key}");
         assert!(

@@ -452,7 +452,7 @@ pub fn catalog() -> Value {
             prompts.push(json!({"id":key,"title":section["title"],"text":defaults[key],"source":format!("src/issues/prompts/{key}.md")}));
         }
     }
-    json!({"commands":commands,"prompts":prompts,"chief_wrapper":hey_boss::issues::worker::chief_instructions("{{project}}","{{prompt}}", &Default::default()),"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
+    json!({"commands":commands,"prompts":prompts,"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
 }
 
 fn request(root: &Path, operation: Value) -> io::Result<Request> {
