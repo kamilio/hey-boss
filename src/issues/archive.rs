@@ -224,7 +224,7 @@ pub(crate) fn backup_store(db: &crate::database::Connection, destination: &Path)
         Archive::read(&cold_destination)?;
     } else {
         let backup = Connection::open_with_flags(
-            destination,
+            Store::validate_database_path(destination)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         let version: i64 = backup.pragma_query_value(None, "user_version", |r| r.get(0))?;

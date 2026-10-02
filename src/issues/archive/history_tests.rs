@@ -999,6 +999,26 @@ fn complete_backup_opens_with_archived_body_and_history_at_a_new_path() {
 }
 
 #[test]
+fn complete_backups_accept_symlinked_parent_directories() {
+    for archived in [false, true] {
+        let mut f = Fixture::new();
+        let before = f.read(json!({"action":"view","number":1}));
+        if archived {
+            f.archive();
+        }
+        let directory = f.root.join("backups");
+        std::fs::create_dir(&directory).unwrap();
+        let link = f.root.join("linked-parent");
+        std::os::unix::fs::symlink(&directory, &link).unwrap();
+        let destination = link.join("copy.sqlite");
+        backup_store(&f.db, &destination).unwrap();
+        let mut backup = Store::open(&destination).unwrap();
+        let request: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Archive","name":"Archive"},"operation":{"action":"view","number":1}})).unwrap();
+        assert_eq!(backup.execute(&request).unwrap(), before);
+    }
+}
+
+#[test]
 fn archive_files_and_sidecars_cannot_be_overwritten_by_auxiliary_outputs() {
     let f = Fixture::new();
     f.archive();
