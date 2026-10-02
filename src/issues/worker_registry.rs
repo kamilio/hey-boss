@@ -497,19 +497,43 @@ fn worker_activity(db: &Connection, selected: Option<&str>, config: &Settings) -
     )?;
     let mut stmt = db.prepare(STATUS_RUNS)?;
     let mut runs=stmt.query_map([&selected],|r|Ok(json!({"id":r.get::<_,String>(0)?,"project_id":r.get::<_,String>(1)?,"project_name":r.get::<_,String>(2)?,"number":r.get::<_,i64>(3)?,"title":r.get::<_,String>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"state":r.get::<_,String>(6)?,"pid":r.get::<_,Option<u32>>(7)?,"started_at":r.get::<_,i64>(8)?,"finished_at":r.get::<_,Option<i64>>(9)?,"stop_requested":r.get::<_,bool>(10)?,"summary":r.get::<_,String>(11)?,"last_event":r.get::<_,String>(12)?,"goal":r.get::<_,Option<String>>(13)?,"reservation_expires":r.get::<_,Option<i64>>(14)?,"claimed_at":r.get::<_,Option<i64>>(15)?,"actor_id":r.get::<_,String>(16)?,"retry_at":r.get::<_,Option<i64>>(17)?,"retry_count":r.get::<_,i64>(18)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut events_by_run: HashMap<String, Vec<(i64, Value)>> = HashMap::new();
+    if !runs.is_empty() {
+        let ids: Vec<_> = runs.iter().map(|run| run["id"].as_str().unwrap()).collect();
+        // Drive the indexed tail lookup from only the displayed runs. Ranking
+        // a worker's entire event history would make old runs slow every poll.
+        for (run_id, id, event) in db.query_collect(
+            "SELECT e.run_id,e.id,e.created_at,e.text FROM json_each(?1) selected
+             CROSS JOIN worker_events e WHERE e.id IN (
+                SELECT id FROM worker_events WHERE run_id=selected.value ORDER BY id DESC LIMIT 12
+             )",
+            [serde_json::to_string(&ids)?],
+            |row| -> rusqlite::Result<_> {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    json!({"at":row.get::<_,i64>(2)?,"text":row.get::<_,String>(3)?}),
+                ))
+            },
+        )? {
+            events_by_run.entry(run_id).or_default().push((id, event));
+        }
+    }
     for run in &mut runs {
         if let Some(s) = run["goal"].as_str() {
             run["goal"] = serde_json::from_str(s)?;
         }
-        let mut events = db.prepare(
-            "SELECT created_at,text FROM worker_events WHERE run_id=?1 ORDER BY id DESC LIMIT 12",
-        )?;
+        let mut events = events_by_run
+            .remove(run["id"].as_str().unwrap())
+            .unwrap_or_default();
+        // Each list has at most twelve entries; avoid a database sort over the
+        // combined activity of every displayed run.
+        events.sort_unstable_by_key(|(id, _)| std::cmp::Reverse(*id));
         run["events"] = json!(
             events
-                .query_map([run["id"].as_str().unwrap()], |r| Ok(
-                    json!({"at":r.get::<_,i64>(0)?,"text":r.get::<_,String>(1)?})
-                ))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>()
         );
     }
     let chiefs = super::super::chief::status(db, selected)?;
@@ -1254,6 +1278,75 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_event_previews_use_one_bounded_batch() {
+        let mut measurements = Vec::new();
+        for (count, archived) in [(16, 0), (16, 1000), (128, 1000)] {
+            let root = std::env::temp_dir()
+                .join(format!("hb-worker-event-batch-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let store = Store::open(&path).unwrap();
+            let config = Settings::default();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',2); INSERT INTO agents VALUES('agent','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:test',1,'Task','','open','agent',0,0,1,'[]');").unwrap();
+            for worker in ["selected", "other"] {
+                store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES(?1,'managed',?2,1,0)",params![worker,serde_json::to_string(&config).unwrap()]).unwrap();
+            }
+            store.db.execute("WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<?1+20) INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) SELECT 'named:test',x,'Task','','open','agent',0,0,1,'[]' FROM n",[count]).unwrap();
+            store.db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?1+20) INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) SELECT 'run-'||x,'named:test',x,'{}','agent',CASE WHEN x<=?1 THEN 'running' ELSE 'completed' END,1,'start','unit',x,0,'selected',CASE WHEN x<=?1 THEN NULL ELSE x END FROM n",[count]).unwrap();
+            store.db.execute("WITH RECURSIVE n(x) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) SELECT 'archived-'||x,'named:test',1,'{}','agent','completed',1,'start','unit',-x,0,CASE WHEN x%2=0 THEN 'selected' ELSE 'other' END,0 FROM n",[archived]).unwrap();
+            store.db.execute_batch("UPDATE worker_runs SET job='{\"issue\":{\"title\":\"Task\"}}';
+                WITH RECURSIVE e(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM e WHERE x<100) INSERT INTO worker_events(run_id,created_at,text) SELECT r.id,e.x%3,r.id||':'||e.x FROM worker_runs r CROSS JOIN e WHERE r.id<>'run-1' AND (r.id<>'run-2' OR e.x<=5);
+                UPDATE worker_runs SET goal='{\"phase\":\"kept\"}' WHERE id='run-1'").unwrap();
+            drop(store);
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            let started = std::time::Instant::now();
+            let snapshot = db.read_transaction().unwrap();
+            let result = worker_activity(&snapshot, Some("selected"), &config).unwrap();
+            snapshot.commit().unwrap();
+            let elapsed = started.elapsed();
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            assert_eq!(result["active"], count);
+            let runs = result["runs"].as_array().unwrap();
+            assert_eq!(runs.len(), count as usize + 20);
+            for run in runs {
+                let id = run["id"].as_str().unwrap();
+                let events = run["events"].as_array().unwrap();
+                assert!(id.starts_with("run-"));
+                if id == "run-1" {
+                    assert!(events.is_empty());
+                    assert_eq!(run["goal"], json!({"phase":"kept"}));
+                } else {
+                    let last = if id == "run-2" { 5 } else { 100 };
+                    let first = if last == 5 { 1 } else { 89 };
+                    assert_eq!(
+                        *events,
+                        (first..=last)
+                            .rev()
+                            .map(|n| json!({"at":n%3,"text":format!("{id}:{n}")}))
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+            eprintln!(
+                "{count} active runs, {archived} historical runs: {commands} RPCs, {steps} query VM steps, {elapsed:?}"
+            );
+            measurements.push((count, archived, commands, steps));
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert!(
+            measurements
+                .iter()
+                .all(|(count, _, commands, steps)| *commands <= 14
+                    && *steps < (*count + 20) * 300 + 5000),
+            "Repeated event reads or historical scans: {measurements:?}"
+        );
+    }
+
     #[test]
     fn pickup_preflight_reads_shared_project_defaults_once() {
         let mut work = Vec::new();
