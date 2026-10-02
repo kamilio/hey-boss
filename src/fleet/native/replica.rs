@@ -322,6 +322,11 @@ impl RowPlan {
     }
 }
 pub(super) fn ensure_metadata(db: &Connection) -> Result<()> {
+    // Existing installations need only a schema read. Even a no-op DDL batch
+    // would acquire the service writer and delay unrelated fleet requests.
+    if db.query_row("SELECT count(*)=4 FROM sqlite_master WHERE type='table' AND name IN ('fleet_ranges','fleet_number_reservations','fleet_signals','fleet_state')", [], |row| row.get::<_,bool>(0))? {
+        return Ok(());
+    }
     db.execute_batch("CREATE TABLE IF NOT EXISTS fleet_ranges(node TEXT NOT NULL,project_id TEXT NOT NULL,first_number INTEGER NOT NULL,last_number INTEGER NOT NULL,PRIMARY KEY(node,project_id)); CREATE TABLE IF NOT EXISTS fleet_number_reservations(node TEXT NOT NULL,project_id TEXT NOT NULL,first_number INTEGER NOT NULL,last_number INTEGER NOT NULL,PRIMARY KEY(node,project_id,first_number)); CREATE TABLE IF NOT EXISTS fleet_signals(id TEXT PRIMARY KEY,host TEXT NOT NULL,worker TEXT NOT NULL,signal TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created_at REAL NOT NULL); CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
     Ok(())
 }
@@ -2187,6 +2192,32 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_metadata_tables_are_repaired_without_changing_saved_state() {
+        let db = Connection::open_in_memory().unwrap();
+        ensure_metadata(&db).unwrap();
+        state_set(&db, "saved", &json!({"keep":true})).unwrap();
+        db.execute_batch("DROP TABLE fleet_ranges; DROP TABLE fleet_signals;")
+            .unwrap();
+        ensure_metadata(&db).unwrap();
+        assert_eq!(
+            state_get(&db, "saved", Value::Null).unwrap(),
+            json!({"keep":true})
+        );
+        db.execute(
+            "INSERT INTO fleet_ranges VALUES('node','project',1,100)",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO fleet_signals(id,host,worker,signal,state,created_at) VALUES('signal','host','worker','stop','pending',1)",[]).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM fleet_number_reservations", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
     #[test]
     fn unchanged_fleet_state_does_not_queue_behind_a_writer() {
         let f = Fixture::new();
