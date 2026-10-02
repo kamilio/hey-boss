@@ -6,6 +6,9 @@ pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS work
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
 
+// PR origins only need attachment events, not the issue's full activity log.
+pub(super) const PR_ORIGIN_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_pr_origin ON events(project_id,issue_number,id DESC) WHERE action='pr_attached';";
+
 const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
     ("issues", "project_id", &["attempt_hold"]),
     (
