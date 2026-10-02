@@ -1789,10 +1789,11 @@ impl Supervisor {
     }
     fn configuration_request(&self, request: &Value) -> Result<Value> {
         let _configuration = self.configuration.lock().unwrap();
-        if let Some(host) = request["machine_update"]["host"].as_str() {
-            if host != "local" && !self.ctx.inventory()?.iter().any(|m| m["host"] == host) {
-                return Err(invalid("Machine is not in the configured inventory"));
-            }
+        if let Some(host) = request["machine_update"]["host"].as_str()
+            && host != "local"
+            && !self.ctx.inventory()?.iter().any(|m| m["host"] == host)
+        {
+            return Err(invalid("Machine is not in the configured inventory"));
         }
         configuration::request(&self.ctx, request)
     }

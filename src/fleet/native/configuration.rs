@@ -502,8 +502,10 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
                     .ok_or_else(|| invalid("Template worker is no longer available"))?["config"]
                     .clone()
             } else {
-                let mut settings = Settings::default();
-                settings.projects = project_ids;
+                let mut settings = Settings {
+                    projects: project_ids,
+                    ..Settings::default()
+                };
                 if let Some(slots) = update["concurrency"].as_u64() {
                     settings.concurrency = slots
                         .try_into()
