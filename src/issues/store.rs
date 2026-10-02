@@ -1237,12 +1237,13 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime')", [], |r| r.get::<_, i64>(0))? < 7 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin')", [], |r| r.get::<_, i64>(0))? < 8 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
             db.execute_batch(registry::PROJECT_QUEUE_INDEX)?;
             db.execute_batch(registry::LEGACY_RUNTIME_INDEX)?;
+            db.execute_batch(registry::PR_ORIGIN_INDEX)?;
             db.execute_batch(transfer::INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
@@ -2989,6 +2990,47 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn pull_request_origins_skip_unrelated_event_history() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-pr-origin-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Origins','Origins',3);
+            INSERT INTO agents VALUES('creator','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            VALUES('named:Origins',1,'One','','open','creator',0,0,1,'[]',1),('named:Origins',2,'Two','','open','creator',0,0,1,'[]',2);
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at) VALUES
+            ('named:Origins',1,'https://github.com/o/r/pull/1','creator',1),
+            ('named:Origins',1,'https://github.com/o/r/pull/2','creator',2),
+            ('named:Origins',2,'https://github.com/o/r/pull/1','creator',1);
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES
+            ('named:Origins',1,'creator','pr_attached',1,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":{\"host\":\"first\"}}'),
+            ('named:Origins',1,'creator','pr_attached',2,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":{\"host\":\"latest\"}}'),
+            ('named:Origins',1,'creator','pr_attached',3,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":\"invalid\"}'),
+            ('named:Origins',2,'creator','pr_attached',4,'{\"url\":\"https://github.com/o/r/pull/1\",\"origin\":{\"host\":\"other-issue\"}}');
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+            INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+            SELECT 'named:Origins',1,'creator','commented',id,json_object('body',printf('%04096d',id)) FROM n;").unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let started = Instant::now();
+        let found = registry::pull_requests_for_issues(&db, "named:Origins", &[1, 2]).unwrap();
+        let elapsed = started.elapsed();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(found[&1][0]["origin"]["host"], "latest");
+        assert!(found[&1][1].get("origin").is_none());
+        assert_eq!(found[&2][0]["origin"]["host"], "other-issue");
+        eprintln!("PR origins: {commands} RPCs, {steps} steps, {elapsed:?}");
+        assert!(steps < 1000, "Unrelated history added query work: {steps}");
+    }
 
     #[test]
     fn issue_lists_batch_pull_request_metadata_without_losing_origins_or_order() {
