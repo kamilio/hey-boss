@@ -19,6 +19,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static LOCK_WAITING: std::cell::RefCell<Option<std::sync::mpsc::Sender<String>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone)]
 pub(super) struct Context {
     pub home: PathBuf,
@@ -189,6 +194,12 @@ impl Context {
             if !wait {
                 return Ok(None);
             }
+            #[cfg(test)]
+            LOCK_WAITING.with(|observer| {
+                if let Some(observer) = observer.borrow_mut().take() {
+                    let _ = observer.send(name.to_owned());
+                }
+            });
             if self.stopped() || Instant::now() >= deadline {
                 return Err("Worker lifecycle is busy; retry the same signal ID".into());
             }

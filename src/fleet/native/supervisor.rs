@@ -515,18 +515,6 @@ impl Supervisor {
             }
             return Ok(json!({"ok":true,"id":identifier,"state":old["state"]}));
         }
-        let tx = db.unchecked_transaction()?;
-        replica::execute(
-            &db,
-            "INSERT INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)",
-            &[
-                json!(identifier),
-                json!(host),
-                json!(worker),
-                json!(action),
-                json!(now()),
-            ],
-        )?;
         if configuration::is_yaml(&self.ctx.desired) {
             configuration::edit(&self.ctx, |doc| {
                 let definition = doc["machines"][host]["workers"]
@@ -575,6 +563,20 @@ impl Supervisor {
             }
             self.ctx.atomic_json(&self.ctx.desired, &saved)?;
         }
+        // The configuration mutex orders signals. File locking and durable
+        // writes must finish before borrowing the database's shared writer.
+        let tx = db.unchecked_transaction()?;
+        replica::execute(
+            &db,
+            "INSERT INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)",
+            &[
+                json!(identifier),
+                json!(host),
+                json!(worker),
+                json!(action),
+                json!(now()),
+            ],
+        )?;
         tx.commit()?;
         self.event(host, "signal", &format!("{action} queued for {worker}"));
         Ok(json!({"ok":true,"id":identifier,"state":"pending"}))
@@ -638,7 +640,8 @@ impl Supervisor {
     }
     fn local_yaml_config(&self, host: &str, changes: &[Value], workers: &Value) -> Result<Value> {
         let db = self.ctx.db()?;
-        let tx = db.unchecked_transaction()?;
+        let mut revisions = BTreeMap::new();
+        let mut receipts = Vec::new();
         configuration::edit(&self.ctx, |doc| {
             let effective = configuration::retain_removals(
                 &json!({"machines":{host:{"workers":workers}}}),
@@ -648,10 +651,13 @@ impl Supervisor {
                 control::revision(&self.ctx.node, &effective["machines"][host]["workers"]);
             for change in changes {
                 let key = format!("config:{host}:{}", change["id"].as_str().unwrap_or(""));
-                if replica::state_get(&db, &key, json!(0))?
-                    .as_i64()
-                    .unwrap_or(0)
-                    >= change["local_revision"].as_i64().unwrap_or(0)
+                let revision = match revisions.entry(key.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(replica::state_get(&db, &key, json!(0))?)
+                    }
+                };
+                if revision.as_i64().unwrap_or(0) >= change["local_revision"].as_i64().unwrap_or(0)
                 {
                     continue;
                 }
@@ -665,7 +671,30 @@ impl Supervisor {
                         .into_iter()
                         .flatten()
                         .any(|w| w["id"] == change["id"]);
-                if change["base_revision"] != current || retired {
+                let conflict = change["base_revision"] != current || retired;
+                if !conflict {
+                    if !doc["machines"][host]["workers"].is_array() {
+                        doc["machines"][host]["workers"] = json!([]);
+                    }
+                    let list = doc["machines"][host]["workers"].as_array_mut().unwrap();
+                    let definition = json!({"id":change["id"],"config":change["config"],"intent":change["intent"]});
+                    if let Some(old) = list.iter_mut().find(|w| w["id"] == change["id"]) {
+                        *old = definition;
+                    } else {
+                        list.push(definition);
+                    }
+                }
+                *revision = change["local_revision"].clone();
+                receipts.push((key, change, conflict));
+            }
+            Ok(())
+        })?;
+        // A failed file save records nothing. Retain ordered revisions and
+        // conflict receipts, but do not hold the writer during configuration I/O.
+        if !receipts.is_empty() {
+            let tx = db.unchecked_transaction()?;
+            for (key, change, conflict) in receipts {
+                if conflict {
                     replica::execute(
                         &db,
                         "INSERT OR IGNORE INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at) VALUES(?,?,?,'worker_configuration',?,?,?)",
@@ -680,23 +709,11 @@ impl Supervisor {
                             json!(crate::issues::worker::now()),
                         ],
                     )?;
-                } else {
-                    if !doc["machines"][host]["workers"].is_array() {
-                        doc["machines"][host]["workers"] = json!([]);
-                    }
-                    let list = doc["machines"][host]["workers"].as_array_mut().unwrap();
-                    let definition = json!({"id":change["id"],"config":change["config"],"intent":change["intent"]});
-                    if let Some(old) = list.iter_mut().find(|w| w["id"] == change["id"]) {
-                        *old = definition;
-                    } else {
-                        list.push(definition);
-                    }
                 }
                 replica::state_set(&db, &key, &change["local_revision"])?;
             }
-            Ok(())
-        })?;
-        tx.commit()?;
+            tx.commit()?;
+        }
         self.configured(host, workers)
     }
     fn configured(&self, host: &str, fallback: &Value) -> Result<Value> {
@@ -2307,6 +2324,119 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn configuration_file_waits_do_not_hold_the_database_writer() {
+        for offline in [false, true] {
+            let (_directory, mut app) = test_supervisor();
+            app.ctx.desired = app.ctx.state.join("fleet.yaml");
+            std::fs::write(
+                &app.ctx.desired,
+                "machines: {local: {workers: [{id: one, intent: pause, config: {}}]}}\n",
+            )
+            .unwrap();
+            let workers =
+                configuration::load(&app.ctx).unwrap()["runtime"]["machines"]["local"]["workers"]
+                    .clone();
+            let mut change = workers[0].clone();
+            change["intent"] = json!("running");
+            change["local_revision"] = json!(1);
+            change["base_revision"] = json!(control::revision(&app.ctx.node, &workers));
+            let file_lock = app.ctx.lock("fleet-config-file.lock", true).unwrap();
+            let writer = app.ctx.db().unwrap();
+            writer.busy_timeout(Duration::from_millis(100)).unwrap();
+            let (waiting, blocked) = mpsc::channel();
+            let operation = std::thread::spawn(move || {
+                super::super::context::LOCK_WAITING
+                    .with(|observer| *observer.borrow_mut() = Some(waiting));
+                if offline {
+                    app.local_config("local", &[change], &workers)
+                } else {
+                    app.signal(
+                        &json!({"id":"resume-one","host":"local","worker":"one","signal":"resume"}),
+                    )
+                }
+            });
+            let lock = blocked.recv_timeout(Duration::from_secs(5));
+            let acquired = writer.execute_batch("BEGIN IMMEDIATE; ROLLBACK");
+            drop(file_lock);
+            let result = operation.join().unwrap();
+            assert_eq!(lock.unwrap(), "fleet-config-file.lock");
+            result.unwrap();
+            assert!(
+                acquired.is_ok(),
+                "offline={offline}: file lock blocked database writes: {acquired:?}"
+            );
+            if offline {
+                assert_eq!(
+                    replica::state_get(&writer, "config:local:one", json!(0)).unwrap(),
+                    1
+                );
+            } else {
+                assert_eq!(writer.query_row("SELECT count(*) FROM fleet_signals WHERE id='resume-one' AND state='pending'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_receipts_keep_ordered_revisions_and_wait_for_a_successful_file_save() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(
+            &app.ctx.desired,
+            "machines: {peer: {workers: [{id: one, intent: pause, config: {}}]}}\n",
+        )
+        .unwrap();
+        let workers = app.configured("peer", &json!([])).unwrap();
+        let mut change = workers[0].clone();
+        change["intent"] = json!("running");
+        change["local_revision"] = json!(2);
+        change["base_revision"] = json!(control::revision(&app.ctx.node, &workers));
+        let mut stale = change.clone();
+        stale["local_revision"] = json!(1);
+        stale["intent"] = json!("stop");
+        let backup = app.ctx.desired.with_extension("yaml.previous");
+        std::fs::create_dir(&backup).unwrap();
+        assert!(
+            app.local_config("peer", &[change.clone(), stale.clone()], &workers)
+                .is_err()
+        );
+        let db = app.ctx.db().unwrap();
+        assert_eq!(
+            replica::state_get(&db, "config:peer:one", json!(0)).unwrap(),
+            0
+        );
+        std::fs::remove_dir(&backup).unwrap();
+        let result = app
+            .local_config("peer", &[change.clone(), stale], &workers)
+            .unwrap();
+        assert_eq!(result[0]["intent"], "running");
+        assert_eq!(
+            replica::state_get(&db, "config:peer:one", json!(0)).unwrap(),
+            2
+        );
+        let mut conflicting = change;
+        conflicting["local_revision"] = json!(3);
+        conflicting["base_revision"] = json!("stale");
+        assert_eq!(
+            app.local_config("peer", &[conflicting.clone(), conflicting], &result)
+                .unwrap()[0]["intent"],
+            "running"
+        );
+        assert_eq!(
+            replica::state_get(&db, "config:peer:one", json!(0)).unwrap(),
+            3
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM fleet_conflicts WHERE table_name='worker_configuration'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]
