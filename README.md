@@ -1205,6 +1205,8 @@ Worker and browser reads use WAL snapshots; migration writes run only when neede
 
 Issue lists and details show each issue's worker agent launch count. Hover or focus the muted web count for its explanation; CLI `issue list` and `issue view` include it, and JSON exposes `agent_launch_count`. Each actual process launch counts once, including retries and resumed sessions; reservations and failed process starts do not count. Launch history persists through reopening, deletion/restoration, project moves, and fleet sync. This count imposes no retry limit. Existing recorded launches are backfilled during upgrade.
 
+New GitHub watcher events also leave a discussion comment with the PR, commit, and reason for another agent pass: required check failures, finished CI, or new review/discussion feedback. Repeated observations stay quiet, including after a restart; earlier events are not backfilled.
+
 In the issue list, the arrow beside an assigned agent opens that session's conversation in Agents, including its owning device and latest recorded attempt for the issue. The assignee badge still filters the list. Assignments without recent recorded history show an availability explanation.
 
 Use **Move to draft** in an open or blocked issue's Readiness section, or
