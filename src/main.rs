@@ -163,6 +163,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Configure or diagnose this machine's Git identity and commit signing.
+    Environment(hey_boss::environment::Options),
     /// Git shortcuts and your connected main Mac's clipboard.
     #[command(subcommand)]
     Utils(utils_cli::Action),
@@ -430,6 +432,7 @@ fn run() -> std::io::Result<()> {
         Command::Utils(action) => return utils_cli::run(action, &git_args),
         Command::Admin(options) => return admin_cli::run(options),
         Command::Skill(options) => return admin_cli::skill(options),
+        Command::Environment(options) => return hey_boss::environment::run(options),
         _ => {}
     }
     hey_boss::database::use_service();
