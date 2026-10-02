@@ -1468,6 +1468,112 @@ fn retries_are_deduplicated_even_after_later_changes() {
 }
 
 #[test]
+fn project_identity_skips_git_outside_repositories_but_honors_explicit_git_dir() {
+    let root = std::env::temp_dir().join(format!(
+        "hb-no-repository-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let cwd = root.join("plain");
+    fs::create_dir_all(&cwd).unwrap();
+    let f = Fixture {
+        db: root.join("state/issues.db"),
+        root,
+        cwd,
+    };
+    let created = f.create();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(real_git.status.success());
+    let bin = f.root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let shim = bin.join("git");
+    fs::write(
+        &shim,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TEST_GIT_CALLS\"\nexec \"$TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let calls = f.root.join("git-calls");
+    let mut command = f.cmd("reader", &["list"]);
+    command
+        .env("PATH", path)
+        .env(
+            "TEST_REAL_GIT",
+            String::from_utf8_lossy(&real_git.stdout).trim(),
+        )
+        .env("TEST_GIT_CALLS", &calls)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE");
+    fs::write(&calls, "").unwrap();
+    let plain = success(command.output().unwrap());
+    assert_eq!(plain["project"], created["project"]);
+    assert!(
+        fs::read_to_string(&calls).unwrap().is_empty(),
+        "A non-repository read launched Git"
+    );
+
+    let repository = f.root.join("repository");
+    fs::create_dir(&repository).unwrap();
+    git(&repository, &["init", "-q"]);
+    git(
+        &repository,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/explicit-dir.git",
+        ],
+    );
+    for git_dir in [repository.join(".git"), PathBuf::from("../repository/.git")] {
+        fs::write(&calls, "").unwrap();
+        let explicit = success(
+            command
+                .env("GIT_DIR", git_dir)
+                .env("GIT_WORK_TREE", &repository)
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(explicit["project"]["id"], "github.com/example/explicit-dir");
+        assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 2);
+    }
+    // Git also recognizes a standalone metadata directory with core.worktree.
+    let metadata = f.root.join("metadata");
+    git(
+        &f.root,
+        &["init", "--bare", "-q", metadata.to_str().unwrap()],
+    );
+    git(&metadata, &["config", "core.bare", "false"]);
+    git(
+        &metadata,
+        &["config", "core.worktree", repository.to_str().unwrap()],
+    );
+    git(
+        &metadata,
+        &[
+            "config",
+            "remote.origin.url",
+            "git@github.com:example/metadata.git",
+        ],
+    );
+    let configured = success(
+        command
+            .current_dir(&metadata)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(configured["project"]["id"], "github.com/example/metadata");
+}
+
+#[test]
 fn project_identity_does_not_read_branch_state() {
     let f = Fixture::new();
     git(&f.cwd, &["init", "-q"]);
