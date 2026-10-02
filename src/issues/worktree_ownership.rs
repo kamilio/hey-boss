@@ -19,6 +19,8 @@ fn read(db: &Connection, home: Option<&Path>) -> Result<BTreeSet<PathBuf>> {
         .prepare("SELECT attempt_hold FROM issues WHERE attempt_hold IS NOT NULL LIMIT 10001")?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    // Unassigned fleet allocations schedule future work, not a checkout. Actual
+    // pre-claim reservations register an actor and worker_run in one transaction.
     // A known assignee's metadata is validated below and owns the checkout.
     // The issue author's older origin may be absent or belong to another machine.
     // Missing assignee records still require the reservation's checkout hint.
@@ -27,6 +29,7 @@ fn read(db: &Connection, home: Option<&Path>) -> Result<BTreeSet<PathBuf>> {
             "SELECT i.origin FROM fleet_allocations a JOIN issues i
              ON i.project_id=a.project_id AND i.number=a.issue_number
              WHERE a.node=?1 AND i.state IN ('open','ready') AND i.deleted_at IS NULL
+             AND i.assignee IS NOT NULL
              AND NOT EXISTS (SELECT 1 FROM agents owner WHERE owner.id=i.assignee)
              LIMIT 10001",
         )?
@@ -193,18 +196,48 @@ mod tests {
     #[test]
     fn queued_reservations_and_retained_attempts_survive_without_processes() {
         let db = fixture();
-        db.execute_batch("INSERT INTO issues(state,attempt_hold) VALUES('closed','{\"machine\":\"local\",\"worktree\":\"/retained/old\"}');
-            INSERT INTO issues(state,project_id,number,origin) VALUES('open','project',1,'{\"machine\":\"local\",\"cwd\":\"/queued/work\"}');
-            INSERT INTO fleet_allocations VALUES('project',1,'local');").unwrap();
+        claim(&db, "queued", "local", "open", "unknown");
+        db.execute_batch("UPDATE issues SET assignee=NULL;
+            INSERT INTO issues(state,attempt_hold) VALUES('closed','{\"machine\":\"local\",\"worktree\":\"/retained/old\"}');
+            INSERT INTO worker_runs VALUES('queued','local',NULL);").unwrap();
         assert_eq!(
             read(&db, None).unwrap(),
             BTreeSet::from([
                 PathBuf::from("/retained/old"),
-                PathBuf::from("/queued/work")
+                PathBuf::from("/declared/queued")
             ])
         );
-        db.execute("UPDATE issues SET origin=NULL WHERE number=1", [])
+        db.execute("DELETE FROM agents WHERE id='queued'", [])
             .unwrap();
+        assert!(read(&db, None).is_err());
+    }
+
+    #[test]
+    fn unstarted_machine_allocations_do_not_reserve_author_checkouts() {
+        let db = fixture();
+        for (number, origin) in [
+            (1, None),
+            (2, Some(r#"{"machine":"foreign","cwd":"/author/work"}"#)),
+            (3, Some(r#"{"machine":"local","cwd":"/author/local"}"#)),
+        ] {
+            db.execute(
+                "INSERT INTO issues(state,project_id,number,origin) VALUES('open','project',?1,?2)",
+                params![number, origin],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO fleet_allocations VALUES('project',?1,'local')",
+                [number],
+            )
+            .unwrap();
+        }
+        assert!(read(&db, None).unwrap().is_empty());
+        // A worker reservation remains authoritative even before issue claim.
+        db.execute(
+            "INSERT INTO worker_runs VALUES('missing-owner','local',NULL)",
+            [],
+        )
+        .unwrap();
         assert!(read(&db, None).is_err());
     }
 
