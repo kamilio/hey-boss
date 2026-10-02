@@ -1833,21 +1833,22 @@ impl Store {
                 // Omit only empty entries, without deleting data or changing the
                 // user's visibility choices. Indexed lookups run only for local
                 // excluded local identities; repository listings need no filesystem IO.
-                let mut saved_work = tx.prepare(
-                    "SELECT
-                    EXISTS(SELECT 1 FROM issues WHERE project_id=?1)
-                    OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1)
-                    OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1)
-                    OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1)
-                    OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=?1)",
-                )?;
+                let legacy_ids: Vec<_> = projects
+                    .iter()
+                    .filter_map(|p| p["id"].as_str())
+                    .filter(|id| {
+                        super::identity::is_temporary_project(id)
+                            || super::identity::is_git_metadata_project(id)
+                    })
+                    .collect();
+                let saved_work = project_names::saved_work(&tx, &legacy_ids)?;
                 let mut listed_projects = Vec::with_capacity(projects.len());
-                let warnings = project_names::warnings(&tx)?;
+                let warnings = project_names::warnings(&tx, None)?;
                 for mut p in projects {
                     let id = p["id"].as_str().unwrap();
                     if !(super::identity::is_temporary_project(id)
                         || super::identity::is_git_metadata_project(id))
-                        || saved_work.query_row([id], |r| r.get::<_, bool>(0))?
+                        || saved_work.contains(id)
                     {
                         p["name_collisions"] = json!(
                             warnings
@@ -1868,7 +1869,7 @@ impl Store {
                 let assignees = query
                     .query_map([&project.id], |r| r.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                json!({"ok":true,"project":project,"projects":listed_projects,"project_warnings":project_names::warnings(&tx)?,"labels":labels,"assignees":assignees})
+                json!({"ok":true,"project":project,"projects":listed_projects,"project_warnings":warnings,"labels":labels,"assignees":assignees})
             }
             Operation::HideProject | Operation::RestoreProject => {
                 let changed = if matches!(r.operation, Operation::HideProject) {
@@ -2313,15 +2314,9 @@ impl Store {
             )?;
         }
         if (write || register) && result.get("project_warnings").is_none() {
-            let warnings = project_names::warnings(&tx)?;
-            let warnings = warnings
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|w| w["project_id"] == project.id)
-                .collect::<Vec<_>>();
-            if !warnings.is_empty() {
-                result["project_warnings"] = json!(warnings);
+            let warnings = project_names::warnings(&tx, Some(&project.id))?;
+            if !warnings.as_array().unwrap().is_empty() {
+                result["project_warnings"] = warnings;
             }
         }
         if matches!(
@@ -3419,6 +3414,93 @@ mod contention_tests {
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_visibility_and_mutation_warnings_batch_legacy_identities() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-project-visibility-{}",
+                super::super::worker::random_id().unwrap()
+            ));
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            store.db.execute_batch(&format!("
+                INSERT INTO projects(id,name,next_number) VALUES('named:Visibility','Visibility',1);
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO projects(id,name,next_number) SELECT 'local:machine:/workspace/p'||id||'/.git','Project '||id,1 FROM n;
+                UPDATE fleet_meta SET syncing=1 WHERE id=1;
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO projects(id,name,next_number) SELECT 'local:machine:/workspace/legacy'||id||'/.git','Project '||id,1 FROM n;
+                UPDATE fleet_meta SET syncing=0 WHERE id=1;
+                INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at)
+                SELECT id,'a-saved','Saved work','Preserve this',0,0 FROM projects WHERE id LIKE 'local:%';
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO projects(id,name,next_number) SELECT 'local:machine:/tmp/empty'||id,'Empty '||id,1 FROM n;
+            ")).unwrap();
+            let listing: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Visibility","name":"Visibility"},"actor":null,"operation":{"action":"projects","include_hidden":true}})).unwrap();
+            let expected = store.execute(&listing).unwrap();
+            assert_eq!(expected["projects"].as_array().unwrap().len(), count + 1);
+            assert_eq!(
+                expected["project_warnings"].as_array().unwrap().len(),
+                count
+            );
+            store
+                .db
+                .execute_batch("DROP INDEX IF EXISTS project_collision_scope")
+                .unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.replace_connection_for_test(db);
+            assert_eq!(store.execute(&listing).unwrap(), expected);
+            store.replace_connection_for_test(Connection::connect(&path).unwrap());
+            let (listing_commands, listing_steps) = transport.join().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.replace_connection_for_test(db);
+            let create: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Visibility","name":"Visibility"},"actor":{"id":"human:boss","kind":"human","machine":"test","host":"test","cwd":"/tmp","source":"test"},"operation":{"action":"create","title":"New task","body":"","labels":[]}})).unwrap();
+            let created = store.execute(&create).unwrap();
+            assert_eq!(created["issue"]["title"], "New task");
+            assert!(created.get("project_warnings").is_none());
+            store.replace_connection_for_test(Connection::connect(&path).unwrap());
+            let (mutation_commands, mutation_steps) = transport.join().unwrap();
+            let mut scoped = create.clone();
+            scoped.project = Project {
+                id: "local:machine:/workspace/p1/.git".into(),
+                name: "Project 1".into(),
+            };
+            let warned = store.execute(&scoped).unwrap();
+            let expected_warnings: Vec<_> = expected["project_warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["project_id"] == scoped.project.id)
+                .cloned()
+                .collect();
+            assert_eq!(warned["project_warnings"], json!(expected_warnings));
+            assert_eq!(expected_warnings.len(), 1);
+            drop(store);
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "{count} legacy projects: listing {listing_commands} RPCs/{listing_steps} steps, mutation {mutation_commands} RPCs/{mutation_steps} steps"
+            );
+            measurements.push((count, listing_commands, mutation_commands, mutation_steps));
+        }
+        for (count, listing, mutation, mutation_steps) in measurements {
+            assert!(
+                listing < 50,
+                "{count} legacy projects used {listing} listing RPCs"
+            );
+            assert!(
+                mutation < 100,
+                "{count} unrelated legacy projects used {mutation} mutation RPCs"
+            );
+            assert!(
+                mutation_steps < 3_000,
+                "Mutation scanned unrelated project warnings: {mutation_steps}"
+            );
+        }
     }
 
     #[test]
