@@ -337,7 +337,7 @@ const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,cre
 
 // Keep list/registry reads off issue records whose bodies can span hundreds of
 // overflow pages. All persisted summary fields fit in this covering index.
-const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold)";
+const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target)";
 
 fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
@@ -1281,7 +1281,7 @@ impl Store {
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0)", [], |r| r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0)", [], |r| r.get::<_,bool>(0))? {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch("DROP INDEX IF EXISTS issue_list_summary")?;
             tx.execute_batch(SUMMARY_INDEX)?;
@@ -3581,6 +3581,119 @@ mod contention_tests {
             work[1].1 <= work[0].1 + 100,
             "Excluded commit history increased query work: {work:?}"
         );
+    }
+
+    #[test]
+    fn assignment_filtered_lists_do_not_read_body_pages_after_index_migration() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-filtered-list-index-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Filters','Filters',17);
+            INSERT INTO agents VALUES('creator','{}',0);
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<16)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,assignment_target)
+            SELECT 'named:Filters',id,'Task '||id,'','open','creator',0,0,1,'[]',17-id,
+                CASE id%4 WHEN 0 THEN 'machine:remote' WHEN 1 THEN 'github' WHEN 2 THEN 'boss' ELSE NULL END FROM n;
+            DROP INDEX issue_list_summary;").unwrap();
+        store
+            .db
+            .execute_batch(&SUMMARY_INDEX.replace(",assignment_target", ""))
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        let db = &store.db;
+        let filters = [
+            (None, false),
+            (Some("watcher:github"), false),
+            (Some("machine:remote"), false),
+            (None, true),
+        ];
+        let read_pages = || {
+            filters
+                .iter()
+                .map(|(owner, unassigned)| {
+                    db.execute_batch("PRAGMA cache_size=-64; PRAGMA shrink_memory")
+                        .unwrap();
+                    let mut pages = 0;
+                    let mut high = 0;
+                    unsafe {
+                        assert_eq!(
+                            rusqlite::ffi::sqlite3_db_status(
+                                db.handle(),
+                                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                                &mut pages,
+                                &mut high,
+                                1
+                            ),
+                            rusqlite::ffi::SQLITE_OK
+                        );
+                    }
+                    let found = db
+                        .prepare(&list_query(false, *owner, *unassigned))
+                        .unwrap()
+                        .query_map(
+                            params![
+                                "named:Filters",
+                                "open",
+                                owner,
+                                unassigned,
+                                Option::<String>::None,
+                                "[]",
+                                -1,
+                                0
+                            ],
+                            |r| {
+                                assert_eq!(r.get::<_, String>(2)?, "");
+                                r.get::<_, i64>(0)
+                            },
+                        )
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap();
+                    let expected: Vec<i64> = (1..=16)
+                        .rev()
+                        .filter(|number| match (*owner, *unassigned) {
+                            (Some("watcher:github"), _) => number % 4 == 1,
+                            (Some("machine:remote"), _) => number % 4 == 0,
+                            (_, true) => number % 4 == 3,
+                            _ => true,
+                        })
+                        .collect();
+                    assert_eq!(found, expected);
+                    unsafe {
+                        assert_eq!(
+                            rusqlite::ffi::sqlite3_db_status(
+                                db.handle(),
+                                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                                &mut pages,
+                                &mut high,
+                                0
+                            ),
+                            rusqlite::ffi::SQLITE_OK
+                        );
+                    }
+                    pages
+                })
+                .collect::<Vec<_>>()
+        };
+        let small = read_pages();
+        db.execute("UPDATE issues SET body=?1", ["x".repeat(1024 * 1024)])
+            .unwrap();
+        let large = read_pages();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        eprintln!(
+            "All/GitHub/machine/unassigned list cache misses for empty/1-MiB bodies: {small:?}/{large:?}"
+        );
+        for (small, large) in small.iter().zip(&large) {
+            assert!(
+                large <= &(small + 16),
+                "Assignment filter read body overflow pages: {small} -> {large}"
+            );
+        }
     }
 
     #[test]
