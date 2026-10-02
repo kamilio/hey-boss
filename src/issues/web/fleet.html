@@ -82,7 +82,8 @@
       <form id="worker-form">
         <h2 id="worker-editor-title">Edit worker</h2><p id="worker-editor-context"></p>
         <div class="worker-form-grid">
-          <label>Name<input id="worker-name" required maxlength="128"></label>
+          <label class="full">Name<input id="worker-name" required maxlength="128"></label>
+          <label>Agent<select id="worker-provider"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="pi">Pi</option></select><small>Applies to the next issue. Current agents keep their session.</small></label>
           <label>Agent slots<input id="worker-slots" type="number" min="1" max="1024" required></label>
           <label class="full">Pickup mode<select id="worker-intent"><option value="running">Running — pick up tasks</option><option value="pause">Paused — finish current tasks</option><option value="drain">Drain — finish tasks, then stop</option><option value="stop">Stopped — stop current tasks</option></select></label>
           <details id="worker-scope" class="worker-scope full"><summary>Projects &amp; checkout paths</summary><div class="worker-scope-fields">

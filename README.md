@@ -9,8 +9,11 @@ Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
 
 The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
 and Pi sessions through one API, including resume, activity, steering, interruption,
-explicit approvals/input, and provider-neutral goal continuation. Issue workers
-continue using Codex; worker/task agent selection is deferred.
+explicit approvals/input, and provider-neutral goal continuation. Choose Codex,
+Claude Code or Pi in **Worker settings → Agent**, or pass `--provider claude|pi`
+to `worker run` or `auto-workers add`. Existing workers default to Codex; changes
+apply to newly picked issues. Each provider must be installed and authenticated
+on its worker's machine. Chief and interactive planning continue using Codex.
 
 Run `hey-boss auto-workers run` to start or resume saved workers, then
 `hey-boss auto-workers watch` to open their dashboard.

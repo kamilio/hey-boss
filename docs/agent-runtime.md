@@ -3,8 +3,9 @@
 `hey_boss::agent_runtime` is the provider-neutral control API. `AgentSession`
 starts and owns one process group. `Provider::{Codex, Claude, Pi}` selects the
 protocol, independently of issue queues, worker settings, task labels and fleet
-routing. Existing issue workers still launch Codex. Their JSONL transport and
-executable discovery now use the shared implementation.
+routing. Issue workers select the provider in their saved settings, with Codex
+as the backward-compatible default. Claude and Pi use this runtime for issue
+claims, steering, goals, approvals/input, cancellation, and exact-session retry.
 
 | Operation | Codex | Claude Code | Pi |
 | --- | --- | --- | --- |
@@ -14,7 +15,7 @@ executable discovery now use the shared implementation.
 | Steering | expected-turn direct input | queued next user turn | before next model call |
 | Interrupt | turn/interrupt plus confirmed termination of thread shell sessions | SDK interrupt; stop when queued input exists | clear_queue then abort; stop for pending dialogs |
 | Tool approvals | command/file/network and turn-scoped permissions | can_use_tool; original input, no permanent grant | no native permission broker |
-| Human input | unsupported requests exposed as Input | unsupported controls exposed as Input | extension select/confirm/input/editor, including cancellation |
+| Human input | requests exposed as Input; worker Inbox handles supported choices | AskUserQuestion answers and cancellation | extension select/confirm/input/editor, including cancellation |
 | Native goal | get/set saved native goal | none | none |
 | Native output schema | per-turn or launch default | --json-schema at launch | none; use prompt format |
 
@@ -31,6 +32,21 @@ Consumers must use that event guard rather than current live state: inspection
 may already have buffered several completions before the UI delivers them.
 Consecutive queued text deltas merge into fragments up to 32 KiB, preserving
 UTF-8 and tool/message boundaries. Do not assume one event per native packet.
+
+Claude AskUserQuestion is an Input event, never a boolean tool approval.
+`respond_input` accepts a JSON object mapping each exact question to its explicit
+answer, or `None` to decline. Worker Inbox collects these answers; multi-select
+questions retain their advertised choices in the description and accept a written
+answer. Missing, extra, duplicate, secret, and repeated answers are rejected.
+
+Worker history stores bounded public message/tool records beside the issue store
+in `issues.db.agent-sessions/`; raw controls and private reasoning are excluded.
+Conversation labels and takeover commands preserve the provider. Pi takeover
+and retry use its exact saved JSONL path. Changing the worker provider starts a
+new conversation for its next issue instead of resuming another provider's ID.
+Goals use the existing saved continuation instructions with Claude/Pi; completion
+still requires the worker's verified issue/PR delivery checks. Pi has no native
+permission broker, and Claude steering is accepted for its next user turn.
 
 Persist the entire `SessionRef`: provider, ID, and Pi's exact session file. Pi
 resume verifies the file header and ID before spawning. All adapters reject a
@@ -104,6 +120,21 @@ See the [official Auto-review documentation](https://learn.chatgpt.com/docs/sand
 protocols, resume identity, guarded/queued steering, explicit approval decline,
 Pi settled retries and extension cancellation, malformed streams, and existing
 Codex worker lifecycle behavior. The fixture never calls a model.
+
+`cargo test --test worker_providers` covers provider selection, claims, steering,
+conversation history, goal continuation, stopping and exact-session retry.
+Its opt-in `real_provider_workers_complete_their_claimed_issue` test runs Claude
+and Pi against isolated Git checkouts and verifies their proof files, commits,
+and issue closure. It passed with Claude 2.1.286 and Pi 0.87.1. The real resume
+and live-control suites also passed again with those versions and Codex 0.159.3.
+`real_claude_and_pi_goals_verify_tool_effects` verifies their goal proof
+files separately; the older all-provider goal test assumes dedicated read/write
+tools that the tested Codex session did not expose.
+
+`tools/provider_workers_browser_checks.js` exercises saving/reopening provider
+settings through the real configuration API, conversation labels, tool details,
+and exact-run steering with synthetic conversations. Visual inspection covered
+320, 390, 768 and 1440 pixel widths in light and dark themes.
 
 The opt-in real CLI test makes two small text-only model requests per provider:
 
