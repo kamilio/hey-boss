@@ -259,6 +259,19 @@ mod tests {
             );
         }
         drop(writer);
-        assert!(RotatingWriter::new(root.path(), 100).is_ok());
+        // Concurrent lifecycle tests can briefly inherit the descriptor between
+        // fork and exec. CLOEXEC releases it; require eventual ownership rather
+        // than depending on that unrelated child's scheduling instant.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if RotatingWriter::new(root.path(), 100).is_ok() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "log lock was not released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 }

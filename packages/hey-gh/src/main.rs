@@ -7,6 +7,7 @@ mod comment_cli;
 mod log_summary;
 mod logging;
 mod read_deadline;
+mod service;
 mod skill_install;
 
 #[derive(Parser)]
@@ -31,6 +32,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage the durable, per-user shared daemon on localhost:8787.
+    Service {
+        #[command(subcommand)]
+        action: service::Action,
+    },
     /// Read recent rotated daemon diagnostics without connecting to the daemon.
     Logs {
         #[arg(long, default_value_t = 100)]
@@ -258,6 +264,15 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(Command::Service { action }) = &args.command {
+        if args.server != "http://127.0.0.1:8787" || args.timeout.is_some() {
+            return Err(
+                "service commands manage only the default local endpoint; omit --server/--timeout"
+                    .into(),
+            );
+        }
+        return service::run(action).await;
+    }
     let deadline = args
         .timeout
         .map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
@@ -375,9 +390,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let lock = options.open(lock_path)?;
         lock.try_lock()
             .map_err(|_| "another hey-gh daemon already owns this cache database")?;
+        let listener = tokio::net::TcpListener::bind(listen).await?;
         let client = Client::from_gh(config).await?;
         let api = hey_gh::api::Api::new(client).await?;
-        let listener = tokio::net::TcpListener::bind(listen).await?;
         let (api_token, _registration) = hey_gh::local_auth::register(listener.local_addr()?)?;
         tracing::info!(address=%listener.local_addr()?,"daemon listening");
         eprintln!(
@@ -520,6 +535,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Command::Snapshot => serde_json::to_value(api.bootstrap().await?)?,
         Command::Status => serde_json::to_value(api.status().await?)?,
         Command::Serve { .. }
+        | Command::Service { .. }
         | Command::Install { .. }
         | Command::Logs { .. }
         | Command::Issue { .. } => unreachable!(),
