@@ -431,7 +431,7 @@ if (typeof document !== 'undefined') (() => {
   function machineProjects(machine){
     const panel=element('div','machine-projects');
     for(const [id,project] of Object.entries(machine.projects||{})){
-      const row=element('div','machine-project');const copy=element('div');copy.append(element('strong','',projectLabel(id)),element('code','',project.path),element('small','',project.git));
+      const row=element('div','machine-project');const copy=element('div');copy.append(element('strong','',projectLabel(id)),element('code','',project.resolved_path||project.path),element('small','',project.git));
       const add=element('button','button small','Assign');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,project:id});add.setAttribute('aria-label','Assign '+projectLabel(id)+' to a worker');row.append(copy,add);panel.append(row);
       const worker=element('button','button small','Add worker');worker.type='button';Object.assign(worker.dataset,{machineAction:'add',host:machine.host,project:id});worker.setAttribute('aria-label','Add worker for '+projectLabel(id));row.append(worker);
     }
@@ -908,21 +908,21 @@ if (typeof document !== 'undefined') (() => {
       $('machine-editor-title').textContent=({add:'Add a worker',remove:'Remove a worker',project:'Add a project','edit-project':'Edit checkout'})[action];
       $('machine-editor-description').textContent=({add:'Choose its settings. The new worker will start picking up tasks.',remove:'This worker will stop picking up tasks and finish its current work. You can kill it immediately while it is finishing.',project:'Set up a checkout on this machine and choose which worker can use it.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
       for(const field of ['template','slots','worker','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['template','slots'],remove:['worker'],project:['worker','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
-      $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=['project','edit-project'].includes(action);
+      $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=false;
       const options=(select,empty)=>{select.replaceChildren();if(empty){const option=element('option','',empty);option.value='';select.append(option);}for(const worker of workers){const option=element('option','',workerLabel(worker)+' · '+worker.id.slice(0,12));option.value=worker.id;select.append(option);}};
       options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Machine only · assign later':null);
       if(template){$('machine-template').value=template.id;$('machine-slots-field').hidden=true;$('machine-editor-context').textContent=scopeLabel({projects:template.config?.projects||[]})+' · '+name;}
       if(action==='add'&&projectId){$('machine-template-field').hidden=true;$('machine-template').value='';$('machine-editor-context').textContent=projectLabel(projectId)+' · '+name;}
       if(workerId)$('machine-worker').value=workerId;
       $('machine-slots').value='1';$('machine-workspace').value=machine.workspace||'~/Workspace';$('machine-git').value='';$('machine-path').value='';
-      if(projectId&&machine.projects?.[projectId]){const project=machine.projects[projectId];$('machine-git').value=project.git;$('machine-path').value=project.path;machinePathEdited=true;}
+      if(projectId&&machine.projects?.[projectId]){const project=machine.projects[projectId];$('machine-git').value=project.git;$('machine-path').value=project.reuse_existing?'':project.path;machinePathEdited=!project.reuse_existing;}
       $('machine-editor-status').textContent=last?.machines?.find(m=>m.host===host)?.state==='disconnected'?'This machine is offline. Changes apply when it reconnects.':'';
       $('machine-editor-save').textContent=({add:'Add worker',remove:'Finish & remove',project:'Save project','edit-project':'Save & retry'})[action];
-      $('machine-editor').showModal();
+      suggestCheckout();$('machine-editor').showModal();
     }catch(error){fail(error);}finally{machineBusy=false;machineButtons();}
   }
   $('machine-template').onchange=()=>{$('machine-slots-field').hidden=!!$('machine-template').value;};
-  function suggestCheckout(){if(machinePathEdited)return;const git=$('machine-git').value.trim().replace(/\/+$|\.git$/g,'');const name=git.split(/[/:]/).pop();$('machine-path').value=name?$('machine-workspace').value.replace(/\/+$/,'')+'/'+name:'';}
+  function suggestCheckout(){if(machinePathEdited)return;const git=$('machine-git').value.trim().replace(/\/+$|\.git$/g,'');const name=git.split(/[/:]/).pop();$('machine-path').placeholder=name?'Automatic · '+$('machine-workspace').value.replace(/\/+$/,'')+'/'+name:'Automatic';}
   $('machine-git').oninput=suggestCheckout;$('machine-workspace').oninput=suggestCheckout;$('machine-path').oninput=()=>{machinePathEdited=!!$('machine-path').value;};
   $('machine-editor-cancel').onclick=()=>{if(!machineBusy){$('machine-editor').close();machineEdit=null;}};
   $('machine-editor').addEventListener('cancel',event=>{if(machineBusy)event.preventDefault();else machineEdit=null;});
