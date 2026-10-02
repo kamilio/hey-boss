@@ -1120,26 +1120,38 @@ fn allocation_payload(db: &Connection, node: &str, mut payload: Value) -> Result
     Ok(payload)
 }
 fn journal_cutoff(db: &Connection) -> Result<Option<i64>> {
-    // The expression index stores UTF-8 byte lengths. Scan only its small
-    // entries, never old issue bodies, to find the newest history suffix that
-    // fits both budgets.
-    let mut statement = db.prepare("SELECT seq,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0) FROM fleet_outbox INDEXED BY fleet_outbox_retention ORDER BY seq DESC LIMIT 10001")?;
-    let mut rows = statement.query([])?;
-    let mut bytes = 0i64;
-    let mut count = 0;
-    while let Some(row) = rows.next()? {
-        let seq: i64 = row.get(0)?;
-        bytes += row.get::<_, i64>(1)?;
-        count += 1;
-        if count > 10_000 || bytes > 64 * 1024 * 1024 {
-            return Ok(db.query_row(
-                "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=?1 ORDER BY seq LIMIT 1000)",
-                [seq],
-                |r| r.get(0),
-            )?);
-        }
-    }
-    Ok(None)
+    // Aggregate the expression index on the owner instead of transferring up
+    // to 10,001 size records on every maintenance pass. No issue bodies load.
+    let (count, bytes, oldest): (i64, i64, Option<i64>) = db.query_row(
+        "SELECT count(*),coalesce(sum(bytes),0),min(seq) FROM (
+            SELECT seq,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0) AS bytes
+            FROM fleet_outbox INDEXED BY fleet_outbox_retention ORDER BY seq DESC LIMIT 10001
+        )", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    )?;
+    let cutoff = if bytes > 64 * 1024 * 1024 {
+        // Oversized history needs the exact newest prefix that fits the byte
+        // budget; the common row-budget case already has its boundary above.
+        db.query_row(
+            "SELECT max(seq) FROM (
+                SELECT seq,
+                    sum(coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0)) OVER (ORDER BY seq DESC ROWS UNBOUNDED PRECEDING) AS bytes,
+                    row_number() OVER (ORDER BY seq DESC) AS count
+                FROM fleet_outbox INDEXED BY fleet_outbox_retention ORDER BY seq DESC LIMIT 10001
+            ) WHERE bytes>67108864 OR count>10000", [], |r| r.get(0),
+        )?
+    } else if count > 10_000 {
+        oldest
+    } else {
+        None
+    };
+    let Some(seq) = cutoff else {
+        return Ok(None);
+    };
+    Ok(db.query_row(
+        "SELECT max(seq) FROM (SELECT seq FROM fleet_outbox WHERE seq<=?1 ORDER BY seq LIMIT 1000)",
+        [seq],
+        |r| r.get(0),
+    )?)
 }
 
 pub(super) fn prune_journal(db: &Connection) -> Result<usize> {
@@ -2434,6 +2446,38 @@ mod tests {
     fn journal_count(f: &Fixture) -> i64 {
         f.db.query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn healthy_journal_probes_aggregate_history_on_the_owner() {
+        let mut measurements = Vec::new();
+        for count in [100, 10_000] {
+            let f = Fixture::new();
+            f.capture();
+            grow_journal(&f, count);
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&f.path);
+            let mut elapsed = Vec::new();
+            for _ in 0..16 {
+                let start = std::time::Instant::now();
+                assert_eq!(prune_journal(&db).unwrap(), 0);
+                elapsed.push(start.elapsed());
+            }
+            drop(db);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            elapsed.sort();
+            eprintln!(
+                "16 healthy journal probes, {count} entries: {commands} RPCs, {steps} query VM steps, median {:?}",
+                elapsed[8]
+            );
+            assert_eq!(journal_count(&f), count);
+            measurements.push(commands);
+        }
+        assert!(
+            measurements.iter().all(|commands| *commands <= 32),
+            "Healthy journal probes fetched history rows instead of a scalar: {measurements:?}"
+        );
     }
 
     #[test]
