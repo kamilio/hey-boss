@@ -31,6 +31,40 @@ fn until(session: &mut AgentSession, predicate: impl Fn(&Event) -> bool) -> Even
 }
 
 #[test]
+fn claude_questions_require_explicit_matching_answers_not_tool_approval() {
+    let mut session = launch(Provider::Claude, None);
+    for answer in [Some("{\"Choose a color\":\"Green\"}"), None] {
+        session.prompt("question fixture", None).unwrap();
+        let Event::Input { id, .. } = until(&mut session, |e| matches!(e, Event::Input { .. }))
+        else {
+            panic!()
+        };
+        assert!(session.decide(&id, true).is_err());
+        assert!(session.respond_input(&id, Some("{}")).is_err());
+        assert!(
+            session
+                .respond_input(&id, Some("{\"wrong\":\"answer\"}"))
+                .is_err()
+        );
+        session.respond_input(&id, answer).unwrap();
+        assert!(session.respond_input(&id, answer).is_err());
+        let Event::TurnCompleted { output, .. } =
+            until(&mut session, |e| matches!(e, Event::TurnCompleted { .. }))
+        else {
+            panic!()
+        };
+        assert_eq!(
+            output,
+            if answer.is_some() {
+                "Green"
+            } else {
+                "cancelled"
+            }
+        );
+    }
+}
+
+#[test]
 fn providers_complete_resume_and_control_owned_sessions() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let mut session = launch(provider, None);

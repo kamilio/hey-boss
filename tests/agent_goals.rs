@@ -181,7 +181,17 @@ fn buffered_claude_completions_preserve_queued_goal_scope() {
 #[test]
 #[ignore = "real authenticated Codex, Claude and Pi CLIs; models and scratch-only tools"]
 fn real_managed_goals_verify_tool_effects() {
-    for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
+    real_goal_tools(&[Provider::Codex, Provider::Claude, Provider::Pi]);
+}
+
+#[test]
+#[ignore = "real authenticated Claude and Pi CLIs; scratch-only tools"]
+fn real_claude_and_pi_goals_verify_tool_effects() {
+    real_goal_tools(&[Provider::Claude, Provider::Pi]);
+}
+
+fn real_goal_tools(providers: &[Provider]) {
+    for &provider in providers {
         let root = std::env::temp_dir().join(format!(
             "hey-boss-live-goal-{}-{}-{}",
             provider.name(),
@@ -201,7 +211,7 @@ fn real_managed_goals_verify_tool_effects() {
             output_schema: None,
         })
         .unwrap();
-        let mut goal = ManagedGoal::new("Create proof.txt in the current directory containing exactly VERIFIED_GOAL. Use the file write tool, then read the file back with the file read tool and verify the exact contents. Do not change any other files. Return only the required JSON status/summary object, without Markdown or code fences. Report completed only after reading and verifying the file.").unwrap();
+        let mut goal = ManagedGoal::new(include_str!("prompts/goal-proof.md").trim()).unwrap();
         goal.start(&mut agent).unwrap();
         let deadline = Instant::now() + Duration::from_secs(180);
         let mut tools = 0;
@@ -254,5 +264,6 @@ fn real_managed_goals_verify_tool_effects() {
             goal.turns_completed(),
             root.display()
         );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -121,7 +121,10 @@ pub(super) fn decision(provider: Provider, value: &Value, allow: bool) -> io::Re
                 json!({"id":value["id"],"result":{"permissions":if allow {requested.clone()} else {json!({})},"scope":"turn"}}),
             )
         }
-        Provider::Claude if value["request"]["subtype"] == "can_use_tool" => {
+        Provider::Claude
+            if value["request"]["subtype"] == "can_use_tool"
+                && value["request"]["tool_name"] != "AskUserQuestion" =>
+        {
             let answer = if allow {
                 json!({"behavior":"allow","updatedInput":value["request"]["input"]})
             } else {
@@ -141,6 +144,46 @@ pub(super) fn input_response(
     value: &Value,
     answer: Option<&str>,
 ) -> io::Result<Value> {
+    if provider == Provider::Claude
+        && value["request"]["subtype"] == "can_use_tool"
+        && value["request"]["tool_name"] == "AskUserQuestion"
+    {
+        let response = if let Some(answer) = answer {
+            if answer.len() > 32000 {
+                return Err(io::Error::other("Input answers exceed 32000 bytes"));
+            }
+            let answers: BTreeMap<String, String> = serde_json::from_str(answer)?;
+            let questions = value["request"]["input"]["questions"]
+                .as_array()
+                .filter(|q| !q.is_empty() && q.len() <= 20)
+                .ok_or_else(|| io::Error::other("Invalid Claude questions"))?;
+            let mut keys = BTreeSet::new();
+            for question in questions {
+                let key = required(question, "question")?;
+                if !keys.insert(key.clone())
+                    || question["isSecret"] == true
+                    || answers.get(&key).is_none_or(|v| v.trim().is_empty())
+                {
+                    return Err(io::Error::other(
+                        "Missing, duplicate or secret Claude input question",
+                    ));
+                }
+            }
+            if keys.len() != answers.len() {
+                return Err(io::Error::other(
+                    "Answers must match the owned questions exactly",
+                ));
+            }
+            let mut input = value["request"]["input"].clone();
+            input["answers"] = json!(answers);
+            json!({"behavior":"allow","updatedInput":input})
+        } else {
+            json!({"behavior":"deny","message":"Declined by the controlling user"})
+        };
+        return Ok(
+            json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":response}}),
+        );
+    }
     if provider != Provider::Pi {
         return Err(io::Error::other(
             "This input request needs a provider-specific response",
@@ -471,12 +514,9 @@ impl AgentSession {
                     .as_str()
                     .unwrap_or("")
                     .to_owned();
-                self.register(
-                    required(&value, "request_id")?,
-                    value,
-                    kind == "can_use_tool",
-                    kind,
-                )?;
+                let approval =
+                    kind == "can_use_tool" && value["request"]["tool_name"] != "AskUserQuestion";
+                self.register(required(&value, "request_id")?, value, approval, kind)?;
             }
             Some("control_cancel_request") => {
                 let id = required(&value, "request_id")?;

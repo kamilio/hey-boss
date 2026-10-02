@@ -1,0 +1,1 @@
+Return a JSON object with status (completed or blocked) and a nonempty summary only after verifying completion or identifying an actual blocker. Never report completed merely because this turn is ending.

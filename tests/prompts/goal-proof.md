@@ -1,0 +1,1 @@
+Create proof.txt in the current directory containing exactly VERIFIED_GOAL. Use the file write tool, then read the file back with the file read tool and verify the exact contents. Do not change any other files. Return only the required JSON status/summary object, without Markdown or code fences. Report completed only after reading and verifying the file.

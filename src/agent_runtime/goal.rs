@@ -97,8 +97,9 @@ impl ManagedGoal {
         agent.inspect()?;
         self.check_session(agent)?;
         let prompt = format!(
-            "{}\n\nContinue pursuing this goal until all requested work is implemented and verified. Preserve its full scope. If a turn ends before completion, continue working in this conversation. Return a JSON object with status (completed or blocked) and a nonempty summary only after verifying completion or identifying an actual blocker. Never report completed merely because this turn is ending.",
-            self.objective
+            "{}\n\n{}",
+            self.objective,
+            include_str!("goal-start.md").trim()
         );
         let turn = agent.prompt(&prompt, None)?;
         self.status = GoalStatus::Active;
@@ -196,10 +197,9 @@ impl ManagedGoal {
                     self.summary = report["summary"].as_str().map(str::to_owned);
                 } else {
                     self.check_session(agent)?;
-                    let prompt = format!(
-                        "Continue pursuing the same saved goal, preserving its full scope:\n\n{}\n\nImplement and verify any remaining requirements. Return the required JSON status and summary only after verification or identifying an actual blocker.",
-                        self.objective
-                    );
+                    let prompt = include_str!("goal-continue.md")
+                        .trim()
+                        .replace("{{objective}}", &self.objective);
                     match agent.prompt(&prompt, None) {
                         Ok(turn) => self.turn = Some(turn),
                         Err(error) => {
