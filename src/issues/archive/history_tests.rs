@@ -57,6 +57,80 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn maintenance_archives_eligible_issues_and_recovers_interrupted_restores() {
+    let mut f = Fixture::new();
+    let _owner = crate::database::Owner::start(&f.root.join("issues.db"))
+        .unwrap()
+        .unwrap();
+    f.db = crate::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    let before = f.read(json!({"action":"view","number":1}));
+    let mut maintenance = Maintenance::default();
+    assert_eq!(maintenance.run(&f.db, GRACE_MS + 99).unwrap(), 0);
+    assert!(maintenance.run(&f.db, GRACE_MS + 100).unwrap() > 0);
+    for _ in 0..10 {
+        maintenance.run(&f.db, GRACE_MS + 100).unwrap();
+    }
+    assert_eq!(f.read(json!({"action":"view","number":1})), before);
+    assert_eq!(
+        f.db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    f.db.execute("UPDATE issues SET archive_restoring=1 WHERE number=1", [])
+        .unwrap();
+    assert!(maintenance.run(&f.db, GRACE_MS + 101).unwrap() > 0);
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NULL AND archive_restoring=0 FROM issues WHERE number=1",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert_eq!(f.read(json!({"action":"view","number":1})), before);
+    assert_eq!(maintenance.run(&f.db, GRACE_MS + 102).unwrap(), 0);
+}
+
+#[test]
+fn maintenance_preserves_grace_for_late_history_and_skips_failed_items() {
+    let mut f = Fixture::new();
+    f.db.execute_batch("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('named:Archive',1,'human:boss','late_event',101,'{}');
+        INSERT INTO requests(project_id,actor,request_id,payload,response,created_at) VALUES('named:Archive','human:boss','bad','{}','invalid json',1),('named:Archive','human:boss','good','{}','{}',2);").unwrap();
+    let _owner = crate::database::Owner::start(&f.root.join("issues.db"))
+        .unwrap()
+        .unwrap();
+    f.db = crate::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    let mut maintenance = Maintenance::default();
+    maintenance.run(&f.db, GRACE_MS + 100).unwrap();
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NULL FROM issues WHERE number=1",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    maintenance.run(&f.db, GRACE_MS + 101).unwrap();
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NOT NULL FROM requests WHERE request_id='good'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert!(f.db.query_row("SELECT archive_key IS NULL AND response='invalid json' FROM requests WHERE request_id='bad'", [], |r|r.get::<_,bool>(0)).unwrap());
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NOT NULL FROM issues WHERE number=1",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn issue_archival_preserves_existing_read_responses_and_dependency_readiness() {
     let mut f = Fixture::new();
     let operations = vec![

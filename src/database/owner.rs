@@ -286,16 +286,23 @@ fn serve(
     let (archive_cancel, archive_wait) = std::sync::mpsc::channel::<()>();
     let archive_path = path.clone();
     let archive_thread = std::thread::spawn(move || {
+        let mut maintenance = crate::issues::archive::Maintenance::default();
+        let mut delay = Duration::from_secs(30);
         while matches!(
-            archive_wait.recv_timeout(Duration::from_secs(30)),
+            archive_wait.recv_timeout(delay),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
             let result = Connection::connect(&archive_path)
                 .map_err(crate::issues::Error::from)
-                .and_then(|db| crate::issues::archive::maintain(&db, crate::issues::worker::now()));
-            if let Err(error) = result {
-                eprintln!("Archive maintenance: {error}");
-            }
+                .and_then(|db| maintenance.run(&db, crate::issues::worker::now()));
+            delay = match result {
+                Ok(0) => Duration::from_secs(30),
+                Ok(_) => Duration::from_millis(250),
+                Err(error) => {
+                    eprintln!("Archive maintenance: {error}");
+                    Duration::from_secs(30)
+                }
+            };
         }
     });
     let mut sessions = Vec::new();
