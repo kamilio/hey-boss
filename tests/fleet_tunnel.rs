@@ -635,6 +635,7 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
         claimed["issue"]
     );
     check_pr_attachments(&f);
+    check_lifecycle_handoffs(&f);
     let supervisor = f.services.last_mut().unwrap();
     unsafe {
         libc::kill(supervisor.id() as i32, libc::SIGTERM);
@@ -668,6 +669,21 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
     let replica_snapshot =
         "SELECT number,state,assignee,blockers,version FROM issues ORDER BY number";
     let before = f.sql("peer", replica_snapshot);
+    for action in ["ready", "close"] {
+        let result = f.issue(
+            "peer",
+            &[
+                action,
+                "4",
+                "--supervisor",
+                "--request-id",
+                "lifecycle-offline",
+            ],
+            1,
+        );
+        assert_eq!(result["error"]["code"], "fleet_unavailable");
+        assert_eq!(f.sql("peer", replica_snapshot), before);
+    }
     assert_eq!(
         f.issue(
             "peer",
@@ -748,6 +764,132 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
             "SELECT count(*) FROM requests WHERE request_id='offline'"
         ),
         json!([[0]])
+    );
+}
+
+fn check_lifecycle_handoffs(f: &Fleet) {
+    assert_eq!(
+        f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_close"],
+        true
+    );
+    for allocated in [false, true] {
+        let created = f.issue(
+            "main",
+            &["create", "--title", "Completed lifecycle handoff"],
+            0,
+        );
+        let number = created["issue"]["number"].to_string();
+        f.issue(
+            "main",
+            &[
+                "pr",
+                "add",
+                &number,
+                "https://github.com/example/repo/pull/123",
+            ],
+            0,
+        );
+        if allocated {
+            // Match the authenticated companion's physical UUID, not the
+            // synthetic supervisor origin used by this in-process fleet.
+            let node = f.sql("peer", "SELECT node FROM fleet_meta WHERE id=1")[0][0]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            f.sql(
+                "main",
+                &format!(
+                    "INSERT INTO fleet_allocations VALUES('named:Tunnel QA',{number},'{node}')"
+                ),
+            );
+        }
+        let key = format!("handoff-{number}");
+        let mut ready_args = vec!["ready", &number, "--request-id", &key];
+        if !allocated {
+            ready_args.push("--supervisor");
+        }
+        let ready = f.issue("peer", &ready_args, 0);
+        assert_eq!(ready["store"]["host"], "supervisor");
+        assert_eq!(ready["issue"]["state"], "ready");
+        assert_eq!(ready["issue"]["assignee"], "human:boss");
+        assert_eq!(
+            ready["issue"],
+            f.issue("main", &["view", &number], 0)["issue"]
+        );
+        assert_eq!(ready, f.issue("peer", &ready_args, 0));
+        let key = format!("close-{number}");
+        let close_args = [
+            "close",
+            &number,
+            "--supervisor",
+            "--comment",
+            "Verified complete",
+            "--request-id",
+            &key,
+        ];
+        // Concurrent callers use the same receipt despite taking snapshots on
+        // either side of the first commit (an uncertain acknowledgement retry).
+        let results = thread::scope(|scope| {
+            let first = scope.spawn(|| f.issue("peer", &close_args, 0));
+            let second = scope.spawn(|| f.issue("peer", &close_args, 0));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert_eq!(results.0, results.1);
+        let closed = results.0;
+        assert_eq!(closed["issue"]["state"], "closed");
+        assert_eq!(closed["issue"]["closed_by"], "codex:tunnel-test");
+        assert_eq!(
+            closed["issue"],
+            f.issue("main", &["view", &number], 0)["issue"]
+        );
+        assert_eq!(closed, f.issue("peer", &close_args, 0));
+        assert_eq!(
+            f.issue("peer", &["request", &key, "--supervisor"], 0)["request"]["response"]["issue"],
+            closed["issue"]
+        );
+        assert_eq!(
+            f.issue(
+                "peer",
+                &[
+                    "close",
+                    &number,
+                    "--supervisor",
+                    "--comment",
+                    "Different",
+                    "--request-id",
+                    &key
+                ],
+                4
+            )["error"]["code"],
+            "conflict"
+        );
+        assert_eq!(f.sql("main", &format!("SELECT count(*) FROM comments WHERE project_id='named:Tunnel QA' AND issue_number={number} AND body='Verified complete'")), json!([[1]]));
+    }
+    // A true active reservation cannot be taken over, including with --force.
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "close",
+                "3",
+                "--supervisor",
+                "--request-id",
+                "close-reserved"
+            ],
+            4
+        )["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(
+        f.issue("peer", &["close", "3", "--supervisor", "--force"], 2)["error"]["code"],
+        "invalid_input"
+    );
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT finished_at FROM worker_runs WHERE id='reserved'"
+        ),
+        json!([[null]])
     );
 }
 

@@ -133,12 +133,12 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
     json!({"ok":true,"route":route,"capabilities":capabilities,"supervisor_build":build,
-        "usage":"Title/body/label edits, blocked-by and reopen use --supervisor. PR add/list use --supervisor with issue_pr_attachments support; add preserves existing purposes and ownership. PR classify/remove and commit URLs are not supported on that route. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
+        "usage":"Title/body/label edits, blocked-by, Ready, close and reopen use --supervisor. Close requires issue_close support and guards captured by the CLI; conflicting owners or live reservations are refused, and --force is unsupported. PR add/list use --supervisor with issue_pr_attachments support; add preserves existing purposes and ownership. PR classify/remove and commit URLs are not supported on that route. Dependency edits require issue_dependencies support, unassigned, unreserved work and no --force; omit blockers to clear links. Reopen requires issue_reopen support and unassigned, unreserved work. Ordinary issue edit NUMBER --draft uses the supervisor tunnel on companions. No SSH hostname or work claim is needed.",
         "recovery":"If a capability is false, run hey-boss upgrade on the supervisor to update the fleet, then reconnect and inspect hey-boss fleet capabilities again."})
 }
 
@@ -228,6 +228,7 @@ impl Relay {
                             "issue_request_status": message["capabilities"]["issue_request_status"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
+                            "issue_close": message["capabilities"]["issue_close"] == true,
                             "issue_dependencies": message["capabilities"]["issue_dependencies"] == true,
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
@@ -267,6 +268,7 @@ impl Relay {
                                 )
                                 .then_some("issue_reopen"),
                             )
+                            .chain(matches!(metadata.operation, crate::issues::Operation::Close { .. }).then_some("issue_close"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::SetBlockers { .. }).then_some("issue_dependencies"))
                             .chain(
                                 matches!(
@@ -537,6 +539,14 @@ mod tests {
         );
         assert_eq!(error.details.unwrap()["sent"], false);
         relay.configure(&json!({"build":"old-ready-build","capabilities":{"authority_rpc":true,"issue_metadata":true,"issue_ready":true}}));
+        let close = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"close-old","operation":{"action":"close","number":1,"force":false,"comment":null,"guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}}});
+        let error = call(&ctx.state, &ctx.path, close).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_close"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
         let draft_ready = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"draft-ready-old","operation":{"action":"ready","number":1,"force":false,"keep_draft":true,"guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}}});
         let error = call(&ctx.state, &ctx.path, draft_ready).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");

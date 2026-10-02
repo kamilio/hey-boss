@@ -83,6 +83,56 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn supervisor_close_completes_unclaimed_ready_without_taking_work() {
+    let mut f = Fixture::new();
+    let handoff = f.handoff();
+    f.store.execute(&handoff).unwrap();
+    let mut close = Fixture::request(json!({"action":"close","number":1,
+        "comment":"Verified completed handoff", "force":false,
+        "guard":f.view()["ready_guard"]}));
+    close.request_id = Some("close-once".into());
+    let closed = f.store.execute_supervisor(&close).unwrap();
+    assert_eq!(closed["issue"]["state"], "closed");
+    assert_eq!(closed["issue"]["assignee"], Value::Null);
+    assert_eq!(closed["issue"]["closed_by"], "codex:owner");
+    assert_eq!(f.store.execute_supervisor(&close).unwrap(), closed);
+    assert_eq!(f.view()["issue"], closed["issue"]);
+}
+
+#[test]
+fn supervisor_close_rejects_changed_snapshots_and_conflicting_work() {
+    for change in [
+        "UPDATE issues SET version=version+1 WHERE number=1",
+        "INSERT INTO agents SELECT 'human:boss',metadata,last_seen FROM agents WHERE id='codex:owner'; UPDATE issues SET assignee='human:boss' WHERE number=1",
+        "INSERT INTO fleet_allocations VALUES('named:Ready QA',1,'foreign')",
+        "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,claimed_at,job,machine,owner_pid,owner_start) VALUES('live','named:Ready QA',1,'codex:foreign','running',0,0,1,'{}','local',1,'test')",
+    ] {
+        for fresh in [false, true] {
+            let mut f = Fixture::new();
+            let guard = f.view()["ready_guard"].clone();
+            f.sql(change);
+            let mut close = Fixture::request(json!({"action":"close","number":1,
+                "comment":null,"force":false,
+                "guard":if fresh {f.view()["ready_guard"].clone()} else {guard}}));
+            close.request_id = Some("guarded-close".into());
+            let before = f.view();
+            if fresh && change.contains("version=version+1") {
+                assert_eq!(
+                    f.store.execute_supervisor(&close).unwrap()["issue"]["state"],
+                    "closed"
+                );
+            } else {
+                assert_eq!(
+                    f.store.execute_supervisor(&close).unwrap_err().code,
+                    "conflict"
+                );
+                assert_eq!(f.view(), before);
+            }
+        }
+    }
+}
+
+#[test]
 fn ready_guard_handoff_is_atomic_idempotent_and_unblocks_dependents() {
     let mut f = Fixture::new();
     f.run(json!({"action":"create","title":"Dependent","body":"","labels":[]}));

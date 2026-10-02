@@ -626,6 +626,22 @@ fn validate(r: &Request) -> Result<()> {
             identifier(&guard.expected_reservation, "expected reservation", 128)?;
         }
     }
+    if let Operation::Close {
+        guard: Some(guard),
+        force,
+        ..
+    } = &r.operation
+    {
+        if *force || guard.if_version < 1 || r.request_id.is_none() {
+            return Err(Error::invalid(
+                "Guarded close requires a positive version and --request-id, and does not support --force",
+            ));
+        }
+        if let Some(owner) = &guard.expected_assignee {
+            identifier(owner, "expected assignee", 512)?;
+        }
+        identifier(&guard.expected_reservation, "expected reservation", 128)?;
+    }
     if r.operation.number().is_some_and(|n| n <= 0) {
         return Err(Error::invalid("Issue number must be positive"));
     }
@@ -1440,7 +1456,12 @@ impl Store {
                 return Ok(result);
             }
         }
-        if let Operation::Ready { guard, .. } = &r.operation {
+        if let Operation::Ready { guard, .. }
+        | Operation::Close {
+            guard: guard @ Some(_),
+            ..
+        } = &r.operation
+        {
             validate(r)?;
             let replica: bool = self.db.query_row(
                 "SELECT role='agent' FROM fleet_meta WHERE id=1",
@@ -1453,7 +1474,10 @@ impl Store {
                         "Ready on a companion requires a current supervisor view and version, assignee and reservation guards; no local change was saved",
                     ));
                 }
-                return self.execute_supervisor(r);
+                let mut result = self.execute_supervisor(r)?;
+                result["store"] = json!({"host":"supervisor"});
+                result["request_id"] = json!(r.request_id);
+                return Ok(result);
             }
         }
         // Drafting and assignment are online authority operations on companions. Never make a
@@ -2980,9 +3004,14 @@ fn mutate(
         Operation::Close {
             comment: text,
             force,
+            guard,
             ..
         } => {
-            ownership(&issue, actor, *force)?;
+            if let Some(guard) = guard {
+                ready::guard_close(db, project, &issue, actor, guard)?;
+            } else {
+                ownership(&issue, actor, *force)?;
+            }
             if issue.state == "closed" && text.is_some() {
                 return Err(Error::conflict(
                     "Issue is already closed; use comment to add further findings",

@@ -709,11 +709,12 @@ pub(super) fn ready_assignment(
     project: &str,
     number: i64,
     assignee: Option<&str>,
-) -> Result<(Option<String>, bool)> {
+    guarded: bool,
+) -> Result<Option<String>> {
     // Managed workers retain ownership until their process finishes. A manual
     // Ready handoff has no worker completion callback to return it to watching.
     if live_claim(db, assignee)? {
-        return Ok((assignee.map(str::to_owned), false));
+        return Ok(assignee.map(str::to_owned));
     }
     let (_, status) = saved(db, project, number)?;
     let acknowledged: Option<String> = db.query_row(
@@ -724,13 +725,24 @@ pub(super) fn ready_assignment(
     let pending = status["event"]
         .as_str()
         .is_some_and(|event| Some(event) != acknowledged.as_deref());
-    if !pending {
+    if pending && !guarded {
+        return Err(Error::conflict(
+            "Ready blocked by unacknowledged GitHub findings; inspect the current watcher status before handing off. State, ownership and reservations were preserved",
+        ));
+    }
+    // The Ready snapshot includes this event; a concurrent finding invalidates
+    // it. Idle triage acknowledges exactly the reviewed status without a claim.
+    if pending {
         db.execute(
-            "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
-            params![project, number],
+            "UPDATE issues SET github_ack_event=?3 WHERE project_id=?1 AND number=?2",
+            params![project, number, status["event"].as_str()],
         )?;
     }
-    Ok(((!pending).then(|| WATCHER.into()), pending))
+    db.execute(
+        "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
+        params![project, number],
+    )?;
+    Ok(Some(WATCHER.into()))
 }
 
 fn steering_update(db: &Connection, run: &str) -> Result<Option<(String, Value)>> {
@@ -1619,31 +1631,64 @@ mod tests {
                 .unwrap();
             if late {
                 f.observation(Some("later"));
+                let before = f.call(json!({"action":"view","number":1})).unwrap();
+                let error = f
+                    .call(json!({"action":"ready","number":1,"force":false}))
+                    .unwrap_err();
+                assert!(error.message.contains("unacknowledged GitHub"));
+                assert_eq!(f.call(json!({"action":"view","number":1})).unwrap(), before);
+                let guard = before["ready_guard"].clone();
+                f.request.request_id = Some("reviewed-ready".into());
+                let ready = f
+                    .call(json!({"action":"ready","number":1,"force":false,"guard":guard}))
+                    .unwrap();
+                assert_eq!(ready["issue"]["state"], "ready");
+                assert_eq!(ready["issue"]["assignee"], WATCHER);
+                f.request.request_id = None;
+                continue;
             }
             let result = f
                 .call(json!({"action":"ready","number":1,"force":false}))
                 .unwrap();
-            assert_eq!(
-                result["issue"]["state"],
-                if late { "open" } else { "ready" }
-            );
-            assert_eq!(
-                result["issue"]["assignee"],
-                if late { Value::Null } else { json!(WATCHER) }
-            );
+            assert_eq!(result["issue"]["state"], "ready");
+            assert_eq!(result["issue"]["assignee"], json!(WATCHER));
             assert_eq!(result["issue"]["assignment"]["kind"], "github");
             assert_eq!(result["prs_enabled"], false);
-            if late {
-                f.call(json!({"action":"claim","number":1,"force":false}))
-                    .unwrap();
-                let ready = f
-                    .call(json!({"action":"ready","number":1,"force":false}))
-                    .unwrap();
-                assert_eq!(ready["issue"]["assignee"], WATCHER);
-                assert_eq!(ready["issue"]["state"], "ready");
-            }
         }
     }
+    #[test]
+    fn guarded_idle_ready_acknowledges_only_the_reviewed_watcher_event() {
+        let mut f = Fixture::new();
+        f.assign("github").unwrap();
+        f.observation(Some("first"));
+        let before = f.call(json!({"action":"view","number":1})).unwrap();
+        assert!(before["issue"]["assignee"].is_null());
+        f.observation(Some("second"));
+        let current = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(before["issue"]["version"], current["issue"]["version"]);
+        f.request.request_id = Some("idle-ready".into());
+        let error = f
+            .call(json!({"action":"ready","number":1,"force":false,"guard":before["ready_guard"]}))
+            .unwrap_err();
+        assert!(error.message.contains("reservation guard mismatch"));
+        let ready = f
+            .call(json!({"action":"ready","number":1,"force":false,"guard":current["ready_guard"]}))
+            .unwrap();
+        assert_eq!(ready["issue"]["state"], "ready");
+        assert_eq!(ready["issue"]["assignee"], WATCHER);
+        assert_eq!(
+            f.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM events WHERE action='claimed'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn watcher_requires_a_link_and_cannot_steal_a_claim() {
         let mut f = Fixture::new();

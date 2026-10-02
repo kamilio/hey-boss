@@ -190,6 +190,7 @@ impl Store {
                 project,
                 actor,
                 &Operation::Close {
+                    guard: None,
                     allow_long_comment: false,
                     number: *number,
                     comment: Some(format!(

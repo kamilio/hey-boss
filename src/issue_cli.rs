@@ -18,7 +18,7 @@ pub struct Options {
     /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST); never falls back locally.
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Use the connected supervisor for PR add/list, guarded metadata, dependency edits or reopen (no SSH or work claim).
+    /// Use the connected supervisor for guarded metadata, Ready, close or reopen (no SSH or work claim).
     #[arg(long, global = true, conflicts_with = "host")]
     supervisor: bool,
     /// Print structured results and operational errors.
@@ -466,6 +466,9 @@ enum Action {
     /// Reopen a resolved comment.
     UnresolveComment { number: i64, comment_id: i64 },
     /// Complete an issue and clear its claim, preserving attribution.
+    #[command(
+        after_help = "Use --supervisor to close an eligible completed handoff through the connected fleet tunnel.\nThe CLI captures version, owner and reservation guards; --force is not supported on this route.\nFor uncertain results, retry the identical command with the same --request-id."
+    )]
     Close {
         number: i64,
         /// Save a final Markdown comment in the same transaction.
@@ -1127,6 +1130,7 @@ impl Options {
                 number: *number,
                 comment: comment.clone(),
                 force: *force,
+                guard: None,
                 allow_long_comment: *allow_long_comment,
             },
             Action::BlockedBy {
@@ -1197,6 +1201,8 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Request { .. }
                 | Action::Allocation { .. }
                 | Action::Assign { .. }
+                | Action::Ready { .. }
+                | Action::Close { .. }
                 | Action::Reopen { .. }
                 | Action::BlockedBy { .. }
                 | Action::Batch { .. }
@@ -1209,7 +1215,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, request, allocation, PR add/list, guarded metadata edits, guarded blocked-by edits, guarded reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, request, allocation, PR add/list, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
             ));
         }
     }

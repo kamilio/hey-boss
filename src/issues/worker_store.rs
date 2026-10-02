@@ -1314,7 +1314,7 @@ mod tests {
     fn a_crash_after_closing_an_issue_is_still_a_failed_run() {
         let mut f = HandoffFixture::new(false);
         f.apply(Operation::Close {
-                    guard: None,
+            guard: None,
             allow_long_comment: false,
             number: 1,
             comment: None,
@@ -1594,7 +1594,7 @@ mod tests {
                 }
                 "closed" => {
                     f.apply(Operation::Close {
-                    guard: None,
+                        guard: None,
                         allow_long_comment: false,
                         number: 1,
                         comment: None,
@@ -2501,7 +2501,7 @@ mod tests {
         for prs in [false, true] {
             let mut f = HandoffFixture::new(prs);
             f.apply(Operation::Close {
-                    guard: None,
+                guard: None,
                 allow_long_comment: false,
                 number: 1,
                 comment: Some("Source/group explicitly completed".into()),

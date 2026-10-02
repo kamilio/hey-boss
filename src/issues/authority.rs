@@ -29,6 +29,11 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
         } if *version > 0 => {}
         Operation::RefreshGithub { .. } => {}
         Operation::Ready { guard: Some(_), .. } => {}
+        Operation::Close {
+            guard: Some(_),
+            force: false,
+            ..
+        } => {}
         Operation::Assign { if_version, .. } if *if_version > 0 => {}
         Operation::Batch { edits }
             if edits
@@ -36,7 +41,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, PR add/list, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, allocation, PR add/list, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
