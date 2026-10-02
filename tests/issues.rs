@@ -1468,6 +1468,58 @@ fn retries_are_deduplicated_even_after_later_changes() {
 }
 
 #[test]
+fn explicit_project_ids_skip_checkout_discovery_but_short_names_still_use_it() {
+    let f = Fixture::new();
+    git(&f.cwd, &["init", "-q"]);
+    git(
+        &f.cwd,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:example/checkout.git",
+        ],
+    );
+    let trace = f.root.join("git-trace.json");
+    for project in ["github.com/example/selected", "named:Selected project"] {
+        let created = f.run(
+            "session-a",
+            &["create", "--title", "Selected issue", "--project", project],
+        );
+        for action in [vec!["list"], vec!["view", "1"]] {
+            for environment in [false, true] {
+                fs::write(&trace, "").unwrap();
+                let mut command = f.cmd("reader", &action);
+                if environment {
+                    command.env("HEY_BOSS_ISSUE_PROJECT", project);
+                } else {
+                    command.args(["--project", project]);
+                    command.env("HEY_BOSS_ISSUE_PROJECT", "named:Wrong project");
+                }
+                let result = success(command.env("GIT_TRACE2_EVENT", &trace).output().unwrap());
+                assert_eq!(result["project"], created["project"]);
+                assert!(
+                    fs::read_to_string(&trace).unwrap().is_empty(),
+                    "Explicit project {project} launched Git for {action:?} (env={environment})"
+                );
+            }
+        }
+    }
+    // An unregistered short name matching the checkout must still resolve to
+    // its repository, rather than registering a new named project.
+    for selector in [Some("checkout"), None] {
+        fs::write(&trace, "").unwrap();
+        let mut command = f.cmd("reader", &["list"]);
+        if let Some(selector) = selector {
+            command.args(["--project", selector]);
+        }
+        let result = success(command.env("GIT_TRACE2_EVENT", &trace).output().unwrap());
+        assert_eq!(result["project"]["id"], "github.com/example/checkout");
+        assert!(!fs::read_to_string(&trace).unwrap().is_empty());
+    }
+}
+
+#[test]
 fn project_identity_skips_git_outside_repositories_but_honors_explicit_git_dir() {
     let root = std::env::temp_dir().join(format!(
         "hb-no-repository-{}-{}",

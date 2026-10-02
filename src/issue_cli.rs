@@ -1316,7 +1316,21 @@ pub fn run(options: &Options) -> Result<()> {
         };
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
-        let project = issues::identity::project(&cwd, &machine)?;
+        let project_override = options.project.clone().or_else(worker_project);
+        // Full IDs already provide the request context. Keep the override so
+        // the store still resolves saved names and canonical destinations.
+        let project = if let Some(id) = project_override
+            .as_deref()
+            .filter(|id| id.contains('/') || id.starts_with("named:") || id.starts_with("local:"))
+        {
+            let name = id.rsplit('/').next().unwrap_or(id);
+            issues::Project {
+                id: id.into(),
+                name: name.strip_prefix("named:").unwrap_or(name).into(),
+            }
+        } else {
+            issues::identity::project(&cwd, &machine)?
+        };
         let inspection = matches!(operation, Operation::View { .. }) && !interactive;
         let mut actor = if operation.needs_actor() || interactive || inspection {
             Some(if inspection {
@@ -1356,10 +1370,8 @@ pub fn run(options: &Options) -> Result<()> {
             issues::identity::model_context(actor);
         }
         if let Operation::AddCommit { commit, title, .. } = &mut operation {
-            let target_project = options
-                .project
+            let target_project = project_override
                 .clone()
-                .or_else(worker_project)
                 .unwrap_or_else(|| project.id.clone());
             if let Ok(resolved) = issues::commits::resolve_commit_input(
                 commit,
@@ -1376,7 +1388,7 @@ pub fn run(options: &Options) -> Result<()> {
         let request = Request {
             version: 1,
             project,
-            project_override: options.project.clone().or_else(worker_project),
+            project_override,
             actor,
             operation,
             request_id: options.request_id.clone(),
