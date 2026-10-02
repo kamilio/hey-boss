@@ -42,15 +42,15 @@ const {agentState, scheduledRetries} = require('../src/issues/web/fleet.js');
 assert.equal(agentState({run:{state:'attempt_held',finished_at:null},online:true}),'Task attempt protected');
 assert.equal(agentState({run:{state:'attempt_held',finished_at:null,retry_at:Date.now()+30000},online:false}),'Task attempt protected');
 const held={run:{...projectRun,number:1,state:'infrastructure_blocked',finished_at:2},online:true};
-assert.equal(agentState(held),'Approval service unavailable');
-assert.equal(agentState({...held,online:false}),'Approval service unavailable','A finished infrastructure hold remains meaningful offline');
+assert.equal(agentState(held),'Infrastructure unavailable');
+assert.equal(agentState({...held,online:false}),'Infrastructure unavailable','A finished infrastructure hold remains meaningful offline');
 const retrying={...held,run:{...held.run,retry_at:Date.now()+30000}};
 assert.equal(scheduledRetries({active:[],history:[held]}).length,0,'An ended attempt is not a pending retry');
 assert.equal(scheduledRetries({active:[],history:[retrying]}).length,1,'An outstanding hold is visible outside collapsed history');
 assert.equal(scheduledRetries({active:[{run:{number:1,started_at:3}}],history:[retrying]}).length,0,'A resumed session supersedes the old hold');
 assert.equal(scheduledRetries({active:[],history:[retrying,{run:{number:1,started_at:3,state:'completed'}}]}).length,0,'A later completion supersedes the old hold');
 assert.equal(scheduledRetries({active:[{run:{number:2,started_at:3}}],history:[retrying]}).length,1,'Another issue does not hide the hold');
-for (const label of ['Database service unavailable', 'Model proxy unavailable']) {
+for (const label of ['GitHub quota exhausted', 'GitHub authentication failed', 'GitHub permission denied', 'GitHub request failed', 'Worker environment check failed', 'Database service unavailable', 'Model proxy unavailable', 'Approval service unavailable']) {
   assert.equal(agentState({...held,run:{...held.run,summary:label+'. Automatic pickup is held.'}}),label);
 }
 console.log('Infrastructure status and outstanding hold checks passed');

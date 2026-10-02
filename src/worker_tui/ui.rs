@@ -153,11 +153,20 @@ fn run_state(run: &Value) -> String {
         "Retry scheduled".into()
     } else if run["state"] == "infrastructure_blocked" {
         let summary = run["summary"].as_str().unwrap_or("");
-        ["Database service unavailable", "Model proxy unavailable"]
-            .into_iter()
-            .find(|label| summary.starts_with(label))
-            .unwrap_or("Approval service unavailable")
-            .into()
+        [
+            "GitHub quota exhausted",
+            "GitHub authentication failed",
+            "GitHub permission denied",
+            "GitHub request failed",
+            "Worker environment check failed",
+            "Database service unavailable",
+            "Model proxy unavailable",
+            "Approval service unavailable",
+        ]
+        .into_iter()
+        .find(|label| summary.starts_with(label))
+        .unwrap_or("Infrastructure unavailable")
+        .into()
     } else {
         text(&run["state"])
     }
