@@ -3,7 +3,7 @@ use super::{Actor, Error, Operation, Project, Result, create_issue, event, get_i
 use crate::database::Connection;
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const SCHEMA: &str = include_str!("subtasks.sql");
 pub(super) fn migrate_sync(db: &Connection) -> Result<()> {
@@ -231,15 +231,22 @@ impl Graph {
         if graph.parents.is_empty() {
             return Ok(graph);
         }
-        let mut statement=db.prepare("SELECT number,title,state,assignee,deleted_at,version,sort_order,closed_at,labels FROM issues WHERE project_id=?1 ORDER BY sort_order,number")?;
-        for issue in statement.query_map([project], |r|Ok(json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"deleted_at":r.get::<_,Option<i64>>(4)?,"version":r.get::<_,i64>(5)?,"sort_order":r.get::<_,i64>(6)?,"closed_at":r.get::<_,Option<i64>>(7)?,"labels":r.get::<_,String>(8)?,"pull_requests":[]})))? {
+        let nodes: BTreeSet<_> = graph
+            .parents
+            .keys()
+            .chain(graph.parents.values())
+            .copied()
+            .collect();
+        let nodes = serde_json::to_string(&nodes)?;
+        let mut statement=db.prepare("SELECT number,title,state,assignee,deleted_at,version,sort_order,closed_at,labels FROM json_each(?2) requested CROSS JOIN issues WHERE project_id=?1 AND number=requested.value ORDER BY sort_order,number")?;
+        for issue in statement.query_map(params![project,nodes], |r|Ok(json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"assignee":r.get::<_,Option<String>>(3)?,"deleted_at":r.get::<_,Option<i64>>(4)?,"version":r.get::<_,i64>(5)?,"sort_order":r.get::<_,i64>(6)?,"closed_at":r.get::<_,Option<i64>>(7)?,"labels":r.get::<_,String>(8)?,"pull_requests":[]})))? {
             let mut issue=issue?;let number=issue["number"].as_i64().unwrap();
             issue["labels"]=serde_json::from_str(issue["labels"].as_str().unwrap())?;
             if let Some(parent)=graph.parents.get(&number) {graph.children.entry(*parent).or_default().push(number);}
             graph.issues.insert(number,issue);
         }
-        let mut statement=db.prepare("SELECT issue_number,url,added_by,created_at,purpose,status,checked_at,error FROM issue_pull_requests WHERE project_id=?1 ORDER BY created_at,url")?;
-        for pr in statement.query_map([project],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"checked_at":r.get::<_,Option<i64>>(6)?,"error":r.get::<_,Option<String>>(7)?}))))? {
+        let mut statement=db.prepare("SELECT issue_number,url,added_by,created_at,purpose,status,checked_at,error FROM json_each(?2) requested CROSS JOIN issue_pull_requests WHERE project_id=?1 AND issue_number=requested.value ORDER BY created_at,url")?;
+        for pr in statement.query_map(params![project,nodes],|r|Ok((r.get::<_,i64>(0)?,json!({"url":r.get::<_,String>(1)?,"added_by":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"purpose":r.get::<_,String>(4)?,"status":r.get::<_,String>(5)?,"checked_at":r.get::<_,Option<i64>>(6)?,"error":r.get::<_,Option<String>>(7)?}))))? {
             let (number,pr)=pr?;
             if let Some(issue)=graph.issues.get_mut(&number){issue["pull_requests"].as_array_mut().unwrap().push(pr);}
         }
@@ -376,7 +383,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metadata_responses_do_not_load_the_project_subtask_graph() {
+    fn subtask_response_enrichment_avoids_unrelated_metadata() {
         let root = std::env::temp_dir().join(format!(
             "hb-subtask-response-{}",
             crate::issues::worker::random_id().unwrap()
@@ -389,6 +396,9 @@ mod tests {
             INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
             SELECT 'named:Graph',id,'Task '||id,'','open','creator',0,0,1,'[]',id FROM n;
             INSERT INTO issue_subtasks VALUES('named:Graph',1,2,0,'creator');
+            INSERT INTO issue_subtasks VALUES('named:Graph',2,3,0,'creator'),('named:Graph',1,4,0,'creator'),('named:Graph',1,5,0,'creator'),('named:Graph',5,6,0,'creator'),('named:Graph',4,7,0,'creator');
+            UPDATE issues SET deleted_at=1 WHERE number=4;
+            UPDATE issues SET state='closed' WHERE number=5;
             INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
             SELECT project_id,number,'https://github.com/o/r/pull/'||number,'creator',0 FROM issues;").unwrap();
         let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
@@ -410,19 +420,29 @@ mod tests {
         let elapsed = started.elapsed();
         drop(db);
         let (commands, steps) = transport.join().unwrap();
+        let mut issue_response = json!({"issue":{"number":1},"parent_issue":{"number":1},"child_issue":{"number":2},"issues":[{"number":1},{"number":2},{"number":8192}],"comments":[]});
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let issue_started = std::time::Instant::now();
+        enrich(&db, "named:Graph", &mut issue_response).unwrap();
+        let issue_elapsed = issue_started.elapsed();
+        drop(db);
+        let (issue_commands, issue_steps) = transport.join().unwrap();
         owner.stop();
-        let mut issue_response = json!({"issue":{"number":1},"parent_issue":{"number":1},"child_issue":{"number":2},"issues":[{"number":1},{"number":2}],"comments":[]});
-        enrich(&store.db, "named:Graph", &mut issue_response).unwrap();
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
         eprintln!(
             "Three metadata responses beside 8192 issues: {commands} RPCs, {steps} query VM steps in {elapsed:?}"
         );
+        eprintln!(
+            "Seven related nodes beside 8192 issues: {issue_commands} RPCs, {issue_steps} query VM steps in {issue_elapsed:?}"
+        );
         assert_eq!(outputs, samples);
-        assert_eq!(issue_response["issue"]["subtasks"]["total"], 1);
+        assert_eq!(issue_response["issue"]["subtasks"]["total"], 2);
+        assert_eq!(issue_response["issue"]["subtasks"]["closed"], 1);
+        assert_eq!(issue_response["issue"]["subtasks"]["deleted"], 1);
         assert_eq!(
             issue_response["parent_issue"]["subtasks"]["open_descendants"],
-            1
+            3
         );
         assert_eq!(issue_response["child_issue"]["parent"]["number"], 1);
         assert_eq!(
@@ -430,6 +450,13 @@ mod tests {
             1
         );
         assert_eq!(issue_response["subtasks"][0]["number"], 2);
+        assert_eq!(issue_response["subtasks"][1]["number"], 4);
+        assert_eq!(issue_response["subtasks"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            issue_response["issues"][1]["subtask_context"]["next"]["number"],
+            5
+        );
+        assert!(issue_response["issues"][2]["subtasks"].is_null());
         assert_eq!(
             issue_response["subtasks"][0]["parent"]["pull_requests"][0]["url"],
             "https://github.com/o/r/pull/1"
@@ -439,5 +466,9 @@ mod tests {
             "Responses without issues must not load a graph"
         );
         assert_eq!(steps, 0);
+        assert!(
+            issue_steps < 5000,
+            "Subtask metadata scanned unrelated issues: {issue_steps} query VM steps"
+        );
     }
 }
