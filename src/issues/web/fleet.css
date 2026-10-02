@@ -333,6 +333,7 @@
 .machine-controls>.button { margin-left:auto }
 .machine-projects { display:grid; gap:8px; margin:0 0 18px }
 .machine-projects:empty { display:none }
+.activity-machine>.machine-projects {margin:0 18px 18px}
 .machine-project { display:flex; align-items:center; gap:16px; padding:12px 14px; border:1px solid var(--line); border-radius:10px }
 .machine-project>div { display:grid; flex:1; min-width:0; gap:4px }
 .machine-project strong { font-size:13px }
