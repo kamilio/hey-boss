@@ -1,9 +1,5 @@
 {{task}}
 
-{{subtask}}
-
-{{github}}
-
 {{workspace}}
 
 {{delivery}}

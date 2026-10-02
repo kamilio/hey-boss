@@ -2528,7 +2528,7 @@ mod tests {
             assert!(
                 worker::preview(&ProjectConfig::default(), &project, issue)
                     .0
-                    .contains("Subtask 2 of 2")
+                    .contains("hey-boss issue view 3")
             );
         }
         std::fs::remove_dir_all(root).unwrap();

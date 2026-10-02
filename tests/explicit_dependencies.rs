@@ -77,7 +77,7 @@ fn explicit_dependencies_keep_nested_groups_without_sibling_blockers() {
     let claim = f.run(json!({"action":"claim","number":5,"force":false}));
     let instructions = claim["instructions"].as_str().unwrap();
     assert!(
-        instructions.contains("explicit dependencies"),
+        instructions.contains("hey-boss issue view 5"),
         "{instructions}"
     );
     assert!(

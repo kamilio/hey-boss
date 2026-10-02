@@ -1388,15 +1388,9 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
         ),
         // Empty legacy layout slots: these details come from fetching the task.
         ("plan_document", String::new()),
-        (
-            "subtask",
-            section("subtask", job.issue["subtask_context"].is_object()),
-        ),
+        ("subtask", String::new()),
         ("dependencies", String::new()),
-        (
-            "github",
-            section("github", job.issue.get("github_status").is_some()),
-        ),
+        ("github", String::new()),
         (
             "handoff",
             section(
@@ -1962,12 +1956,13 @@ fn run_thread(
 }
 
 fn steering_text(instruction: &Value, job: &Job, config: &ProjectConfig) -> String {
-    let key = if instruction["request_id"]
+    if instruction["request_id"]
         .as_str()
         .is_some_and(|id| id.starts_with("github:"))
     {
-        "github"
-    } else if instruction["scope"] == "dependency" {
+        return prompt_with_config(job, config).0;
+    }
+    let key = if instruction["scope"] == "dependency" {
         "dependency_update"
     } else {
         "steering"
@@ -2359,7 +2354,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn watcher_steering_uses_editable_tool_guidance_without_evidence() {
+    fn watcher_steering_uses_the_normal_task_prompt_without_evidence() {
         let mut job: Job = serde_json::from_value(json!({
             "id":"run", "worker_id":"worker", "project":project(), "issue":issue(),
             "comments":[], "owner_pid":0, "owner_start":"", "machine":"test",
@@ -2369,12 +2364,12 @@ mod tests {
         let input =
             json!({"request_id":"github:run:new","scope":"session","text":"large GitHub evidence"});
         let text = steering_text(&input, &job, &job.config);
-        assert!(text.contains("hey-gh pr view"));
+        assert_eq!(text, prompt_with_config(&job, &job.config).0);
         assert!(!text.contains("large GitHub evidence"));
         job.config.prompt_overrides.github = Some("Check {{number}} in {{project}}".into());
         assert_eq!(
             steering_text(&input, &job, &job.config),
-            "Check 7 in named:a'b $(touch nope)"
+            prompt_with_config(&job, &job.config).0
         );
     }
 
@@ -2687,7 +2682,45 @@ mod tests {
         let text = preview(&ProjectConfig::default(), &project(), task).0;
         assert!(!text.contains("large evidence"), "{text}");
         assert!(!text.contains("github_status"), "{text}");
-        assert!(text.contains("hey-gh pr view"), "{text}");
+        assert_eq!(
+            text,
+            preview(&ProjectConfig::default(), &project(), issue()).0
+        );
+    }
+    #[test]
+    fn subtasks_and_github_updates_use_the_normal_task_prompt() {
+        for layout in [
+            None,
+            Some("{{task}}\n\n{{subtask}}\n\n{{github}}".to_owned()),
+        ] {
+            let config: ProjectConfig = serde_json::from_value(json!({
+                "prompt":"Task {{number}}.",
+                "prompt_overrides":{
+                    "layout":layout,
+                    "subtask":"Old subtask instructions.",
+                    "github":"Old GitHub instructions."
+                }
+            }))
+            .unwrap();
+            let normal = preview(&config, &project(), issue()).0;
+            let mut task = issue();
+            task["subtask_context"] =
+                json!({"position":2,"total":3,"parent":{"number":1,"title":"Parent"}});
+            task["github_status"] = json!({"event":"finding","prs":{}});
+            assert_eq!(preview(&config, &project(), task).0, normal);
+            assert!(!normal.contains("{{subtask}}"));
+            assert!(!normal.contains("{{github}}"));
+        }
+        for key in ["subtask", "github"] {
+            assert!(prompt_defaults().get(key).is_none());
+            assert!(
+                !prompt_sections()
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["key"] == key)
+            );
+        }
     }
     #[test]
     fn task_details_are_fetched_instead_of_injected_into_prompts() {
@@ -2732,8 +2765,7 @@ mod tests {
         let config: ProjectConfig = serde_json::from_value(json!({
             "prs_enabled":true,
             "prompt_overrides":{
-                "handoff":"Handoff {{number}}: {{project_arg}}",
-                "github":"Inspect {{title}} with tools."
+                "handoff":"Handoff {{number}}: {{project_arg}}"
             }
         }))
         .unwrap();
@@ -2744,10 +2776,6 @@ mod tests {
         let text = preview(&config, &project(), task).0;
         assert!(
             text.contains("Handoff 7: 'named:a'\\''b $(touch nope)'"),
-            "{text}"
-        );
-        assert!(
-            text.contains("Inspect Literal {{body}} with tools."),
             "{text}"
         );
 

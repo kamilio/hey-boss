@@ -19,7 +19,9 @@ async (page) => {
   await page.locator('#project-prompt-layout').fill('{{delivery}}\n\n{{task}}');
   await page.getByText('Task context sections', {exact:true}).click();
   await page.locator('#project-prompt-handoff').fill('Short handoff for {{number}}.');
-  check((await page.locator('#project-prompt-github').getAttribute('placeholder')).includes('hey-gh pr view'), 'GitHub defaults point to retrieval tools');
+  for (const key of ['subtask', 'github', 'dependencies', 'plan_document']) {
+    check(await page.locator('#project-prompt-' + key).count() === 0, key + ' is fetched with the task, not an editor section');
+  }
   await page.locator('#project-prompt').fill('Edited implementation');
   await tab('Planning').click();
   await page.locator('#project-plan-template').fill('plans/edited-{number}.md');

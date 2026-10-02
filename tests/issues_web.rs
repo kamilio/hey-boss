@@ -1886,8 +1886,6 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
     for key in [
         "layout",
         "handoff",
-        "github",
-        "subtask",
         "resume",
         "steering",
         "dependency_update",
@@ -1903,7 +1901,7 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
                 .any(|section| section["key"] == key)
         );
     }
-    for key in ["dependencies", "plan_document"] {
+    for key in ["dependencies", "plan_document", "subtask", "github"] {
         assert!(settings["prompt_defaults"].get(key).is_none());
         assert!(
             !settings["prompt_sections"]
