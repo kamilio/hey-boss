@@ -117,6 +117,21 @@ The dashboard identifies selected projects and connectivity to the supervisor.
 worker picks issues, manages its Codex agents, and handles retries. An agent is
 one coding session. A companion synchronizes a machine and applies worker controls.
 
+Before adding a machine, run `hey-boss environment setup` as its worker OS user.
+It resolves GitHub identity, reuses a working signing key or generates a local
+Ed25519 key, confirms GitHub signing-key registration, and configures Git. Private
+keys stay on their machine. Existing working SSH and registered OpenPGP signing
+setups are preserved. Checks read GitHub’s public signing-key list; registering
+a key requires SSH signing-key write permission. Missing permissions are reported.
+
+`hey-boss environment check` diagnoses without changing configuration or keys.
+Both commands make and verify a temporary commit without `-S`, then remove the
+temporary repository. Use `-C PATH` to check a checkout's effective configuration
+and `--json` for structured output. Repository overrides are reported and left
+intact. Workers check their own inherited environment before starting Git work;
+successful GitHub checks are reused within that process for five minutes, while
+local signing is tested for every task. Explicit checks always query GitHub.
+
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the supervisor machine
 to manage the existing SSH machine inventory automatically. The supervisor
 installs companions, mirrors issue queues, distributes saved worker configurations,

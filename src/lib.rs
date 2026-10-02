@@ -13,6 +13,7 @@ pub(crate) mod codex_permissions;
 #[doc(hidden)]
 pub mod database;
 pub mod document;
+pub mod environment;
 pub mod fleet;
 pub use hey_harvester::health;
 /// SQLite-backed project issues and durable agent ownership.
