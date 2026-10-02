@@ -78,13 +78,23 @@ fn cached_response(
     };
     identifier(&project.id, "project ID", 8192)?;
     identifier(&project.name, "project name", 1024)?;
-    let previous: Option<(String, String, Option<String>)> = db.query_row(
-        "SELECT payload,response,archive_key FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
-        params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
-    let Some((old, response, archive_key)) = previous else {
+    let previous: Option<(String, String, Option<String>, Option<String>)> = db.query_row(
+        "SELECT payload,response,archive_key,payload_hash FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
+        params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?))).optional()?;
+    let Some((old, response, archive_key, payload_hash)) = previous else {
         return Ok(None);
     };
-    if old != payload {
+    let matches = if archive_key.is_some() {
+        payload_hash.as_deref().ok_or_else(|| {
+            Error::new(
+                "archive_unavailable",
+                "Archived receipt identity is missing",
+            )
+        })? == super::archive::receipt_payload_hash(payload)
+    } else {
+        old == payload
+    };
+    if !matches {
         return Err(Error::conflict(
             "Request ID was already used for a different operation",
         ));
@@ -130,6 +140,7 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("requests", "created_at", "INTEGER NOT NULL DEFAULT 0"),
     ("requests", "archive_key", "TEXT"),
+    ("requests", "payload_hash", "TEXT"),
     ("worker_runs", "archive_key", "TEXT"),
     ("worker_runs", "events_archive_key", "TEXT"),
     (
@@ -1590,10 +1601,12 @@ impl Store {
                 "SELECT payload,response,archive_key FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
                 params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
             let (operation, response) = match saved {
-                Some((payload, response, archive_key)) => (
-                    serde_json::from_str::<Value>(&payload)?,
-                    super::archive::receipt_response(&snapshot, &response, archive_key.as_deref())?,
-                ),
+                Some((payload, response, archive_key)) => super::archive::receipt_contents(
+                    &snapshot,
+                    &payload,
+                    &response,
+                    archive_key.as_deref(),
+                )?,
                 None => (Value::Null, Value::Null),
             };
             let recorded = !response.is_null();
