@@ -15,6 +15,19 @@ pub const CARRIER_PREFIX: &str = "hey_gemini_v1.";
 /// https://cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
 pub const IMPORTED_THOUGHT_SIGNATURE: &str = "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=";
 
+#[derive(Debug)]
+pub(crate) struct AuthenticationError;
+
+impl std::fmt::Display for AuthenticationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "Gemini reasoning authentication failed (different model, key or altered carrier)",
+        )
+    }
+}
+
+impl std::error::Error for AuthenticationError {}
+
 /// Authenticated, stateless carrier for the exact native model turn. Persist the
 /// caller-supplied key to replay conversations across process restarts.
 pub struct ReasoningCodec(Aes256GcmSiv);
@@ -63,8 +76,16 @@ impl ReasoningCodec {
         if bytes.len() < 28 {
             bail!("Invalid Gemini reasoning carrier");
         }
-        let decoded = self.0.decrypt(Nonce::from_slice(&bytes[..12]), Payload {msg:&bytes[12..],aad:model.as_bytes()})
-            .map_err(|_| anyhow!("Gemini reasoning authentication failed (different model, key or altered carrier)"))?;
+        let decoded = self
+            .0
+            .decrypt(
+                Nonce::from_slice(&bytes[..12]),
+                Payload {
+                    msg: &bytes[12..],
+                    aad: model.as_bytes(),
+                },
+            )
+            .map_err(|_| AuthenticationError)?;
         Ok(serde_json::from_slice(&decoded)?)
     }
 }

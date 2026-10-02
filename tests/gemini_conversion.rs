@@ -207,14 +207,82 @@ fn generated_client_call_id_is_not_invented_in_native_replay() {
     );
 }
 #[test]
-fn reasoning_cannot_be_tampered_lost_or_crossed_between_models() {
+fn unreadable_reasoning_is_pruned_without_losing_visible_history() {
+    let response = convert_response(&native(), &converted(), &codec(), "test").unwrap();
+    for mode in ["model", "key", "ciphertext"] {
+        let mut r = request();
+        let mut input = vec![json!({"role":"user","content":"Inspect"})];
+        input.extend(response["output"].as_array().unwrap().clone());
+        input.extend([
+            json!({"type":"function_call_output","call_id":"native-call-1","output":"file.py"}),
+            json!({"type":"function_call_output","call_id":"native-call-2","output":"/workspace"}),
+            json!({"role":"user","content":"Continue the review"}),
+        ]);
+        r["input"] = json!(input);
+        let active_codec = if mode == "key" {
+            ReasoningCodec::new(&[7; 32])
+        } else {
+            codec()
+        };
+        if mode == "model" {
+            r["model"] = json!("gemini/replacement-model");
+        } else if mode == "ciphertext" {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            let carrier = r["input"][1]["encrypted_content"].as_str().unwrap();
+            let mut bytes = URL_SAFE_NO_PAD
+                .decode(carrier.strip_prefix(CARRIER_PREFIX).unwrap())
+                .unwrap();
+            bytes[12] ^= 1;
+            r["input"][1]["encrypted_content"] =
+                json!(format!("{CARRIER_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes)));
+        }
+        let next = convert_request(&r, &config(), &active_codec).unwrap();
+        let mut imported = r.clone();
+        imported["input"].as_array_mut().unwrap().remove(1);
+        assert_eq!(
+            next.body,
+            convert_request(&imported, &config(), &active_codec)
+                .unwrap()
+                .body,
+            "{mode}"
+        );
+        let history = next.body["contents"].to_string();
+        assert!(history.contains("Checking now."));
+        assert!(history.contains("file.py"));
+        assert!(history.contains("Continue the review"));
+        assert!(!history.contains("I should inspect the workspace."));
+        assert!(!history.contains("thought-signature"));
+        assert!(!history.contains("call-signature"));
+        assert_eq!(
+            next.body["contents"][1]["parts"][1]["thoughtSignature"],
+            IMPORTED_THOUGHT_SIGNATURE
+        );
+        // A newly generated signed turn must still replay alongside the old,
+        // pruned carrier on subsequent requests.
+        let fresh = json!({"candidates":[{"content":{"parts":[{"text":"Review complete","thoughtSignature":"new-signature"}]},"finishReason":"STOP"}]});
+        let reply = convert_response(&fresh, &next, &active_codec, "next").unwrap();
+        r["input"]
+            .as_array_mut()
+            .unwrap()
+            .extend(reply["output"].as_array().unwrap().clone());
+        r["input"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role":"user","content":"Thanks"}));
+        let continued = convert_request(&r, &config(), &active_codec).unwrap();
+        assert!(
+            continued.body["contents"]
+                .to_string()
+                .contains("new-signature")
+        );
+    }
+}
+
+#[test]
+fn authenticated_reasoning_rejects_altered_or_missing_visible_items() {
     let response = convert_response(&native(), &converted(), &codec(), "test").unwrap();
     let mut r = request();
     r["input"] = response["output"].clone();
-    assert!(convert_request(&r, &config(), &ReasoningCodec::new(&[7; 32])).is_err());
-    let mut different = r.clone();
-    different["model"] = json!("gemini/gemini-2.5-pro");
-    assert!(convert_request(&different, &config(), &codec()).is_err());
     let mut edited = r.clone();
     edited["input"][1]["content"][0]["text"] = json!("changed");
     assert!(convert_request(&edited, &config(), &codec()).is_err());
