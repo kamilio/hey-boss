@@ -2078,49 +2078,57 @@ fn plan_allocations(db: &Connection, node: &str, workers: &[Value]) -> Result<Al
             pools.entry(project.into()).or_default().push(config);
         }
     }
-    for (project, configs) in pools {
-        let projects = rows(
-            db,
-            "SELECT * FROM projects WHERE id=? AND hidden_at IS NULL",
-            &[json!(project)],
-        )?;
-        let Some(row) = projects.first() else {
-            continue;
-        };
-        let ranges = rows(
-            db,
-            "SELECT * FROM fleet_ranges WHERE node=? AND project_id=?",
-            &[json!(node), json!(project)],
-        )?;
-        let replenish = if let Some(range) = ranges.first() {
-            let used = rows(
-                db,
-                "SELECT coalesce(max(number),0) used FROM issues WHERE project_id=? AND number BETWEEN ? AND ?",
-                &[
-                    json!(project),
-                    range["first_number"].clone(),
-                    range["last_number"].clone(),
-                ],
-            )?;
-            used[0]["used"].as_i64().unwrap() > range["last_number"].as_i64().unwrap() - 20
-        } else {
-            true
-        };
+    if pools.is_empty() {
+        return Ok(plan);
+    }
+    // Each heartbeat plans all selected projects together. Keep the indexed
+    // range lookups in SQLite instead of requesting three rows per project.
+    let projects = rows(
+        db,
+        "SELECT p.id,p.next_number,r.last_number,
+         coalesce((SELECT max(number) FROM issues WHERE project_id=p.id AND number BETWEEN r.first_number AND r.last_number),0) AS used
+         FROM json_each(?1) selected CROSS JOIN projects p
+         LEFT JOIN fleet_ranges r ON r.node=?2 AND r.project_id=p.id
+         WHERE p.id=selected.value AND p.hidden_at IS NULL ORDER BY p.id",
+        &[json!(serde_json::to_string(&pools.keys().collect::<Vec<_>>())?), json!(node)],
+    )?;
+    if projects.is_empty() {
+        return Ok(plan);
+    }
+    let keys: Vec<_> = projects.iter().map(|p| p["id"].as_str().unwrap()).collect();
+    let mut supplied_by_project = BTreeMap::<String, Vec<Value>>::new();
+    for supplied in rows(
+        db,
+        &format!(
+            "SELECT a.project_id,i.labels FROM json_each(?1) selected
+            CROSS JOIN fleet_allocations a CROSS JOIN issues i
+            WHERE a.project_id=selected.value AND a.node=?2
+              AND i.project_id=a.project_id AND i.number=a.issue_number
+              AND i.state='open' AND i.deleted_at IS NULL AND {ALLOCATED}"
+        ),
+        &[json!(serde_json::to_string(&keys)?), json!(node)],
+    )? {
+        supplied_by_project
+            .entry(supplied["project_id"].as_str().unwrap().to_owned())
+            .or_default()
+            .push(supplied);
+    }
+    let mut pending = Vec::new();
+    for row in projects {
+        let project = row["id"].as_str().unwrap().to_owned();
+        let configs = &pools[&project];
+        let replenish = row["last_number"]
+            .as_i64()
+            .is_none_or(|last| row["used"].as_i64().unwrap() > last - 20);
         if replenish {
             plan.ranges
                 .push((project.clone(), row["next_number"].as_i64().unwrap()));
         }
         // Start from allocation keys; readiness checks must inspect this
         // machine's small supplied pool rather than every project issue.
-        let mut supplied = rows(
-            db,
-            &format!(
-                "SELECT i.labels FROM fleet_allocations a CROSS JOIN issues i WHERE i.project_id=a.project_id AND i.number=a.issue_number AND a.node=? AND a.project_id=? AND i.state='open' AND i.deleted_at IS NULL AND {ALLOCATED}"
-            ),
-            &[json!(node), json!(project)],
-        )?;
+        let supplied = supplied_by_project.remove(&project).unwrap_or_default();
         let mut filters = BTreeMap::<BTreeSet<String>, i64>::new();
-        for c in &configs {
+        for c in configs {
             *filters.entry(tags(c)).or_default() += c["concurrency"].as_i64().unwrap_or(1);
         }
         // A filled pool needs no queue scan. Check both each filter and the
@@ -2144,13 +2152,29 @@ fn plan_allocations(db: &Connection, node: &str, workers: &[Value]) -> Result<Al
         {
             continue;
         }
-        let candidates = rows(
-            db,
-            &format!(
-                "SELECT i.number,i.labels FROM issues i WHERE project_id=? AND state='open' AND deleted_at IS NULL AND assignee IS NULL AND (assignment_target IS NULL OR assignment_target NOT LIKE 'machine:%' OR assignment_target='machine:'||?2) AND {READY} AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number) AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL) ORDER BY sort_order,number"
-            ),
-            &[json!(project), json!(node)],
-        )?;
+        pending.push((project, filters, supplied));
+    }
+    if pending.is_empty() {
+        return Ok(plan);
+    }
+    let keys: Vec<_> = pending.iter().map(|(project, _, _)| project).collect();
+    let mut candidates_by_project = BTreeMap::<String, Vec<Value>>::new();
+    for candidate in rows(
+        db,
+        &format!(
+            "SELECT i.project_id,i.number,i.labels FROM json_each(?1) selected CROSS JOIN issues i
+             WHERE i.project_id=selected.value AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL
+               AND (assignment_target IS NULL OR assignment_target NOT LIKE 'machine:%' OR assignment_target='machine:'||?2)
+               AND {READY} AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number)
+               AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL)
+             ORDER BY i.project_id,sort_order,number"
+        ),
+        &[json!(serde_json::to_string(&keys)?), json!(node)],
+    )? {
+        candidates_by_project.entry(candidate["project_id"].as_str().unwrap().to_owned()).or_default().push(candidate);
+    }
+    for (project, filters, mut supplied) in pending {
+        let candidates = candidates_by_project.remove(&project).unwrap_or_default();
         let mut used = BTreeSet::new();
         for (filter, capacity) in &filters {
             let mut needed = (capacity * 2
@@ -5989,6 +6013,100 @@ mod tests {
             steps < 20_000,
             "A full pool scanned queued issues: {steps} VM steps"
         );
+    }
+
+    #[test]
+    fn allocation_planning_batches_project_reads_for_full_and_empty_pools() {
+        let mut measurements = Vec::new();
+        for count in [16, 128] {
+            let f = Fixture::new();
+            f.capture();
+            f.db.execute_batch(&format!("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
+                INSERT INTO projects(id,name,next_number) SELECT 'named:Batch '||id,'Batch '||id,1000 FROM n;
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+                SELECT id,n.number,'Queued','','open','human:fixture',0,0,1,'[]',3-n.number FROM projects CROSS JOIN (SELECT 1 AS number UNION ALL SELECT 2) n WHERE id LIKE 'named:Batch %';
+                INSERT INTO fleet_ranges SELECT 'peer',id,100,199 FROM projects WHERE id LIKE 'named:Batch %';
+                INSERT INTO fleet_allocations SELECT project_id,number,'peer' FROM issues WHERE project_id LIKE 'named:Batch %';")).unwrap();
+            let projects: Vec<_> = (1..=count).map(|id| format!("named:Batch {id}")).collect();
+            let workers =
+                vec![json!({"config":{"projects":projects,"concurrency":1,"enabled":true}})];
+            let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+            for full in [true, false] {
+                if !full {
+                    f.db.execute("DELETE FROM fleet_allocations", []).unwrap();
+                }
+                let (db, transport) = crate::database::tests::measured_connection(&f.path);
+                let plan = plan_allocations(&db, "peer", &workers).unwrap();
+                drop(db);
+                let (commands, steps) = transport.join().unwrap();
+                assert!(plan.ranges.is_empty());
+                let expected = if full {
+                    Vec::new()
+                } else {
+                    let mut projects = projects.clone();
+                    projects.sort();
+                    projects
+                        .into_iter()
+                        .flat_map(|project| [(project.clone(), 2), (project, 1)])
+                        .collect()
+                };
+                assert_eq!(plan.tasks, expected);
+                eprintln!(
+                    "{count} project allocation plans (full={full}): {commands} RPCs, {steps} VM steps"
+                );
+                measurements.push((count, full, commands));
+            }
+            owner.stop();
+        }
+        for (count, full, commands) in measurements {
+            assert!(
+                commands <= 3,
+                "{count} projects (full={full}) needed {commands} RPCs"
+            );
+        }
+    }
+
+    #[test]
+    fn allocation_batches_keep_projects_machines_tags_and_range_boundaries_scoped() {
+        let f = Fixture::new();
+        f.capture();
+        f.db.execute_batch("INSERT INTO projects(id,name,next_number,hidden_at) VALUES
+            ('named:A','A',1000,NULL),('named:B','B',2000,NULL),('named:C','C',3000,NULL),
+            ('named:Hidden','Hidden',4000,1),('named:Paused','Paused',5000,NULL);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT p.id,n.number,'Queued','','open','human:fixture',0,0,1,CASE p.id WHEN 'named:B' THEN '[\"b\"]' ELSE '[\"a\"]' END,4-n.number
+            FROM projects p CROSS JOIN (SELECT 1 AS number UNION ALL SELECT 2 UNION ALL SELECT 3) n WHERE p.id<>'named:Native fleet';
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,draft)
+            VALUES('named:A',179,'Used','','open','human:fixture',0,0,1,'[]',1);
+            INSERT INTO fleet_ranges VALUES('peer','named:A',100,199),('peer','named:B',100,199),('other','named:C',100,199);
+            INSERT INTO fleet_allocations VALUES('named:A',1,'other'),('named:B',1,'peer');").unwrap();
+        let workers = vec![
+            json!({"config":{"projects":["named:A","named:Hidden"],"concurrency":1,"tags":["a"],"enabled":true}}),
+            json!({"config":{"projects":["named:B"],"concurrency":1,"tags":["b"],"enabled":true}}),
+            json!({"config":{"projects":["named:C","named:Missing"],"concurrency":1,"tags":["unmatched"],"enabled":true}}),
+            json!({"intent":"pause","config":{"projects":["named:Paused"],"concurrency":1,"enabled":true}}),
+        ];
+        let plan = plan_allocations(&f.db, "peer", &workers).unwrap();
+        assert_eq!(plan.ranges, vec![("named:C".into(), 3000)]);
+        assert_eq!(
+            plan.tasks,
+            vec![
+                ("named:A".into(), 3),
+                ("named:A".into(), 2),
+                ("named:B".into(), 3)
+            ]
+        );
+        f.db.execute(
+            "UPDATE issues SET number=180 WHERE project_id='named:A' AND number=179",
+            [],
+        )
+        .unwrap();
+        let replenished = plan_allocations(&f.db, "peer", &workers).unwrap();
+        assert_eq!(
+            replenished.ranges,
+            vec![("named:A".into(), 1000), ("named:C".into(), 3000)]
+        );
+        assert_eq!(replenished.tasks, plan.tasks);
     }
 
     #[test]
