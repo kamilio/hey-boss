@@ -32,6 +32,15 @@ pub(crate) fn worker_payload(
 }
 
 pub(crate) type EventTails = HashMap<String, Vec<(i64, Value)>>;
+type RunSnapshot = (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<String>,
+    Option<String>,
+);
 
 /// Both worker dashboards share this bounded lookup. Cold tails merge with any
 /// late progress received after completion; stable row IDs prevent duplicates.
@@ -100,7 +109,7 @@ pub(super) fn archive_run(db: &HotConnection, now: i64, run: &str) -> Result<usi
     }
     let cutoff = now.saturating_sub(GRACE_MS);
     let snapshot = db.read_transaction()?;
-    let saved: Option<(String,String,String,i64,i64,Option<String>,Option<String>)> = snapshot.query_row(
+    let saved: Option<RunSnapshot> = snapshot.query_row(
         "SELECT id,job,expanded_prompt,updated_at,finished_at,events_archive_key,archive_key FROM worker_runs WHERE id=?2 AND archive_pending=1 AND finished_at IS NOT NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1)", params![cutoff,run],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))
     ).optional()?;

@@ -224,7 +224,7 @@ fn selecting_one_receipt_does_not_sort_a_shared_migration_timestamp_backlog() {
 #[test]
 fn issue_archival_preserves_existing_read_responses_and_dependency_readiness() {
     let mut f = Fixture::new();
-    let operations = vec![
+    let operations = [
         json!({"action":"view","number":1}),
         json!({"action":"comments","number":1,"limit":1,"offset":0,"sort":"newest"}),
         json!({"action":"comments","number":1,"limit":1,"offset":1,"sort":"oldest"}),
