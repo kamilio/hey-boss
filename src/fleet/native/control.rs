@@ -187,7 +187,37 @@ pub(super) fn configure_companion(ctx: &Context, message: &Value) -> Result<Valu
     };
     let previous = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
     let workers = retain_pending_changes(&previous, message)?;
-    let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers,"declarative":message["declarative"]});
+    let retiring: Vec<_> = workers
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| matches!(w["intent"].as_str(), Some("drain" | "stop")))
+        .cloned()
+        .collect();
+    let workers = match super::projects::prepare(ctx, &message["projects"], &workers) {
+        Ok(workers) => workers,
+        Err(error) => {
+            // A failed checkout must not revive removed workers on the next pull.
+            let mut retained = previous.clone();
+            if !retained["workers"].is_array() {
+                retained["workers"] = json!([]);
+            }
+            for removal in &retiring {
+                let list = retained["workers"].as_array_mut().unwrap();
+                if let Some(old) = list.iter_mut().find(|w| w["id"] == removal["id"]) {
+                    *old = removal.clone();
+                } else {
+                    list.push(removal.clone());
+                }
+            }
+            if retained != previous {
+                ctx.atomic_json(&ctx.state.join("fleet-agent.json"), &retained)?;
+            }
+            reconcile_locked(ctx, &json!({"workers":retiring}))?;
+            return Ok(json!({"kind":"ack","configuration_error":error.to_string()}));
+        }
+    };
+    let configured = json!({"role":"agent","controller":message["controller"],"revision":message["revision"],"workers":workers,"projects":message["projects"],"declarative":message["declarative"]});
     let failures = configure_workers(
         ctx,
         workers
@@ -653,6 +683,27 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_project_setup_keeps_removal_intent_without_starting_new_workers() {
+        let (root, ctx, store) = super::super::context::tests::test_context();
+        super::super::replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        let previous = json!({"revision":"old","workers":[{"id":"removed","intent":"running","config":{}},{"id":"kept","intent":"pause","config":{}}]});
+        ctx.atomic_json(&ctx.state.join("fleet-agent.json"), &previous)
+            .unwrap();
+        let message = json!({"revision":"new","workers":[{"id":"removed","intent":"drain","retiring":true,"config":{}},{"id":"new","intent":"running","config":{}}],"projects":{"bad":{"git":"invalid","path":"~/Workspace/bad"}}});
+        let result = configure_companion(&ctx, &message).unwrap();
+        assert!(result["configuration_error"].is_string());
+        let saved = ctx
+            .read_json(&ctx.state.join("fleet-agent.json"), Value::Null)
+            .unwrap();
+        assert_eq!(saved["revision"], "old");
+        assert_eq!(saved["workers"][0]["intent"], "drain");
+        assert_eq!(saved["workers"][1]["id"], "kept");
+        assert_eq!(saved["workers"].as_array().unwrap().len(), 2);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn stale_configuration_cannot_undo_a_newer_graceful_removal() {
         let old = json!({"workers":[{"id":"worker","intent":"drain","local_revision":12,"base_revision":"old"}]});

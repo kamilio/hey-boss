@@ -268,8 +268,16 @@ impl Supervisor {
                 }
                 let machine = machines.iter_mut().find(|m| m["host"] == *host).unwrap();
                 machine["desired_workers"] = desired["workers"].clone();
-                machine["desired_revision"] =
-                    json!(control::revision(&self.ctx.node, &desired["workers"]));
+                machine["desired_revision"] = json!(super::projects::revision(
+                    &self.ctx.node,
+                    &desired["workers"],
+                    &desired["projects"]
+                ));
+                machine["projects"] = desired.get("projects").cloned().unwrap_or(json!({}));
+                machine["workspace"] = desired
+                    .get("workspace")
+                    .cloned()
+                    .unwrap_or(json!("~/Workspace"));
                 if host == "local" {
                     machine["applied_revision"] = applied["revision"].clone();
                     machine["configuration_error"] = applied["error"].clone();
@@ -287,11 +295,12 @@ impl Supervisor {
                     }
                     if let Some(worker) = workers.iter_mut().find(|w| w["id"] == definition["id"]) {
                         worker["retiring"] = json!(
-                            !config["document"]["machines"][host]["workers"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .any(|w| w["id"] == definition["id"])
+                            definition["retiring"] == true
+                                || !config["document"]["machines"][host]["workers"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .any(|w| w["id"] == definition["id"])
                         );
                     }
                 }
@@ -648,8 +657,11 @@ impl Supervisor {
                 &json!({"machines":{host:{"workers":workers}}}),
                 doc,
             );
-            let current =
-                control::revision(&self.ctx.node, &effective["machines"][host]["workers"]);
+            let current = super::projects::revision(
+                &self.ctx.node,
+                &effective["machines"][host]["workers"],
+                &effective["machines"][host]["projects"],
+            );
             for change in changes {
                 let key = format!("config:{host}:{}", change["id"].as_str().unwrap_or(""));
                 let revision = match revisions.entry(key.clone()) {
@@ -662,16 +674,21 @@ impl Supervisor {
                 {
                     continue;
                 }
-                let retired = workers
+                let retired = doc["machines"][host]["workers"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .any(|w| w["id"] == change["id"])
-                    && !doc["machines"][host]["workers"]
+                    .any(|w| w["id"] == change["id"] && w["retiring"] == true)
+                    || workers
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .any(|w| w["id"] == change["id"]);
+                        .any(|w| w["id"] == change["id"])
+                        && !doc["machines"][host]["workers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|w| w["id"] == change["id"]);
                 let conflict = change["base_revision"] != current || retired;
                 if !conflict {
                     if !doc["machines"][host]["workers"].is_array() {
@@ -1053,12 +1070,13 @@ impl Supervisor {
                 .unwrap_or(&[]),
             &self.configured(host, &fallback)?,
         )?;
-        let mut revision = control::revision(&self.ctx.node, &workers);
+        let mut projects = super::projects::desired(&self.ctx, host)?;
+        let mut revision = super::projects::revision(&self.ctx.node, &workers, &projects);
         self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         send(
             &mut *input.lock().unwrap(),
-            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         peer.set(node.to_owned()).unwrap();
         let mut last_message = Instant::now();
@@ -1158,7 +1176,9 @@ impl Supervisor {
                         )?;
                     }
                     let current = self.configured(host, &workers)?;
-                    let updated = control::revision(&self.ctx.node, &current);
+                    let current_projects = super::projects::desired(&self.ctx, host)?;
+                    let updated =
+                        super::projects::revision(&self.ctx.node, &current, &current_projects);
                     if updated != revision
                         || !self.machine(host)["configuration_error"].is_null()
                         || message["local_config"]
@@ -1166,10 +1186,11 @@ impl Supervisor {
                             .is_some_and(|changes| !changes.is_empty())
                     {
                         workers = current;
+                        projects = current_projects;
                         revision = updated;
                         send(
                             &mut *input.lock().unwrap(),
-                            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,
@@ -1405,8 +1426,28 @@ impl Supervisor {
                 desired.as_array_mut().unwrap().push(discovered.clone());
             }
         }
-        let mut main = json!({"role":"controller","workers":desired,"declarative":configuration::is_yaml(&self.ctx.desired),"revision":control::revision(&self.ctx.node, &desired)});
-        let failures = control::configure_workers(&self.ctx, desired.as_array().unwrap())?;
+        let projects = super::projects::desired(&self.ctx, "local")?;
+        let revision = super::projects::revision(&self.ctx.node, &desired, &projects);
+        let retiring: Vec<_> = desired
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|w| matches!(w["intent"].as_str(), Some("drain" | "stop")))
+            .cloned()
+            .collect();
+        let prepared = super::projects::prepare(&self.ctx, &projects, &desired);
+        let (desired, failures) = match prepared {
+            Ok(workers) => {
+                let failures = control::configure_workers(&self.ctx, workers.as_array().unwrap())?;
+                (workers, failures)
+            }
+            Err(error) => {
+                let mut failures = control::apply_workers_locked(&self.ctx, &retiring)?;
+                failures.push(error.to_string());
+                (desired, failures)
+            }
+        };
+        let mut main = json!({"role":"controller","workers":desired,"projects":projects,"declarative":configuration::is_yaml(&self.ctx.desired),"revision":revision});
         if !failures.is_empty() {
             self.event("local", "configuration", &failures.join("; "));
             main["revision"] = Value::Null;
@@ -1707,6 +1748,11 @@ impl Supervisor {
     }
     fn configuration_request(&self, request: &Value) -> Result<Value> {
         let _configuration = self.configuration.lock().unwrap();
+        if let Some(host) = request["machine_update"]["host"].as_str() {
+            if host != "local" && !self.ctx.inventory()?.iter().any(|m| m["host"] == host) {
+                return Err(invalid("Machine is not in the configured inventory"));
+            }
+        }
         configuration::request(&self.ctx, request)
     }
 }
@@ -2377,6 +2423,43 @@ mod tests {
         assert_eq!(
             app.authoritative(&json!({"kind":"status"})).unwrap()["ok"],
             true
+        );
+    }
+
+    #[test]
+    fn retiring_workers_reject_offline_resurrection_and_allow_explicit_stop() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(&app.ctx.desired, "machines: {local: {workers: [{id: removed, intent: drain, retiring: true, config: {}}]}}\n").unwrap();
+        let old = configuration::load(&app.ctx).unwrap()["runtime"]["machines"]["local"]["workers"]
+            .clone();
+        let mut change = old[0].clone();
+        change["intent"] = json!("running");
+        change["local_revision"] = json!(1);
+        change["base_revision"] = json!(control::revision(&app.ctx.node, &old));
+        app.local_yaml_config("local", &[change], &old).unwrap();
+        assert_eq!(
+            configuration::load(&app.ctx).unwrap()["document"]["machines"]["local"]["workers"][0]["intent"],
+            "drain"
+        );
+        app.signal(
+            &json!({"host":"local","worker":"removed","signal":"stop","id":"kill-retiring"}),
+        )
+        .unwrap();
+        let saved = configuration::load(&app.ctx).unwrap();
+        assert_eq!(
+            saved["document"]["machines"]["local"]["workers"][0]["intent"],
+            "stop"
+        );
+        assert_eq!(
+            saved["document"]["machines"]["local"]["workers"][0]["retiring"],
+            true
+        );
+        assert!(
+            app.signal(
+                &json!({"host":"local","worker":"removed","signal":"resume","id":"invalid-resume"})
+            )
+            .is_err()
         );
     }
 

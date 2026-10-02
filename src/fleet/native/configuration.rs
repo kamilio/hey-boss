@@ -35,7 +35,12 @@ struct Document {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Machine {
+    #[serde(default)]
     workers: Vec<Worker>,
+    #[serde(default)]
+    projects: BTreeMap<String, super::projects::Checkout>,
+    #[serde(default = "super::projects::default_workspace")]
+    workspace: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +48,8 @@ struct Worker {
     id: String,
     intent: String,
     config: Settings,
+    #[serde(default)]
+    retiring: bool,
 }
 
 pub(super) fn is_yaml(path: &Path) -> bool {
@@ -65,6 +72,13 @@ fn parse(text: &str) -> Result<Value> {
             return Err(invalid("Invalid machine name"));
         }
         let mut workers = vec![];
+        super::projects::validate_path(&machine.workspace)?;
+        for (id, checkout) in &machine.projects {
+            if super::projects::identity(&checkout.git)? != *id {
+                return Err(invalid("Project ID must match its Git repository"));
+            }
+            super::projects::validate_path(&checkout.path)?;
+        }
         for worker in machine.workers {
             if worker.id.is_empty()
                 || worker.id.len() > 128
@@ -87,6 +101,9 @@ fn parse(text: &str) -> Result<Value> {
                 ));
             }
             let mut settings = worker.config;
+            if worker.retiring && !matches!(worker.intent.as_str(), "drain" | "stop") {
+                return Err(invalid("Removed workers must drain or stop"));
+            }
             settings.enabled = worker.intent == "running";
             if !settings.directory.is_empty()
                 && (settings.projects.len() != 1
@@ -110,9 +127,20 @@ fn parse(text: &str) -> Result<Value> {
             structural.directory.clear();
             structural.directories.clear();
             validate_settings(&structural)?;
-            workers.push(json!({"id":worker.id,"intent":worker.intent,"config":settings}));
+            let mut row = json!({"id":worker.id,"intent":worker.intent,"config":settings});
+            if worker.retiring {
+                row["retiring"] = json!(true);
+            }
+            workers.push(row);
         }
-        machines.insert(host, json!({"workers":workers}));
+        let mut value = json!({"workers":workers});
+        if !machine.projects.is_empty() {
+            value["projects"] = json!(machine.projects);
+        }
+        if machine.workspace != super::projects::default_workspace() {
+            value["workspace"] = json!(machine.workspace);
+        }
+        machines.insert(host, value);
     }
     Ok(json!({"machines":machines}))
 }
@@ -179,7 +207,7 @@ fn compact(value: &Value) -> Value {
             worker
                 .as_object_mut()
                 .unwrap()
-                .retain(|k, _| matches!(k.as_str(), "id" | "intent" | "config"));
+                .retain(|k, _| matches!(k.as_str(), "id" | "intent" | "config" | "retiring"));
             if let Some(config) = worker["config"].as_object_mut() {
                 config.retain(|k, v| k != "enabled" && defaults.get(k) != Some(v));
             }
@@ -367,6 +395,14 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
     let current = read_text(&ctx.desired)?;
     let revision = context::hash(&json!(current));
     let mut request = request.clone();
+    if let Some(update) = request.get("machine_update").cloned() {
+        if request.get("text").is_some() || request.get("worker_update").is_some() {
+            return Err(invalid("Choose one configuration edit"));
+        }
+        let mut doc = parse(&current)?;
+        machine_update(&mut doc, &update)?;
+        request["text"] = json!(serde_yaml_ng::to_string(&compact(&doc))?);
+    }
     if let Some(update) = request
         .get("worker_update")
         .cloned()
@@ -427,6 +463,108 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
     )
 }
 
+fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
+    let host = update["host"]
+        .as_str()
+        .filter(|h| context::valid_host(h))
+        .ok_or_else(|| invalid("Choose a machine"))?;
+    let machine = &mut doc["machines"][host];
+    if !machine.is_object() {
+        *machine = json!({"workers":[]});
+    }
+    match update["action"].as_str() {
+        Some("add") => {
+            let id = update["id"]
+                .as_str()
+                .ok_or_else(|| invalid("Missing worker ID"))?;
+            let project_ids: Vec<_> = machine["projects"]
+                .as_object()
+                .into_iter()
+                .flat_map(|p| p.keys())
+                .cloned()
+                .collect();
+            let workers = machine["workers"].as_array_mut().unwrap();
+            if workers.iter().any(|w| w["id"] == id) {
+                return Err(invalid("Worker ID already exists"));
+            }
+            let config = if let Some(template) = update["template"].as_str() {
+                workers
+                    .iter()
+                    .find(|w| w["id"] == template && w["retiring"] != true)
+                    .ok_or_else(|| invalid("Template worker is no longer available"))?["config"]
+                    .clone()
+            } else {
+                let mut settings = Settings::default();
+                settings.projects = project_ids;
+                if let Some(slots) = update["concurrency"].as_u64() {
+                    settings.concurrency = slots
+                        .try_into()
+                        .map_err(|_| invalid("Invalid agent slot count"))?;
+                }
+                json!(settings)
+            };
+            workers.push(json!({"id":id,"intent":"running","config":config}));
+        }
+        Some("remove") => {
+            let worker = machine["workers"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|w| w["id"] == update["id"])
+                .ok_or_else(|| invalid("Worker is no longer configured"))?;
+            worker["intent"] = json!("drain");
+            worker["retiring"] = json!(true);
+        }
+        Some("project") => {
+            let git = update["git"].as_str().unwrap_or("").trim();
+            let id = super::projects::identity(git)?;
+            let workspace = update["workspace"]
+                .as_str()
+                .unwrap_or("~/Workspace")
+                .trim()
+                .trim_end_matches('/');
+            super::projects::validate_path(workspace)?;
+            let name = id.rsplit('/').next().unwrap();
+            let path = update["path"]
+                .as_str()
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| p.trim().to_owned())
+                .unwrap_or_else(|| format!("{workspace}/{name}"));
+            super::projects::validate_path(&path)?;
+            if let Some(worker_id) = update["worker"].as_str().filter(|s| !s.is_empty()) {
+                let worker = machine["workers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|w| w["id"] == worker_id && w["retiring"] != true)
+                    .ok_or_else(|| invalid("Worker is no longer configured"))?;
+                let settings: &mut Value = &mut worker["config"];
+                // Preserve a single-project explicit checkout when expanding its scope.
+                if let Some(directory) = settings["directory"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                {
+                    let previous = settings["projects"][0].as_str().unwrap().to_owned();
+                    settings["directories"][previous] = json!(directory);
+                    settings["directory"] = json!("");
+                }
+                let selected = settings["projects"].as_array_mut().unwrap();
+                if !selected.iter().any(|p| p == &id) {
+                    selected.push(json!(id));
+                }
+                if let Some(directories) = settings["directories"].as_object_mut() {
+                    directories.remove(&id);
+                }
+            }
+            machine["workspace"] = json!(workspace);
+            machine["projects"][&id] = json!({"git":git,"path":path});
+        }
+        _ => return Err(invalid("Unknown machine edit")),
+    }
+    Ok(())
+}
+
 fn changes(old: &Value, new: &Value) -> Vec<Value> {
     let flatten = |doc: &Value| -> BTreeMap<(String, String), Value> {
         doc["machines"]
@@ -463,6 +601,71 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn machine_controls_add_drain_and_remember_project_paths() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::write(&ctx.desired, "machines: {local: {workers: []}}\n").unwrap();
+        let first = request(ctx, &json!({})).unwrap();
+        let add = json!({"host":"local","action":"add","id":"new-worker"});
+        let preview = request(
+            ctx,
+            &json!({"machine_update":add,"revision":first["revision"]}),
+        )
+        .unwrap();
+        assert_eq!(preview["changes"][0]["action"], "add");
+        assert_eq!(
+            request(ctx, &json!({})).unwrap()["revision"],
+            first["revision"]
+        );
+        let saved = request(
+            ctx,
+            &json!({"machine_update":add,"revision":first["revision"],"save":true}),
+        )
+        .unwrap();
+        assert_eq!(
+            saved["document"]["machines"]["local"]["workers"][0]["id"],
+            "new-worker"
+        );
+        assert!(
+            request(
+                ctx,
+                &json!({"machine_update":add,"revision":first["revision"],"save":true})
+            )
+            .is_err()
+        );
+        let project = json!({"host":"local","action":"project","git":"git@github.com:acme/my-project.git","workspace":"~/Work","worker":"new-worker"});
+        let saved = request(
+            ctx,
+            &json!({"machine_update":project,"revision":saved["revision"],"save":true}),
+        )
+        .unwrap();
+        let machine = &saved["document"]["machines"]["local"];
+        assert_eq!(machine["workspace"], "~/Work");
+        assert_eq!(
+            machine["projects"]["github.com/acme/my-project"]["path"],
+            "~/Work/my-project"
+        );
+        assert_eq!(
+            machine["workers"][0]["config"]["projects"],
+            json!(["github.com/acme/my-project"])
+        );
+        let removed = request(ctx, &json!({"machine_update":{"host":"local","action":"remove","id":"new-worker"},"revision":saved["revision"],"save":true})).unwrap();
+        assert_eq!(
+            removed["document"]["machines"]["local"]["workers"][0]["intent"],
+            "drain"
+        );
+        assert_eq!(
+            removed["document"]["machines"]["local"]["workers"][0]["retiring"],
+            true
+        );
+        let reloaded = request(ctx, &json!({})).unwrap();
+        assert_eq!(
+            reloaded["document"]["machines"]["local"]["workspace"],
+            "~/Work"
+        );
+    }
 
     struct Fixture {
         ctx: Context,

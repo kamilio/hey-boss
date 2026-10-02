@@ -50,7 +50,7 @@ fn git_output(cwd: &str, args: &[&str]) -> Option<String> {
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
-fn normalize_origin(origin: &str) -> Option<String> {
+pub fn normalize_origin(origin: &str) -> Option<String> {
     // Query/fragment strings can carry credentials and are never repository identity.
     let value = origin.trim().split(['?', '#']).next()?;
     let (authority, path, scheme) = if let Some((scheme, rest)) = value.split_once("://") {
