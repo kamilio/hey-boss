@@ -76,19 +76,32 @@ pub(crate) fn worker_event_tails(db: &HotConnection, runs: &[&str]) -> Result<Ev
     Ok(events)
 }
 
-pub(crate) fn archive_runs(db: &HotConnection, now: i64) -> Result<usize> {
+#[cfg(test)]
+pub(super) fn archive_runs(db: &HotConnection, now: i64) -> Result<usize> {
+    let cleanup: Option<String> = db.query_row("SELECT id FROM worker_runs WHERE archive_cleanup=1 AND finished_at IS NOT NULL LIMIT 1", [], |r|r.get(0)).optional()?;
+    if let Some(id) = cleanup
+        && cleanup_run(db, &id)? > 0
+    {
+        return Ok(1);
+    }
+    let cutoff = now.saturating_sub(GRACE_MS);
+    let id: Option<String> = db.query_row("SELECT id FROM worker_runs WHERE archive_pending=1 AND finished_at IS NOT NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1) ORDER BY finished_at,id LIMIT 1", [cutoff], |r|r.get(0)).optional()?;
+    match id {
+        Some(id) => archive_run(db, now, &id),
+        None => Ok(0),
+    }
+}
+
+pub(super) fn archive_run(db: &HotConnection, now: i64, run: &str) -> Result<usize> {
     if !db.is_autocommit() {
         return Err(unavailable(
             "Archive maintenance cannot run inside a hot transaction",
         ));
     }
-    if cleanup_runs(db)? > 0 {
-        return Ok(1);
-    }
     let cutoff = now.saturating_sub(GRACE_MS);
     let snapshot = db.read_transaction()?;
     let saved: Option<(String,String,String,i64,i64,Option<String>,Option<String>)> = snapshot.query_row(
-        "SELECT id,job,expanded_prompt,updated_at,finished_at,events_archive_key,archive_key FROM worker_runs WHERE archive_pending=1 AND finished_at IS NOT NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1) ORDER BY finished_at,id LIMIT 1", [cutoff],
+        "SELECT id,job,expanded_prompt,updated_at,finished_at,events_archive_key,archive_key FROM worker_runs WHERE id=?2 AND archive_pending=1 AND finished_at IS NOT NULL AND finished_at<=?1 AND updated_at<=?1 AND NOT EXISTS(SELECT 1 FROM worker_events e WHERE e.run_id=worker_runs.id AND e.created_at>?1)", params![cutoff,run],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))
     ).optional()?;
     let Some((id, job, prompt, updated, finished, previous_events, previous_job)) = saved else {
@@ -147,7 +160,7 @@ pub(crate) fn archive_runs(db: &HotConnection, now: i64) -> Result<usize> {
     let changed = tx.execute("UPDATE worker_runs SET job=?6,expanded_prompt='',archive_key=?7,events_archive_key=?8,archive_event_id=?12,archive_pending=0,archive_cleanup=1 WHERE id=?1 AND job=?2 AND expanded_prompt=?3 AND updated_at=?4 AND finished_at=?5 AND archive_key IS ?11 AND (SELECT max(id) FROM worker_events WHERE run_id=?1) IS ?9 AND events_archive_key IS ?10", params![id,job,prompt,updated,finished,compact.to_string(),job_key,events_key,last_id,previous_events,previous_job,header["last"].as_i64().unwrap_or(0)])?;
     tx.commit()?;
     if changed > 0 {
-        cleanup_runs(db)?;
+        cleanup_run(db, &id)?;
     }
     Ok(changed)
 }
@@ -177,8 +190,8 @@ fn save_part(archive: &Archive, header: &mut Value, events: Vec<Value>) -> Resul
     Ok(())
 }
 
-fn cleanup_runs(db: &HotConnection) -> Result<usize> {
-    let saved:Option<(String,String,i64)>=db.query_row("SELECT id,events_archive_key,archive_event_id FROM worker_runs WHERE archive_cleanup=1 AND finished_at IS NOT NULL LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+pub(super) fn cleanup_run(db: &HotConnection, run: &str) -> Result<usize> {
+    let saved:Option<(String,String,i64)>=db.query_row("SELECT id,events_archive_key,archive_event_id FROM worker_runs WHERE id=?1 AND archive_cleanup=1 AND finished_at IS NOT NULL",[run],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
     let Some((run, key, last)) = saved else {
         return Ok(0);
     };

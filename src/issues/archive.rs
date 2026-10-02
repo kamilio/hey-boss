@@ -1,7 +1,11 @@
 //! Cold payloads are published durably before a hot record can reference them.
 
 mod runs;
-pub(crate) use runs::{archive_runs, worker_event_tails, worker_payload};
+#[cfg(test)]
+use runs::archive_runs;
+pub(crate) use runs::{worker_event_tails, worker_payload};
+mod maintenance;
+pub(crate) use maintenance::Maintenance;
 mod history;
 pub(crate) mod transfer;
 pub(crate) use history::{
@@ -242,7 +246,8 @@ pub(crate) fn receipt_response(
 
 /// The cold commit precedes the conditional hot update. Neither a concurrent
 /// pass nor a failed hot commit can lose a receipt or repeat its side effects.
-pub(crate) fn archive_receipts(db: &crate::database::Connection, now: i64) -> Result<usize> {
+#[cfg(test)]
+fn archive_receipts(db: &crate::database::Connection, now: i64) -> Result<usize> {
     if !db.is_autocommit() {
         return Err(unavailable(
             "Archive maintenance cannot run inside a hot transaction",
@@ -256,19 +261,10 @@ pub(crate) fn archive_receipts(db: &crate::database::Connection, now: i64) -> Re
     if candidates.is_empty() {
         return Ok(0);
     }
-    let archive = Archive::open(&archive_path(db)?)?;
     let started = std::time::Instant::now();
     let mut moved = 0;
     for (project, actor, request, created) in candidates {
-        // Read one payload at a time: a batch of large responses must not hold
-        // eight times the wire limit in memory while compressing its first row.
-        let response: Option<String> = db.query_row("SELECT response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND created_at=?4 AND archive_key IS NULL", params![project,actor,request,created], |r| r.get(0)).optional()?;
-        let Some(response) = response else {
-            continue;
-        };
-        let value = serde_json::from_str(&response)?;
-        let key = archive.put("receipt", &value)?;
-        moved += db.execute("UPDATE requests SET response='',archive_key=?6 WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND response=?4 AND created_at=?5 AND archive_key IS NULL", params![project,actor,request,response,created,key])?;
+        moved += archive_receipt(db, &project, &actor, &request, created)?;
         if started.elapsed() >= Duration::from_millis(25) {
             break;
         }
@@ -276,12 +272,21 @@ pub(crate) fn archive_receipts(db: &crate::database::Connection, now: i64) -> Re
     Ok(moved)
 }
 
-pub(crate) fn maintain(db: &crate::database::Connection, now: i64) -> Result<usize> {
-    let (_, version) = db.check_schema()?;
-    if version != Store::schema_version() {
+fn archive_receipt(
+    db: &crate::database::Connection,
+    project: &str,
+    actor: &str,
+    request: &str,
+    created: i64,
+) -> Result<usize> {
+    let response: Option<String> = db.query_row("SELECT response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND created_at=?4 AND archive_key IS NULL", params![project,actor,request,created], |r| r.get(0)).optional()?;
+    let Some(response) = response else {
         return Ok(0);
-    }
-    Ok(archive_receipts(db, now)? + archive_runs(db, now)?)
+    };
+    let value = serde_json::from_str(&response)?;
+    let archive = Archive::open(&archive_path(db)?)?;
+    let key = archive.put("receipt", &value)?;
+    Ok(db.execute("UPDATE requests SET response='',archive_key=?6 WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND response=?4 AND created_at=?5 AND archive_key IS NULL", params![project,actor,request,response,created,key])?)
 }
 
 #[cfg(test)]

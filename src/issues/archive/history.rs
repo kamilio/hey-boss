@@ -496,8 +496,16 @@ fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
 }
 
 pub(crate) fn cleanup_history(db: &HotConnection) -> Result<usize> {
-    let target: Option<(String,i64,String)> = db.query_row("SELECT project_id,number,archive_key FROM issues WHERE archive_key IS NOT NULL AND archive_cleanup=1 AND archive_restoring=0 LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let Some((project, number, key)) = target else {
+    let target: Option<(String,i64)> = db.query_row("SELECT project_id,number FROM issues WHERE archive_key IS NOT NULL AND archive_cleanup=1 AND archive_restoring=0 LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    match target {
+        Some((project, number)) => cleanup_issue(db, &project, number),
+        None => Ok(0),
+    }
+}
+
+pub(super) fn cleanup_issue(db: &HotConnection, project: &str, number: i64) -> Result<usize> {
+    let key: Option<String> = db.query_row("SELECT archive_key FROM issues WHERE project_id=?1 AND number=?2 AND archive_key IS NOT NULL AND archive_cleanup=1 AND archive_restoring=0", params![project,number], |r|r.get(0)).optional()?;
+    let Some(key) = key else {
         return Ok(0);
     };
     let archive = Archive::read(&archive_path(db)?)?;
