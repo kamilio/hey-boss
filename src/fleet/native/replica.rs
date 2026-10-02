@@ -80,9 +80,19 @@ pub(super) fn state_get(db: &Connection, key: &str, default: Value) -> Result<Va
     })
 }
 pub(super) fn state_set(db: &Connection, key: &str, value: &Value) -> Result<()> {
+    let encoded = value.to_string();
+    // A repeated status save needs only a WAL read, even while another client
+    // owns the writer. Changed values retain the atomic upsert below.
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_state WHERE key=?1 AND value=?2)",
+        [key, &encoded],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     db.execute(
         "INSERT INTO fleet_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [key, &value.to_string()],
+        [key, &encoded],
     )?;
     Ok(())
 }
@@ -2177,6 +2187,77 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unchanged_fleet_state_does_not_queue_behind_a_writer() {
+        let f = Fixture::new();
+        ensure_metadata(&f.db).unwrap();
+        let value = json!({"build":"same","workers":[1,2,3]});
+        state_set(&f.db, "desired", &value).unwrap();
+        state_set(&f.db, "null", &Value::Null).unwrap();
+        f.db.execute_batch("CREATE TABLE state_writes(kind TEXT);
+            CREATE TRIGGER state_insert_audit AFTER INSERT ON fleet_state BEGIN INSERT INTO state_writes VALUES('insert'); END;
+            CREATE TRIGGER state_update_audit AFTER UPDATE ON fleet_state BEGIN INSERT INTO state_writes VALUES('update'); END;").unwrap();
+        let mut owner = crate::database::Owner::start(&f.path).unwrap().unwrap();
+        let writer = Connection::connect(&f.path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let reader = Connection::connect(&f.path).unwrap();
+        let repeated = value.clone();
+        let (done, completed) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = state_set(&reader, "desired", &repeated);
+            done.send(result.is_ok()).unwrap();
+            result.unwrap();
+        });
+        let finished_while_locked = completed
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok();
+        writer.execute_batch("COMMIT").unwrap();
+        worker.join().unwrap();
+        drop(writer);
+        let (db, transport) = crate::database::tests::measured_connection(&f.path);
+        for _ in 0..128 {
+            state_set(&db, "desired", &value).unwrap();
+            state_set(&db, "null", &Value::Null).unwrap();
+        }
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        let writes: i64 =
+            f.db.query_row("SELECT count(*) FROM state_writes", [], |r| r.get(0))
+                .unwrap();
+        eprintln!(
+            "Unchanged fleet state: {commands} RPCs, {steps} query steps, {writes} writes, completed while writer held={finished_while_locked:?}"
+        );
+        // Changed values and missing keys still save, including JSON null.
+        state_set(&f.db, "new", &Value::Null).unwrap();
+        state_set(&f.db, "desired", &json!({"build":"new"})).unwrap();
+        assert_eq!(
+            state_get(&f.db, "desired", Value::Null).unwrap(),
+            json!({"build":"new"})
+        );
+        assert_eq!(
+            f.db.query_row("SELECT value FROM fleet_state WHERE key='new'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "null"
+        );
+        f.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        state_set(&f.db, "desired", &json!("temporary")).unwrap();
+        state_set(&f.db, "desired", &json!("temporary")).unwrap();
+        f.db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            state_get(&f.db, "desired", Value::Null).unwrap(),
+            json!({"build":"new"})
+        );
+        assert_eq!(
+            finished_while_locked,
+            Some(true),
+            "Unchanged state waited for the writer"
+        );
+        assert_eq!(writes, 0, "Unchanged state caused writes");
+    }
+
     #[test]
     fn on_demand_numbers_refresh_stale_and_exhausted_ranges_without_workers() {
         let mut f = Fixture::new();
