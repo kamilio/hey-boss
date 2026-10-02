@@ -1,5 +1,111 @@
 use super::*;
 
+fn writer(db: rusqlite::Connection) -> Writer {
+    Writer {
+        db: Mutex::new(db),
+        waiters: Mutex::new(VecDeque::new()),
+        ready: Condvar::new(),
+        next: AtomicUsize::new(0),
+    }
+}
+
+#[test]
+fn writer_release_cannot_notify_between_availability_check_and_wait() {
+    let writer = writer(rusqlite::Connection::open_in_memory().unwrap());
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let writer_ref = &writer;
+        let stop_ref = &stop;
+        let owner = scope.spawn(move || {
+            let (stream, _peer) = UnixStream::pair().unwrap();
+            let lease = acquire(writer_ref, &stream, stop_ref).unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lease);
+            released_tx.send(()).unwrap();
+        });
+        held_rx.recv().unwrap();
+        // Reproduce acquire's check-to-wait gap while holding its queue lock.
+        let waiters = writer.waiters.lock().unwrap();
+        assert!(matches!(
+            writer.db.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        release_tx.send(()).unwrap();
+        let released_before_wait = released_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        let started = Instant::now();
+        let (waiters, result) = writer
+            .ready
+            .wait_timeout(waiters, Duration::from_secs(1))
+            .unwrap();
+        drop(waiters);
+        owner.join().unwrap();
+        eprintln!(
+            "Writer release finished before wait: {released_before_wait}; wake timed out: {}; wait: {:?}",
+            result.timed_out(),
+            started.elapsed()
+        );
+        assert!(
+            !released_before_wait,
+            "Writer release escaped the check-to-wait synchronization"
+        );
+        assert!(!result.timed_out(), "Writer release notification was lost");
+        assert!(writer.db.try_lock().is_ok());
+    });
+}
+
+#[test]
+fn writer_handoff_keeps_fifo_order_after_a_queued_client_disconnects() {
+    let writer = writer(rusqlite::Connection::open_in_memory().unwrap());
+    let stop = AtomicBool::new(false);
+    let (stream, _peer) = UnixStream::pair().unwrap();
+    let lease = acquire(&writer, &stream, &stop).unwrap();
+    std::thread::scope(|scope| {
+        let (sent, received) = std::sync::mpsc::channel();
+        let mut peers = Vec::new();
+        for index in 0..4 {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            peers.push(peer);
+            let sent = sent.clone();
+            let writer = &writer;
+            let stop = &stop;
+            scope.spawn(move || {
+                let lease = acquire(writer, &stream, stop);
+                sent.send((index, lease.is_ok())).unwrap();
+                drop(lease);
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while writer.waiters.lock().unwrap().len() != index + 1 {
+                assert!(
+                    Instant::now() < deadline,
+                    "Client did not join the writer queue"
+                );
+                std::thread::yield_now();
+            }
+        }
+        // The first client leaves while the original transaction still owns
+        // the writer; its cancellation must not let later arrivals overtake.
+        drop(peers.remove(0));
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            (0, false)
+        );
+        assert!(received.try_recv().is_err());
+        drop(lease);
+        for index in 1..4 {
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(5)).unwrap(),
+                (index, true)
+            );
+        }
+    });
+    assert!(writer.waiters.lock().unwrap().is_empty());
+    assert!(writer.db.try_lock().is_ok());
+}
+
 fn run(db: &rusqlite::Connection, command: Command) -> Result<Reply> {
     let (mut output, _input) = UnixStream::pair().unwrap();
     let mut reply = Reply::default();
@@ -37,13 +143,12 @@ fn writer_release_rolls_back_and_restores_foreign_keys_and_full_sync() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     db.execute_batch("CREATE TABLE changes(value INTEGER)")
         .unwrap();
-    let writer = Mutex::new(db);
-    let ready = Condvar::new();
+    let writer = writer(db);
     {
-        let lease = Lease(Some(writer.lock().unwrap()), &ready);
+        let lease = Lease(Some(writer.db.lock().unwrap()), &writer);
         lease.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA synchronous=OFF; BEGIN; INSERT INTO changes VALUES(1)").unwrap();
     }
-    let db = writer.lock().unwrap();
+    let db = writer.db.lock().unwrap();
     assert!(db.is_autocommit());
     assert!(
         db.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY)
@@ -166,10 +271,9 @@ fn repeated_service_statements_compile_once_and_keep_per_query_work_counts() {
         assert!(matches!(reply.rows[0][0], wire::SqlValue::Integer(value) if value == id*10));
         assert_eq!(reply.steps, *first_steps.get_or_insert(reply.steps));
     }
-    let writer = Mutex::new(db);
-    let ready = Condvar::new();
+    let writer = writer(db);
     for value in 0..128 {
-        let lease = Lease(Some(writer.lock().unwrap()), &ready);
+        let lease = Lease(Some(writer.db.lock().unwrap()), &writer);
         let mut reply = Reply::default();
         execute(
             &lease,
@@ -191,6 +295,7 @@ fn repeated_service_statements_compile_once_and_keep_per_query_work_counts() {
     );
     assert_eq!(
         writer
+            .db
             .lock()
             .unwrap()
             .query_row("SELECT value FROM counters WHERE id=1", [], |row| row

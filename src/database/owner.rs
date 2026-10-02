@@ -337,7 +337,7 @@ struct Writer {
     ready: Condvar,
     next: AtomicUsize,
 }
-struct Lease<'a>(Option<MutexGuard<'a, rusqlite::Connection>>, &'a Condvar);
+struct Lease<'a>(Option<MutexGuard<'a, rusqlite::Connection>>, &'a Writer);
 impl std::ops::Deref for Lease<'_> {
     type Target = rusqlite::Connection;
     fn deref(&self) -> &Self::Target {
@@ -357,9 +357,12 @@ impl Drop for Lease<'_> {
                 true,
             );
             let _ = db.execute_batch("PRAGMA synchronous=FULL;");
+            // Pair availability changes with acquire's check-to-wait lock so
+            // release cannot notify just before the next writer goes to sleep.
+            let _waiters = self.1.waiters.lock().unwrap();
             drop(db);
+            self.1.ready.notify_all();
         }
-        self.1.notify_all();
     }
 }
 fn acquire<'a>(
@@ -381,7 +384,7 @@ fn acquire<'a>(
             match writer.db.try_lock() {
                 Ok(guard) => {
                     waiters.pop_front();
-                    return Ok(Lease(Some(guard), &writer.ready));
+                    return Ok(Lease(Some(guard), writer));
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
                     waiters.pop_front();
