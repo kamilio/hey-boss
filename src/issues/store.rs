@@ -275,6 +275,7 @@ fn migrate_issue_states(db: &Connection) -> Result<()> {
     }
     Ok(())
 }
+const COMMENT_RESOLUTION_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_comment_resolution ON events(project_id,issue_number,json_extract(data,'$.comment_id'),created_at DESC,id DESC) WHERE action IN ('comment_resolved','comment_unresolved')";
 const PAGE_BYTES: usize = 16 * 1024 * 1024;
 
 fn comment_page(
@@ -307,32 +308,22 @@ fn comment_page(
         }
         comments.push(comment);
     }
-    // Only scan resolution history when this page actually contains comments.
+    // Fetch one latest resolution per displayed comment, independently of how
+    // much history belongs to other comments on this issue.
     if !comments.is_empty() {
-        let visible: std::collections::HashSet<i64> =
-            comments.iter().map(|c| c["id"].as_i64().unwrap()).collect();
-        let mut stmt = db.prepare("SELECT json_extract(data,'$.comment_id'),action FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') ORDER BY created_at DESC,id DESC")?;
-        let mut states = std::collections::HashMap::new();
-        let mut rows = stmt.query(params![project.id, number])?;
-        while let Some(row) = rows.next()? {
-            let id = row.get::<_, i64>(0)?;
-            if !visible.contains(&id) {
-                continue;
-            }
-            states
-                .entry(id)
-                .or_insert(row.get::<_, String>(1)? == "comment_resolved");
-            if states.len() == visible.len() {
-                break;
-            }
-        }
+        let visible: Vec<i64> = comments
+            .iter()
+            .map(|comment| comment["id"].as_i64().unwrap())
+            .collect();
+        let mut stmt = db.prepare("SELECT visible.value,coalesce((SELECT action='comment_resolved' FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('comment_resolved','comment_unresolved') AND json_extract(data,'$.comment_id')=visible.value ORDER BY created_at DESC,id DESC LIMIT 1),0) FROM json_each(?3) visible")?;
+        let states = stmt
+            .query_map(
+                params![project.id, number, serde_json::to_string(&visible)?],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            )?
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
         for comment in &mut comments {
-            comment["resolved"] = json!(
-                states
-                    .get(&comment["id"].as_i64().unwrap())
-                    .copied()
-                    .unwrap_or(false)
-            );
+            comment["resolved"] = json!(states[&comment["id"].as_i64().unwrap()]);
         }
     }
     let next = u64::from(offset) + comments.len() as u64;
@@ -1237,13 +1228,14 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin')", [], |r| r.get::<_, i64>(0))? < 8 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_comment_resolution')", [], |r| r.get::<_, i64>(0))? < 9 {
             db.execute_batch(mindmap::INDEXES)?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
             db.execute_batch(registry::PROJECT_QUEUE_INDEX)?;
             db.execute_batch(registry::LEGACY_RUNTIME_INDEX)?;
             db.execute_batch(registry::PR_ORIGIN_INDEX)?;
+            db.execute_batch(COMMENT_RESOLUTION_INDEX)?;
             db.execute_batch(transfer::INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
@@ -2990,6 +2982,89 @@ CREATE TABLE requests(project_id TEXT NOT NULL REFERENCES projects(id), actor TE
 #[cfg(test)]
 mod contention_tests {
     use super::*;
+
+    #[test]
+    fn comment_resolution_lookup_skips_hidden_history() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-comment-resolution-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Comments','Comments',3);
+                INSERT INTO agents VALUES('creator','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+                VALUES('named:Comments',1,'One','','open','creator',0,0,1,'[]'),('named:Comments',2,'Two','','open','creator',0,0,1,'[]');
+                INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES
+                (1,'named:Comments',1,'creator','Hidden',1),(2,'named:Comments',1,'creator','Resolved',2),
+                (3,'named:Comments',1,'creator','Reopened',3),(4,'named:Comments',1,'creator','Never resolved',4);
+                INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES
+                ('named:Comments',1,'creator','comment_resolved',20,'{\"comment_id\":2}'),
+                ('named:Comments',1,'creator','comment_unresolved',10,'{\"comment_id\":2}'),
+                ('named:Comments',1,'creator','comment_resolved',30,'{\"comment_id\":3}'),
+                ('named:Comments',1,'creator','comment_unresolved',30,'{\"comment_id\":3}'),
+                ('named:Comments',2,'creator','comment_unresolved',40,'{\"comment_id\":2}');
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+                INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                SELECT 'named:Comments',1,'creator','comment_resolved',id,json_object('comment_id',1) FROM n;
+                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+                INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                SELECT 'named:Comments',1,'creator','commented',id,'{}' FROM n;").unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let project = Project {
+            id: "named:Comments".into(),
+            name: "Comments".into(),
+        };
+        let started = Instant::now();
+        let newest =
+            comment_page(&db, &project, 1, 3, 0, super::super::CommentSort::Newest, 0).unwrap();
+        let oldest =
+            comment_page(&db, &project, 1, 3, 0, super::super::CommentSort::Oldest, 0).unwrap();
+        let empty = comment_page(
+            &db,
+            &project,
+            1,
+            3,
+            10,
+            super::super::CommentSort::Newest,
+            0,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            newest["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| (c["id"].as_i64().unwrap(), c["resolved"].as_bool().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![(4, false), (3, false), (2, true)]
+        );
+        assert_eq!(
+            oldest["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| (c["id"].as_i64().unwrap(), c["resolved"].as_bool().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![(1, true), (2, true), (3, false)]
+        );
+        assert_eq!(newest["comment_count"], 4);
+        assert_eq!(newest["next_offset"], 3);
+        assert!(empty["comments"].as_array().unwrap().is_empty());
+        assert!(empty["next_offset"].is_null());
+        eprintln!("Comment resolution: {commands} RPCs, {steps} query steps, {elapsed:?}");
+        assert!(
+            steps < 1000,
+            "Hidden resolution history caused {steps} query steps"
+        );
+    }
 
     #[test]
     fn pull_request_origins_skip_unrelated_event_history() {
