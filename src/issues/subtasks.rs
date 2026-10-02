@@ -335,6 +335,17 @@ pub(super) fn worker_issue(db: &Connection, project: &str, number: i64) -> Resul
 }
 /// One graph snapshot enriches an entire page; no relationship query per row.
 pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Result<()> {
+    let has_issue = ["issue", "parent_issue", "child_issue"]
+        .iter()
+        .any(|key| result[*key]["number"].as_i64().is_some())
+        || result["issues"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|issue| issue["number"].as_i64().is_some());
+    if !has_issue && result.get("comments").is_none() {
+        return Ok(());
+    }
     let mut graph = Graph::load(db, project)?;
     for key in ["issue", "parent_issue", "child_issue"] {
         if let Some(issue) = result.get_mut(key) {
@@ -358,4 +369,75 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
         )?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_responses_do_not_load_the_project_subtask_graph() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-subtask-response-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = crate::issues::Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Graph','Graph',10000);
+            INSERT INTO agents VALUES('creator','{}',0);
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<8192)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order)
+            SELECT 'named:Graph',id,'Task '||id,'','open','creator',0,0,1,'[]',id FROM n;
+            INSERT INTO issue_subtasks VALUES('named:Graph',1,2,0,'creator');
+            INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at)
+            SELECT project_id,number,'https://github.com/o/r/pull/'||number,'creator',0 FROM issues;").unwrap();
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let (db, transport) = crate::database::tests::measured_connection(&path);
+        let samples = [
+            json!({"ok":true,"issues":null}),
+            json!({"ok":true,"issues":[]}),
+            json!({"ok":true,"issues":[{"other":0}]}),
+        ];
+        let started = std::time::Instant::now();
+        let outputs: Vec<_> = samples
+            .iter()
+            .map(|sample| {
+                let mut result = sample.clone();
+                enrich(&db, "named:Graph", &mut result).unwrap();
+                result
+            })
+            .collect();
+        let elapsed = started.elapsed();
+        drop(db);
+        let (commands, steps) = transport.join().unwrap();
+        owner.stop();
+        let mut issue_response = json!({"issue":{"number":1},"parent_issue":{"number":1},"child_issue":{"number":2},"issues":[{"number":1},{"number":2}],"comments":[]});
+        enrich(&store.db, "named:Graph", &mut issue_response).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+        eprintln!(
+            "Three metadata responses beside 8192 issues: {commands} RPCs, {steps} query VM steps in {elapsed:?}"
+        );
+        assert_eq!(outputs, samples);
+        assert_eq!(issue_response["issue"]["subtasks"]["total"], 1);
+        assert_eq!(
+            issue_response["parent_issue"]["subtasks"]["open_descendants"],
+            1
+        );
+        assert_eq!(issue_response["child_issue"]["parent"]["number"], 1);
+        assert_eq!(
+            issue_response["issues"][1]["subtask_context"]["position"],
+            1
+        );
+        assert_eq!(issue_response["subtasks"][0]["number"], 2);
+        assert_eq!(
+            issue_response["subtasks"][0]["parent"]["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/1"
+        );
+        assert_eq!(
+            commands, 0,
+            "Responses without issues must not load a graph"
+        );
+        assert_eq!(steps, 0);
+    }
 }
