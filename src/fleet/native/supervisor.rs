@@ -1892,7 +1892,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut waits = Vec::new();
-        for _ in 0..5 {
+        for attempt in 0..5 {
             assert_eq!(
                 listener.accept().unwrap_err().kind(),
                 std::io::ErrorKind::WouldBlock
@@ -1903,17 +1903,29 @@ mod tests {
                 let listener = &listener;
                 scope.spawn(move || {
                     started.send(()).unwrap();
-                    wait_for_request(listener).unwrap();
-                    let (stream, _) = listener.accept().unwrap();
-                    sent.send(()).unwrap();
-                    drop(stream);
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    loop {
+                        assert!(Instant::now() < deadline, "Listener did not accept the client");
+                        wait_for_request(listener).unwrap();
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                sent.send(Instant::now()).unwrap();
+                                drop(stream);
+                                break;
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => panic!("Listener failed: {error}"),
+                        }
+                    }
                 });
                 waiting.recv().unwrap();
-                std::thread::sleep(Duration::from_millis(20));
+                // The client may be scheduled after an idle timeout. Exercise
+                // that path explicitly instead of assuming one wait suffices.
+                std::thread::sleep(Duration::from_millis(if attempt == 0 { 150 } else { 20 }));
                 let start = Instant::now();
                 let _client = UnixStream::connect(&socket).unwrap();
-                received.recv_timeout(Duration::from_secs(2)).unwrap();
-                waits.push(start.elapsed());
+                let accepted = received.recv_timeout(Duration::from_secs(2)).unwrap();
+                waits.push(accepted.duration_since(start));
             });
         }
         waits.sort();
