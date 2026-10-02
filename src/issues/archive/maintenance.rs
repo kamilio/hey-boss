@@ -79,6 +79,10 @@ impl Maintenance {
                 self.failed.insert(work, now.saturating_add(60_000));
             }
         }
+        match transfer::cleanup_downloads(db, now) {
+            Ok(removed) => attempted += usize::from(removed > 0),
+            Err(error) => eprintln!("Archive transfer cleanup: {error}"),
+        }
         Ok(attempted)
     }
 }

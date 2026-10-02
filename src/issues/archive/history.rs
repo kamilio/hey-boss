@@ -21,13 +21,15 @@ CREATE INDEX history_comment_models ON issue_history(archive_key,json_extract(js
 
 pub(super) fn initialize(db: &Connection) -> Result<()> {
     if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_copies')",
+        "SELECT count(*)=2 FROM sqlite_master WHERE name IN ('issue_copies','archive_downloads')",
         [],
         |r| r.get::<_, bool>(0),
     )? {
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS archive_downloads(staging TEXT PRIMARY KEY CHECK(staging GLOB 'download-*'),updated_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS archive_download_age ON archive_downloads(updated_at);")?;
     if !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_copies')",
         [],

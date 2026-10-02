@@ -470,6 +470,85 @@ fn recent_history_extends_the_grace_period_and_deleted_issues_remain_readable() 
 }
 
 #[test]
+fn abandoned_download_cleanup_preserves_verified_copies_and_recent_transfers() {
+    let source = Fixture::new();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let target = Fixture::new();
+    let mut stale = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    let archive = Archive::open(&archive_path(&target.db).unwrap()).unwrap();
+    archive
+        .db
+        .execute("UPDATE archive_downloads SET updated_at=0", [])
+        .unwrap();
+    let _fresh = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    assert!(transfer::cleanup_downloads(&target.db, GRACE_MS).unwrap() > 0);
+    assert_eq!(
+        archive
+            .db
+            .query_row("SELECT count(*) FROM archive_downloads", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let page = transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null).unwrap();
+    assert!(stale.receive(&page).is_err());
+    assert!(
+        !transfer::Catalog::new(&target.db)
+            .unwrap()
+            .contains(&key, "named:Archive", 1)
+            .unwrap()
+    );
+
+    let original = Archive::open(&archive_path(&source.db).unwrap()).unwrap();
+    original
+        .db
+        .execute(
+            "INSERT INTO archive_downloads VALUES('download-abandoned',0)",
+            [],
+        )
+        .unwrap();
+    original.db.execute("INSERT INTO issue_copies SELECT 'download-abandoned',project_id,number,record,comments,record_hash FROM issue_copies WHERE key=?1", [&key]).unwrap();
+    original.db.execute("INSERT INTO issue_history SELECT 'download-abandoned',kind,id,text_id,created_at,author,action,record,record_hash FROM issue_history WHERE archive_key=?1", [&key]).unwrap();
+    for _ in 0..10 {
+        if transfer::cleanup_downloads(&source.db, GRACE_MS).unwrap() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        original
+            .db
+            .query_row(
+                "SELECT count(*) FROM issue_copies WHERE key='download-abandoned'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        original
+            .db
+            .query_row(
+                "SELECT count(*) FROM issue_history WHERE archive_key='download-abandoned'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        issue_body(&source.db, "named:Archive", 1, &key).unwrap(),
+        "Searchable archive body 🦀"
+    );
+}
+
+#[test]
 fn archive_transfer_is_bounded_verified_and_resumes_at_record_boundaries() {
     let source = Fixture::new();
     source
