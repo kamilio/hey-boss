@@ -392,7 +392,15 @@ pub(in crate::issues) fn status_for(
             "next_at":next,"summary":r.get::<_,String>(9)?,"last_event":r.get::<_,String>(10)?
         }))
     })?;
-    for chief in chiefs {
+    let models = super::actor_labels::models(db, chiefs.iter())?;
+    for mut chief in chiefs {
+        chief["model"] = models
+            .get(&format!(
+                "codex:{}",
+                chief["session_id"].as_str().unwrap_or_default()
+            ))
+            .cloned()
+            .unwrap_or(Value::Null);
         by_worker
             .entry(chief["worker_id"].as_str().unwrap().into())
             .or_default()

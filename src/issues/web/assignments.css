@@ -18,7 +18,7 @@
 .github-feedback p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .github-observed { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
 .list-assignment { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.list-assignment > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-assignment > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
 @media (max-width: 640px) {
   .issue-row:not(.subtask-row) { display: grid; grid-template-columns: 22px 17px minmax(0, 1fr); }
   .issue-row:not(.subtask-row) > .issue-row-end { grid-column: 3; justify-self: start; flex-direction: row; flex-wrap: wrap; min-width: 0; max-width: 100%; margin-top: 0; }

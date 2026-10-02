@@ -11,6 +11,8 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[path = "agent_launches.rs"]
 mod agent_launches;
+#[path = "actor_labels.rs"]
+pub(crate) mod actor_labels;
 #[path = "chief.rs"]
 pub(crate) mod chief;
 #[path = "claim_recovery.rs"]
@@ -1657,7 +1659,7 @@ impl Store {
         }
         if write {
             let actor = actor.unwrap();
-            tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",
+            tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=json_set(excluded.metadata,'$.model',coalesce(json_extract(excluded.metadata,'$.model'),json_extract(agents.metadata,'$.model'))),last_seen=excluded.last_seen",
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut attachment_files = crate::attachments::DiskChange::default();
@@ -2194,6 +2196,7 @@ impl Store {
         }
         super::blockers::enrich(&tx, &response_project.id, &mut result)?;
         assignments::enrich_result(&tx, &response_project.id, &mut result, actor)?;
+        actor_labels::enrich(&tx, &mut result)?;
         if let Some(issue) = result.get_mut("issue") {
             attempts::enrich(&tx, &response_project.id, issue)?;
         }
@@ -2452,8 +2455,11 @@ pub(super) fn event(
     now: i64,
     data: &Value,
 ) -> Result<()> {
+    let mut data = data.clone();
+    let model: Option<String> = if ["codex:", "claude:", "worker:", "agent:"].iter().any(|prefix| actor.starts_with(prefix)) { db.query_row("SELECT json_extract(metadata,'$.model') FROM agents WHERE id=?1", [actor], |row| row.get(0)).optional()?.flatten() } else { None };
+    if let Some(model) = model { data["actor_model"] = json!(model); }
     db.execute("INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![project,number,actor,action,now,serde_json::to_string(data)?])?;
+        params![project,number,actor,action,now,serde_json::to_string(&data)?])?;
     Ok(())
 }
 fn ownership(issue: &Issue, actor: &Actor, force: bool) -> Result<()> {

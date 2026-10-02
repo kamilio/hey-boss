@@ -85,15 +85,13 @@ let toastTimer,
   confirmResolve = null;
 icons();
 const own = (id) => id && id === model.actor?.id;
-function actorName(id) {
+function actorName(id, actorModel) {
   if (!id) return "Unassigned";
   if (id === "human:boss") return model.boss.name;
   if (id === "watcher:github") return "GitHub watcher";
   if (id.startsWith("machine:")) return model.assignmentMachines.find(m => m.id === id.slice(8))?.name || id.slice(8);
-  if (own(id)) return "You";
-  if (id.startsWith("codex:")) return `Codex · ${id.slice(6, 14)}`;
-  if (id.startsWith("claude:")) return `Claude · ${id.slice(7, 15)}`;
-  return id.replace(/^human:/, "").split("@")[0];
+  if (own(id) && id.startsWith("human:")) return "You";
+  return HeyBossUI.actorLabel(id, actorModel, model.boss.name);
 }
 const nameSegmenter =
   typeof Intl.Segmenter === "function"
@@ -106,7 +104,7 @@ function initials(name) {
   return characters.slice(0, 2).join("").toUpperCase();
 }
 function avatar(id) {
-  return `<span class="avatar" title="${esc(id)}" aria-label="${esc(actorName(id))}">${esc(id === "human:boss" ? initials(actorName(id)) : own(id) ? "Y" : id.startsWith("codex:") ? "CX" : id.startsWith("claude:") ? "CL" : initials(actorName(id)))}</span>`;
+  return `<span class="avatar" title="${esc(actorName(id))}" aria-label="${esc(actorName(id))}">${esc(id === "human:boss" ? initials(actorName(id)) : own(id) ? "Y" : id.startsWith("codex:") ? "CX" : id.startsWith("claude:") ? "CL" : initials(actorName(id)))}</span>`;
 }
 const specialIssueTags = new Map([
   ["yolo", {
@@ -224,6 +222,7 @@ async function post(path, data, reconnect = true) {
       updateProfile();
     }
   }
+  if (HeyBossUI.rememberActors(value)) { detailCache.clear(); model.signature = ""; }
   connection(true);
   return value;
 }
@@ -411,7 +410,7 @@ function listAssignment(issue) {
   }
   const description=IssueAssignments.describe(issue,{actorName,bossName:model.boss.name});
   const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
-  const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
+  const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.label + " · " + description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
   const actor=a.actor||issue.assignee;
   if(a.kind==='github') return `<span class="list-assignee">${filter}<button type="button" class="list-agent-trace list-watcher-open" data-open-watcher="${issue.number}" title="Open GitHub watcher" aria-label="Open GitHub watcher for issue #${issue.number}">${icon('arrow-right')}</button></span>`;
   if(!actor || actor.startsWith('human:') || actor==='watcher:github') return filter;
@@ -894,7 +893,7 @@ async function refresh(quiet = true) {
         else renderDetail(result);
       } else if (
         model.detail &&
-        (JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
         if (quiet) showUpdate();
         else renderDetail(result);
@@ -1449,7 +1448,7 @@ async function historyPage(reset = false) {
       result.events
         .map(
           (event) =>
-            `<div class="timeline-item"><strong>${esc(event.action === "worker_selected" ? event.data.worker_name || "Worker" : actorName(event.actor))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${queueActivity(event)}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
+            `<div class="timeline-item"><strong>${esc(event.action === "worker_selected" ? event.data.worker_name || "Worker" : actorName(event.actor, event.data.actor_model))}</strong> ${esc(verbs[event.action] || event.action)} · ${date(event.created_at)}${event.data.parent && event.data.child ? ` <span class="timeline-relationship"><a data-issue="${esc(event.data.parent)}" href="${esc(routeHash({...model.route,issue:event.data.parent}))}">#${esc(event.data.parent)}</a> → <a data-issue="${esc(event.data.child)}" href="${esc(routeHash({...model.route,issue:event.data.child}))}">#${esc(event.data.child)}</a></span>` : ""}${queueActivity(event)}${event.data.sync_conflict ? `<p class="muted-text">${esc(event.data.sync_conflict)}</p>` : ""}${event.data.body ? `<details><summary>Read comment</summary><pre>${esc(event.data.body)}</pre></details>` : ["edited", "triaged"].includes(event.action) ? `<details><summary>View changes</summary><pre>${esc(JSON.stringify(event.data, null, 2))}</pre></details>` : ""}</div>`,
         )
         .join(""),
     );
@@ -2024,6 +2023,7 @@ async function boot() {
     model.activeHost = model.defaultHost;
     model.csrf = value.csrf;
     model.actor = value.actor;
+    HeyBossUI.rememberActors(value);
     model.boss = value.boss;
     model.bossHost = model.defaultHost;
     model.assignees = value.assignees || [];

@@ -1449,7 +1449,8 @@ mod tests {
     fn test_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE project_settings(project_id TEXT PRIMARY KEY, prs_enabled INTEGER);
+            "CREATE TABLE agents(id TEXT PRIMARY KEY, metadata TEXT);
+             CREATE TABLE project_settings(project_id TEXT PRIMARY KEY, prs_enabled INTEGER);
              CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT, hidden_at INTEGER);
              INSERT INTO projects VALUES('github.com/kamilio/hey-boss', 'hey-boss', NULL);
              CREATE TABLE issues(project_id TEXT, number INTEGER, title TEXT, state TEXT, assignee TEXT, deleted_at INTEGER, version INTEGER DEFAULT 1, updated_at INTEGER DEFAULT 0, origin TEXT, PRIMARY KEY(project_id, number));

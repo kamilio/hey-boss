@@ -183,6 +183,7 @@ if (typeof document !== 'undefined') (() => {
     if(last)render(last);
   }
   const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id});
+  const runLabel = run => HeyBossUI.actorLabel(run.session_id ? 'codex:'+run.session_id : run.actor_id || 'agent:unknown', run.model);
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
   function card(entry, history=false) {
     const {run,machine}=entry;
@@ -192,7 +193,7 @@ if (typeof document !== 'undefined') (() => {
     const activity=run.last_event||'';
     const preview=element('p','agent-preview',run.state==='infrastructure_blocked'?infrastructureGuidance(run):run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
     const bottom=element('div','agent-card-bottom');bottom.append(element('span','',`Issue #${run.number}`),element('span','open-conversation',history?'Read conversation →':'Open conversation →'));
-    a.append(top,title,preview,bottom);return a;
+    a.append(top,element('p','agent-model',runLabel(run)),title,preview,bottom);return a;
   }
   function renderOverview(data) {
     const workersPage=route().has('workers');
@@ -237,7 +238,7 @@ if (typeof document !== 'undefined') (() => {
         const top=element('div','chief-heading');
         top.append(element('h3','','Chief'),element('span','agent-state '+(entry.online&&run.state==='running'?'is-live':'is-quiet'),chiefState(entry)));
         const owner=element('p','chief-owner',(worker.config?.name||'Worker '+worker.id.slice(0,8))+' · '+(machine.hostname||machine.host));
-        chief.append(top,owner);
+        chief.append(top,element('p','agent-model',runLabel(run)),owner);
         if(run.started_at!=null){
           const last=element('div','chief-last-pass');
           const outcome=run.state==='running'?'Current pass':run.state==='idle'?'Last pass · Completed':['failed','blocked'].includes(run.state)?'Last pass · Failed':'Last pass · '+run.state;
@@ -289,7 +290,7 @@ if (typeof document !== 'undefined') (() => {
     };
     function task(run,entry){
       const a=element('a','activity-task');a.href=link({machine:entry.device.machine,run});a.dataset.focus=entry.device.machine.host+':task:'+run.id;
-      const meta=element('span','activity-task-meta');meta.append(element('span','',run.project_name||projectLabel(run.project_id||'')),element('span','',run.number?'#'+run.number:'Organizer'));
+      const meta=element('span','activity-task-meta');meta.append(element('span','',run.project_name||projectLabel(run.project_id||'')),element('span','',run.number?'#'+run.number:'Organizer'),element('span','agent-model',runLabel(run)));
       const text=element('span','activity-task-copy');text.append(element('strong','',run.title||'Organizing project'),element('span','',activity(run)));
       const state=element('span','activity-task-state',agentState({run,worker:entry.worker,machine:entry.device.machine,online:entry.device.online}));
       a.append(meta,text,state,runtime(run),element('span','activity-task-arrow','↗'));return a;
@@ -521,7 +522,7 @@ if (typeof document !== 'undefined') (() => {
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.kind==='chief'?'Chief · '+(run.project_name||'Organizing project'):run.title||'Preparing your task';
-    $('session-context').textContent=(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
+    $('session-context').textContent=runLabel(run)+' · '+(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').hidden=!run.number;
     $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
@@ -610,7 +611,7 @@ if (typeof document !== 'undefined') (() => {
       const oldHeight=document.documentElement.scrollHeight,oldScroll=scrollY;
       const data=await read('/api/fleet/conversation?'+new URLSearchParams(query));
       if(token!==generation||disposed)return;
-      if(data.run){historical={...selected,run:data.run};selected=historical;renderDetail(last);}
+      if(data.run){historical={...selected,run:{...data.run,model:data.run.model || selected.run.model}};selected=historical;renderDetail(last);}
       if(data.created_resources){
         const resources=data.created_resources;
         $('session-resources').hidden=!resources.length;

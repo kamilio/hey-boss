@@ -1348,6 +1348,8 @@ pub fn run(options: &Options) -> Result<()> {
         ) && let Some(actor) = actor.as_mut()
         {
             issues::identity::creation_context(actor);
+        } else if operation.writes() && let Some(actor) = actor.as_mut() {
+            issues::identity::model_context(actor);
         }
         if let Operation::AddCommit { commit, title, .. } = &mut operation {
             let target_project = options
