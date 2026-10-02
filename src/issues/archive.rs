@@ -239,8 +239,41 @@ pub(crate) fn receipt_response(
     key: Option<&str>,
 ) -> Result<Value> {
     match key {
-        Some(key) => Archive::read(&archive_path(db)?)?.get("receipt", key),
+        Some(key) => Archive::read(&archive_path(db)?)?
+            .get("receipt", key)?
+            .get("response")
+            .cloned()
+            .ok_or_else(|| unavailable("Archived receipt response is missing")),
         None => Ok(serde_json::from_str(response)?),
+    }
+}
+
+pub(crate) fn receipt_payload_hash(payload: &str) -> String {
+    format!("{:x}", Sha256::digest(payload.as_bytes()))
+}
+
+pub(crate) fn receipt_contents(
+    db: &crate::database::Connection,
+    payload: &str,
+    response: &str,
+    key: Option<&str>,
+) -> Result<(Value, Value)> {
+    match key {
+        Some(key) => {
+            let receipt = Archive::read(&archive_path(db)?)?.get("receipt", key)?;
+            let operation = receipt["payload"]
+                .as_str()
+                .ok_or_else(|| unavailable("Archived receipt operation is missing"))?;
+            let response = receipt
+                .get("response")
+                .cloned()
+                .ok_or_else(|| unavailable("Archived receipt response is missing"))?;
+            Ok((serde_json::from_str(operation)?, response))
+        }
+        None => Ok((
+            serde_json::from_str(payload)?,
+            serde_json::from_str(response)?,
+        )),
     }
 }
 
@@ -279,14 +312,16 @@ fn archive_receipt(
     request: &str,
     created: i64,
 ) -> Result<usize> {
-    let response: Option<String> = db.query_row("SELECT response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND created_at=?4 AND archive_key IS NULL", params![project,actor,request,created], |r| r.get(0)).optional()?;
-    let Some(response) = response else {
+    let saved: Option<(String,String)> = db.query_row("SELECT payload,response FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND created_at=?4 AND archive_key IS NULL", params![project,actor,request,created], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let Some((payload, response)) = saved else {
         return Ok(0);
     };
-    let value = serde_json::from_str(&response)?;
+    let response_value: Value = serde_json::from_str(&response)?;
+    let _: Value = serde_json::from_str(&payload)?;
+    let value = serde_json::json!({"payload":payload,"response":response_value});
     let archive = Archive::open(&archive_path(db)?)?;
     let key = archive.put("receipt", &value)?;
-    Ok(db.execute("UPDATE requests SET response='',archive_key=?6 WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND response=?4 AND created_at=?5 AND archive_key IS NULL", params![project,actor,request,response,created,key])?)
+    Ok(db.execute("UPDATE requests SET payload='',response='',archive_key=?6,payload_hash=?8 WHERE project_id=?1 AND actor=?2 AND request_id=?3 AND response=?4 AND created_at=?5 AND archive_key IS NULL AND payload=?7", params![project,actor,request,response,created,key,payload,receipt_payload_hash(&payload)])?)
 }
 
 #[cfg(test)]
@@ -435,7 +470,7 @@ mod tests {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-            "{}"
+            ""
         );
         drop(db);
         let db = Store::open(&hot).unwrap().into_database();
@@ -478,6 +513,7 @@ mod tests {
             "request_id":"create-once","operation":{"action":"create","title":"Keep exactly once","body":"Body preserved","labels":[],"draft":true}
         })).unwrap();
         let created = store.execute(&request).unwrap();
+        let original_operation = serde_json::to_value(&request.operation).unwrap();
         let db = Store::open(&hot).unwrap().into_database();
         db.execute("UPDATE requests SET created_at=1", []).unwrap();
         assert_eq!(archive_receipts(&db, GRACE_MS + 2).unwrap(), 1);
@@ -493,6 +529,7 @@ mod tests {
         let status = store.execute(&request).unwrap();
         assert_eq!(status["request"]["state"], "recorded");
         assert_eq!(status["request"]["response"], created);
+        assert_eq!(status["request"]["operation"], original_operation);
         request.request_id = Some("create-once".into());
         request.operation = serde_json::from_value(
             json!({"action":"create","title":"Different","body":"","labels":[],"draft":true}),
