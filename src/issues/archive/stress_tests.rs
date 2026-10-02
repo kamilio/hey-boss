@@ -17,6 +17,92 @@ impl Drop for ChildGuard {
     }
 }
 
+#[test]
+#[ignore = "Profiles archival on an explicitly supplied disposable database backup"]
+fn profile_private_archive_backup() {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("HB_ARCHIVE_PROFILE_DB")
+            .expect("Set HB_ARCHIVE_PROFILE_DB to a private backup"),
+    );
+    assert!(
+        path.is_file()
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| name.to_string_lossy().starts_with("hb-archive-profile.")),
+        "Use a disposable hb-archive-profile.* directory"
+    );
+    let migrate = Instant::now();
+    let mut store = Store::open(&path).unwrap();
+    eprintln!(
+        "private backup migration_ms={}",
+        migrate.elapsed().as_millis()
+    );
+    let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+    let db = crate::database::Connection::connect(&path).unwrap();
+    store.replace_connection_for_test(crate::database::Connection::connect(&path).unwrap());
+    let requests = db.query_collect("SELECT i.project_id,p.name,i.number FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.state='closed' OR i.deleted_at IS NOT NULL ORDER BY i.updated_at LIMIT 32", [], |r|->rusqlite::Result<_>{Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))}).unwrap().into_iter().map(|(project,name,number)| serde_json::from_value::<Request>(json!({"version":1,"project":{"id":project,"name":name},"operation":{"action":"view","number":number}})).unwrap()).collect::<Vec<_>>();
+    let before: Vec<_> = requests.iter().map(|r| store.execute(r).unwrap()).collect();
+    let footprint = |db: &crate::database::Connection| {
+        let allocated: i64 = db.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
+        let free: i64 = db
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+            .unwrap();
+        let page: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        json!({"allocated_bytes":allocated*page,"used_bytes":(allocated-free)*page,"reusable_bytes":free*page})
+    };
+    eprintln!("private archive before={}", footprint(&db));
+    let started = Instant::now();
+    let mut maintenance = Maintenance::default();
+    let mut maximum = Duration::ZERO;
+    let now = crate::issues::worker::now() + GRACE_MS + 1000;
+    let mut idle = false;
+    for pass in 0..100_000 {
+        let start = Instant::now();
+        let work = maintenance.run(&db, now).unwrap();
+        maximum = maximum.max(start.elapsed());
+        if work == 0 {
+            idle = true;
+            break;
+        }
+        if pass % 1000 == 0 {
+            eprintln!(
+                "private archive passes={pass} elapsed_s={} maximum_pass_ms={}",
+                started.elapsed().as_secs(),
+                maximum.as_millis()
+            );
+        }
+    }
+    assert!(
+        idle,
+        "Private archival did not drain within its operation budget"
+    );
+    for (request, expected) in requests.iter().zip(before) {
+        assert!(
+            store.execute(request).unwrap() == expected,
+            "Archival changed a sampled issue view"
+        );
+    }
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    eprintln!(
+        "private archive after={} elapsed_s={} maximum_pass_ms={}",
+        footprint(&db),
+        started.elapsed().as_secs(),
+        maximum.as_millis()
+    );
+    for table in ["comments", "events", "worker_events", "requests"] {
+        let rows: i64 = db
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        eprintln!("private archive retained {table}={rows}");
+    }
+    owner.stop();
+}
+
 /// Invoked only by the crash test with a private fixture path.
 #[test]
 fn archive_crash_child() {

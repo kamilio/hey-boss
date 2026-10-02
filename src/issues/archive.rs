@@ -8,9 +8,11 @@ mod maintenance;
 pub(crate) use maintenance::Maintenance;
 mod history;
 pub(crate) mod transfer;
+#[cfg(test)]
+pub(crate) use history::cleanup_history;
 pub(crate) use history::{
-    archive_issue, cleanup_history, history_connection, issue_body, materialize_history,
-    mutation_targets, restore_issue, search_bodies,
+    archive_issue, history_connection, issue_body, materialize_history, mutation_targets,
+    restore_issue, search_bodies,
 };
 #[cfg(test)]
 mod history_tests;
