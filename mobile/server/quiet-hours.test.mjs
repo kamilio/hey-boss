@@ -33,3 +33,13 @@ test('quiet hours suppress every notification kind and queued retries without a 
   store.upsert({taskID:'morning',kind:'prompt',createdAt:clock/1000});store.enqueue({id:'morning'},clock);await app.locals.pump();assert.equal(sent.length,1);
  } finally {store.close();}
 });
+test('relay startup stays silent until the supervisor supplies its schedule, including Always mode',()=>{
+ const store=new HubStore();
+ try{
+  store.setPreferences({mode:'always',awayAfterSeconds:60});
+  assert.equal(store.routing(Date.parse('2026-10-02T03:00:00Z')).notifyPhone,false);
+  store.setQuietHours(schedule);
+  assert.equal(store.routing(Date.parse('2026-10-02T03:00:00Z')).notifyPhone,false);
+  assert.equal(store.routing(Date.parse('2026-10-02T12:00:00Z')).notifyPhone,true);
+ }finally{store.close();}
+});

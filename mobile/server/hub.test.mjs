@@ -2,9 +2,11 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
+// Routing tests explicitly disable the schedule; startup without one stays silent.
+function daytimeStore(){const store=new HubStore();store.setQuietHours({enabled:false,start:'22:00',end:'07:00',time_zone:'UTC'});return store;}
 const task={taskID:'request-1',kind:'approval',title:'Ship the migration?',question:'All replicas have caught up.',description:'The migration is ready.',options:['Approve','Reject'],project:'Atlas'};
 test('automatic pushes give the Mac time to open an update and recheck activity before delivery',async()=>{
- const store=new HubStore();let now=1000000;const sent=[];
+ const store=daytimeStore();let now=1000000;const sent=[];
  const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);
  store.presence({idleSeconds:600,unavailable:false},now);
  store.upsert({...task,kind:'update',options:[]});store.enqueue({id:task.taskID},now);
@@ -17,7 +19,7 @@ test('automatic pushes give the Mac time to open an update and recheck activity 
  store.close();
 });
 test('a Mac answer arriving during another push suppresses the next queued push',async()=>{
- const store=new HubStore();let now=1000000;const sent=[];
+ const store=daytimeStore();let now=1000000;const sent=[];
  const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);
  for(const name of ['first','second']){store.upsert({...task,taskID:name});store.enqueue({id:name},now);}
  now+=30000;store.presence({idleSeconds:600,unavailable:true},now);
@@ -25,7 +27,7 @@ test('a Mac answer arriving during another push suppresses the next queued push'
  await app.locals.pump();assert.deepEqual(sent.map(x=>x.id),['first']);store.close();
 });
 test('automatic routing requires lock or sustained disconnect and ignores inactivity; preferences persist',()=>{
- const store=new HubStore();let now=1000000;
+ const store=daytimeStore();let now=1000000;
  assert.equal(store.routing(now).notifyPhone,false);assert.equal(store.routing(now).macState,'unknown');
  store.presence({idleSeconds:0,unavailable:false},now);
  assert.equal(store.routing(now).notifyPhone,false);
@@ -40,7 +42,7 @@ test('automatic routing requires lock or sustained disconnect and ignores inacti
  assert.throws(()=>store.presence({idleSeconds:-1,unavailable:false}),{status:400});store.close();
 });
 test('trusted input inactivity requires a minute of continuous confirmation and resets on input or missing samples',()=>{
- const store=new HubStore();let now=1000000;
+ const store=daytimeStore();let now=1000000;
  store.presence({idleSeconds:10000,idleReliable:false,unavailable:false},now);assert.equal(store.routing(now).notifyPhone,false);
  const sample=idle=>store.presence({idleSeconds:idle,idleReliable:true,unavailable:false},now);
  sample(601);assert.equal(store.routing(now).macState,'confirming');
@@ -53,7 +55,7 @@ test('trusted input inactivity requires a minute of continuous confirmation and 
  store.close();
 });
 test('active Mac defers pushes, pending decisions reach an away user once, and resolved work is suppressed',async()=>{
- const store=new HubStore();let now=1000000;const sent=[];
+ const store=daytimeStore();let now=1000000;const sent=[];
  const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);
  store.upsert({...task,createdAt:now/1000});store.enqueue({id:task.taskID,title:task.title},now);
  const app=createApp({store,now:()=>now,hubToken:'x'.repeat(64),push:{setVapidDetails(){},async sendNotification(subscription,body){sent.push(JSON.parse(body));}},vapid:{subject:'mailto:test@example.invalid',publicKey:'public',privateKey:'private'}});
@@ -65,23 +67,23 @@ test('active Mac defers pushes, pending decisions reach an away user once, and r
  store.close();
 });
 test('one accepted answer, with immutable terminal state and durable delivery acknowledgement',()=>{
- const store=new HubStore();store.upsert(task);const phone=store.resolve(task.taskID,'Approve','phone');
+ const store=daytimeStore();store.upsert(task);const phone=store.resolve(task.taskID,'Approve','phone');
  assert.equal(phone.status,'ok');assert.throws(()=>store.resolve(task.taskID,'Reject','mac'),{status:409});
  store.upsert({...task,title:'Retry must not reset the answer'});assert.equal(store.get(task.taskID).result,'Approve');
  assert.equal(store.terminal().length,1);store.ack(task.taskID,phone.version-1);assert.equal(store.terminal().length,1);store.ack(task.taskID,phone.version);assert.equal(store.terminal().length,0);store.close();
 });
 test('an away backlog is summarized once instead of producing a notification burst',async()=>{
- const store=new HubStore();store.setPreferences({mode:'always',awayAfterSeconds:120});const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);
+ const store=daytimeStore();store.setPreferences({mode:'always',awayAfterSeconds:120});const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);
  for(let i=0;i<5;i++){store.upsert({...task,taskID:'backlog-'+i});store.enqueue({id:'backlog-'+i,title:'Decision'});}
  const sent=[];const app=createApp({store,hubToken:'x'.repeat(64),push:{setVapidDetails(){},async sendNotification(subscription,body){sent.push(JSON.parse(body));}},vapid:{subject:'mailto:test@example.invalid',publicKey:'public',privateKey:'private'}});
  await app.locals.pump();await app.locals.pump();assert.equal(sent.length,1);assert.equal(sent[0].id,'inbox');assert.equal(sent[0].taskIDs.length,5);assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,0);store.close();
 });
 test('questions validate exact answers and cancellation prevents a later answer',()=>{
- const store=new HubStore();store.upsert({...task,kind:'prompt',options:[]});assert.throws(()=>store.resolve(task.taskID,' ','phone'),{status:400});
+ const store=daytimeStore();store.upsert({...task,kind:'prompt',options:[]});assert.throws(()=>store.resolve(task.taskID,' ','phone'),{status:400});
  const result='First exact line\nSecond line 🌍';assert.equal(store.resolve(task.taskID,result,'mac').result,result);store.upsert({...task,taskID:'cancel'});store.resolve('cancel',null,'mac',true);assert.throws(()=>store.resolve('cancel','Approve','phone'),{status:409});store.close();
 });
 test('pairing is single use, server state is private, and request origins are checked',async t=>{
- const store=new HubStore();const key='x'.repeat(64);const app=createApp({store,hubToken:key,origin:'http://127.0.0.1',secure:false});const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
+ const store=daytimeStore();const key='x'.repeat(64);const app=createApp({store,hubToken:key,origin:'http://127.0.0.1',secure:false});const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
  assert.equal((await fetch(base+'/api/tasks')).status,401);
  const auth={Authorization:'Bearer '+key,'Content-Type':'application/json'};
  const code=(await (await fetch(base+'/api/bridge/pair-code',{method:'POST',headers:auth,body:'{}'})).json()).code;
@@ -94,7 +96,7 @@ test('pairing is single use, server state is private, and request origins are ch
  assert.deepEqual(calls.map(r=>r.status).sort(),[200,409]);
 });
 test('expired endpoints are removed and resolved tasks are never pushed from the outbox',async()=>{
- const store=new HubStore();store.setPreferences({mode:'always',awayAfterSeconds:120});const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run(JSON.stringify({endpoint:'https://a.push.apple.com/test'}),id);store.upsert(task);store.enqueue({id:task.taskID,title:'Test'});let sent=0;
+ const store=daytimeStore();store.setPreferences({mode:'always',awayAfterSeconds:120});const {id}=store.pair(store.pairing());store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run(JSON.stringify({endpoint:'https://a.push.apple.com/test'}),id);store.upsert(task);store.enqueue({id:task.taskID,title:'Test'});let sent=0;
  const app=createApp({store,hubToken:'x'.repeat(64),push:{setVapidDetails(){},async sendNotification(){sent++;throw {statusCode:410};}},vapid:{subject:'mailto:test@example.invalid',publicKey:'public',privateKey:'private'}});
  await app.locals.pump();assert.equal(sent,1);assert.equal(store.db.prepare('SELECT subscription FROM devices').get().subscription,null);
  store.db.prepare('UPDATE devices SET subscription=? WHERE id=?').run('{}',id);store.enqueue({id:task.taskID});store.resolve(task.taskID,'Approve','mac');await app.locals.pump();assert.equal(sent,1);assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,0);store.close();
