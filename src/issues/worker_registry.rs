@@ -4,6 +4,7 @@ use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
 use std::collections::HashMap;
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
+pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
 
 const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
     ("issues", "project_id", &["attempt_hold"]),
@@ -1287,6 +1288,86 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_runtime_index_repairs_old_stores_and_tracks_late_markers() {
+        let root = std::env::temp_dir().join(format!("hb-runtime-index-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .db
+            .execute_batch("DROP INDEX worker_legacy_runtime")
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='worker_legacy_runtime' AND type='index')", [], |row| row.get::<_,bool>(0)).unwrap());
+        let config = serde_json::to_string(&Settings {
+            enabled: false,
+            ..Settings::default()
+        })
+        .unwrap();
+        for (id, marker, stopped) in [
+            ("draining", "true", false),
+            ("stopped", "true", true),
+            ("false", "false", false),
+            ("null", "null", false),
+        ] {
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,owner_pid,owner_start,stop_requested,updated_at) VALUES(?1,'managed',json_set(?2,'$.upgrading',json(?3)),1,123,'same-owner',?4,0)", params![id,config,marker,stopped]).unwrap();
+        }
+        assert_eq!(store.db.query_row("SELECT count(*) FROM issue_workers INDEXED BY worker_legacy_runtime WHERE json_type(config,'$.upgrading') IS NOT NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 4);
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        migrate_runtime(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(store.db.query_row("SELECT count(*) FROM issue_workers INDEXED BY worker_legacy_runtime WHERE json_type(config,'$.upgrading') IS NOT NULL", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        for worker in worker_overview(&store.db).unwrap() {
+            let id = worker["id"].as_str().unwrap();
+            assert_eq!(worker["config"]["enabled"], id == "draining");
+            assert_eq!(worker["upgrading"], matches!(id, "draining" | "stopped"));
+        }
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn healthy_scoped_fleet_polls_do_not_parse_unrelated_worker_configs() {
+        let mut measurements = Vec::new();
+        for unrelated in [0, 1024, 8192] {
+            let root =
+                std::env::temp_dir().join(format!("hb-runtime-scope-{}", random_id().unwrap()));
+            fs::create_dir(&root).unwrap();
+            let path = root.join("issues.db");
+            let mut store = Store::open(&path).unwrap();
+            let config = serde_json::to_string(&Settings::default()).unwrap();
+            store.db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('wanted','managed',?1,1,1)", [&config]).unwrap();
+            store.db.execute("WITH RECURSIVE n(x) AS (SELECT 1 WHERE ?1>0 UNION ALL SELECT x+1 FROM n WHERE x<?1) INSERT INTO issue_workers(id,kind,config,version,updated_at) SELECT 'unrelated-'||x,'managed',?2,1,100+x FROM n", params![unrelated, config]).unwrap();
+            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+            let (db, transport) = crate::database::tests::measured_connection(&path);
+            store.db = db;
+            let workers = store
+                .fleet_workers_for(Some(&["wanted".into()].into()))
+                .unwrap();
+            assert_eq!(workers.len(), 1);
+            assert_eq!(workers[0]["id"], "wanted");
+            assert_eq!(workers[0]["upgrading"], false);
+            assert_eq!(workers[0]["active"], 0);
+            drop(store);
+            let (commands, steps) = transport.join().unwrap();
+            owner.stop();
+            fs::remove_dir_all(root).unwrap();
+            eprintln!(
+                "Full scoped fleet poll, {unrelated} unrelated registrations: {commands} RPCs, {steps} query VM steps"
+            );
+            measurements.push(steps);
+        }
+        assert!(
+            measurements.iter().all(|steps| *steps < 5000),
+            "Healthy runtime checks scanned registration history: {measurements:?}"
+        );
+    }
+
     #[test]
     fn scoped_worker_overview_skips_unrelated_registrations() {
         let mut work = Vec::new();
