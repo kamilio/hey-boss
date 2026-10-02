@@ -123,3 +123,20 @@ assert.equal(workerScopeGroups([scoped[1]])[0].key,scopes[0].key,'Project order 
 const duplicateNames=workerScopeGroups([{worker:{id:'first-id',config:{name:'Worker',projects:['one']}}},{worker:{id:'second-id',config:{name:'Worker',projects:['one']}}}])[0];
 assert.notEqual(duplicateNames.labels.get('first-id'),duplicateNames.labels.get('second-id'),'Identical saved names remain distinguishable within a group');
 console.log('Worker project-set grouping checks passed');
+
+const {workerCapacityUpdate} = require('../src/issues/web/fleet.js');
+const capacityDocument={machines:{local:{workers:[
+  {id:'poe-code',intent:'running',config:{concurrency:5,projects:['named:Code'],provider:'claude'}},
+  {id:'other',intent:'pause',config:{concurrency:37,projects:['named:Other']}},
+  {id:'retired',retiring:true,intent:'drain',config:{concurrency:2}},
+  {id:'small',intent:'pause',config:{concurrency:1}},
+  {id:'large',intent:'running',config:{concurrency:1024}}
+]}}};
+assert.deepEqual(workerCapacityUpdate(capacityDocument,'local','poe-code',1),{host:'local',id:'poe-code',intent:'running',config:{concurrency:6}},'Plus changes agent concurrency of the selected worker, never the machine worker count');
+assert.deepEqual(workerCapacityUpdate(capacityDocument,'local','other',-1),{host:'local',id:'other',intent:'pause',config:{concurrency:36}},'Changing a limit preserves pickup intent');
+assert.equal(capacityDocument.machines.local.workers[0].config.concurrency,5,'Planning an edit leaves the snapshot unchanged');
+assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','small',-1),/between 1 and 1024/);
+assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','large',1),/between 1 and 1024/);
+assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','retired',1),/no longer/);
+assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','missing',1),/no longer/);
+console.log('Project worker agent limit checks passed');
