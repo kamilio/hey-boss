@@ -6,6 +6,7 @@ use super::{
     takeover,
 };
 use serde_json::{Value, json};
+use std::os::fd::AsRawFd;
 mod status;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -1758,6 +1759,22 @@ fn definition(w: &Value) -> Value {
 fn definitions(workers: &[Value]) -> Value {
     json!(workers.iter().map(definition).collect::<Vec<_>>())
 }
+fn wait_for_request(listener: &UnixListener) -> std::io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Wake immediately for a connection while retaining the stop check's
+    // 100 ms bound. Sleeping here delays requests that arrive while idle.
+    if unsafe { libc::poll(&mut descriptor, 1, 100) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
 pub(super) fn run(ctx: Context) -> Result<()> {
     let Some(_lock) = ctx.lock("fleet-controller.lock", false)? else {
         return Err("Fleet supervisor is already running".into());
@@ -1789,7 +1806,7 @@ pub(super) fn run(ctx: Context) -> Result<()> {
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                ctx.wait(Duration::from_millis(250))
+                wait_for_request(&listener)?;
             }
             Err(e) => return Err(e.into()),
         }
@@ -1864,6 +1881,68 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_listener_wakes_when_a_request_arrives() {
+        let directory = TestDirectory(
+            std::path::Path::new("/tmp").join(format!("hb-listener-{}", id().unwrap())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let socket = directory.0.join("fleet.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            std::thread::scope(|scope| {
+                let (started, waiting) = mpsc::channel();
+                let (sent, received) = mpsc::channel();
+                let listener = &listener;
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    wait_for_request(listener).unwrap();
+                    let (stream, _) = listener.accept().unwrap();
+                    sent.send(()).unwrap();
+                    drop(stream);
+                });
+                waiting.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+                let start = Instant::now();
+                let _client = UnixStream::connect(&socket).unwrap();
+                received.recv_timeout(Duration::from_secs(2)).unwrap();
+                waits.push(start.elapsed());
+            });
+        }
+        waits.sort();
+        eprintln!("Idle listener connection delays: {waits:?}");
+        assert!(
+            waits[2] < Duration::from_millis(50),
+            "Connections waited for the idle polling interval: {waits:?}"
+        );
+    }
+
+    #[test]
+    fn idle_listener_wait_returns_without_a_connection() {
+        let directory = TestDirectory(
+            std::path::Path::new("/tmp").join(format!("hb-listener-{}", id().unwrap())),
+        );
+        std::fs::create_dir_all(&directory.0).unwrap();
+        let listener = UnixListener::bind(directory.0.join("fleet.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::scope(|scope| {
+            let (sent, received) = mpsc::channel();
+            scope.spawn(move || {
+                let start = Instant::now();
+                wait_for_request(&listener).unwrap();
+                sent.send(start.elapsed()).unwrap();
+            });
+            let elapsed = received.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(elapsed >= Duration::from_millis(50), "Idle listener spun");
+        });
+    }
 
     #[test]
     fn standalone_companion_gets_allocations_without_becoming_a_saved_worker() {
