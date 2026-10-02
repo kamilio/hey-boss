@@ -4,6 +4,7 @@ pub mod agent_conversations;
 pub mod agent_guidance;
 pub(crate) mod agent_process;
 pub mod agent_runtime;
+mod agent_transcript;
 pub use hey_harvester::agents;
 pub mod artifacts;
 pub mod attachments;

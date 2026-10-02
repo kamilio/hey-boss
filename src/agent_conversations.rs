@@ -402,10 +402,28 @@ pub(crate) fn window_page(
     if !valid_session(&session) {
         return Err(Error::invalid("Invalid saved conversation ID"));
     }
-    let Some(path) = rollout(home, &session) else {
-        return Ok(result);
+    let provider = result["run"]["actor_id"]
+        .as_str()
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("codex");
+    let (path, storage) = if matches!(provider, "claude" | "pi") {
+        let path = crate::agent_transcript::location(
+            &crate::issues::database_path()?,
+            provider,
+            &session,
+        )?;
+        if !path.exists() {
+            return Ok(result);
+        }
+        let storage = path.parent().unwrap().to_path_buf();
+        (path, storage)
+    } else {
+        let Some(path) = rollout(home, &session) else {
+            return Ok(result);
+        };
+        (path, home.to_path_buf())
     };
-    if !path.canonicalize()?.starts_with(home.canonicalize()?) {
+    if !path.canonicalize()?.starts_with(storage.canonicalize()?) {
         return Err(Error::invalid(
             "Saved conversation is outside Codex storage",
         ));
@@ -520,6 +538,36 @@ fn recent_range(
 }
 
 fn item(record: &Value, offset: u64) -> Option<Value> {
+    if record["type"] == "agent_event" {
+        use crate::agent_runtime::Event;
+        let event: Event = serde_json::from_value(record["event"].clone()).ok()?;
+        let (role, label, text) = match event {
+            Event::Message { role, text } if matches!(role.as_str(), "user" | "assistant") => {
+                let label = if role == "user" {
+                    "You"
+                } else {
+                    match record["provider"].as_str()? {
+                        "claude" => "Claude",
+                        "pi" => "Pi",
+                        _ => return None,
+                    }
+                };
+                (role, label.to_owned(), text)
+            }
+            Event::ToolStarted { name, input, .. } => ("tool".into(), name, text(Some(&input))),
+            Event::ToolCompleted { output, failed, .. } => (
+                "tool".into(),
+                if failed { "Failed" } else { "Result" }.into(),
+                text(Some(&output)),
+            ),
+            _ => return None,
+        };
+        let mut message = json!({"id":offset.to_string(),"role":role,"label":label,"text":text});
+        if role == "assistant" {
+            message["html"] = json!(crate::markdown::render_fragment(&text));
+        }
+        return Some(message);
+    }
     if record["type"] != "response_item" {
         return None;
     }

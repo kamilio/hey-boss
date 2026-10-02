@@ -136,7 +136,7 @@ pub(crate) fn assigned_run(
         return Ok(None);
     };
     let actor: Actor = serde_json::from_str(&metadata)?;
-    if actor.kind != "codex" {
+    if !matches!(actor.kind.as_str(), "codex" | "claude" | "pi") {
         return Ok(None);
     }
     let Some(session) = actor.session_id.as_deref() else {

@@ -576,6 +576,7 @@ fn run(path: &Path, store: &mut Store, job: &Job, stop: &AtomicBool) -> Result<S
         )
         .env_remove("HEY_BOSS_ISSUE_HOST")
         .env_remove("HEY_BOSS_AGENT_ID")
+        .env_remove("HEY_BOSS_WORKER_RUN")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CLAUDE_SESSION_ID")

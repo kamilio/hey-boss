@@ -409,13 +409,9 @@ impl Supervisor {
             crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
         }
         if taking_over && result["ok"] != false && result["stopped"] == true {
-            result["resume_command"] = takeover::command(
-                host,
-                result["directory"].as_str().unwrap_or(""),
-                result["session_id"].as_str().unwrap_or(""),
-            )
-            .map(|c| json!(c))
-            .unwrap_or(Value::Null);
+            result["resume_command"] = takeover::saved_command(host, &result)
+                .map(|c| json!(c))
+                .unwrap_or(Value::Null);
         }
         Ok(result)
     }

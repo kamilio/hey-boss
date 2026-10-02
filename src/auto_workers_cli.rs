@@ -34,6 +34,8 @@ enum Action {
     },
     /// Add and start a saved worker. Repeat --directory to share slots across projects.
     Add {
+        #[arg(long, value_enum, default_value = "codex")]
+        provider: hey_boss::agent_runtime::Provider,
         /// Reuse an ID when retrying the same creation request.
         #[arg(long)]
         id: Option<String>,
@@ -54,6 +56,7 @@ enum Action {
 }
 pub fn run(options: &Options) -> issues::Result<()> {
     if let Some(Action::Add {
+        provider,
         id,
         name,
         concurrency,
@@ -62,6 +65,7 @@ pub fn run(options: &Options) -> issues::Result<()> {
     {
         let machine = issues::identity::machine()?;
         let mut settings = issues::worker::Settings {
+            provider: *provider,
             name: name.clone(),
             concurrency: *concurrency,
             enabled: true,

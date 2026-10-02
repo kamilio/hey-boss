@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use std::{io::Read, os::unix::net::UnixStream};
 
 struct Prompt {
+    answer_key: Option<String>,
     question: String,
     description: String,
     choices: Vec<(String, Value)>,
@@ -22,6 +23,7 @@ fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
                 .as_str()
                 .unwrap_or("This tool requires a form response.");
             return Ok(Some(Prompt {
+                answer_key: None,
                 question: format!("{server} needs input Hey Boss cannot collect"),
                 description: format!(
                     "Hey Boss does not collect MCP form responses or credentials. Choose ‘Continue without this tool’ to cancel this tool request and let Codex use another approach in the same session. ‘Cancel’ stops the worker for explicit retry. Neither choice approves the tool or supplies form values.\n\n**Server message**\n\n{}",
@@ -52,6 +54,7 @@ fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
         let server = params["serverName"].as_str().unwrap_or("MCP server");
         let message = params["message"].as_str().unwrap_or("Sign in to continue.");
         return Ok(Some(Prompt {
+            answer_key: None,
             question: format!("{server} needs you to sign in"),
             description: format!(
                 "Open the sign-in page on {} and finish there. Return here and choose ‘I've finished signing in’ to continue the same Codex session. Opening the link does not approve or answer this request. Never enter credentials in Hey Boss.\n\n**Server**\n\n{}\n**Server message**\n\n{}",
@@ -149,6 +152,7 @@ fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
         "Approval applies only to this request."
     };
     Ok(Some(Prompt {
+        answer_key: None,
         question: question.into(),
         description: format!(
             "{scope} Codex will continue in the same session after your decision.\n\n{context}"
@@ -159,6 +163,95 @@ fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
 }
 
 fn input_prompts(method: &str, params: &Value) -> Result<Option<Vec<Prompt>>> {
+    if method == "agent/questions" {
+        let questions = params["questions"]
+            .as_array()
+            .filter(|q| !q.is_empty() && q.len() <= 20)
+            .ok_or_else(|| Error::invalid("Expected 1–20 agent questions"))?;
+        let mut keys = std::collections::HashSet::new();
+        return questions
+            .iter()
+            .map(|q| {
+                let key = q["question"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty() && keys.insert(*s) && q["isSecret"] != true)
+                    .ok_or_else(|| Error::invalid("Invalid, duplicate or secret agent question"))?;
+                let options = q["options"]
+                    .as_array()
+                    .filter(|a| a.len() <= 20)
+                    .ok_or_else(|| Error::invalid("Invalid agent options"))?;
+                let mut choices = vec![];
+                let mut description = String::new();
+                for option in options {
+                    let label = option["label"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| Error::invalid("Invalid agent option"))?;
+                    description.push_str(&code(&format!(
+                        "{label}: {}",
+                        option["description"].as_str().unwrap_or("")
+                    )));
+                    choices.push((label.into(), json!({"answers":{key:label}})));
+                }
+                if q["multiSelect"] == true {
+                    choices.clear();
+                }
+                Ok(Prompt {
+                    answer_key: Some(key.into()),
+                    question: key.into(),
+                    description,
+                    choices,
+                    link: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some);
+    }
+    if method == "agent/tool" {
+        return Ok(Some(vec![Prompt {
+            answer_key: None,
+            question: format!(
+                "Allow {}?",
+                params["tool_name"].as_str().unwrap_or("this tool")
+            ),
+            description: code(&serde_json::to_string_pretty(&params["input"])?),
+            choices: vec![
+                ("Approve once".into(), json!({"allow":true})),
+                ("Decline".into(), json!({"allow":false})),
+                ("Cancel".into(), json!({"allow":false})),
+            ],
+            link: None,
+        }]));
+    }
+    if method == "agent/input" {
+        let choices = match params["method"].as_str() {
+            Some("confirm") => vec![
+                ("Yes".into(), json!({"input":"true"})),
+                ("No".into(), json!({"input":"false"})),
+            ],
+            Some("select") => params["options"]
+                .as_array()
+                .filter(|a| !a.is_empty() && a.len() <= 20)
+                .ok_or_else(|| Error::invalid("Agent selection requires 1–20 choices"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| (s.to_owned(), json!({"input":s})))
+                        .ok_or_else(|| Error::invalid("Invalid agent choice"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Some("input" | "editor") => vec![],
+            _ => return Ok(None),
+        };
+        return Ok(Some(vec![Prompt {
+            answer_key: None,
+            question: params["title"].as_str().unwrap_or("Agent input").into(),
+            description: params["prefill"].as_str().unwrap_or("").into(),
+            choices,
+            link: None,
+        }]));
+    }
     if !matches!(
         method,
         "tool/requestUserInput" | "item/tool/requestUserInput"
@@ -206,6 +299,7 @@ fn input_prompts(method: &str, params: &Value) -> Result<Option<Vec<Prompt>>> {
             choices.push((label.into(), json!({"answers":{id:{"answers":[label]}}})));
         }
         prompts.push(Prompt {
+            answer_key: None,
             question: question["question"]
                 .as_str()
                 .unwrap_or("Choose an option")
@@ -275,6 +369,7 @@ struct Pending {
 }
 
 struct Question {
+    answer_key: Option<String>,
     task: String,
     choices: Vec<(String, Value)>,
     reading: Option<Reading>,
@@ -392,8 +487,9 @@ impl Approvals {
             let mut request = Request::action("ask", None);
             request.project = Some(job.project.name.clone());
             request.title = Some(format!(
-                "#{} · Codex {}",
+                "#{} · {} {}",
                 job.number(),
+                job.config.provider.name(),
                 if p.link.is_some() {
                     "sign-in"
                 } else {
@@ -402,7 +498,8 @@ impl Approvals {
             ));
             request.question = Some(p.question);
             request.description = Some(p.description);
-            request.options = Some(p.choices.iter().map(|(label, _)| label.clone()).collect());
+            request.options = (!p.choices.is_empty())
+                .then(|| p.choices.iter().map(|(label, _)| label.clone()).collect());
             request.issue = Some(crate::notices::IssueReference {
                 project: job.project.id.clone(),
                 number: job.number(),
@@ -426,6 +523,7 @@ impl Approvals {
                 ));
             }
             pending.questions.push(Question {
+                answer_key: p.answer_key,
                 task: reply.task_id,
                 choices: p.choices,
                 reading: None,
@@ -480,13 +578,23 @@ impl Approvals {
                 } else {
                     None
                 };
-                let response = answer
-                    .and_then(|answer| q.choices.iter().find(|(label, _)| label == answer))
-                    .map(|(_, value)| value.clone());
+                let response = if let Some(key) = &q.answer_key {
+                    answer
+                        .filter(|s| !s.trim().is_empty() && s.len() <= 32000)
+                        .map(|s| json!({"answers":{key:s}}))
+                } else if q.choices.is_empty() {
+                    answer
+                        .filter(|s| s.len() <= 32000)
+                        .map(|s| json!({"input":s}))
+                } else {
+                    answer
+                        .and_then(|answer| q.choices.iter().find(|(label, _)| label == answer))
+                        .map(|(_, value)| value.clone())
+                };
                 // Free text, dismissal and missing results never grant authority.
                 cancelled = response.is_none() || answer == Some("Cancel");
                 let response = response.unwrap_or_else(|| {
-                    let shape = &q.choices[0].1;
+                    let shape = q.choices.first().map(|v| &v.1).unwrap_or(&Value::Null);
                     if shape.get("permissions").is_some() {
                         json!({"permissions":{},"scope":"turn"})
                     } else if shape.get("answers").is_some() {
@@ -558,6 +666,37 @@ impl Drop for Pending {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_inputs_keep_answers_separate_from_permission_grants() {
+        let p = input_prompts(
+            "agent/tool",
+            &json!({"tool_name":"Write","input":{"path":"proof.txt"}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(p[0].choices[0].1, json!({"allow":true}));
+        assert_eq!(p[0].choices[1].1, json!({"allow":false}));
+        let p=input_prompts("agent/questions", &json!({"questions":[{"question":"Choose","options":[{"label":"one","description":"First"}]}]})).unwrap().unwrap();
+        assert_eq!(p[0].answer_key.as_deref(), Some("Choose"));
+        assert_eq!(p[0].choices[0].1, json!({"answers":{"Choose":"one"}}));
+        assert!(
+            input_prompts(
+                "agent/questions",
+                &json!({"questions":[{"question":"Secret","isSecret":true,"options":[]}]})
+            )
+            .is_err()
+        );
+        for method in ["input", "editor"] {
+            assert!(
+                input_prompts("agent/input", &json!({"method":method,"title":"Answer"}))
+                    .unwrap()
+                    .unwrap()[0]
+                    .choices
+                    .is_empty()
+            );
+        }
+    }
 
     #[test]
     fn mcp_sign_in_has_an_explicit_completion_and_safe_external_link() {
@@ -632,6 +771,7 @@ mod tests {
                 item: Value::Null,
                 turn: Value::Null,
                 questions: vec![Question {
+                    answer_key: None,
                     task: id.into(),
                     choices: vec![("Approve once".into(), json!({"decision":"accept"}))],
                     reading: Some(Reading {
@@ -676,6 +816,7 @@ mod tests {
                 item: Value::Null,
                 turn: Value::Null,
                 questions: vec![Question {
+                    answer_key: None,
                     task: "synthetic-skip".into(),
                     choices: p.choices,
                     reading: Some(Reading {

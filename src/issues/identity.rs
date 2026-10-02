@@ -171,6 +171,19 @@ fn resolve_with_discovery(
         creation_run: None,
         model: None,
     };
+    if explicit.is_none()
+        && let Some(run) = env("HEY_BOSS_WORKER_RUN")
+    {
+        identifier(&run, "worker run", 128)?;
+        let db = crate::database::Connection::open_with_flags(
+            super::database_path()?,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let raw: String = db.query_row("SELECT json_extract(job,'$.actor') FROM worker_runs WHERE id=?1 AND finished_at IS NULL", [&run], |r| r.get(0))?;
+        let mut saved: Actor = serde_json::from_str(&raw)?;
+        saved.cwd = cwd.into();
+        return Ok(saved);
+    }
     let configured = explicit
         .map(str::to_owned)
         .or_else(|| env("HEY_BOSS_AGENT_ID"));

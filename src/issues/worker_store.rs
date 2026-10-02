@@ -373,7 +373,9 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(json!({"ok":true,"stopped":finished,"session_id":session,"directory":job.config.cwd}))
+        Ok(
+            json!({"ok":true,"stopped":finished,"session_id":session,"session_ref":job.session_ref,"provider":job.config.provider,"directory":job.config.cwd}),
+        )
     }
 
     pub(crate) fn worker_prompt(&self, job: &Job, text: &str) -> Result<()> {
@@ -414,22 +416,41 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    pub(crate) fn worker_prepare_provider(&mut self, job: &mut Job) -> Result<()> {
+        job.actor.id = format!("{}:{}", job.config.provider.name(), job.id);
+        job.actor.kind = job.config.provider.name().into();
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("INSERT INTO agents VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen", params![job.actor.id,serde_json::to_string(&job.actor)?,now()])?;
+        tx.execute(
+            "UPDATE worker_runs SET actor_id=?2,job=?3 WHERE id=?1 AND finished_at IS NULL",
+            params![job.id, job.actor.id, serde_json::to_string(job)?],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub(crate) fn worker_attach(&mut self, job: &mut Job, session: &str) -> Result<()> {
-        identifier(session, "Codex session", 128)?;
+        identifier(session, "Agent session", 128)?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let issue = get_issue(&tx, &job.project.id, job.number(), true)?;
-        if issue.assignee.is_some() || issue.state != "open" || issue.deleted_at.is_some() {
+        if (issue.assignee.is_some() && issue.assignee.as_deref() != Some(&job.actor.id))
+            || issue.state != "open"
+            || issue.deleted_at.is_some()
+        {
             return Err(Error::conflict(
                 "Issue ownership changed before Codex started",
             ));
         }
         let mut actor = job.actor.clone();
-        actor.id = format!("codex:{session}");
-        actor.kind = "codex".into();
+        if job.config.provider == crate::agent_runtime::Provider::Codex {
+            actor.id = format!("codex:{session}");
+        }
+        actor.kind = job.config.provider.name().into();
         actor.session_id = Some(session.into());
-        actor.source = "issue worker Codex session".into();
+        actor.source = "issue worker agent session".into();
         let (pid, start): (Option<u32>, Option<String>) = tx.query_row(
             "SELECT pid,process_start FROM worker_runs WHERE id=?1",
             [&job.id],
@@ -756,6 +777,7 @@ mod tests {
             let issue =
                 serde_json::to_value(get_issue(&store.db, &project.id, 1, false).unwrap()).unwrap();
             let job = Job {
+                session_ref: None,
                 id: "handoff-run".into(),
                 worker_id: String::new(),
                 resume_session: None,
