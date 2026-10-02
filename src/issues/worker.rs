@@ -18,6 +18,8 @@ use std::{
 
 #[path = "worker_prompts.rs"]
 mod prompts;
+#[path = "worker_providers.rs"]
+mod providers;
 pub use prompts::*;
 pub const DEFAULT_PROMPT: &str = include_str!("prompts/worker.md").trim_ascii_end();
 /// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
@@ -64,6 +66,7 @@ pub const DEFAULT_CLAIM_TIMEOUT_SECONDS: u32 = 600;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub provider: crate::agent_runtime::Provider,
     pub name: String,
     pub concurrency: u32,
     pub tags: Vec<String>,
@@ -83,6 +86,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            provider: Default::default(),
             name: "Worker".into(),
             concurrency: 1,
             tags: vec![],
@@ -119,7 +123,7 @@ pub fn validate_settings(c: &Settings) -> Result<()> {
         }
     }
     if c.enabled {
-        codex_binary()?;
+        c.provider.binary()?;
     }
     Ok(())
 }
@@ -195,6 +199,7 @@ fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
+    pub provider: crate::agent_runtime::Provider,
     pub prompt: String,
     pub cwd: String,
     pub concurrency: u32,
@@ -208,6 +213,7 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            provider: Default::default(),
             prompt: DEFAULT_PROMPT.into(),
             cwd: String::new(),
             concurrency: 1,
@@ -222,6 +228,8 @@ impl Default for ProjectConfig {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Job {
+    #[serde(default)]
+    pub session_ref: Option<crate::agent_runtime::SessionRef>,
     pub id: String,
     #[serde(default)]
     pub worker_id: String,
@@ -286,7 +294,7 @@ pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
         ));
     }
     if c.enabled {
-        codex_binary()?;
+        c.provider.binary()?;
     }
     Ok(())
 }
@@ -777,6 +785,28 @@ pub(crate) fn recover(store: &mut Store, machine: &str) -> Result<()> {
     Ok(())
 }
 
+fn check_job(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
+    if store.worker_model_expired(job)? {
+        return Err(Error::new(
+            "startup_timeout",
+            "Agent did not begin model work within 15 minutes. The session was stopped and the issue can retry.",
+        ));
+    }
+    if store.worker_claim_expired(job)? {
+        return Err(Error::new(
+            "claim_timeout",
+            "Agent did not claim the issue before its reservation expired. The session was stopped; review or retry the issue.",
+        ));
+    }
+    if stop.load(Ordering::Relaxed) || store.worker_cancelled(job)? {
+        return Err(Error::new(
+            "cancelled",
+            "Worker stopped or issue ownership changed",
+        ));
+    }
+    Ok(())
+}
+
 struct Codex {
     process: crate::agent_process::Process,
     protection: (PathBuf, Job),
@@ -820,6 +850,7 @@ impl Codex {
             )
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("HEY_BOSS_WORKER_RUN")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CODEX_SESSION_ID")
             .env_remove("CLAUDE_SESSION_ID")
@@ -864,27 +895,6 @@ impl Codex {
             .receive(Duration::from_millis(200))
             .map_err(Error::from)
     }
-    fn check(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
-        if store.worker_model_expired(job)? {
-            return Err(Error::new(
-                "startup_timeout",
-                "Codex did not begin model work within 15 minutes. The session was stopped and the issue can retry.",
-            ));
-        }
-        if store.worker_claim_expired(job)? {
-            return Err(Error::new(
-                "claim_timeout",
-                "Codex did not claim the issue before its reservation expired. The session was stopped; review or retry the issue.",
-            ));
-        }
-        if stop.load(Ordering::Relaxed) || store.worker_cancelled(job)? {
-            return Err(Error::new(
-                "cancelled",
-                "Worker stopped or issue ownership changed",
-            ));
-        }
-        Ok(())
-    }
     fn rpc(
         &mut self,
         method: &str,
@@ -898,7 +908,7 @@ impl Codex {
         self.send(json!({"id":id,"method":method,"params":params}))?;
         let mut deadline = Instant::now() + Duration::from_secs(45);
         loop {
-            Self::check(store, job, stop)?;
+            check_job(store, job, stop)?;
             self.poll_approvals(store, job, stop)?;
             if self.approvals.is_pending() {
                 deadline = Instant::now() + Duration::from_secs(45);
@@ -969,7 +979,7 @@ impl Codex {
         job: &Job,
         stop: &AtomicBool,
     ) -> Result<()> {
-        Self::check(store, job, stop)?;
+        check_job(store, job, stop)?;
         if value["params"]["threadId"].as_str() != self.session.as_deref() || self.session.is_none()
         {
             return Err(Error::new(
@@ -1012,7 +1022,7 @@ impl Codex {
                 format!("Codex needs input or approval: Inbox bridge unavailable: {e}. Review the saved session."),
             )
         })? {
-            Self::check(store, job, stop)?;
+            check_job(store, job, stop)?;
             self.send(response)?;
             if cancelled {
                 return Err(Error::new(
@@ -1087,7 +1097,11 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
         }
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_codex(path, &mut store, &mut job, &stop)
+        if job.config.provider == crate::agent_runtime::Provider::Codex {
+            run_codex(path, &mut store, &mut job, &stop)
+        } else {
+            providers::run(path, &mut store, &mut job, &stop)
+        }
     }));
     let (state, summary) = match outcome {
         Ok(Ok(result)) => result,
@@ -1313,6 +1327,7 @@ pub(crate) fn preview(
     issue: Value,
 ) -> (String, bool, String) {
     let job = Job {
+        session_ref: None,
         id: String::new(),
         worker_id: String::new(),
         resume_session: None,
@@ -1483,11 +1498,11 @@ fn run_codex(
     stop: &AtomicBool,
 ) -> Result<(String, String)> {
     validate_config(&job.config, &job.project)?;
-    Codex::check(store, job, stop)?;
+    check_job(store, job, stop)?;
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut delay = Duration::from_secs(1);
     let mut c = loop {
-        Codex::check(store, job, stop)?;
+        check_job(store, job, stop)?;
         let mut c = Codex::spawn(path, job)?;
         store.worker_process(&job.id, c.process.pid())?;
         store.worker_event(
@@ -1511,7 +1526,7 @@ fn run_codex(
                 store.worker_event(&job.id, &format!("Codex state is temporarily unavailable; retrying startup: {}", error.message), None)?;
                 let retry_at = (Instant::now() + delay).min(deadline);
                 while Instant::now() < retry_at {
-                    Codex::check(store, job, stop)?;
+                    check_job(store, job, stop)?;
                     thread::sleep(Duration::from_millis(100));
                 }
                 delay = (delay * 2).min(Duration::from_secs(8));
@@ -1627,7 +1642,7 @@ fn run_thread(
     let mut applied_prompt = text;
     let mut last_prompt_check = Instant::now();
     loop {
-        Codex::check(store, job, stop)?;
+        check_job(store, job, stop)?;
         c.poll_approvals(store, job, stop)?;
         if last_prompt_check.elapsed() >= Duration::from_secs(2) {
             last_prompt_check = Instant::now();
@@ -1678,7 +1693,7 @@ fn run_thread(
                     // Keep the update pending; completion below starts a follow-up
                     // in the same thread before accepting a completion report.
                     result => {
-                        Codex::check(store, job, stop)?;
+                        check_job(store, job, stop)?;
                         let detail = result.err().map(|e| e.to_string()).unwrap_or_else(|| "Unexpected steering acknowledgement".into());
                         store.worker_event(&job.id, &format!("Instruction update pending; retrying: {detail}"), None)?;
                     }
@@ -2088,7 +2103,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         }
     }
     println!(
-        "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch Codex → manual claim → implement → finish",
+        "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch agent → manual claim → implement → finish",
         v["config"]["tags"], v["eligible"]
     );
     if let Some(chiefs) = v["chiefs"].as_array() {
@@ -2129,12 +2144,17 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
                 .map(|t| format!(" · claim in {}s", ((t - now()).max(0) + 999) / 1000))
                 .unwrap_or_default();
             println!(
-                "{} #{} · {} · {}{} · Codex {} · {}",
+                "{} #{} · {} · {}{} · {} {} · {}",
                 run["project_name"].as_str().unwrap_or(""),
                 run["number"],
                 run["state"].as_str().unwrap_or(""),
                 crate::worker_tui::duration::format_runtime(seconds),
                 claim,
+                match run["actor_id"].as_str().unwrap_or("").split(':').next() {
+                    Some("claude") => "Claude",
+                    Some("pi") => "Pi",
+                    _ => "Codex",
+                },
                 run["session_id"]
                     .as_str()
                     .unwrap_or(if run["finished_at"].is_null() {
@@ -2300,7 +2320,7 @@ impl Startup {
                     println!("{value}");
                 } else {
                     print_status_with_history(&value, false, history_limit);
-                    println!("Ctrl+C stops this worker's Codex sessions.");
+                    println!("Ctrl+C stops this worker's agent sessions.");
                 }
                 std::io::stdout().flush()?;
                 last = signature;

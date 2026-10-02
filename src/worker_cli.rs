@@ -3,10 +3,13 @@ use hey_boss::issues::{self, Error, Operation, Request, Result, Store, worker::S
 #[derive(Args)]
 #[command(arg_required_else_help = true)]
 pub struct Options {
-    /// Run on the authoritative SSH host; Codex sessions run there too.
+    /// Agent used for newly picked issues; saved workers default to Codex.
+    #[arg(long, global = true, value_enum)]
+    provider: Option<hey_boss::agent_runtime::Provider>,
+    /// Run on the authoritative SSH host; agent sessions run there too.
     #[arg(long, global = true)]
     host: Option<String>,
-    /// Parallel Codex sessions owned by this worker; there is no shared pool cap.
+    /// Parallel agent sessions owned by this worker; there is no shared pool cap.
     #[arg(long, global = true)]
     concurrency: Option<u32>,
     /// Only pick issues matching every selected tag; omit for unrestricted tags.
@@ -49,7 +52,7 @@ pub struct Options {
     chief: bool,
     #[arg(long, conflicts_with = "chief", global = true)]
     no_chief: bool,
-    /// Seconds allowed for Codex to claim its reserved issue.
+    /// Seconds allowed for the agent to claim its reserved issue.
     #[arg(long, global = true)]
     claim_timeout: Option<u32>,
     #[arg(long, global = true)]
@@ -349,6 +352,9 @@ fn run_inner(o: &Options) -> Result<()> {
     if let Some(n) = o.concurrency {
         c.concurrency = n;
     }
+    if let Some(provider) = o.provider {
+        c.provider = provider;
+    }
     if !o.tags.is_empty() {
         c.tags = o.tags.clone();
     }
@@ -589,6 +595,7 @@ fn remote_arguments(o: &Options) -> Vec<String> {
     let mut args = vec!["worker".into()];
     args.extend(["--history".into(), o.history.to_string()]);
     for (flag, value) in [
+        ("--provider", o.provider.map(|p| p.name().to_owned())),
         ("--concurrency", o.concurrency.map(|v| v.to_string())),
         ("--name", o.name.clone()),
         ("--id", o.id.clone()),
@@ -662,7 +669,7 @@ fn run_remote(o: &Options, host: &str) -> Result<()> {
         && o.project.is_empty()
     {
         return Err(Error::invalid(
-            "A remote worker needs --cwd PATH, --project, or --all-projects on the authoritative host; Codex sessions run on that host",
+            "A remote worker needs --cwd PATH, --project, or --all-projects on the authoritative host; agent sessions run on that host",
         ));
     }
     let mut command = std::process::Command::new("ssh");
