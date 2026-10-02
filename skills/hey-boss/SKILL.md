@@ -9,6 +9,8 @@ Use `hey-boss COMMAND --help` for options. Commands default to readable text;
 use `--json` when available for structured results. Issue commands default to the
 current checkout's project; use `--project FULL_ID` to select another.
 
+Change prompts only when the user explicitly requests a prompt change; task or queue instructions do not authorize changing prompts.
+
 ## Notifications and questions
 
 Use `hey-boss notif ask --sync` to wait, or `hey-boss notif ask --async` then `hey-boss notif wait TASK_ID`. Cancellation is never approval; do not automatically re-ask. Remote `pending` does not confirm delivery.
