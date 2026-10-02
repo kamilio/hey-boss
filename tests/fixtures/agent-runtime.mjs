@@ -50,6 +50,10 @@ function prompt(text) {
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
+  if (text === 'question fixture' && provider === 'claude') {
+    send({type:'control_request',request_id:'question',request:{subtype:'can_use_tool',tool_name:'AskUserQuestion',input:{questions:[{question:'Choose a color',options:[{label:'Blue'},{label:'Green'}],multiSelect:false}]}}});
+    return;
+  }
   if (text === 'closed input') {
     const event = provider === 'codex'
       ? {method:'item/agentMessage/delta',params:{threadId:session,delta:'INPUT_CLOSED'}}
@@ -216,6 +220,9 @@ for await (const chunk of process.stdin) {
       // only one result. The client must dispatch its next-turn queue itself.
       if (!streaming) prompt(r.message.content); else output = r.message.content;
     } else if (r.type === 'control_response') {
+      if(r.response.request_id==='question') {
+        output=r.response.response.behavior==='deny'?'cancelled':r.response.response.updatedInput.answers['Choose a color'];complete();continue;
+      }
       if (r.response.response.behavior !== 'deny') throw new Error('expected explicit denial');
       complete();
     }

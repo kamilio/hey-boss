@@ -16,9 +16,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
+    #[default]
     Codex,
     Claude,
     Pi,
@@ -278,8 +279,8 @@ impl AgentSession {
                 .arg(serde_json::to_string(schema)?);
         }
         let mut paths = vec![
-            binary.parent().unwrap().to_owned(),
             std::env::current_exe()?.parent().unwrap().to_owned(),
+            binary.parent().unwrap().to_owned(),
         ];
         paths.extend(std::env::split_paths(
             &launch
@@ -291,6 +292,7 @@ impl AgentSession {
         ));
         for key in [
             "HEY_BOSS_AGENT_ID",
+            "HEY_BOSS_WORKER_RUN",
             "CODEX_THREAD_ID",
             "CODEX_SESSION_ID",
             "CLAUDE_SESSION_ID",
@@ -696,6 +698,9 @@ impl AgentSession {
         )?;
         self.requests.clear();
         Ok(())
+    }
+    pub(crate) fn preserve_until(&mut self, protected: impl FnMut() -> bool + Send + 'static) {
+        self.process.preserve_until(protected);
     }
     fn ready(&self) -> io::Result<()> {
         if self.stopped || self.uncertain {
