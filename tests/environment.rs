@@ -45,7 +45,8 @@ fn github_quota_is_shared_across_processes_and_not_authentication() {
         1
     );
     let persisted: serde_json::Value = serde_json::from_slice(&f.cli("check").stdout).unwrap();
-    assert_eq!(persisted["retry_at"], reset * 1000);
+    // Exhausted reset headers have whole-second precision; retry after that second.
+    assert_eq!(persisted["retry_at"], (reset + 1) * 1000);
     // An unrelated credential context is not blocked by this account's receipt.
     let other = f
         .command(env!("CARGO_BIN_EXE_hey-boss"))
@@ -205,7 +206,7 @@ fn quota_pool_startup_releases_five_issues_and_recovers_with_one_identity_check(
     assert_eq!(held["active"], 0, "{held}");
     for run in held["runs"].as_array().unwrap() {
         assert_eq!(run["state"], "infrastructure_blocked");
-        assert_eq!(run["retry_at"], reset * 1000);
+        assert_eq!(run["retry_at"], (reset + 1) * 1000);
         assert!(
             run["summary"]
                 .as_str()
