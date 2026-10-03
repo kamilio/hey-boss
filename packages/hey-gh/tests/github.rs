@@ -711,6 +711,37 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 }
                 node
             };
+            if mode == "account-page-timeout" {
+                let size: usize = body["query"]
+                    .as_str()
+                    .unwrap()
+                    .split("pullRequests(first: ")
+                    .nth(1)
+                    .unwrap()
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                if size > 25 {
+                    return reply(504, json!({"message":"gateway timeout"}), &[]);
+                }
+                let start = body["variables"]["after"]
+                    .as_str()
+                    .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
+                let end = (start + size).min(60);
+                let nodes: Vec<_> = (start..end)
+                    .map(|n| node(&format!("acme/page{n:02}")))
+                    .collect();
+                return reply(
+                    200,
+                    json!({"data":{"viewer":{"pullRequests":{
+                        "totalCount":60,"nodes":nodes,
+                        "pageInfo":{"hasNextPage":end<60,"endCursor":end.to_string()}
+                    }}}}),
+                    &[],
+                );
+            }
             let (nodes, next, total) = if mode == "account-large" {
                 let mut nodes = vec![node("acme/demo")];
                 nodes.extend((0..24).map(|n| node(&format!("acme/watch{n:02}"))));
@@ -3447,6 +3478,39 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
 }
 
 #[tokio::test]
+async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
+    let h = Harness::new().await;
+    h.mode("account-page-timeout");
+    let c = h.client();
+    let freshness = Freshness::MaxAge(Duration::from_secs(60));
+    let (first, second) = tokio::join!(
+        c.all_my_open_pull_requests(freshness),
+        c.all_my_open_pull_requests(freshness)
+    );
+    let first = first.expect("bounded discovery pages must avoid the gateway timeout");
+    assert_eq!(first.len(), 60);
+    assert_eq!(first, second.unwrap());
+    assert_eq!(first[0]["repository"]["nameWithOwner"], "acme/page00");
+    assert_eq!(first[59]["repository"]["nameWithOwner"], "acme/page59");
+    assert_eq!(
+        h.calls().len(),
+        3,
+        "each page is fetched once without retries"
+    );
+    assert_eq!(h.calls()[1].body["variables"]["after"], "25");
+    assert_eq!(h.calls()[2].body["variables"]["after"], "50");
+    assert_eq!(
+        h.client()
+            .all_my_open_pull_requests(Freshness::CachedOnly)
+            .await
+            .unwrap(),
+        first,
+        "the full roster remains durable across client reconstruction"
+    );
+    assert_eq!(h.calls().len(), 3);
+}
+
+#[tokio::test]
 async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failure() {
     let h = Harness::new().await;
     h.mode("account");
@@ -3467,7 +3531,7 @@ async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failur
         h.calls()[0].body["query"]
             .as_str()
             .unwrap()
-            .contains("first: 100")
+            .contains("first: 25")
     );
 
     // A reconstructed client reuses the durable collection without requests.
