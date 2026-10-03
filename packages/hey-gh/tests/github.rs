@@ -706,6 +706,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     node["baseRefName"] = json!(if phase >= 1 { "release" } else { "main" });
                     node["baseRefOid"] = json!(if phase >= 2 { NEW_HEAD } else { BASE });
                 }
+                if mode == "account-priority-head" && phase >= 3 && repository == "acme/other" {
+                    node["headRefOid"] = json!(NEW_HEAD);
+                    node["commits"]["nodes"][0]["commit"]["oid"] = json!(NEW_HEAD);
+                }
                 if mode == "account-repository-case-change" && phase >= 1 {
                     node["repository"]["nameWithOwner"] = json!(repository.to_ascii_uppercase());
                 }
@@ -725,6 +729,8 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     (25, Some("acme/watch23"))
                 } else if mode.starts_with("account-growing") && phase >= 1 {
                     (3, Some("acme/new"))
+                } else if mode == "account-priority-new" && phase < 3 {
+                    (1, Some("acme/demo"))
                 } else if phase >= 9 {
                     (0, None)
                 } else if phase >= 8 || (mode == "account-state-version" && phase == 7) {
@@ -833,6 +839,8 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 let mut nodes = vec![node("acme/demo")];
                 nodes.extend((0..24).map(|n| node(&format!("acme/watch{n:02}"))));
                 (nodes, None, 25)
+            } else if mode == "account-priority-new" && phase < 3 {
+                (vec![node("acme/demo")], None, 1)
             } else if mode == "account-state-version" && phase == 7 {
                 (vec![node("acme/other")], None, 1)
             } else if phase >= 9 {
@@ -907,7 +915,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         };
         return reply(200, data, &[]);
     }
-    if mode == "account-slow-one" && path == "/repos/acme/demo/pulls/7" {
+    if (mode == "account-slow-one" || mode.starts_with("account-priority-") && phase >= 3)
+        && path == "/repos/acme/demo/pulls/7"
+    {
         mock.release.notified().await;
     }
     if mode == "account-identity-stalled" && path == "/repos/acme/other/issues/7/comments" {
@@ -918,6 +928,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     }
     let current_head = if (mode == "push-during-report" && call_number >= 2)
         || ((mode == "account-head-change" || mode == "account-page-order") && phase >= 1)
+        || (mode == "account-priority-head" && phase >= 3 && path.contains("/acme/other/"))
     {
         NEW_HEAD
     } else {
@@ -6479,6 +6490,69 @@ async fn account_initial_checks_are_available_before_slow_detail_hydration_and_r
         .find(|p| p["repository"]["nameWithOwner"] == "acme/other")
         .unwrap();
     assert_eq!(other["ci"]["summary"]["state"], "success");
+    h.mock.release.notify_waiters();
+}
+
+#[tokio::test]
+async fn account_changed_head_gets_ci_before_the_older_rotation_after_discovery_and_restart() {
+    account_priority_after_discovery_and_restart("account-priority-head", NEW_HEAD).await;
+}
+
+#[tokio::test]
+async fn account_new_pr_gets_ci_before_the_older_rotation_after_discovery_and_restart() {
+    account_priority_after_discovery_and_restart("account-priority-new", HEAD).await;
+}
+
+async fn account_priority_after_discovery_and_restart(mode: &str, expected_head: &str) {
+    let h = Harness::new().await;
+    h.mode(mode);
+    h.phase(2);
+    let c = h.client();
+    assert!(
+        c.refresh_pr_status(Freshness::Revalidate, true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    h.phase(3);
+    // Discovery updates the public roster before the independent CI loop runs.
+    // Priority must compare against that loop's own durable head observations.
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    drop(c);
+    let before = h.calls().len();
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(2);
+    config.request_timeout = Duration::from_secs(4);
+    config.max_attempts = 1;
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.refresh_pr_status(Freshness::Revalidate, true)
+        .await
+        .unwrap();
+    let calls = h.calls();
+    let first = calls[before..]
+        .iter()
+        .find(|call| call.path.ends_with("/pulls/7"))
+        .unwrap();
+    assert_eq!(
+        first.path, "/repos/acme/other/pulls/7",
+        "new or changed heads must precede the old rotation"
+    );
+    let page = c
+        .pr_status_page(None, None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let changed = page
+        .pull_requests
+        .iter()
+        .find(|row| row["repository"]["nameWithOwner"] == "acme/other")
+        .unwrap();
+    assert_eq!(changed["ci"]["head_sha"], expected_head);
+    assert_eq!(changed["sourceErrors"]["ci"], Value::Null);
+    assert!(
+        page.pull_requests
+            .iter()
+            .all(|row| row.get("urgent").is_none())
+    );
     h.mock.release.notify_waiters();
 }
 

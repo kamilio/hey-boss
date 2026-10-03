@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+mod schedule;
 
 // PR updatedAt versions mutable PR metadata, not CI or mergeability. These
 // sources still use their own validations and immutable commit references.
@@ -591,6 +592,8 @@ impl Client {
             .map(|n| Ok((key(n)?, n.clone())))
             .collect::<Result<_>>()?;
         let tracking_key = format!("account-status-pending:{mode}");
+        let schedule_key = format!("account-status-schedule:{mode}");
+        let rotation_key = format!("account-status-next:{mode}");
         let mut pending: BTreeMap<(String, u64), Value> = BTreeMap::new();
         if let Some(stored) = self.derived(&tracking_key).await? {
             for node in stored
@@ -601,10 +604,35 @@ impl Client {
                 pending.insert(key(node)?, node.clone());
             }
         }
+        // Unlike the public roster and pending node payloads, this record is
+        // owned only by its hydration lane. Discovery cannot erase an unseen
+        // head change by publishing newer nodes before that lane gets a turn.
+        let mut schedule = if seed_only {
+            schedule::Schedule::baseline(&pending, None)
+        } else if let Some(stored) = self.derived(&schedule_key).await? {
+            stored.decode::<schedule::Schedule>()?
+        } else {
+            let next = self
+                .derived(&rotation_key)
+                .await?
+                .map(|r| r.decode::<Option<(String, u64)>>())
+                .transpose()?
+                .flatten()
+                .map(|(repo, number)| (repo.to_ascii_lowercase(), number));
+            schedule::Schedule::baseline(&pending, next)
+        };
         for node in previous.as_array().into_iter().flatten() {
             pending.insert(key(node)?, node.clone());
         }
         pending.extend(current.clone());
+        if !seed_only {
+            schedule.reconcile(&pending);
+            self.save_derived(
+                &schedule_key,
+                serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
+            )
+            .await?;
+        }
         // Persist before touching the roster, so closed/merged PR follow-ups
         // survive process death between discovery and their final observation.
         self.save_derived(&tracking_key, json!(pending.values().collect::<Vec<_>>()))
@@ -613,47 +641,35 @@ impl Client {
             self.observe(&self.roster_resource(), &json!(pulls)).await?;
         }
         let mut retry = current.clone();
-        let rotation_key = format!("account-status-next:{mode}");
-        let next: Option<(String, u64)> = self
-            .derived(&rotation_key)
-            .await?
-            .map(|r| r.decode())
-            .transpose()?
-            .flatten()
-            .map(|(repo, number): (String, u64)| (repo.to_ascii_lowercase(), number));
-        let mut work: Vec<_> = pending.into_iter().collect();
-        if let Some(next) = next
-            && let Some(index) = work.iter().position(|(key, _)| *key == next)
-        {
-            work.rotate_left(index);
-        }
-        let successors: BTreeMap<_, _> = work
-            .iter()
-            .zip(work.iter().cycle().skip(1))
-            .take(work.len())
-            .map(|((key, _), (next, _))| (key.clone(), next.clone()))
-            .collect();
-        let mut resume = None;
+        let work = schedule.order(pending);
         let total = work.len();
         let mut attempted = 0usize;
         let mut failed = 0usize;
         let mut interrupted = 0usize;
         let mut deferred = 0usize;
         let mut work = work.into_iter();
-        while let Some(((repo, number), node)) = work.next() {
+        while let Some(item) = work.next() {
             if !seed_only && tokio::time::Instant::now() >= deadline {
                 // Unvisited PRs are deferred work, not failed observations.
                 // Preserve terminal follow-ups as well as the current roster.
-                resume.get_or_insert_with(|| (repo.clone(), number));
                 let remaining = 1 + work.len();
                 deferred = remaining;
-                retry.insert((repo, number), node);
-                retry.extend(work);
+                retry.insert(item.key, item.node);
+                retry.extend(work.map(|item| (item.key, item.node)));
                 errors.push(format!(
                     "refresh cycle budget exhausted; {remaining} PRs remain queued"
                 ));
                 break;
             }
+            if !seed_only {
+                schedule.started(&item);
+                self.save_derived(
+                    &schedule_key,
+                    serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
+                )
+                .await?;
+            }
+            let ((repo, number), node) = (item.key, item.node);
             attempted += 1;
             let pr_started_at_ms = crate::now_ms();
             // Deliberate scheduler waits consume the cycle budget, not the
@@ -811,8 +827,13 @@ impl Client {
                     .await?;
                 }
             }
-            if !seed_only && matches!(result, Err(Error::Deadline)) && resume.is_none() {
-                resume = successors.get(&(repo.clone(), number)).cloned();
+            if !seed_only && result.is_ok() {
+                schedule.succeeded(&(repo.clone(), number));
+                self.save_derived(
+                    &schedule_key,
+                    serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
+                )
+                .await?;
             }
             if let Err(error) = &result {
                 if cycle_interrupted {
@@ -878,7 +899,8 @@ impl Client {
             .await?;
         let finished_at_ms = crate::now_ms();
         if !seed_only {
-            self.save_derived(&rotation_key, json!(resume)).await?;
+            self.save_derived(&rotation_key, json!(schedule.next))
+                .await?;
             self.save_derived(
                 &format!("account-status-cycle:{mode}"),
                 json!(AccountRefreshCycle {
