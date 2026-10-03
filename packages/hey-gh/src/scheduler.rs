@@ -263,10 +263,18 @@ struct Budgets(HashMap<String, BTreeMap<u64, Budget>>);
 
 impl Budgets {
     fn for_resource(&self, resource: &str) -> impl Iterator<Item = &Budget> {
+        let seconds_now = now_ms() / 1000;
         self.0
             .get(resource)
             .into_iter()
             .flat_map(|windows| windows.values())
+            // Queued work must recover at reset even when no new response can
+            // arrive to prune the window in observe(). Unknown reset times
+            // retain their explicit cooldown; shared Retry-After is separate.
+            .filter(move |budget| {
+                budget.reset_at_seconds == 0
+                    || budget.reset_at_seconds.saturating_add(1) > seconds_now
+            })
     }
 
     fn observe(
@@ -924,12 +932,27 @@ impl Scheduler {
 }
 
 fn ready(job: &Job, budgets: &Budgets, global: Instant) -> Instant {
+    let now = Instant::now();
+    let stamp = now_ms();
     job.ready_at.max(global).max(
         budgets
             .for_resource(&job.resource)
             .map(|budget| {
                 if conditional_budget_exempt(job, budget) {
                     job.ready_at
+                } else if budget.reset_at_seconds != 0 {
+                    // Wake at known expiry even if no response or new job can
+                    // wake the scheduler. Retry-After still gates via global.
+                    let until_reset = Duration::from_millis(
+                        budget
+                            .reset_at_seconds
+                            .saturating_add(1)
+                            .saturating_mul(1000)
+                            .saturating_sub(stamp),
+                    );
+                    budget
+                        .next
+                        .min(now.checked_add(until_reset).unwrap_or(budget.next))
                 } else {
                     budget.next
                 }
@@ -1036,6 +1059,44 @@ mod tests {
                 .try_acquire_owned()
                 .unwrap(),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_quota_releases_queued_work_without_another_response() {
+        let now = Instant::now();
+        let job = core_job();
+        let mut budgets = Budgets::default();
+        // A pacing reservation can outlive the wall-clock reset. No response
+        // can retire that window while all queued requests wait behind it.
+        budgets.exhausted("core", now_ms() / 1000 - 2, Duration::from_secs(600));
+        assert_eq!(ready(&job, &budgets, now), now);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_wait_wakes_at_reset_without_new_queue_activity() {
+        let now = Instant::now();
+        let job = core_job();
+        let mut budgets = Budgets::default();
+        budgets.exhausted("core", now_ms() / 1000 + 10, Duration::from_secs(600));
+        let wake = ready(&job, &budgets, now);
+        assert!(wake >= now + Duration::from_secs(10));
+        assert!(wake <= now + Duration::from_secs(11));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_expiry_preserves_other_windows_and_shared_cooldowns() {
+        let now = Instant::now();
+        let job = core_job();
+        let mut budgets = Budgets::default();
+        budgets.exhausted("core", now_ms() / 1000 - 2, Duration::from_secs(600));
+        budgets.exhausted("core", now_ms() / 1000 + 3600, Duration::from_secs(30));
+        assert_eq!(ready(&job, &budgets, now), now + Duration::from_secs(30));
+        assert_eq!(
+            ready(&job, &budgets, now + Duration::from_secs(90)),
+            now + Duration::from_secs(90)
+        );
+        budgets.exhausted("core", 0, Duration::from_secs(120));
+        assert_eq!(ready(&job, &budgets, now), now + Duration::from_secs(120));
     }
 
     #[tokio::test(start_paused = true)]
