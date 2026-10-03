@@ -43,8 +43,8 @@ fn restart_companion_processes() {
 fn refresh_shared_api(binary: &Path, companion: bool, home: &Path) -> io::Result<()> {
     let api = binary.with_file_name("hey-gh");
     output(Command::new(&api).arg("install"))?;
-    // Companions need a machine owner. Preserve the supervisor's existing PR
-    // monitor ownership unless a user has explicitly installed the service.
+    // Companions need a machine owner. The supervisor's PR monitor starts this
+    // same service when needed; reload it when already registered.
     let registration = if cfg!(target_os = "macos") {
         home.join("Library/LaunchAgents/local.hey-gh.plist")
     } else {
