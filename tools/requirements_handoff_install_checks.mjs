@@ -14,7 +14,7 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), 'hb-requirements-handoff-')
 const database = join(root, 'issues.db');
 const socket = `/tmp/hey-boss-db-${process.getuid()}/${createHash('sha256').update(database).digest('hex').slice(0,24)}`;
 const env = {...process.env, HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:root,
-  HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock'), HEY_BOSS_CODEX:join(root,'codex-fixture'),
+  HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock'), HEY_BOSS_CODEX:join(root,'codex-fixture.mjs'),
   HEY_BOSS_HANDOFF_TEST_BINARY:binary};
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR','HEY_BOSS_AGENT_ID','HEY_BOSS_WORKER_RUN','CODEX_THREAD_ID']) delete env[key];
 const children = [];
