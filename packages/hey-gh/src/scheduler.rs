@@ -340,12 +340,12 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    fn abandoned_collection(&self, job: &Job) -> bool {
-        if !job.collection_slice {
-            return false;
-        }
+    fn abandoned_request(&self, job: &Job) -> bool {
         // Admission inserts the registry receiver while holding this lock.
         // Do not mistake a newly sent job for one whose last caller left.
+        // HTTP caller cancellation keeps the daemon handler warming its cache;
+        // once that handler's report expires, unobserved queued work is waste.
+        // Active responses still finish, and coalesced callers retain their turn.
         let _inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         job.notify.receiver_count() <= 1
     }
@@ -391,7 +391,7 @@ impl Scheduler {
             // Expiry is independent of quota availability, including exhausted
             // buckets whose next reset might be an hour away.
             if let Some(index) = pending.iter().position(|j| {
-                self.abandoned_collection(j)
+                self.abandoned_request(j)
                     || j.deadline() <= now
                     || ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline()
             }) {
@@ -401,7 +401,7 @@ impl Scheduler {
                     || budgets
                         .for_resource(&job.resource)
                         .any(|b| b.next > now && !conditional_budget_exempt(&job, b));
-                let error = if quota_blocked && !self.abandoned_collection(&job) {
+                let error = if quota_blocked && !self.abandoned_request(&job) {
                     Error::RateLimited {
                         retry_after_seconds: ceil_seconds(ready.saturating_duration_since(now)),
                     }
@@ -562,7 +562,7 @@ impl Scheduler {
                         Err(e) => {
                             tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,timed_out=e.is_timeout(),"GitHub transport attempt failed");
                             if Instant::now() >= job.deadline()
-                                || self.abandoned_collection(&job)
+                                || self.abandoned_request(&job)
                                 || (e.is_timeout()
                                     && job.collection_slice
                                     && !job.interactive.load(Ordering::Relaxed))
