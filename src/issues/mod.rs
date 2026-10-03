@@ -516,6 +516,8 @@ pub enum Operation {
     Ready {
         number: i64,
         force: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        acknowledge_requirements: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         guard: Option<ReadyGuard>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

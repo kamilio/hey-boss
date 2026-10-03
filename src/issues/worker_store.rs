@@ -115,8 +115,7 @@ fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
         || !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
         || issue.assignee.as_deref() != Some("human:boss")
-        || issue.title != job.issue["title"]
-        || issue.body != job.issue["body"]
+        || !ready::requirements::matches(db, job, issue)?
     {
         return Ok(false);
     }
@@ -571,11 +570,7 @@ impl Store {
         }
         if state == "completed"
             && !own_closed
-            && ((!own && !handed_off)
-                || issue.title != job.issue["title"]
-                || issue.body != job.issue["body"]
-                || crate::issues::worker::artifact_task(&json!({"labels": issue.labels}))
-                    != crate::issues::worker::artifact_task(&job.issue))
+            && ((!own && !handed_off) || !ready::requirements::matches(&tx, job, &issue)?)
         {
             state = "blocked";
             summary = format!(
@@ -614,19 +609,6 @@ impl Store {
             // Only the owning agent's explicit Close may resolve the issue.
             // Failed attempts remain in run history; retries must not flood the
             // task with duplicate handoff comments or imply successful delivery.
-            if state == "completed" {
-                mutate(
-                    &tx,
-                    &job.project,
-                    &job.actor,
-                    &Operation::Comment {
-                        allow_long_comment: false,
-                        number: job.number(),
-                        body: format!("### Worker completed\n\n{summary}"),
-                    },
-                    now(),
-                )?;
-            }
             if state == "completed" && job.requires_pr() && !watching {
                 mutate(
                     &tx,
@@ -634,6 +616,7 @@ impl Store {
                     &job.actor,
                     &if registry::project_settings(&tx, &job.project)?["prs_enabled"] == true {
                         Operation::Ready {
+                            acknowledge_requirements: false,
                             number: job.number(),
                             force: false,
                             guard: None,
@@ -656,6 +639,19 @@ impl Store {
                     &job.project.id,
                     job.number(),
                     &job.actor.id,
+                    now(),
+                )?;
+            }
+            if state == "completed" {
+                mutate(
+                    &tx,
+                    &job.project,
+                    &job.actor,
+                    &Operation::Comment {
+                        allow_long_comment: false,
+                        number: job.number(),
+                        body: format!("### Worker completed\n\n{summary}"),
+                    },
                     now(),
                 )?;
             }
@@ -735,6 +731,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("requirements_handoff_tests.rs");
 
     #[test]
     fn quota_deadline_survives_result_recovery_without_relabeling_or_losing_session() {
@@ -2364,6 +2362,7 @@ mod tests {
                 watch_event(&mut f, "late");
             }
             f.apply(Operation::Ready {
+                acknowledge_requirements: false,
                 number: 1,
                 force: false,
                 guard: None,
@@ -2453,6 +2452,7 @@ mod tests {
                 });
                 assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
                 f.apply(Operation::Ready {
+                    acknowledge_requirements: false,
                     number: 1,
                     force: false,
                     guard: None,
@@ -2573,6 +2573,7 @@ mod tests {
             for late in [false, true] {
                 let mut f = HandoffFixture::new(true);
                 f.apply(Operation::Ready {
+                    acknowledge_requirements: false,
                     number: 1,
                     force: false,
                     guard: None,
@@ -2610,6 +2611,7 @@ mod tests {
     fn explicit_ready_handoff_keeps_worker_alive_and_finishes_once() {
         let mut f = HandoffFixture::new(true);
         f.apply(Operation::Ready {
+            acknowledge_requirements: false,
             number: 1,
             force: false,
             guard: None,

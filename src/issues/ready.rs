@@ -3,6 +3,8 @@
 use super::*;
 use crate::issues::ReadyGuard;
 use sha2::{Digest, Sha256};
+#[path = "requirements_handoff.rs"]
+pub(super) mod requirements;
 
 pub(super) fn snapshot(db: &Connection, project: &str, issue: &Issue) -> Result<ReadyGuard> {
     let allocation: Option<(String, Option<i64>)> = db.query_row(
@@ -118,6 +120,7 @@ pub(super) fn handoff(
 ) -> Result<Option<Value>> {
     let Operation::Ready {
         guard,
+        acknowledge_requirements,
         clear_manual_hold,
         keep_draft,
         ..
@@ -130,6 +133,16 @@ pub(super) fn handoff(
     if let Some(expected) = guard {
         check_snapshot(db, &project.id, issue, expected, "Ready")?;
     }
+    let requirements_handoff = if *acknowledge_requirements {
+        if guard.is_none() {
+            return Err(Error::invalid(
+                "Acknowledging requirements requires a guarded Ready snapshot",
+            ));
+        }
+        Some(requirements::capture(db, &project.id, issue, actor)?)
+    } else {
+        None
+    };
     // Even a matching snapshot or --force cannot release a foreign live attempt.
     // Include expired, unclaimed attempts: expiry is not evidence of safe release.
     let foreign: Option<String> = db.query_row("SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND (actor_id<>?3 OR claimed_at IS NULL) LIMIT 1", params![project.id,issue.number,actor.id], |r| r.get(0)).optional()?;
@@ -219,7 +232,10 @@ pub(super) fn handoff(
             "Ready assignee guard required for manual owner {owner}; read issue view and provide the exact version, assignee and reservation guards"
         )));
     }
-    if issue.state == "ready" && issue.assignee.as_deref() == Some("human:boss") {
+    if issue.state == "ready"
+        && issue.assignee.as_deref() == Some("human:boss")
+        && requirements_handoff.is_none()
+    {
         return Ok(None);
     }
     let assignee = if watching {
@@ -234,7 +250,10 @@ pub(super) fn handoff(
         register_boss(db, actor, now)?;
         Some("human:boss".into())
     };
-    let data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":assignee,"previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
+    let mut data = json!({"previous_assignee":if own_handoff {Some(actor.id.clone())} else {issue.assignee.clone()},"assignee":assignee,"previous_state":issue.state,"cleared_manual_hold":issue.manual_blocked,"guard":guard,"kept_draft":keep_draft});
+    if let Some(ack) = requirements_handoff {
+        data["requirements_handoff"] = ack;
+    }
     issue.state = "ready".into();
     issue.assignee = assignee;
     issue.manual_blocked = false;

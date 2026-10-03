@@ -242,6 +242,17 @@ pub(super) fn assign(
         // Assignment runs on the supervisor, including companion handoffs.
         // Scope the acknowledgement to this attempt, not a reusable session ID.
         if let Some(run) = live_issue_run(db, &project.id, issue.number, &actor.id)? {
+            if let Some(mut ack) =
+                ready::requirements::current(db, &project.id, issue, &actor.id, &run)?
+            {
+                if !ack.valid {
+                    return Err(Error::conflict(
+                        "Requirements acknowledgement changed; inspect the issue and repeat guarded Ready with --acknowledge-requirements before assigning GitHub",
+                    ));
+                }
+                ack.snapshot["version"] = json!(issue.version + 1);
+                data["requirements_handoff"] = ack.snapshot;
+            }
             if reviewed_evidence.is_some()
                 && let Some(id) = steering_id(&run, &status)
             {
@@ -253,7 +264,7 @@ pub(super) fn assign(
     Ok(data)
 }
 
-fn live_issue_run(
+pub(super) fn live_issue_run(
     db: &Connection,
     project: &str,
     number: i64,
@@ -864,8 +875,7 @@ pub(super) fn own_handoff(
 ) -> Result<bool> {
     if !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
-        || issue.title != job.issue["title"]
-        || issue.body != job.issue["body"]
+        || !ready::requirements::matches(db, job, issue)?
         || !is_watching(db, &job.project.id, job.number())?
     {
         return Ok(false);

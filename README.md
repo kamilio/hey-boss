@@ -554,6 +554,15 @@ dependencies and subtask sequencing unblock at **Ready** or **Closed**, enabling
 stacked PRs before merge. Reopen a Ready task before rework: new dependent pickups
 pause, while running agents keep their claims and receive a dependency update.
 
+After reviewing updated requirements or handoff notes, the owning worker can run
+`hey-boss issue ready NUMBER --acknowledge-requirements`, then
+`hey-boss issue assign NUMBER github`. The CLI captures the Ready version,
+ownership and reservation guards. This explicit acknowledgement binds the current
+title, body and labels to that run; later edits or versions require a fresh Ready
+acknowledgement. Ordinary Ready does not replace the run-start requirements.
+GitHub findings still require their separate evidence acknowledgement, and a
+handoff never closes the issue or turns an interrupted run into a successful one.
+
 Dependencies must belong to the same project and cannot form cycles. Closing or
 deleting all blockers reopens the dependent issue automatically; reopening or
 restoring a blocker blocks it again. Subtasks remain blocking until every reachable
