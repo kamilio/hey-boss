@@ -144,7 +144,7 @@ try {
   const edit=['--supervisor','edit','2','--body','## Corrected guidance\n\nFollow the existing dependency graph.','--if-version','4','--request-id','body-correction'];
   assert.match((await issue(peer,edit)).issue.body,/Corrected guidance/);check('Guarded body correction is canonical');
   for(const args of [
-    ['claim','2','--force'],['close','1'],
+    ['claim','2','--force'],['close','1','--force'],
     ['edit','2','--label','invalid-version','--if-version','0','--request-id','invalid-version'],
   ])assert.equal((await issue(peer,['--supervisor',...args],2)).error.code,'invalid_input');
   batch[0].assignment='unassign';writeFileSync(file,JSON.stringify(batch));
@@ -303,6 +303,47 @@ try {
       assert(attempt<200,'PR attachments did not replicate');await wait(100);
     }
     check('Authoritative PR attachments converge to the companion viewer');
+  }
+  if(process.argv.includes('--lifecycle')) {
+    assert.equal(capabilities.capabilities.issue_close,true);
+    for(const title of ['Reviewed development handoff','Verified completed handoff','Idle watched handoff','Browser handoff']) {
+      const created=await issue(main,['create','--title',title,'--body','Development usability is recorded separately from CI, merge and production acceptance.']);
+      await issue(main,['pr','add',String(created.issue.number),'https://github.com/example/lifecycle/pull/1']);
+    }
+    const node=(await sql(peer,'SELECT node FROM fleet_meta WHERE id=1'))[0][0];
+    await sql(main,"INSERT INTO fleet_allocations VALUES('named:Chief metadata QA',7,?)",[node]);
+    await issue(main,['assign','7','github']);
+    await sql(main,"INSERT INTO issue_github_watches VALUES('named:Chief metadata QA',7,?) ON CONFLICT(project_id,issue_number) DO UPDATE SET status=excluded.status",[JSON.stringify({event:'reviewed-event',prs:{},trigger:{blocking:false,completed:true}})]);
+    await sql(main,"UPDATE issues SET assignee=NULL,github_ack_event=NULL WHERE number=7");
+    await sql(main,"INSERT OR REPLACE INTO fleet_allocations VALUES('named:Chief metadata QA',7,?)",[node]);
+    for(const number of ['5','6','7']) {
+      const args=['ready',number,'--request-id','lifecycle-ready-'+number];
+      if(number!=='7')args.push('--supervisor');
+      const ready=await issue(peer,args);
+      assert.equal(ready.issue.state,'ready');
+      assert.equal(ready.store.host,'supervisor');
+      assert.deepEqual((await issue(peer,['view',number,'--supervisor'])).issue,ready.issue);
+      assert.deepEqual(await issue(peer,args),ready);
+    }
+    check('Ordinary and explicit Ready persist on the authority, including idle allocated watcher work');
+    const args=['close','6','--supervisor','--comment','Implementation and installation verified.','--request-id','lifecycle-close'];
+    const [first,retry]=await Promise.all([issue(peer,args),issue(peer,args)]);
+    assert.deepEqual(first,retry);assert.equal(first.issue.state,'closed');
+    assert.deepEqual((await issue(peer,['request','lifecycle-close','--supervisor'])).request.response.issue,first.issue);
+    assert.deepEqual((await issue(peer,['view','6','--supervisor'])).issue,first.issue);
+    check('Concurrent close and receipt recovery agree on the authoritative lifecycle');
+    const before=await ownership();
+    for(const action of ['ready','close'])assert.equal((await issue(peer,[action,'2','--supervisor','--request-id','lifecycle-denied-'+action],4)).error.code,'conflict');
+    assert.deepEqual(await ownership(),before);
+    assert.deepEqual(await sql(main,"SELECT count(*) FROM events WHERE issue_number IN (5,6,7) AND action='claimed'"),[[0]]);
+    assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id LIKE 'lifecycle-%'"),[[0]]);
+    check('Lifecycle triage preserves active work and never claims idle tasks or writes replica receipts');
+    for(let attempt=0;;attempt++) {
+      const items=(await issue(peer,['list','--state','all','--all'])).issues;
+      if(items.some(i=>i.number===5&&i.state==='ready')&&items.some(i=>i.number===6&&i.state==='closed')&&items.some(i=>i.number===7&&i.state==='ready')&&items.some(i=>i.number===8))break;
+      assert(attempt<200,'Lifecycle changes did not replicate');await wait(100);
+    }
+    check('Authoritative lifecycle results converge to the companion viewer');
   }
   if(serve) {
     const web=start(peer,['issue','--project','Chief metadata QA','--agent','codex:chief-fixture','--json','web','--port','59651','--no-discovery']);web.stdout.resume();

@@ -19,8 +19,29 @@ Repeat the identical command after an uncertain response. A different edit is a 
 
 Drafting requires open or blocked, unassigned work with no active worker
 reservation. It retains the original actor and all normal project and label
-authorization. It never claims work or takes over a reservation. Undrafting,
-assignment and other lifecycle operations are not added to the metadata route.
+authorization. It never claims work or takes over a reservation. Undrafting
+is not added to the metadata route.
+
+`issue close NUMBER --supervisor --request-id ID` closes completed work when
+`issue_close` is advertised. The CLI captures the authoritative version, owner
+and reservation snapshot. Eligible targets are unassigned work, your own claim,
+or an idle Ready handoff to Boss/GitHub. Foreign allocations and unfinished or
+unclaimed attempts are refused; an owner's own claimed attempt may finish its
+task. `--force` is unsupported. The closing comment and actor attribution commit
+with the lifecycle change. No claim, reverse SSH or replica write is needed.
+
+`issue ready NUMBER` routes through the tunnel on companions; `--supervisor`
+also works explicitly. The snapshot includes the current GitHub watcher event,
+so idle triage can hand off reviewed work without claiming it. New findings
+between the read and write cause a guard conflict. An unguarded handoff with
+unacknowledged findings is refused, never reported as a successful Open result.
+Ready records development usability, not CI, merge or production approval.
+
+For both operations, use the same request ID and identical command after an
+uncertain acknowledgement. `issue request ID --supervisor` retrieves the original
+receipt. Replays return that committed result without overwriting later edits;
+use `issue view NUMBER --supervisor` for the current state. Disconnection never
+falls back to a replica mutation.
 
 Guarded `issue reopen NUMBER --supervisor --request-id ID`
 uses the same tunnel when `issue_reopen` is advertised. It requires unassigned,
@@ -72,3 +93,7 @@ Use `--dependencies --serve` for dependency routing and replication qualificatio
 then run `tools/dependency_tunnel_browser_checks.js` for desktop/phone checks.
 Use `--pr-attachments --serve` and `tools/pr_tunnel_browser_checks.js` to verify
 installed PR routing, replicated links and their desktop/phone presentation.
+Use `--lifecycle --serve` and `tools/lifecycle_tunnel_browser_checks.js` for
+Ready/close receipts, idle watcher handoffs, active-work guards and responsive
+replica rendering. Browser screenshots go to `/tmp/hb-lifecycle-visual`; remove
+them and stop the fixture and disposable browser after inspection.
