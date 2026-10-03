@@ -24,6 +24,12 @@ Reload skills or start a new agent session to discover it. For a custom skill
 root, use `hey-gh install --skills-dir /path/to/skills`; repeat the option for
 multiple roots. The installer only replaces its own `SKILL.md`.
 
+The fleet PR monitor starts this same user service when the local API is absent,
+so supervisor upgrades cannot leave an old private daemon holding the port.
+An existing listener is reused. Automatic startup requires launchd or a systemd
+user manager; startup failures are logged and retried on the next monitor cycle.
+For environments without a user service manager, run `hey-gh serve` explicitly.
+
 In another terminal:
 
 ```sh
