@@ -7,6 +7,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+// Keep the partial index and bootstrap selection identical. Malformed PR JSON
+// remains a candidate so reads report corruption instead of silently hiding it.
+const OPEN_PR_SELECTION: &str = "resource GLOB 'pr-status://*' AND
+    CASE WHEN json_valid(data) THEN
+        json_extract(data,'$.pullRequest.state')='OPEN'
+        AND json_type(data,'$.pullRequest.removed') IS NOT 'true'
+    ELSE 1 END";
+
 #[derive(Clone, Debug)]
 pub(crate) struct PrOwner {
     pub repository: String,
@@ -284,6 +292,12 @@ impl Store {
                 scope TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL,
                 PRIMARY KEY(scope, id));").map_err(storage)?;
         migrate_current_data(&mut conn)?;
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS snapshot_open_prs ON snapshots(
+                scope,resource COLLATE NOCASE,length(CAST(data AS BLOB)),observed_at_ms)
+             WHERE {OPEN_PR_SELECTION}"
+        ))
+        .map_err(storage)?;
         conn.execute(
             "INSERT OR IGNORE INTO metadata(key,value) VALUES('database_id',?1)",
             [digest(&format!("{}-{}", now_ms(), fastrand::u128(..)))],
@@ -855,15 +869,15 @@ impl Store {
             let head: u64 = tx.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
                 .optional().map_err(storage)?.unwrap_or(0);
             let cursor = format!("{}.{}", feed_prefix(&tx, &scope)?, head);
-            // Use the existing case-insensitive resource index to narrow a repo
-            // before inspecting JSON. Match the public roster's exact lifecycle
-            // semantics, including boolean true (not numeric 1) for removed.
-            let mut stmt = tx.prepare("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots
+            // Lifecycle and original byte counts come from the partial index;
+            // closed/removed bodies are not scanned to select the open roster.
+            // Require that index: without statistics SQLite can prefer the
+            // general resource index and read every terminal JSON body again.
+            let mut stmt = tx.prepare(&format!("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots INDEXED BY snapshot_open_prs
                 WHERE scope=?1 AND resource>=?2 COLLATE NOCASE AND resource<?3 COLLATE NOCASE
-                AND json_extract(data,'$.pullRequest.state')='OPEN'
-                AND json_type(data,'$.pullRequest.removed') IS NOT 'true'
+                AND ({OPEN_PR_SELECTION})
                 AND (?4 IS NULL OR json_extract(data,'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
-                ORDER BY resource").map_err(storage)?;
+                ORDER BY resource")).map_err(storage)?;
             let rows = stmt.query_map(params![scope, prefix, upper, repository], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?, r.get::<_, u64>(2)?))
             }).map_err(storage)?;
@@ -1980,6 +1994,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_pr_bootstrap_skips_terminal_payload_pages_after_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 1000, 4096).unwrap();
+        let mut rows = Vec::new();
+        for number in 1..=512 {
+            let (state, removed) = match number % 3 {
+                0 => ("OPEN", true),
+                1 => ("CLOSED", false),
+                _ => ("MERGED", false),
+            };
+            rows.push((
+                format!("pr-status://github.com/acme/demo/{number}"),
+                serde_json::json!({
+                    "pullRequest":{"number":number,"state":state,"removed":removed,
+                    "repository":{"nameWithOwner":"acme/demo"},"body":"x".repeat(2048)}
+                }),
+            ));
+        }
+        store.observe_many("account", &rows).await.unwrap();
+        drop(rows);
+        let resource = "pr-status://github.com/acme/demo/1000";
+        let open = serde_json::json!({"pullRequest":{"number":1000,"state":"OPEN","repository":{"nameWithOwner":"acme/demo"},"complete":false,"sourceErrors":{}}});
+        let cursor = store.observe("account", resource, &open).await.unwrap();
+        // Exercise migration from an existing store, including its feed cursor.
+        store
+            .run(|conn| {
+                conn.execute_batch("DROP INDEX IF EXISTS snapshot_open_prs")
+                    .map_err(storage)
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 1000, 4096).unwrap();
+        let stored_bytes: i64 = store
+            .run(|conn| {
+                conn.query_row(
+                    "SELECT sum(length(CAST(data AS BLOB))) FROM snapshots",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)
+            })
+            .await
+            .unwrap();
+        assert!(stored_bytes >= 1024 * 1024);
+        for repository in [None, Some("ACME/DEMO")] {
+            store
+                .run(|conn| {
+                    conn.execute_batch(
+                        "PRAGMA mmap_size=0; PRAGMA cache_size=32; PRAGMA shrink_memory",
+                    )
+                    .map_err(storage)?;
+                    Ok(cache_misses(conn, true))
+                })
+                .await
+                .unwrap();
+            let page = store
+                .bootstrap_open_prs(
+                    "account",
+                    "pr-status://github.com/",
+                    repository,
+                    Some(vec!["number".into()]),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page.cursor, cursor);
+            assert_eq!(page.snapshots.len(), 1);
+            assert_eq!(page.snapshots[0].data["pullRequest"]["number"], 1000);
+            let pages = store
+                .run(|conn| Ok(cache_misses(conn, false)))
+                .await
+                .unwrap();
+            eprintln!("bootstrap {repository:?}: {pages} page misses");
+            assert!(
+                pages < 128,
+                "bootstrap read {pages} SQLite pages for one tiny open row; terminal bodies must not be scanned"
+            );
+        }
+    }
+
+    fn cache_misses(conn: &Connection, reset: bool) -> i32 {
+        let (mut misses, mut unused) = (0, 0);
+        // The test holds the store connection lock; SQLite only writes these
+        // counters and does not retain either pointer.
+        let result = unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                conn.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut misses,
+                &mut unused,
+                i32::from(reset),
+            )
+        };
+        assert_eq!(result, rusqlite::ffi::SQLITE_OK);
+        misses
+    }
+
+    #[tokio::test]
     async fn projected_reads_validate_omitted_json_and_do_not_bypass_original_size_limits() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cache.sqlite");
@@ -1996,6 +2109,12 @@ mod tests {
         )
         .unwrap();
         let fields = Some(vec!["number".to_owned()]);
+        assert!(matches!(
+            store
+                .bootstrap_open_prs("account", "pr-status://", None, fields.clone())
+                .await,
+            Err(Error::Storage(_))
+        ));
         assert!(matches!(
             store
                 .changes_prefix_projected(

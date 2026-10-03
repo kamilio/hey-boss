@@ -245,14 +245,17 @@ the whole cycle. They are not GitHub
 transport or rate-limit failure. Fair retry position remains durable; genuine
 upstream errors keep their original diagnostics.
 
-Discovery uses pages of 100, reads the head CI state without enumerating check
+Discovery uses pages of 25, reads the head CI state without enumerating check
 contexts, and shares a durable, fully paginated collection
 between polling loops. Its reuse window starts when the scan completes; rows
 retain the oldest page's actual validation time. Failed or inconsistent scans
 never replace the last successful collection. Explicit refresh bypasses this
-collection cache. PR bootstraps select open, nonremoved status snapshots directly
-in SQLite, narrowing repository filters before loading bodies. Closed PRs and
-unrelated repositories do not consume the open list's byte budget. Selected rows
+collection cache. PR bootstraps use a compact SQLite index of open, nonremoved
+status snapshots and their original byte counts, narrowing repository filters
+before loading bodies. Closed and removed PR bodies are not scanned on each
+bootstrap. The index is built once for existing databases and maintained with
+snapshot writes. Malformed PR JSON remains eligible for an explicit corruption
+error. Closed PRs and unrelated repositories do not consume the open list's byte budget. Selected rows
 still count their original stored bytes before projection. The selected state and
 global observation cursor remain transactional; closure and reopening events
 remain available through cursor reads.
