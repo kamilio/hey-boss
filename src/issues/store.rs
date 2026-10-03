@@ -2853,6 +2853,7 @@ fn mutate(
     let mut action = "";
     let mut data = json!({});
     let mut comment_id = None;
+    let mut preserved_version = false;
     match operation {
         Operation::Assign {
             target,
@@ -3048,7 +3049,13 @@ fn mutate(
             }
         }
         Operation::Comment { body, .. } => {
-            Store::preserve_requirements_handoff(db, &project.id, number, Some(&actor.id), now)?;
+            preserved_version = Store::preserve_requirements_handoff(
+                db,
+                &project.id,
+                number,
+                Some(&actor.id),
+                now,
+            )?;
             comment_id = Some(comment(db, &project.id, number, actor, body, now)?);
         }
         Operation::ResolveComment {
@@ -3268,7 +3275,7 @@ fn mutate(
     }
     let changed = !action.is_empty() || comment_id.is_some();
     if changed {
-        issue.version += 1;
+        issue.version += i64::from(!preserved_version);
         issue.updated_at = now;
         db.execute("UPDATE issues SET title=?3,body=?4,state=?5,assignee=?6,closed_by=?7,updated_at=?8,closed_at=?9,deleted_at=?10,version=?11,labels=?12,draft=?13,plan=?14,manual_blocked=?15,blockers=?16 WHERE project_id=?1 AND number=?2",
             params![project.id,number,issue.title,issue.body,issue.state,issue.assignee,issue.closed_by,now,issue.closed_at,issue.deleted_at,issue.version,serde_json::to_string(&issue.labels)?,issue.draft,issue.plan.as_ref().map(serde_json::to_string).transpose()?,issue.manual_blocked,serde_json::to_string(&issue.blocker_numbers)?])?;

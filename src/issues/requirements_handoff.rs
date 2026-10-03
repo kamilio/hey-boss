@@ -161,29 +161,31 @@ fn version_matches(
 
 impl Store {
     /// Called only before an owner's comment or a field-identical replica merge,
-    /// in the same transaction as its single issue-version increment. Never
-    /// repairs an already stale acknowledgement or accepts changed requirements.
+    /// in the same transaction. Return true to retain an exact acknowledged
+    /// version: notes and no-op merges do not change that guarded issue snapshot.
+    /// Existing receipt chains remain readable but never rewind a revision.
     pub(crate) fn preserve_requirements_handoff(
         db: &Connection,
         project: &str,
         number: i64,
         commenter: Option<&str>,
         now: i64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let latest: Option<(String, String)> = db.query_row(
             "SELECT e.actor,json_extract(e.data,'$.requirements_handoff.run') FROM issues i JOIN events e ON e.project_id=i.project_id AND e.issue_number=i.number WHERE i.project_id=?1 AND i.number=?2 AND i.state='ready' AND e.action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY e.id DESC LIMIT 1",
             params![project, number], |r| Ok((r.get(0)?, r.get::<_,Option<String>>(1)?.unwrap_or_default())),
         ).optional()?;
         let Some((actor, run)) = latest else {
-            return Ok(());
+            return Ok(false);
         };
         if run.is_empty() || commenter.is_some_and(|commenter| commenter != actor) {
-            return Ok(());
+            return Ok(false);
         }
         let issue = get_issue(db, project, number, true)?;
         if let Some(ack) = current(db, project, &issue, &actor, &run)?
             && ack.valid
         {
+            let exact = ack.snapshot["version"] == issue.version;
             event(
                 db,
                 project,
@@ -193,11 +195,28 @@ impl Store {
                 now,
                 &json!({
                     "acknowledgement":ack.snapshot, "previous_version":issue.version,
-                    "version":issue.version+1, "source":if commenter.is_some() {"owner_comment"} else {"replica"}
+                    "version":issue.version+i64::from(!exact), "source":if commenter.is_some() {"owner_comment"} else {"replica"}
                 }),
             )?;
+            return Ok(exact);
         }
-        Ok(())
+        Ok(false)
+    }
+
+    /// A split journal can deliver external history before its issue delta.
+    /// Invalidate the exact revision before publishing that history so resident
+    /// readers that predate receipts cannot complete against an obsolete guard.
+    pub(crate) fn replicated_handoff_changes(
+        db: &Connection,
+        project: &str,
+        number: i64,
+        actor: &str,
+        action: &str,
+    ) -> Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issues i JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=i.project_id AND issue_number=i.number AND action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1) WHERE i.project_id=?1 AND i.number=?2 AND i.state='ready' AND i.version=json_extract(e.data,'$.requirements_handoff.version') AND (e.actor<>?3 OR ?4 NOT IN ('commented','requirements_preserved')))",
+            params![project, number, actor, action], |r| r.get(0),
+        )?)
     }
 }
 

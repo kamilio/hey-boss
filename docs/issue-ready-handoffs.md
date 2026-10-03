@@ -57,17 +57,17 @@ the same `--request-id`; upgrade the supervisor if it still rejects your own han
 
 An explicit `--acknowledge-requirements` handoff remains bound to its actor, run,
 requirements and GitHub evidence. The owner's later comments and field-identical
-replica merges can preserve it through transaction-recorded version advances.
+replica merges retain its exact version while recording preservation in history.
 External comments, changed requirements and unexplained revision gaps require a
 fresh acknowledgment. Ready and assignment commands still check exact versions
 and reservations; final notes never acknowledge another actor's new work.
 
-Version receipts require a worker that reads them. Installing the CLI and fleet
-service does not replace code in an already running pool; routine upgrades load
-at that pool's natural idle point. Verify its reported worker build separately.
-`tools/requirements_handoff_install_checks.mjs BINARY BUILD --worker-binary PATH`
-tests that exact worker executable with the installed service in disposable state.
-A passing fresh-worker check does not establish that an older resident pool is fixed.
+The mutation path supports resident workers that compare exact versions. Replica
+replay invalidates the issue before publishing external history, even when comment
+rows, events and issue deltas arrive separately. Existing version receipts remain
+readable; the writer never rewinds versions or renews a stale acknowledgment.
+Verify mixed builds with `node tools/requirements_handoff_install_checks.mjs BINARY BUILD --worker-binary PATH`.
+This uses disposable state and does not restart the live pool.
 
 When the watcher is behind the evidence you reviewed, add
 `--reviewed-evidence reviewed.json` to that GitHub assignment. The file is a JSON

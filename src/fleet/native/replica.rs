@@ -515,7 +515,10 @@ fn append_row(
             return Ok(Some(id));
         }
     }
-    let own: String = db.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let (own, role): (String, String) =
+        db.query_row("SELECT node,role FROM fleet_meta WHERE id=1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
     let local_id = if own == origin && mapped.is_none() {
         db.query_row(
             &format!("SELECT id FROM {table} WHERE id=?"),
@@ -600,6 +603,45 @@ fn append_row(
         match existing {
             Some(id) => id,
             None => {
+                let invalidate = role != "agent"
+                    && matches!(table, "comments" | "events")
+                    && crate::issues::Store::replicated_handoff_changes(
+                        db,
+                        row["project_id"]
+                            .as_str()
+                            .ok_or_else(|| invalid("Invalid history project"))?,
+                        row["issue_number"]
+                            .as_i64()
+                            .ok_or_else(|| invalid("Invalid history issue"))?,
+                        row[if table == "comments" {
+                            "author"
+                        } else {
+                            "actor"
+                        }]
+                        .as_str()
+                        .ok_or_else(|| invalid("Invalid history actor"))?,
+                        if table == "comments" {
+                            "commented"
+                        } else {
+                            row["action"]
+                                .as_str()
+                                .ok_or_else(|| invalid("Invalid history action"))?
+                        },
+                    )?;
+                if invalidate {
+                    // Keep the guard delta ahead of the history in the journal.
+                    // A policy-suppressed append must roll both writes back.
+                    db.execute_batch("SAVEPOINT handoff_history")?;
+                    execute(
+                        db,
+                        "UPDATE issues SET version=version+1,updated_at=max(updated_at,?) WHERE project_id=? AND number=?",
+                        &[
+                            json!(crate::issues::worker::now()),
+                            values["project_id"].clone(),
+                            values["issue_number"].clone(),
+                        ],
+                    )?;
+                }
                 let inserted = execute(
                     db,
                     &format!(
@@ -609,6 +651,13 @@ fn append_row(
                     ),
                     &parameters,
                 )?;
+                if invalidate {
+                    db.execute_batch(if inserted == 0 {
+                        "ROLLBACK TO handoff_history; RELEASE handoff_history"
+                    } else {
+                        "RELEASE handoff_history"
+                    })?;
+                }
                 // Policy guards may suppress a stale generated notice. Never
                 // map its remote ID to the connection's previous insert.
                 if inserted == 0 {
@@ -939,10 +988,8 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
                     "Concurrent edits changed the same issue field or ownership",
                 ));
             }
-            // Version/clock-only journal entries (notably delayed comments)
-            // still advance canonical guards. Preserve a valid handoff only
-            // when this merge changes no issue field; foreign comment events
-            // independently invalidate it even if they arrive in a later batch.
+            // A field-identical merge may retain an exact handoff revision.
+            // Foreign history invalidates it independently, even in split batches.
             let preserves_requirements = changed.is_empty();
             let mut merged = old.clone();
             for (k, v) in changed {
@@ -979,16 +1026,19 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
                 )
                 .map_err(|e| invalid(&e.message))?;
             }
-            if preserves_requirements {
+            let preserved_version = if preserves_requirements {
                 crate::issues::Store::preserve_requirements_handoff(
                     db,
                     old["project_id"].as_str().unwrap(),
                     old["number"].as_i64().unwrap(),
                     None,
                     crate::issues::worker::now(),
-                )?;
-            }
-            merged["version"] = json!(old["version"].as_i64().unwrap() + 1);
+                )?
+            } else {
+                false
+            };
+            merged["version"] =
+                json!(old["version"].as_i64().unwrap() + i64::from(!preserved_version));
             merged["updated_at"] = json!(
                 old["updated_at"]
                     .as_i64()
