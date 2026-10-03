@@ -192,6 +192,11 @@ fn pending_optional_checks_do_not_require_review_collection() {
 }
 
 #[test]
+fn native_stack_trunk_policy_survives_monitor_storage_with_a_different_diff_base() {
+    scenario(Scenario::NativeStack);
+}
+
+#[test]
 fn stale_ci_never_wakes_work_or_starts_review_collection() {
     scenario(Scenario::Stale);
 }
@@ -220,6 +225,7 @@ fn changed_review_head_preserves_the_validated_ci_failure() {
 enum Scenario {
     ReviewsDenied,
     Pending,
+    NativeStack,
     Stale,
     InvalidTime,
     CiDenied,
@@ -244,7 +250,7 @@ fn disabling_automatic_completion_returns_merged_work_to_boss() {
 }
 
 fn scenario(scenario: Scenario) {
-    let pending = matches!(scenario, Scenario::Pending);
+    let pending = matches!(scenario, Scenario::Pending | Scenario::NativeStack);
     let stale = matches!(scenario, Scenario::Stale);
     let invalid_time = matches!(scenario, Scenario::InvalidTime);
     let ci_denied = matches!(scenario, Scenario::CiDenied);
@@ -286,6 +292,16 @@ fn scenario(scenario: Scenario) {
     }
     drop(store);
     let (mut ci, mut policy, mut metadata) = evidence(pending, stale);
+    if matches!(scenario, Scenario::NativeStack) {
+        let trunk = "cccccccccccccccccccccccccccccccccccccccc";
+        let stack =
+            json!({"id":12,"number":4,"position":2,"size":2,"base":{"ref":"main","sha":trunk}});
+        metadata["data"]["base"]["ref"] = json!("layer");
+        metadata["data"]["stack"] = stack.clone();
+        policy["base_branch"] = json!("layer");
+        policy["policy_identity"] = json!({"branch":"main","stack":stack});
+        policy["policy_sha"] = json!(trunk);
+    }
     if head_changed {
         ci["data"]["head_sha"] = json!("next-head");
         metadata["data"]["head"]["sha"] = json!("next-head");
@@ -408,6 +424,15 @@ fn scenario(scenario: Scenario) {
     }
     if !stale && !invalid_time && !terminal {
         assert_eq!(status["evidence"]["required"][0]["state"], "failure");
+    }
+    if matches!(scenario, Scenario::NativeStack) {
+        assert_eq!(status["evidence"]["policy_identity"]["branch"], "main");
+        assert_eq!(status["evidence"]["policy_identity"]["stack"]["id"], 12);
+        assert_eq!(
+            status["evidence"]["source_bases"]["required"]["ref"],
+            "layer"
+        );
+        assert_eq!(status["evidence"]["sources_match"], true);
     }
     if head_changed || review_head_changed {
         assert_eq!(

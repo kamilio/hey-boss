@@ -20,12 +20,65 @@ pub struct RequiredCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_key: Option<String>,
 }
+
+/// Policy provenance is independent of the PR's immediate diff base.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PolicyIdentity {
+    pub branch: String,
+    pub stack: Option<Value>,
+}
+
+pub(crate) fn policy_identity(pr: &Value) -> Result<PolicyIdentity> {
+    let base = pr["base"]["ref"]
+        .as_str()
+        .ok_or_else(|| Error::Invalid("PR lacks base branch".into()))?;
+    validate_branch(base)?;
+    let Some(stack) = pr.get("stack").filter(|v| !v.is_null()) else {
+        return Ok(PolicyIdentity {
+            branch: base.into(),
+            stack: None,
+        });
+    };
+    let invalid = || Error::Invalid("PR advertises incomplete native stack metadata".into());
+    let branch = stack["base"]["ref"].as_str().ok_or_else(invalid)?;
+    validate_branch(branch)?;
+    if !["id", "number", "position", "size"]
+        .iter()
+        .all(|key| stack[*key].as_u64().is_some_and(|v| v > 0))
+        || stack["position"].as_u64() > stack["size"].as_u64()
+        || !stack["base"]["sha"]
+            .as_str()
+            .is_some_and(crate::repository::valid_sha)
+    {
+        return Err(invalid());
+    }
+    Ok(PolicyIdentity {
+        branch: branch.into(),
+        stack: Some(
+            json!({"id":stack["id"],"number":stack["number"],"position":stack["position"],"size":stack["size"],"base":{"ref":branch,"sha":stack["base"]["sha"]}}),
+        ),
+    })
+}
+
+pub(crate) fn identity_matches(pr: &Value, identity: Option<&PolicyIdentity>) -> bool {
+    match identity {
+        Some(identity) => policy_identity(pr).is_ok_and(|current| current == *identity),
+        // Legacy reports are valid only without advertised native membership.
+        None => pr["stack"].is_null(),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredChecksReport {
     pub repository: String,
     pub pull_number: u64,
     pub head_sha: String,
     pub base_branch: String,
+    #[serde(default)]
+    pub policy_identity: Option<PolicyIdentity>,
+    /// Resolved tip of the effective policy branch (the trunk for native stacks).
+    #[serde(default)]
+    pub policy_sha: Option<String>,
     /// Immutable base tip and test-merge commit used for this conclusion.
     /// Legacy reports lack these selectors and must not be attached as current.
     pub base_sha: Option<String>,
@@ -155,6 +208,7 @@ impl Client {
                 .ok_or_else(|| Error::Invalid("PR lacks base branch".into()))?
                 .to_owned();
             validate_branch(&base)?;
+            let identity = policy_identity(&pr.data)?;
             let head = pr.data["head"]["sha"]
                 .as_str()
                 .ok_or_else(|| Error::Invalid("PR lacks head SHA".into()))?;
@@ -162,35 +216,53 @@ impl Client {
                 .as_str()
                 .filter(|sha| crate::repository::valid_sha(sha));
             let branch_path = format!("repos/{repository}/branches/{}", segment(&base));
-            let protection_path = format!("{branch_path}/protection/required_status_checks");
-            let rules_path = format!("repos/{repository}/rules/branches/{}", segment(&base));
+            let policy_path = format!("repos/{repository}/branches/{}", segment(&identity.branch));
+            let protection_path = format!("{policy_path}/protection/required_status_checks");
+            let rules_path = format!(
+                "repos/{repository}/rules/branches/{}",
+                segment(&identity.branch)
+            );
             let (ci_res, branch, protection_res, rules_first_res) = tokio::join!(
                 self.required_ci_report(repository, head, merge, freshness),
-                self.get(&branch_path, freshness),
+                self.get(&policy_path, freshness),
                 self.policy_get(&protection_path, freshness),
                 self.policy_get(&rules_path, freshness),
             );
             let ci = ci_res?;
             let mut errors = ci.errors.clone();
+            let direct_branch = if identity.branch == base {
+                branch.clone()
+            } else {
+                self.get(&branch_path, freshness).await
+            };
             if let Ok(branch) = &branch
                 && !branch.data["commit"]["sha"]
                     .as_str()
                     .is_some_and(crate::repository::valid_sha)
             {
-                errors.push(source("base_branch", "base branch lacks immutable SHA"));
+                errors.push(source("policy_branch", "policy branch lacks immutable SHA"));
             }
             let protected = branch
                 .as_ref()
                 .ok()
                 .and_then(|r| r.data["protected"].as_bool());
-            let base_sha = branch
+            let policy_sha = branch
                 .as_ref()
                 .ok()
                 .and_then(|r| r.data["commit"]["sha"].as_str())
                 .filter(|sha| crate::repository::valid_sha(sha))
                 .map(str::to_owned);
             if let Err(e) = &branch {
-                errors.push(source("base_branch", e));
+                errors.push(source("policy_branch", e));
+            }
+            let base_sha = direct_branch
+                .as_ref()
+                .ok()
+                .and_then(|r| r.data["commit"]["sha"].as_str())
+                .filter(|sha| crate::repository::valid_sha(sha))
+                .map(str::to_owned);
+            if base_sha.is_none() {
+                errors.push(source("base_branch", "diff base tip unavailable"));
             }
             let mut requirements = BTreeSet::new();
             let mut strict = false;
@@ -356,11 +428,13 @@ impl Client {
                     && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
                     && branch
                         .as_ref()
-                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000))
+                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000)
+                    && identity.stack.is_none())
             {
                 (pr.clone(), None)
             } else {
-                let pr_policy = if matches!(freshness, Freshness::MaxAge(_))
+                let pr_policy = if identity.stack.is_none()
+                    && matches!(freshness, Freshness::MaxAge(_))
                     && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
                 {
                     freshness
@@ -378,7 +452,7 @@ impl Client {
                 };
                 let (pr_res, branch_res) = tokio::join!(
                     self.pull_request(repository, number, pr_policy),
-                    self.get(&branch_path, branch_policy),
+                    self.get(&policy_path, branch_policy),
                 );
                 (pr_res?, Some(branch_res))
             };
@@ -386,6 +460,7 @@ impl Client {
                 || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
                 || pr.data["base"] != final_pr.data["base"]
                 || pr.data["merge_commit_sha"] != final_pr.data["merge_commit_sha"]
+                || identity != policy_identity(&final_pr.data)?
             {
                 continue;
             }
@@ -397,6 +472,17 @@ impl Client {
                 } else if let Err(e) = confirmed {
                     errors.push(source("base_confirmation", e));
                 }
+                if identity.branch != base {
+                    match self.get(&branch_path, Freshness::Revalidate).await {
+                        Ok(after)
+                            if after.data["commit"]["sha"].as_str() != base_sha.as_deref() =>
+                        {
+                            continue;
+                        }
+                        Err(e) => errors.push(source("base_confirmation", e)),
+                        _ => {}
+                    }
+                }
             }
             let state = if errors.is_empty() { state } else { "unknown" };
             let validations = crate::report::VALIDATIONS.with(|records| records.borrow().clone());
@@ -406,6 +492,8 @@ impl Client {
                 pull_number: number,
                 head_sha: ci.head_sha,
                 base_branch: base,
+                policy_identity: Some(identity),
+                policy_sha,
                 base_sha,
                 pr_base_sha: pr.data["base"]["sha"]
                     .as_str()
@@ -424,7 +512,7 @@ impl Client {
                 oldest_validation_at_ms: validations.iter().map(|r| r.validated_at_ms).min(),
                 validations,
             };
-            let value = json!({"repository":report.repository,"pull_number":number,"head_sha":report.head_sha,"base_branch":report.base_branch,"base_sha":report.base_sha,"pr_base_sha":report.pr_base_sha,"merge_sha":report.merge_sha,"state":report.state,"strict":strict,"up_to_date":up_to_date,"checks":report.checks,"rules":report.rules,"errors":report.errors});
+            let value = json!({"repository":report.repository,"pull_number":number,"head_sha":report.head_sha,"base_branch":report.base_branch,"base_sha":report.base_sha,"policy_identity":report.policy_identity,"policy_sha":report.policy_sha,"pr_base_sha":report.pr_base_sha,"merge_sha":report.merge_sha,"state":report.state,"strict":strict,"up_to_date":up_to_date,"checks":report.checks,"rules":report.rules,"errors":report.errors});
             if value.to_string().len() > self.collection_limit() {
                 return Err(Error::Invalid(
                     "required-check report exceeds collection limit".into(),
