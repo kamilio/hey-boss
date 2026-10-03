@@ -8,24 +8,6 @@ mod watches;
 
 const INTERVAL: Duration = Duration::from_secs(30);
 
-// LaunchAgents do not inherit the interactive shell's Homebrew/user PATH.
-fn gh_program(home: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .chain([
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-            "/opt/homebrew/bin".into(),
-            "/usr/local/bin".into(),
-        ])
-        .map(|directory| directory.join("gh"))
-        .find(|path| {
-            path.metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-        .unwrap_or_else(|| "gh".into())
-}
-
 fn selector(url: &str) -> Option<(String, u64)> {
     hey_gh::watcher::pull_request_selector(url)
 }
@@ -75,13 +57,12 @@ pub(super) fn run(ctx: Context) {
             return;
         }
     };
-    let mut daemon: Option<std::process::Child> = None;
     while !ctx.stopped() {
         let started = std::time::Instant::now();
         // Start the same shared daemon used by the CLI if it is absent. Never
         // fall back to a private GitHub queue that bypasses its quota backoff.
-        if let Err(error) = ensure_daemon(&ctx, &mut daemon) {
-            eprintln!("PR monitor: cannot start hey-gh serve: {error}");
+        if let Err(error) = ensure_daemon(&ctx, "127.0.0.1:8787".parse().unwrap()) {
+            eprintln!("PR monitor: cannot start hey-gh service: {error}");
         }
         poll_cycle(&ctx, &runtime, &client);
         ctx.wait(INTERVAL.saturating_sub(started.elapsed()));
@@ -110,34 +91,25 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
     }
 }
 
-fn ensure_daemon(ctx: &Context, child: &mut Option<std::process::Child>) -> Result<()> {
+fn ensure_daemon(ctx: &Context, address: std::net::SocketAddr) -> Result<()> {
     use std::process::{Command, Stdio};
-    if let Some(process) = child.as_mut()
-        && process.try_wait()?.is_some()
-    {
-        *child = None;
-    }
-    if std::net::TcpStream::connect_timeout(&"127.0.0.1:8787".parse()?, Duration::from_millis(200))
-        .is_ok()
-        || child.is_some()
-    {
+    if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
         return Ok(());
     }
-    let binary = ctx.binary.with_file_name("hey-gh");
-    // A LaunchAgent needs the resolved gh directory in the daemon's PATH too.
-    let gh = gh_program(&ctx.home);
-    let path = std::env::join_paths(gh.parent().into_iter().map(|p| p.to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))?;
-    *child = Some(
-        Command::new(binary)
-            .arg("serve")
-            .env("PATH", path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?,
-    );
+    // The user service owns the daemon across supervisor exits and upgrades.
+    // It also resolves the gh PATH for launchd's minimal environment. Spawning
+    // serve here leaves an orphan holding the port after a supervisor reload.
+    let mut command = Command::new(ctx.binary.with_file_name("hey-gh"));
+    command.args(["service", "start"]).stdin(Stdio::null());
+    let output = super::supervisor::output_timeout(command, Duration::from_secs(60))?;
+    if !output.status.success() {
+        return Err(format!(
+            "hey-gh service start failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -320,6 +292,49 @@ async fn tokio_read(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn daemon_startup_reports_manager_failure_and_retries_without_retaining_a_child() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let (root, mut ctx, store) = super::super::context::tests::test_context();
+        drop(store);
+        ctx.binary = root.join("hey-boss");
+        let binary = root.join("hey-gh");
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        fs::write(
+            &binary,
+            "#!/bin/sh\necho 'user service manager unavailable' >&2\nexit 78\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = ensure_daemon(&ctx, address).unwrap_err().to_string();
+        assert!(
+            error.contains("user service manager unavailable"),
+            "{error}"
+        );
+        fs::write(&binary, "#!/bin/sh\nif test \"$*\" != 'service start'; then exit 79; fi\necho started > \"$0.started\"\n").unwrap();
+        ensure_daemon(&ctx, address).unwrap();
+        assert_eq!(
+            fs::read_to_string(binary.with_extension("started")).unwrap(),
+            "started\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn daemon_startup_preserves_an_existing_listener_without_running_a_command() {
+        let (root, mut ctx, store) = super::super::context::tests::test_context();
+        drop(store);
+        ctx.binary = root.join("missing/hey-boss");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        ensure_daemon(&ctx, address).unwrap();
+        assert!(std::net::TcpStream::connect(address).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn only_explicit_merge_evidence_for_the_requested_pr_closes_tasks() {
         let mut data =
