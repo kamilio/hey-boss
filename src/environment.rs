@@ -287,6 +287,7 @@ fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value
             "GitHub request failed for {endpoint}: {detail}"
         )));
     }
+    gate.succeeded()?;
     if pages {
         Ok(Value::Array(
             responses.into_iter().map(|r| r.body).collect(),
