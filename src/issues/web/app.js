@@ -893,7 +893,7 @@ async function refresh(quiet = true) {
         else renderDetail(result);
       } else if (
         model.detail &&
-        (JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || result.issue.version !== model.detail.issue.version || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || JSON.stringify(result.issue.commits) !== JSON.stringify(model.detail.issue.commits) || result.issue.version !== model.detail.issue.version || result.comment_count !== model.detail.comment_count || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
         if (quiet) showUpdate();
         else renderDetail(result);
