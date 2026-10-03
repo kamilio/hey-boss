@@ -539,6 +539,11 @@ This feed synchronizes current data. If several updates affect a resource before
 
 CI covers both the immutable PR head and its current test-merge SHA when available. It fetches all pages of check runs, combined commit statuses, workflow runs, and jobs/steps for the latest attempt of each current workflow. Superseded runs do not make a successful rerun look failed. A head/base/test-merge change during collection causes a bounded recollection instead of relabeling old-head checks.
 
+The final CI selector check can reuse REST or matching discovery evidence under
+15 seconds old, bounded further by the requested cache age. This includes
+evidence validated while CI was loading. Older evidence is revalidated through
+REST; explicit `--refresh` still requires revalidation.
+
 Check-run summaries and failure lists use the newest check ID per immutable SHA,
 app, and check name. GitHub's `filter=latest` is scoped to a check suite, so old
 suite failures can remain in the raw `check_runs` evidence after a successful
