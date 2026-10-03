@@ -14,12 +14,12 @@ Requires Rust, Cargo, and an authenticated GitHub CLI (`gh auth login`).
 ```sh
 cargo install --path . --locked
 hey-gh install
-hey-gh serve
+hey-gh service start
 ```
 
 `hey-gh install` installs or updates a compact global command-card skill in
-`~/.codex/skills/hey-gh` (or `$CODEX_HOME/skills/hey-gh`) and
-`~/.agents/skills/hey-gh`. It runs without the daemon or GitHub authentication.
+`~/.codex/skills/hey-gh` (or `$CODEX_HOME/skills/hey-gh`),
+`~/.agents/skills/hey-gh`, and `~/.claude/skills/hey-gh`. It runs without the daemon or GitHub authentication.
 Reload skills or start a new agent session to discover it. For a custom skill
 root, use `hey-gh install --skills-dir /path/to/skills`; repeat the option for
 multiple roots. The installer only replaces its own `SKILL.md`.
