@@ -746,16 +746,18 @@ impl Client {
         self.0.store.bootstrap(&self.0.scope).await
     }
 
-    pub(crate) async fn bootstrap_prefix(
+    pub(crate) async fn bootstrap_open_prs(
         &self,
         prefix: &str,
+        repository: Option<&str>,
         fields: Option<&[&str]>,
     ) -> Result<crate::SnapshotPage> {
         self.0
             .store
-            .bootstrap_prefix_projected(
+            .bootstrap_open_prs(
                 &self.0.scope,
                 prefix,
+                repository,
                 fields.map(|fields| fields.iter().map(|field| (*field).to_owned()).collect()),
             )
             .await

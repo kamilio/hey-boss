@@ -834,6 +834,61 @@ impl Store {
         }).await
     }
 
+    /// Bootstrap only the current open roster. Terminal rows remain in the
+    /// snapshot/change feed, but cannot consume an open list's byte budget.
+    pub(crate) async fn bootstrap_open_prs(
+        &self,
+        scope: &str,
+        prefix: &str,
+        repository: Option<&str>,
+        fields: Option<Vec<String>>,
+    ) -> Result<SnapshotPage> {
+        let scope = scope.to_owned();
+        let repository = repository.map(str::to_owned);
+        let prefix = repository
+            .as_ref()
+            .map_or_else(|| prefix.to_owned(), |repo| format!("{prefix}{repo}/"));
+        let upper = format!("{prefix}\u{10ffff}");
+        let max_bytes = self.max_snapshot_bytes;
+        self.run(move |conn| {
+            let tx = conn.transaction().map_err(storage)?;
+            let head: u64 = tx.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
+                .optional().map_err(storage)?.unwrap_or(0);
+            let cursor = format!("{}.{}", feed_prefix(&tx, &scope)?, head);
+            // Use the existing case-insensitive resource index to narrow a repo
+            // before inspecting JSON. Match the public roster's exact lifecycle
+            // semantics, including boolean true (not numeric 1) for removed.
+            let mut stmt = tx.prepare("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots
+                WHERE scope=?1 AND resource>=?2 COLLATE NOCASE AND resource<?3 COLLATE NOCASE
+                AND json_extract(data,'$.pullRequest.state')='OPEN'
+                AND json_type(data,'$.pullRequest.removed') IS NOT 'true'
+                AND (?4 IS NULL OR json_extract(data,'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
+                ORDER BY resource").map_err(storage)?;
+            let rows = stmt.query_map(params![scope, prefix, upper, repository], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?, r.get::<_, u64>(2)?))
+            }).map_err(storage)?;
+            // Sort only small metadata, and reject oversized selections before
+            // allocating their bodies. Full JSON must not enter SQLite's sorter.
+            let mut body = tx.prepare("SELECT data FROM snapshots WHERE scope=?1 AND resource=?2").map_err(storage)?;
+            let mut snapshots = Vec::new();
+            let mut bytes = 0usize;
+            for row in rows {
+                let (resource, data_bytes, observed_at_ms) = row.map_err(storage)?;
+                bytes = bytes.saturating_add(data_bytes);
+                if bytes > max_bytes {
+                    return Err(Error::Invalid("bootstrap exceeds configured snapshot byte limit".into()));
+                }
+                let data: String = body.query_row(params![scope, resource], |r| r.get(0)).map_err(storage)?;
+                snapshots.push(Snapshot {
+                    resource,
+                    data: crate::pr_fields::decode_stored(&data, fields.as_deref()).map_err(storage)?,
+                    observed_at_ms,
+                });
+            }
+            Ok(SnapshotPage { snapshots, cursor })
+        }).await
+    }
+
     pub async fn save_watch(&self, scope: &str, watch: &Watch) -> Result<()> {
         let (scope, watch) = (scope.to_owned(), watch.clone());
         self.run(move |conn| {

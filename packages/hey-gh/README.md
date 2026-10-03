@@ -238,9 +238,12 @@ contexts, and shares a durable, fully paginated collection
 between polling loops. Its reuse window starts when the scan completes; rows
 retain the oldest page's actual validation time. Failed or inconsistent scans
 never replace the last successful collection. Explicit refresh bypasses this
-collection cache. PR bootstraps select status snapshots directly in SQLite,
-so unrelated source bodies do not consume the PR feed's byte budget or parsing
-time; the selected state and global observation cursor remain transactional.
+collection cache. PR bootstraps select open, nonremoved status snapshots directly
+in SQLite, narrowing repository filters before loading bodies. Closed PRs and
+unrelated repositories do not consume the open list's byte budget. Selected rows
+still count their original stored bytes before projection. The selected state and
+global observation cursor remain transactional; closure and reopening events
+remain available through cursor reads.
 Background discovery has its own full scan budget. CI and detail loops consume
 the last successful collection without starting or waiting for discovery;
 `watches` exposes separate `discovery_last_*` health fields. Successful source
