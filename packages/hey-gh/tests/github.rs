@@ -45,6 +45,7 @@ struct MockData {
     phase: u8,
     calls: Vec<Call>,
     mode: String,
+    quota_reset: Option<u64>,
 }
 #[derive(Clone, Default)]
 struct Mock {
@@ -415,12 +416,12 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "issue72-partial-auth-stall" && path.contains("/check-runs") {
         mock.release.notified().await;
     }
-    if path == "/quota-reset" {
+    if path == "/quota-reset" || path == "/quota-idle-reset" {
         let reset = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            + if phase == 0 { 0 } else { 3600 })
+            + if phase == 0 { 4 } else { 3600 })
         .to_string();
         return reply(
             200,
@@ -429,7 +430,11 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 ("x-ratelimit-resource", "core"),
                 (
                     "x-ratelimit-remaining",
-                    if phase == 0 { "0" } else { "5000" },
+                    if phase == 0 {
+                        if path == "/quota-reset" { "0" } else { "1" }
+                    } else {
+                        "5000"
+                    },
                 ),
                 ("x-ratelimit-reset", &reset),
             ],
@@ -457,11 +462,19 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         );
     }
     if path == "/conditional-paced" {
-        let reset = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        // One server window, not a new reset timestamp on every validation.
+        let reset = mock
+            .data
+            .lock()
             .unwrap()
-            .as_secs()
-            + 3600)
+            .quota_reset
+            .get_or_insert_with(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 3600
+            })
             .to_string();
         let rate_headers = [
             ("etag", "\"stable\""),
@@ -5016,26 +5029,31 @@ async fn charged_parallel_requests_reserve_separate_pacing_slots() {
 
 #[tokio::test]
 async fn exhausted_budget_recovers_at_reset_without_restarting_client() {
-    let h = Harness::new().await;
-    let mut config = h.config();
-    config.queue_timeout = Duration::from_millis(200);
-    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
-    c.get("quota-reset", Freshness::Revalidate).await.unwrap();
-    assert!(matches!(
-        c.get("quota-reset", Freshness::Revalidate).await,
-        Err(Error::RateLimited { .. })
-    ));
-    assert_eq!(h.calls().len(), 1);
-    h.phase(1);
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    c.get("quota-reset", Freshness::Revalidate).await.unwrap();
-    assert_eq!(c.status().rate_limits["core"].remaining, 5000);
-    assert_eq!(h.calls().len(), 2);
-    // Recovery does not discard pacing for the new window.
-    assert!(matches!(
-        c.get("quota-reset", Freshness::Revalidate).await,
-        Err(Error::RateLimited { .. })
-    ));
+    for path in ["quota-reset", "quota-idle-reset"] {
+        let h = Harness::new().await;
+        let mut config = h.config();
+        config.queue_timeout = Duration::from_millis(1500);
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        c.get(path, Freshness::Revalidate).await.unwrap();
+        assert!(matches!(
+            c.get(path, Freshness::Revalidate).await,
+            Err(Error::RateLimited { .. })
+        ));
+        assert_eq!(h.calls().len(), 1);
+        h.phase(1);
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        c.get(path, Freshness::Revalidate).await.unwrap();
+        assert_eq!(c.status().rate_limits["core"].remaining, 5000);
+        let started = std::time::Instant::now();
+        c.get(path, Freshness::Revalidate)
+            .await
+            .expect("only the new window's pacing may delay this request");
+        assert!(
+            started.elapsed() >= Duration::from_millis(600),
+            "new window still reserves pacing slots"
+        );
+        assert_eq!(h.calls().len(), 3);
+    }
 }
 
 #[tokio::test]
