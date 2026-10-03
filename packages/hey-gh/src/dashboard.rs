@@ -49,6 +49,15 @@ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
   } }
 }"#;
 
+// Capture the tail before reading expensive pages. PRs created after it belong
+// to the next scan, so harmless appends cannot discard a nearly finished scan.
+const MY_PRS_BOUNDARY: &str = r#"query MyOpenPullRequestsBoundary {
+  viewer { pullRequests(last: 1, states: OPEN,
+    orderBy: {field: CREATED_AT, direction: ASC}) {
+    totalCount nodes { id }
+  } }
+}"#;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrStatusChange {
@@ -295,12 +304,36 @@ impl Client {
 
     async fn scan_my_open_pull_requests(&self, freshness: Freshness) -> Result<Discovery> {
         let started = tokio::time::Instant::now();
+        let boundary = self.graphql(MY_PRS_BOUNDARY, json!({}), freshness).await?;
+        let mut bytes = boundary.data.to_string().len();
+        if bytes > self.collection_limit() {
+            return Err(Error::Invalid(
+                "PR discovery exceeds collection limit".into(),
+            ));
+        }
+        let conn = &boundary.data["data"]["viewer"]["pullRequests"];
+        let total = conn["totalCount"]
+            .as_u64()
+            .ok_or_else(|| Error::Invalid("PR discovery total missing".into()))?;
+        let nodes = conn["nodes"]
+            .as_array()
+            .ok_or_else(|| Error::Invalid("PR discovery boundary missing".into()))?;
+        if total == 0 && nodes.is_empty() {
+            return Ok(Discovery {
+                pulls: Vec::new(),
+                validated_at: boundary.validated_at_ms,
+                validated_by_pr: BTreeMap::new(),
+            });
+        }
+        let tail = nodes
+            .first()
+            .and_then(|node| node["id"].as_str())
+            .filter(|id| !id.is_empty() && total > 0 && nodes.len() == 1)
+            .ok_or_else(|| Error::Invalid("invalid PR discovery boundary".into()))?;
         let mut after = Value::Null;
         let mut cursors = BTreeSet::new();
         let mut pulls = BTreeMap::new();
-        let mut bytes = 0usize;
-        let mut total = None;
-        let mut validated_at = u64::MAX;
+        let mut validated_at = boundary.validated_at_ms;
         let mut validated_by_pr = BTreeMap::new();
         for page in 0..1000 {
             let response = self
@@ -317,7 +350,7 @@ impl Client {
             let count = conn["totalCount"]
                 .as_u64()
                 .ok_or_else(|| Error::Invalid("PR discovery total missing".into()))?;
-            if total.replace(count).is_some_and(|old| old != count) {
+            if count < total {
                 return Err(Error::Invalid(
                     "open PR set changed during discovery; retry".into(),
                 ));
@@ -325,6 +358,24 @@ impl Client {
             let nodes = conn["nodes"]
                 .as_array()
                 .ok_or_else(|| Error::Invalid("PR discovery nodes missing".into()))?;
+            let has_next = conn["pageInfo"]["hasNextPage"]
+                .as_bool()
+                .ok_or_else(|| Error::Invalid("PR discovery page info missing".into()))?;
+            let page_end = pulls.len().saturating_add(nodes.len()) as u64;
+            if page_end > count || (has_next && page_end == count) {
+                return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
+            }
+            if has_next {
+                let next = conn["pageInfo"]["endCursor"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Error::Invalid("PR discovery cursor missing".into()))?;
+                if nodes.is_empty() || !cursors.insert(next.to_owned()) {
+                    return Err(Error::Invalid("PR discovery pagination cycle".into()));
+                }
+                after = json!(next);
+            }
+            let mut reached_tail = false;
             for node in nodes {
                 let identity = key(node)?;
                 validated_by_pr.insert(
@@ -336,36 +387,36 @@ impl Client {
                         "invalid or repeated PR in discovery; retry".into(),
                     ));
                 }
+                if pulls.len() as u64 > total {
+                    return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
+                }
+                if node["id"] == tail {
+                    reached_tail = true;
+                    break;
+                }
             }
-            match conn["pageInfo"]["hasNextPage"].as_bool() {
-                Some(false) => {
-                    if pulls.len() as u64 != count {
-                        return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
-                    }
-                    let pulls: Vec<_> = pulls.into_values().collect();
-                    tracing::info!(
-                        pages = page + 1,
-                        pull_requests = pulls.len(),
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        "account discovery scan completed"
-                    );
-                    return Ok(Discovery {
-                        pulls,
-                        validated_at,
-                        validated_by_pr,
-                    });
+            if reached_tail {
+                if pulls.len() as u64 != total {
+                    return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
                 }
-                Some(true) => {
-                    let next = conn["pageInfo"]["endCursor"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| Error::Invalid("PR discovery cursor missing".into()))?;
-                    if nodes.is_empty() || !cursors.insert(next.to_owned()) {
-                        return Err(Error::Invalid("PR discovery pagination cycle".into()));
-                    }
-                    after = json!(next);
-                }
-                None => return Err(Error::Invalid("PR discovery page info missing".into())),
+                let pulls: Vec<_> = pulls.into_values().collect();
+                tracing::info!(
+                    pages = page + 1,
+                    pull_requests = pulls.len(),
+                    deferred_pull_requests = count - total,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "account discovery scan completed"
+                );
+                return Ok(Discovery {
+                    pulls,
+                    validated_at,
+                    validated_by_pr,
+                });
+            }
+            if !has_next {
+                return Err(Error::Invalid(
+                    "PR discovery boundary disappeared; retry".into(),
+                ));
             }
         }
         Err(Error::Invalid("PR discovery exceeds 1000 pages".into()))
