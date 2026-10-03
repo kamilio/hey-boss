@@ -151,13 +151,35 @@ impl Gate {
         result?;
         Ok(io::Error::other(quota))
     }
+    pub fn succeeded(&mut self) -> io::Result<()> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => fs::File::open(self.path.parent().unwrap())?.sync_all()?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.previous = None;
+        Ok(())
+    }
 }
 
 fn deadline(headers: &std::collections::BTreeMap<String, String>, now: i64, failures: u32) -> i64 {
     let reset = headers
         .get("x-ratelimit-reset")
         .and_then(|s| s.parse::<i64>().ok())
-        .and_then(|s| s.checked_mul(1000));
+        .and_then(|s| s.checked_mul(1000))
+        // Reset headers have whole-second precision. A probe in that second
+        // can still see an exhausted bucket; don't mistake it for missing
+        // metadata and impose the accumulated five-minute fallback.
+        .and_then(|reset| {
+            if headers
+                .get("x-ratelimit-remaining")
+                .is_some_and(|s| s == "0")
+            {
+                reset.checked_add(1000)
+            } else {
+                Some(reset)
+            }
+        });
     let retry = headers.get("retry-after").and_then(|s| {
         s.parse::<i64>()
             .ok()
@@ -202,5 +224,31 @@ mod tests {
         for n in [1, 2, 3, 10, u32::MAX] {
             assert!((60_000..=300_000).contains(&(deadline(&h, 300_000, n) - 300_000)));
         }
+    }
+
+    #[test]
+    fn reset_second_does_not_escalate_to_five_minutes() {
+        let h = std::collections::BTreeMap::from([
+            ("x-ratelimit-reset".into(), "200".into()),
+            ("x-ratelimit-remaining".into(), "0".into()),
+        ]);
+        assert_eq!(deadline(&h, 200_360, 6), 201_000);
+        let mut retry = h.clone();
+        retry.insert("retry-after".into(), "120".into());
+        assert_eq!(deadline(&retry, 200_360, 6), 320_360);
+    }
+
+    #[test]
+    fn successful_probe_clears_failure_history_under_the_gate_lock() {
+        let temporary = crate::admin::Temporary::new().unwrap();
+        let path = temporary.0.join("quota.json");
+        fs::write(&path, br#"{"retry_at":1,"failures":6}"#).unwrap();
+        let mut gate = Gate::at(&path).unwrap();
+        gate.succeeded().unwrap();
+        assert!(!path.exists());
+        let error = gate.exhausted(&Default::default()).unwrap();
+        let quota = error.get_ref().unwrap().downcast_ref::<Quota>().unwrap();
+        assert_eq!(quota.failures, 1);
+        assert!((59_000..=60_000).contains(&(quota.retry_at - now())));
     }
 }
