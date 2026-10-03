@@ -603,7 +603,8 @@ impl Client {
             attempted += 1;
             let pr_started_at_ms = crate::now_ms();
             // Deliberate scheduler waits consume the cycle budget, not the
-            // short per-PR work allowance. Slow sockets still rotate promptly.
+            // short per-PR stall allowance. Successful sources renew progress;
+            // slow sockets still rotate promptly and the cycle remains bounded.
             let pr_deadline = deadline;
             let previously_terminal = if seed_only {
                 self.stored_pr_snapshot(

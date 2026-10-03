@@ -579,7 +579,14 @@ impl Client {
         let mut wait = crate::collection_budget::Wait::current(true);
         loop {
             match receiver.borrow_and_update().clone() {
-                SharedResult::Complete(result) => return result.map(|r| (*r).clone()),
+                SharedResult::Complete(result) => {
+                    if result.is_ok()
+                        && let Some(wait) = &wait
+                    {
+                        wait.completed();
+                    }
+                    return result.map(|r| (*r).clone());
+                }
                 state => {
                     if let Some(wait) = &mut wait {
                         wait.update(matches!(state, SharedResult::Queued));
