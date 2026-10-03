@@ -1416,6 +1416,7 @@ function issueActivity(event) {
   const verbs = {
     created:"opened this issue", worker_selected:"selected this issue for a worker", allocation_released:"released the fleet reservation",
     comment_resolved:"resolved a comment", comment_unresolved:"reopened a comment", ready:"marked the PR ready for review",
+    requirements_preserved:"preserved the delivery handoff",
     blocked:"blocked this issue", blockers_changed:"changed the blocking issues", dependency_rework:"notified dependent work of upstream changes",
     closed:"closed this issue", reopened:"reopened this issue", manual_hold_cleared:"released the hold", deleted:"deleted this issue", restored:"restored this issue",
     reordered:"changed this issue’s queue order", transferred:"moved this issue from another project", subtask_added:"added a subtask", subtask_removed:"unlinked a subtask",
@@ -1557,7 +1558,6 @@ function openEditor(issue = null, options = {}) {
   $("#editor-submit").disabled = false;
   $("#editor-error").hidden = true;
   $("#editor-conflict").hidden = true;
-    requirements_preserved:"preserved the delivery handoff",
   $("#conflict-replace").textContent = options.parent ? "Create using the latest parent revision" : "Save my draft over this version";
   editorBusy(false);
   preview("editor", false);
