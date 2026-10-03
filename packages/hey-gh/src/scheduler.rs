@@ -339,7 +339,7 @@ impl Scheduler {
         // Random process-local identifier; scope is already an opaque auth hash.
         let instance = format!("{:032x}", fastrand::u128(..));
         let mut pending = VecDeque::<Job>::new();
-        let mut interactive_streaks = HashMap::<String, [usize; 2]>::new();
+        let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
@@ -401,17 +401,15 @@ impl Scheduler {
                     ready(job, &budgets, global) <= now && !lane_busy(&active, job, prod)
                 };
                 // Prefer interactive policy, but admit an eligible background job
-                // after at most three foreground dispatches in the same quota lane.
-                // A GraphQL/detail completion cannot reset core's fairness counter.
+                // after at most three foreground dispatches in the same quota.
+                // CI and details spend the same core allowance despite using
+                // separate socket lanes. GraphQL keeps its own counter.
                 // Quotas, lane limits,
                 // retries, cooldowns and expiry remain unchanged.
                 let preferred = pending.iter().position(|job| {
                     eligible(job)
                         && job.interactive.load(Ordering::Relaxed)
-                            == (interactive_streaks
-                                .get(&job.resource)
-                                .map_or(0, |streaks| streaks[usize::from(job.detail_lane)])
-                                < 3)
+                            == (interactive_streaks.get(&job.resource).copied().unwrap_or(0) < 3)
                 });
                 preferred.or_else(|| pending.iter().position(eligible))
             };
@@ -422,7 +420,6 @@ impl Scheduler {
                 // Reserve every live window before another socket can dispatch.
                 budgets.reserve(&job);
                 let streak = interactive_streaks.entry(job.resource.clone()).or_default();
-                let streak = &mut streak[usize::from(job.detail_lane)];
                 *streak = if job.interactive.load(Ordering::Relaxed) {
                     streak.saturating_add(1)
                 } else {
