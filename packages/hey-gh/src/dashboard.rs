@@ -41,6 +41,7 @@ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
     orderBy: {field: CREATED_AT, direction: ASC}) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
       headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus reviewDecision
+      potentialMergeCommit { oid parents(first: 2) { totalCount nodes { oid } } }
       commits(last: 1) { nodes { commit { oid statusCheckRollup {
         state
       } } } }
@@ -1047,9 +1048,11 @@ impl Client {
             }
         }
         let graph_ci = discovered["commits"]["nodes"][0]["commit"]["statusCheckRollup"].clone();
-        row.as_object_mut()
-            .ok_or_else(|| Error::Invalid("invalid discovered PR".into()))?
-            .remove("commits");
+        let fields = row
+            .as_object_mut()
+            .ok_or_else(|| Error::Invalid("invalid discovered PR".into()))?;
+        fields.remove("commits");
+        fields.remove("potentialMergeCommit");
         row["headCiState"] = graph_ci["state"].clone();
         let metadata_at = match self
             .get(

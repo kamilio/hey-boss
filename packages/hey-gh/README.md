@@ -46,9 +46,17 @@ hey-gh watches
 hey-gh status
 ```
 
-PR numbers above are examples. `watch` registrations and discovery state survive restarts. A repository watch discovers new PRs and refreshes a previously tracked PR once after it closes or merges; unsuccessful refreshes remain tracked for retry. CI polling runs independently of the full comment/review scan. Background account hydration gives each PR at most five seconds before continuing through the roster; unfinished work remains queued. `/v1/watches` reports each loop's last successful refresh and errors. Covered individual watches report stale or pending evidence when their lane's conservative validation clock is unknown or older than two watch intervals (at least 60 seconds), even if cached data is complete.
+PR numbers above are examples. `watch` registrations and discovery state survive restarts. A repository watch discovers new PRs and refreshes a previously tracked PR once after it closes or merges; unsuccessful refreshes remain tracked for retry. CI polling runs independently of the full comment/review scan. Background account hydration allows five seconds without source progress, excluding deliberate scheduler queue waits; each cycle remains bounded and unfinished work stays queued. `/v1/watches` reports each loop's last successful refresh and errors. Covered individual watches report stale or pending evidence when their lane's conservative validation clock is unknown or older than two watch intervals (at least 60 seconds), even if cached data is complete.
 
-`pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without GraphQL or comments. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
+`pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without issuing GraphQL or comment requests. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
+
+CI reads can reuse recent account-discovery selectors when the PR identity, head,
+base, and validated test-merge commit match cached REST metadata. Freshness uses
+that PR's discovery page time; unrelated REST metadata keeps its original clock.
+These validations appear as `my-open-prs://HOST/OWNER/REPO/NUMBER#ci-selectors`.
+Missing, stale, or inconsistent selectors fall back to REST. Explicit refresh and
+cached-only behavior are unchanged, and CI still confirms selectors after
+collecting checks.
 
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 

@@ -66,6 +66,7 @@ fn saved(db: &Connection, project: &str, number: i64) -> Result<(Option<String>,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assign(
     db: &Connection,
     project: &Project,

@@ -709,6 +709,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 if mode == "account-repository-case-change" && phase >= 1 {
                     node["repository"]["nameWithOwner"] = json!(repository.to_ascii_uppercase());
                 }
+                if mode == "account-ci-selectors" {
+                    node["potentialMergeCommit"] = json!({"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":BASE},{"oid":HEAD}]}});
+                }
                 node
             };
             if body["query"]
@@ -1051,6 +1054,15 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             } else {
                 "2026-09-19T00:00:00Z"
             });
+        }
+    }
+    if mode == "account-ci-selectors" {
+        if normalized.ends_with("/pulls/7") {
+            value["merge_commit_sha"] = json!(MERGE);
+        } else if normalized.contains(MERGE) && normalized.ends_with("/check-runs") {
+            value["check_runs"][0]["head_sha"] = json!(MERGE);
+        } else if normalized.ends_with("/actions/runs") && query.contains(MERGE) {
+            value = json!({"workflow_runs":[]});
         }
     }
     if mode == "account-multi-source" {
@@ -3559,6 +3571,286 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
     );
     api.stop().await;
     task.abort();
+}
+
+#[tokio::test]
+async fn ci_reuses_fresh_discovery_selectors_without_refreshing_full_rest_metadata() {
+    let h = Harness::new().await;
+    h.mode("account-ci-selectors");
+    let c = h.client();
+    c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+    let metadata_before = c
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    h.phase(2);
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    // A native stack's test merge can use its trunk rather than the direct
+    // diff base. Repository spelling is also independent of selector identity.
+    db.execute("UPDATE cache SET response=json_set(response,'$.data.pulls[0].potentialMergeCommit.parents.nodes[0].oid',?1,'$.data.pulls[0].repository.nameWithOwner','ACME/Demo') WHERE key='account-discovery-complete:v1'", [OTHER_BASE]).unwrap();
+    let before = h.calls().len();
+    let report = c
+        .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(report.data.head_sha, HEAD);
+    assert_eq!(report.data.merge_sha.as_deref(), Some(MERGE));
+    assert_eq!(report.data.summary.state, "success");
+    let calls = h.calls();
+    assert!(
+        calls[before..]
+            .iter()
+            .any(|call| call.path.contains("check-runs")),
+        "CI itself must still be validated"
+    );
+    assert!(
+        !calls[before..]
+            .iter()
+            .any(|call| call.path == "/repos/acme/demo/pulls/7"),
+        "fresh matching discovery should avoid the queued metadata read"
+    );
+    let metadata_after = c
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(metadata_after.data, metadata_before.data);
+    assert_eq!(
+        metadata_after.validated_at_ms, 0,
+        "CI selectors do not refresh other REST fields"
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("#ci-selectors") && v.validated_at_ms > 0)
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .all(|v| !v.resource.ends_with("/pulls/7"))
+    );
+}
+
+#[tokio::test]
+async fn ci_discovery_reuse_rejects_missing_stale_or_inconsistent_selectors() {
+    for case in [
+        "stale-page",
+        "missing-clock",
+        "future-clock",
+        "head",
+        "base",
+        "node",
+        "merge",
+        "null-merge",
+        "parents",
+        "closed",
+        "revalidate",
+        "cold-rest",
+        "corrupt-memo",
+    ] {
+        let h = Harness::new().await;
+        h.mode("account-ci-selectors");
+        h.phase(2);
+        let c = h.client();
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+        c.all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .unwrap();
+        let raw: String = db
+            .query_row(
+                "SELECT response FROM cache WHERE key='account-discovery-complete:v1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut memo: Value = serde_json::from_str(&raw).unwrap();
+        let node = &mut memo["data"]["pulls"][0];
+        match case {
+            "head" => node["headRefOid"] = json!(NEW_HEAD),
+            "base" => node["baseRefOid"] = json!(NEW_HEAD),
+            "node" => node["id"] = json!("PR_replaced"),
+            "merge" => node["potentialMergeCommit"]["oid"] = json!(NEW_HEAD),
+            "null-merge" => node["potentialMergeCommit"] = Value::Null,
+            "parents" => {
+                node["potentialMergeCommit"]["parents"]["nodes"][1]["oid"] = json!(NEW_HEAD)
+            }
+            "closed" => node["state"] = json!("CLOSED"),
+            "stale-page" => memo["data"]["validatedAtByPr"]["acme/demo/7"] = json!(1),
+            "missing-clock" => {
+                memo["data"]["validatedAtByPr"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("acme/demo/7");
+            }
+            "future-clock" => memo["data"]["validatedAtByPr"]["acme/demo/7"] = json!(u64::MAX),
+            "cold-rest" => {
+                db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
+                    .unwrap();
+            }
+            "revalidate" => {}
+            "corrupt-memo" => {}
+            _ => unreachable!(),
+        }
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE key='account-discovery-complete:v1'",
+            [if case == "corrupt-memo" {
+                "{".into()
+            } else {
+                memo.to_string()
+            }],
+        )
+        .unwrap();
+        let before = h.calls().len();
+        let report = c
+            .ci_for_pr(
+                "acme/demo",
+                7,
+                if case == "revalidate" {
+                    Freshness::Revalidate
+                } else {
+                    Freshness::MaxAge(Duration::from_secs(30))
+                },
+            )
+            .await
+            .unwrap();
+        assert!(report.complete, "{case}: {:?}", report.data.errors);
+        assert!(
+            h.calls()[before..]
+                .iter()
+                .any(|call| call.path == "/repos/acme/demo/pulls/7"),
+            "{case}"
+        );
+        assert!(
+            report
+                .validations
+                .iter()
+                .all(|v| !v.resource.ends_with("#ci-selectors")),
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ci_discovery_reuse_preserves_cached_only_and_incomplete_source_evidence() {
+    let h = Harness::new().await;
+    h.mode("account-ci-selectors");
+    h.phase(2);
+    let c = h.client();
+    c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    let before = h.calls().len();
+    let cached = c
+        .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert!(cached.complete);
+    assert_eq!(cached.oldest_validation_at_ms, 0);
+    assert!(
+        cached
+            .validations
+            .iter()
+            .all(|v| !v.resource.ends_with("#ci-selectors"))
+    );
+    assert_eq!(h.calls().len(), before);
+    h.mode("account-ci-permission-fails");
+    let failed = c
+        .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(!failed.complete);
+    assert!(
+        failed
+            .data
+            .errors
+            .iter()
+            .any(|e| e.source.starts_with("check_runs"))
+    );
+    assert!(
+        failed
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("#ci-selectors"))
+    );
+    assert!(
+        !h.calls()[before..]
+            .iter()
+            .any(|call| call.path == "/repos/acme/demo/pulls/7")
+    );
+}
+
+#[tokio::test]
+async fn ci_discovery_reuse_rechecks_newer_metadata_after_collecting_checks() {
+    let h = Harness::new().await;
+    h.mode("account-ci-selectors");
+    h.phase(2);
+    let c = h.client();
+    c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    h.mode("ci-batch-blocked-checks");
+    let before = h.calls().len();
+    let read = tokio::spawn({
+        let c = c.clone();
+        async move {
+            c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+        }
+    });
+    until(|| {
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path == format!("/repos/acme/demo/commits/{HEAD}/check-runs"))
+    })
+    .await;
+    // Another cache client validates a push while the first one is collecting
+    // checks. The old graph observation must not hide that newer REST evidence.
+    h.mode("account-head-change");
+    h.phase(2);
+    let newer = h
+        .client()
+        .pull_request("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(newer.data["head"]["sha"], NEW_HEAD);
+    h.mock.release.notify_waiters();
+    let result = tokio::time::timeout(Duration::from_secs(3), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(result.complete, "{:?}", result.data.errors);
+    assert_eq!(result.data.head_sha, NEW_HEAD);
+    assert_eq!(result.data.merge_sha, None);
+    assert!(
+        result
+            .data
+            .check_runs
+            .iter()
+            .all(|check| check["head_sha"] == NEW_HEAD)
+    );
 }
 
 #[tokio::test]
