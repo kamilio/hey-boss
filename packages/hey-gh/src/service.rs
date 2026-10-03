@@ -68,6 +68,33 @@ fn active(domain: &str) -> bool {
     result.is_ok_and(|o| o.status.success())
 }
 
+fn bootstrap(launchctl: &Path, domain: &str, registration: &Path) -> io::Result<()> {
+    // bootout returns before launchd has fully released the registration.
+    // Retry only its transient I/O error; never unload or kill another owner.
+    let mut last = None;
+    for delay in [0, 100, 200, 400, 800, 1000, 2000, 2000, 2000] {
+        std::thread::sleep(Duration::from_millis(delay));
+        let result = Command::new(launchctl)
+            .args(["bootstrap", domain])
+            .arg(registration)
+            .output()?;
+        if result.status.success() {
+            return Ok(());
+        }
+        let retry = result.status.code() == Some(5);
+        last = Some(result);
+        if !retry {
+            break;
+        }
+    }
+    let failure = last.unwrap();
+    Err(io::Error::other(format!(
+        "user service bootstrap failed ({}): {}; inspect launchctl print {domain}/{LABEL}, then retry hey-gh service start",
+        failure.status,
+        String::from_utf8_lossy(&failure.stderr).trim()
+    )))
+}
+
 fn xml(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -205,11 +232,7 @@ fn install(restart: bool) -> Result<()> {
             )?;
         }
         if !running || restart {
-            checked(
-                Command::new("/bin/launchctl")
-                    .args(["bootstrap", &domain])
-                    .arg(&path),
-            )?;
+            bootstrap(Path::new("/bin/launchctl"), &domain, &path)?;
         }
     } else {
         if changed {
@@ -326,6 +349,30 @@ pub async fn run(action: &Action) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bootstrap_retries_async_unload_but_reports_permanent_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let command = dir.path().join("launchctl");
+        let calls = dir.path().join("calls");
+        fs::write(&command, format!(
+            "#!/bin/sh\nif test -e '{}'; then echo retried >> '{}'; exit 0; fi\necho first > '{}'\necho 'Bootstrap failed: 5: Input/output error' >&2\nexit 5\n",
+            calls.display(), calls.display(), calls.display()
+        )).unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+        bootstrap(&command, "gui/123", &dir.path().join("job.plist")).unwrap();
+        assert_eq!(fs::read_to_string(&calls).unwrap(), "first\nretried\n");
+        fs::write(
+            &command,
+            "#!/bin/sh\necho invalid-registration >&2\nexit 78\n",
+        )
+        .unwrap();
+        let error = bootstrap(&command, "gui/123", &dir.path().join("job.plist"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid-registration"));
+        assert!(error.contains("retry hey-gh service start"));
+    }
     #[test]
     fn unavailable_manager_returns_actionable_failure() {
         let missing = tempfile::tempdir().unwrap().path().join("missing-manager");
