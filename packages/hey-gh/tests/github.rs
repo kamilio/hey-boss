@@ -415,6 +415,47 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "issue72-partial-auth-stall" && path.contains("/check-runs") {
         mock.release.notified().await;
     }
+    if path == "/quota-reset" {
+        let reset = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + if phase == 0 { 0 } else { 3600 })
+        .to_string();
+        return reply(
+            200,
+            json!({"ok":true}),
+            &[
+                ("x-ratelimit-resource", "core"),
+                (
+                    "x-ratelimit-remaining",
+                    if phase == 0 { "0" } else { "5000" },
+                ),
+                ("x-ratelimit-reset", &reset),
+            ],
+        );
+    }
+    if path == "/conditional-changed" || path.starts_with("/paced-") {
+        let reset = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600)
+            .to_string();
+        return reply(
+            200,
+            json!({"changed":true}),
+            &[
+                ("etag", "\"changing\""),
+                ("x-ratelimit-resource", "core"),
+                (
+                    "x-ratelimit-remaining",
+                    if phase == 0 { "5000" } else { "500" },
+                ),
+                ("x-ratelimit-reset", &reset),
+            ],
+        );
+    }
     if path == "/conditional-paced" {
         let reset = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4953,9 +4994,84 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
 }
 
 #[tokio::test]
+async fn charged_parallel_requests_reserve_separate_pacing_slots() {
+    let h = Harness::new().await;
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_secs(4);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.get("paced-seed", Freshness::Revalidate).await.unwrap();
+    let start = std::time::Instant::now();
+    let (a, b, d) = tokio::join!(
+        c.get("paced-a", Freshness::Revalidate),
+        c.get("paced-b", Freshness::Revalidate),
+        c.get("paced-c", Freshness::Revalidate)
+    );
+    assert!(a.is_ok() && b.is_ok() && d.is_ok());
+    assert!(
+        start.elapsed() >= Duration::from_secs(2),
+        "parallel lanes spent the same quota slot"
+    );
+    assert_eq!(h.calls().len(), 4);
+}
+
+#[tokio::test]
+async fn exhausted_budget_recovers_at_reset_without_restarting_client() {
+    let h = Harness::new().await;
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_millis(200);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.get("quota-reset", Freshness::Revalidate).await.unwrap();
+    assert!(matches!(
+        c.get("quota-reset", Freshness::Revalidate).await,
+        Err(Error::RateLimited { .. })
+    ));
+    assert_eq!(h.calls().len(), 1);
+    h.phase(1);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    c.get("quota-reset", Freshness::Revalidate).await.unwrap();
+    assert_eq!(c.status().rate_limits["core"].remaining, 5000);
+    assert_eq!(h.calls().len(), 2);
+    // Recovery does not discard pacing for the new window.
+    assert!(matches!(
+        c.get("quota-reset", Freshness::Revalidate).await,
+        Err(Error::RateLimited { .. })
+    ));
+}
+
+#[tokio::test]
+async fn changed_conditional_requests_obey_pacing_even_above_old_threshold() {
+    for phase in [0, 1] {
+        let h = Harness::new().await;
+        h.phase(phase);
+        let mut config = h.config();
+        config.queue_timeout = Duration::from_millis(200);
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        c.get("conditional-changed", Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(matches!(
+            c.get("conditional-changed", Freshness::Revalidate).await,
+            Err(Error::RateLimited { .. })
+        ));
+        assert_eq!(
+            h.calls().len(),
+            1,
+            "an ETag is not evidence that the next request is free"
+        );
+    }
+}
+
+#[tokio::test]
 async fn conditional_validations_skip_soft_pacing_without_bypassing_exhaustion() {
     let h = Harness::new().await;
-    let c = h.client();
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_secs(5);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.get("conditional-paced", Freshness::Revalidate)
+        .await
+        .unwrap();
+    // First learn that this representation really revalidates unchanged. The
+    // preceding 200 carries a validator but must still respect quota pacing.
     c.get("conditional-paced", Freshness::Revalidate)
         .await
         .unwrap();
@@ -4969,11 +5085,14 @@ async fn conditional_validations_skip_soft_pacing_without_bypassing_exhaustion()
     assert!(matches!(validated.source, Source::Revalidated));
     assert_eq!(validated.data, json!({"stable":true}));
     // A free validation does not erase the charged request's pacing debt.
-    assert!(matches!(
-        c.get("charged-after-conditional", Freshness::Revalidate)
-            .await,
-        Err(Error::RateLimited { .. })
-    ));
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            c.get("charged-after-conditional", Freshness::Revalidate)
+        )
+        .await
+        .is_err()
+    );
     assert!(
         !h.calls()
             .iter()

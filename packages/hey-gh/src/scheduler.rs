@@ -177,6 +177,7 @@ async fn next_attempt(active: &mut [Active]) -> (usize, Job, Attempt) {
 struct Budget {
     next: Instant,
     remaining: u64,
+    spacing: Duration,
 }
 
 pub(crate) struct Scheduler {
@@ -274,6 +275,13 @@ impl Scheduler {
                 && let Some(index) = next
             {
                 let mut job = pending.remove(index).expect("existing queue entry");
+                if let Some(budget) = budgets.get_mut(&job.resource)
+                    && !conditional_budget_exempt(&job, budget)
+                {
+                    // Reserve at dispatch, not response: parallel sockets must
+                    // not all spend the same pacing slot before headers arrive.
+                    budget.next = quota_deadline(budget.spacing);
+                }
                 let streak = interactive_streaks.entry(job.resource.clone()).or_default();
                 let streak = &mut streak[usize::from(job.detail_lane)];
                 *streak = if job.interactive.load(Ordering::Relaxed) {
@@ -423,10 +431,8 @@ impl Scheduler {
                         let seconds = reset.saturating_sub(now_ms() / 1000);
                         let wait = if remaining == 0 {
                             Duration::from_secs(seconds.saturating_add(1))
-                        } else if remaining <= 1000 {
-                            Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
                         } else {
-                            Duration::ZERO
+                            Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
                         };
                         // Authenticated REST 304 validations do not consume primary
                         // quota. Preserve pacing debt from the last charged result.
@@ -435,9 +441,19 @@ impl Scheduler {
                                 .get(&job.resource)
                                 .map_or(Instant::now(), |budget| budget.next)
                         } else {
-                            quota_deadline(wait)
+                            budgets.get(&job.resource).map_or_else(
+                                || quota_deadline(wait),
+                                |budget| budget.next.max(quota_deadline(wait)),
+                            )
                         };
-                        budgets.insert(job.resource.clone(), Budget { next, remaining });
+                        budgets.insert(
+                            job.resource.clone(),
+                            Budget {
+                                next,
+                                remaining,
+                                spacing: wait,
+                            },
+                        );
                     }
                     if status == StatusCode::NOT_MODIFIED {
                         let result = if let Some(mut cached) = job.cached.clone() {
@@ -482,6 +498,7 @@ impl Scheduler {
                                 Budget {
                                     next: quota_deadline(wait),
                                     remaining: 0,
+                                    spacing: wait,
                                 },
                             );
                             if let Some(retry) = retry {
@@ -574,6 +591,7 @@ impl Scheduler {
                         Budget {
                             next: quota_deadline(wait),
                             remaining: 0,
+                            spacing: wait,
                         },
                     );
                     // Retry-After always pauses shared traffic, even when
@@ -699,14 +717,15 @@ fn ready(job: &Job, budgets: &HashMap<String, Budget>, global: Instant) -> Insta
 }
 
 fn conditional_budget_exempt(job: &Job, budget: &Budget) -> bool {
-    // Conditional requests can still return changed data (200). Keep a reserve
-    // before relaxing soft pacing; never bypass exhaustion or shared cooldowns.
+    // A validator alone does not predict a free response: some endpoints return
+    // 200 on every poll. Only previously unchanged representations may probe
+    // without pacing. A changed response revokes that exemption automatically.
     job.body.is_none()
         && budget.remaining > 100
-        && job
-            .cached
-            .as_ref()
-            .is_some_and(|cached| cached.etag.is_some() || cached.last_modified.is_some())
+        && job.cached.as_ref().is_some_and(|cached| {
+            matches!(cached.source, Source::Revalidated)
+                && (cached.etag.is_some() || cached.last_modified.is_some())
+        })
 }
 
 pub(crate) fn header(headers: &HeaderMap, name: &str) -> Option<String> {
