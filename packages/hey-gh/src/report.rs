@@ -1049,9 +1049,25 @@ impl Client {
         field: &str,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
+        self.collect_ci_source(
+            repository,
+            sha,
+            source,
+            self.pages(path, Some(field), freshness),
+        )
+        .await
+    }
+
+    async fn collect_ci_source(
+        &self,
+        repository: &str,
+        sha: &str,
+        source: &str,
+        collection: impl std::future::Future<Output = Result<Vec<Value>>>,
+    ) -> Result<Vec<Value>> {
         let started = tokio::time::Instant::now();
         tracing::info!(repository, sha, source, "CI source refresh started");
-        let result = self.pages(path, Some(field), freshness).await;
+        let result = collection.await;
         match &result {
             Ok(values) => tracing::info!(
                 repository,
@@ -1099,21 +1115,19 @@ impl Client {
             return cached.decode();
         }
         tracing::info!(cache="completed_jobs", outcome=if !finished { "in_progress" } else if matches!(freshness, Freshness::Revalidate) { "refresh" } else { "miss" }, version=%crate::digest(&key), "GitHub derived cache decision");
-        // A newly completed parent must validate every page, even if a prior
-        // in-progress run happened to have only completed jobs at that moment.
-        let policy = if finished && matches!(freshness, Freshness::MaxAge(_)) {
-            Freshness::Revalidate
-        } else {
-            freshness
-        };
         let jobs = self
-            .ci_source(
+            .collect_ci_source(
                 repository,
                 run["head_sha"].as_str().unwrap_or("unknown"),
                 "jobs",
-                &path,
-                "jobs",
-                policy,
+                async {
+                    if finished {
+                        self.completed_job_pages(&path, &crate::digest(&key), freshness)
+                            .await
+                    } else {
+                        self.pages(&path, Some("jobs"), freshness).await
+                    }
+                },
             )
             .await?;
         if finished
