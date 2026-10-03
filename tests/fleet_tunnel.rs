@@ -210,7 +210,7 @@ fn companion_moves_persist_with_guarded_retries_and_no_offline_fallback() {
     let wait_order = |f: &Fleet, expected: &[i64]| {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let actual = order(&f, "peer");
+            let actual = order(f, "peer");
             if actual == expected {
                 break;
             }

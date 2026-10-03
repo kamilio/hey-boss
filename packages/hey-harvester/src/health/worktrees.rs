@@ -1031,7 +1031,7 @@ mod tests {
         fixture.work.path = checkout;
         if unsafe { libc::geteuid() } != 0 {
             let permissions = std::fs::metadata(&fixture.root).unwrap().permissions();
-            std::fs::set_permissions(&fixture.root, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(&fixture.root, std::fs::Permissions::from_mode(0o0)).unwrap();
             let results: Vec<_> = [false, true]
                 .into_iter()
                 .map(|mode| fixture.check(mode, &[]))
