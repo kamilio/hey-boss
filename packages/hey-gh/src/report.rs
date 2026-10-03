@@ -1095,8 +1095,10 @@ impl Client {
             && let Some(cached) = self.peek_derived(&key).await?
             && now_ms().saturating_sub(cached.validated_at_ms) < 86400 * 1000
         {
+            tracing::info!(cache="completed_jobs", outcome="hit", version=%crate::digest(&key), "GitHub derived cache decision");
             return cached.decode();
         }
+        tracing::info!(cache="completed_jobs", outcome=if !finished { "in_progress" } else if matches!(freshness, Freshness::Revalidate) { "refresh" } else { "miss" }, version=%crate::digest(&key), "GitHub derived cache decision");
         // A newly completed parent must validate every page, even if a prior
         // in-progress run happened to have only completed jobs at that moment.
         let policy = if finished && matches!(freshness, Freshness::MaxAge(_)) {
