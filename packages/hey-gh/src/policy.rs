@@ -68,6 +68,18 @@ pub(crate) fn identity_matches(pr: &Value, identity: Option<&PolicyIdentity>) ->
     }
 }
 
+fn classic_checks_disabled(branch: &Value) -> bool {
+    let protection = &branch["protection"];
+    let checks = &protection["required_status_checks"];
+    // `protected` includes rulesets. Only this explicit, internally consistent
+    // classic-policy absence can replace the otherwise repeated 404 probe.
+    protection["enabled"] == false
+        && checks["enforcement_level"] == "off"
+        && checks["contexts"].as_array().is_some_and(Vec::is_empty)
+        && checks["checks"].as_array().is_some_and(Vec::is_empty)
+        && (checks["strict"].is_null() || checks["strict"] == false)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredChecksReport {
     pub repository: String,
@@ -222,10 +234,20 @@ impl Client {
                 "repos/{repository}/rules/branches/{}",
                 segment(&identity.branch)
             );
-            let (ci_res, branch, protection_res, rules_first_res) = tokio::join!(
+            let (ci_res, (branch, protection_res), rules_first_res) = tokio::join!(
                 self.required_ci_report(repository, head, merge, freshness),
-                self.get(&policy_path, freshness),
-                self.policy_get(&protection_path, freshness),
+                async {
+                    let branch = self.get(&policy_path, freshness).await;
+                    let protection = if branch
+                        .as_ref()
+                        .is_ok_and(|r| classic_checks_disabled(&r.data))
+                    {
+                        None
+                    } else {
+                        Some(self.policy_get(&protection_path, freshness).await)
+                    };
+                    (branch, protection)
+                },
                 self.policy_get(&rules_path, freshness),
             );
             let ci = ci_res?;
@@ -267,7 +289,8 @@ impl Client {
             let mut requirements = BTreeSet::new();
             let mut strict = false;
             match protection_res {
-                Ok(r) => {
+                None => {}
+                Some(Ok(r)) => {
                     if !r.data["strict"].is_boolean()
                         || (!r.data["contexts"].is_array() && !r.data["checks"].is_array())
                     {
@@ -303,13 +326,13 @@ impl Client {
                     }
                 }
                 // Rulesets can mark a branch protected while legacy protection
-                // is absent. Only the explicit GitHub message proves absence;
-                // generic/masked 404 and access denial remain unknown.
-                Err(Error::GitHub {
+                // is absent. Without explicit disabled metadata, generic/masked
+                // 404 and access denial on a protected branch remain unknown.
+                Some(Err(Error::GitHub {
                     status: 404,
                     message,
-                }) if protected == Some(false) || message == "Branch not protected" => {}
-                Err(e) => errors.push(source("branch_protection", e)),
+                })) if protected == Some(false) || message == "Branch not protected" => {}
+                Some(Err(e)) => errors.push(source("branch_protection", e)),
             }
             let rules_result = match rules_first_res {
                 Ok(first) if first.link.is_none() && first.data.is_array() => {
@@ -466,7 +489,10 @@ impl Client {
             }
             if let Some(confirmed) = confirmed_opt {
                 if let (Ok(before), Ok(after)) = (&branch, &confirmed) {
-                    if before.data["commit"]["sha"] != after.data["commit"]["sha"] {
+                    if before.data["commit"]["sha"] != after.data["commit"]["sha"]
+                        || before.data["protected"] != after.data["protected"]
+                        || before.data["protection"] != after.data["protection"]
+                    {
                         continue;
                     }
                 } else if let Err(e) = confirmed {
