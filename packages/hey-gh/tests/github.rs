@@ -2329,6 +2329,59 @@ async fn ci_batches_independent_sources_but_preserves_single_slot_queue_reads() 
 }
 
 #[tokio::test]
+async fn fresh_ci_validation_does_not_include_cached_dashboard_policy_lookups() {
+    let h = Harness::new().await;
+    h.mode("account-policy-selectors");
+    h.phase(3);
+    let c = h.client();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    let policy = c
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(policy.errors.is_empty());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    {
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        assert!(db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1,'$.fetched_at_ms',?1) WHERE key LIKE '%/branches/release%'", [now - 600_000]).unwrap() > 0);
+    }
+    let report = c
+        .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(report.complete);
+    assert!(
+        report.oldest_validation_at_ms >= now,
+        "fresh CI inherited unrelated cached validation: {:?}",
+        report.validations
+    );
+    assert!(
+        !report
+            .validations
+            .iter()
+            .any(|v| v.resource.contains("/branches/"))
+    );
+    assert!(report.validations.iter().any(|v| v.resource.contains(HEAD)));
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.contains(MERGE))
+    );
+    let cached_policy = c
+        .required_checks_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert!(
+        cached_policy.oldest_validation_at_ms.unwrap() < now - 500_000,
+        "policy must retain its own stale clock"
+    );
+}
+
+#[tokio::test]
 async fn completed_job_pages_survive_a_cancelled_collection_without_repeated_requests() {
     let h = Harness::new().await;
     h.mode("completed-job-pages");
