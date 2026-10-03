@@ -293,6 +293,16 @@ impl Client {
         Ok(response)
     }
 
+    // Inspect cached evidence before deciding whether to consume its validation.
+    pub(crate) async fn peek_get(&self, path: &str) -> Result<Response> {
+        self.request(
+            self.rest_url(path)?.to_string(),
+            None,
+            Freshness::CachedOnly,
+        )
+        .await
+    }
+
     pub async fn graphql(
         &self,
         query: &str,

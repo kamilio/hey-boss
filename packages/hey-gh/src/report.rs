@@ -9,6 +9,8 @@ use std::{
     },
 };
 
+mod ci_metadata;
+
 // Nested PR/CI reads share this flag: contention makes the entire cached
 // observation read-only, preventing stale writes over an active refresh.
 tokio::task_local! { static PUBLICATION_READ_ONLY: Arc<AtomicBool>; }
@@ -465,37 +467,40 @@ impl Client {
                         Freshness::Revalidate
                     };
                     crate::entity::clear();
-                    let pr = self.pull_request(repository, number, policy).await?;
-                    crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
+                    let pr = self.ci_metadata(repository, number, policy).await?;
+                    crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
                     // Lifecycle evidence does not depend on finishing CI jobs.
-                    if can_publish() {
+                    if can_publish() && pr.rest_observation().is_some() {
                         self.observe(
                             &format!("metadata://{}/{repository}/{number}", self.hostname()),
-                            &json!({"conflicts":conflicts(&pr.data),"pull_request":pr.data}),
+                            &json!({"conflicts":conflicts(pr.data()),"pull_request":pr.data()}),
                         ).await?;
                         self.publish_individual_pr_status(repository, number, &[]).await?;
                     }
-                    let head = sha(&pr.data, "head")?;
-                    let merge = pr.data["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
+                    let head = sha(pr.data(), "head")?;
+                    let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
                     let data = self.ci_report(repository, &head, merge, policy).await?;
                     let final_policy = if matches!(policy, Freshness::CachedOnly)
                         || (matches!(policy, Freshness::MaxAge(_))
-                            && now_ms().saturating_sub(pr.validated_at_ms) < 15_000)
+                            && now_ms().saturating_sub(pr.validated_at()) < 15_000)
                     {
                         policy
                     } else {
                         Freshness::Revalidate
                     };
-                    let final_pr = self.pull_request(repository, number, final_policy).await?;
-                    if pr.data["node_id"] != final_pr.data["node_id"]
-                        || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
-                        || pr.data["base"]["sha"] != final_pr.data["base"]["sha"]
-                        || pr.data["merge_commit_sha"] != final_pr.data["merge_commit_sha"] {
+                    let final_pr = self.ci_metadata(repository, number, final_policy).await?;
+                    if pr.data()["node_id"] != final_pr.data()["node_id"]
+                        || pr.data()["head"]["sha"] != final_pr.data()["head"]["sha"]
+                        || pr.data()["base"]["sha"] != final_pr.data()["base"]["sha"]
+                        || pr.data()["merge_commit_sha"] != final_pr.data()["merge_commit_sha"] {
                         continue;
                     }
                     let complete = data.errors.is_empty();
                     let suffix = format!("{}/{repository}/{number}", self.hostname());
-                    let mut observations = vec![(format!("metadata://{suffix}"), json!({"conflicts":conflicts(&final_pr.data),"pull_request":final_pr.data}))];
+                    let mut observations = Vec::new();
+                    if final_pr.rest_observation().is_some() {
+                        observations.push((format!("metadata://{suffix}"), json!({"conflicts":conflicts(final_pr.data()),"pull_request":final_pr.data()})));
+                    }
                     if complete {
                         observations.push((format!("ci://{suffix}"), serde_json::to_value(&data).map_err(|e| Error::Invalid(e.to_string()))?));
                     }
