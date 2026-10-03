@@ -1243,6 +1243,92 @@ mod priority_tests {
     use super::*;
 
     #[tokio::test]
+    async fn background_details_share_core_fairness_with_foreground_and_background_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move |uri: axum::http::Uri| {
+                let calls = calls.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.lock().unwrap().push(uri.path().to_owned());
+                    let mut response = axum::Json(serde_json::json!({"ok":true})).into_response();
+                    if uri.path() == "/seed" {
+                        // Hold all core jobs until they are queued, then release
+                        // both socket lanes together at the quota reset.
+                        let headers = response.headers_mut();
+                        headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-reset",
+                            (now_ms() / 1000 + 3).to_string().parse().unwrap(),
+                        );
+                    }
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::from_millis(20),
+                queue_timeout: Duration::from_secs(10),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+        let mut tasks = Vec::new();
+        let detail = "repos/acme/demo/issues/7/comments";
+        for (path, interactive) in std::iter::once((detail.to_owned(), false))
+            .chain((0..8).map(|n| (format!("background-ci/{n}"), false)))
+            .chain((0..12).map(|n| (format!("foreground-ci/{n}"), true)))
+        {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                INTERACTIVE_READ
+                    .scope(
+                        Arc::new(AtomicBool::new(interactive)),
+                        c.get(&path, Freshness::Revalidate),
+                    )
+                    .await
+            }));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.status().outstanding_requests != tasks.len() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        server.abort();
+        let calls = calls.lock().unwrap();
+        assert!(
+            calls[1..4]
+                .iter()
+                .all(|path| path.starts_with("/foreground-ci/"))
+        );
+        let position = calls
+            .iter()
+            .position(|path| path == &format!("/{detail}"))
+            .unwrap();
+        assert!(
+            position <= 4,
+            "oldest background detail was starved behind {position} core calls: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn interactive_reserve_is_bounded_and_full_queue_still_coalesces() {
         let dir = tempfile::tempdir().unwrap();
         let release = Arc::new(tokio::sync::Notify::new());
