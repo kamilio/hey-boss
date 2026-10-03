@@ -1056,6 +1056,53 @@ async fn cache_revalidates_and_persists_without_credentials() {
 }
 
 #[tokio::test]
+async fn expired_foreground_reports_do_not_dispatch_unobserved_queued_requests() {
+    for surviving_caller in [false, true] {
+        let h = Harness::new().await;
+        let mut config = h.config();
+        config.report_timeout = Duration::from_millis(100);
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        let gate = tokio::spawn({
+            let c = c.clone();
+            async move { c.get("slow", Freshness::Revalidate).await }
+        });
+        until(|| h.calls().len() == 1).await;
+        let report = tokio::spawn({
+            let c = c.clone();
+            async move {
+                c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+                    .await
+            }
+        });
+        until(|| c.status().outstanding_requests == 2).await;
+        let survivor = surviving_caller.then(|| {
+            tokio::spawn({
+                let c = c.clone();
+                async move { c.pull_request("acme/demo", 7, Freshness::Revalidate).await }
+            })
+        });
+        if surviving_caller {
+            until(|| c.status().coalesced_requests == 1).await;
+        }
+        assert!(matches!(report.await.unwrap(), Err(Error::Deadline)));
+        h.mock.release.notify_one();
+        gate.await.unwrap().unwrap();
+        if let Some(survivor) = survivor {
+            survivor.await.unwrap().unwrap();
+        }
+        until(|| c.status().outstanding_requests == 0).await;
+        assert_eq!(
+            h.calls()
+                .iter()
+                .filter(|call| call.path == "/repos/acme/demo/pulls/7")
+                .count(),
+            usize::from(surviving_caller),
+            "expired reports must not spend quota unless another caller still needs the request"
+        );
+    }
+}
+
+#[tokio::test]
 async fn coalesces_even_when_first_caller_is_cancelled_and_queue_is_full() {
     let h = Harness::new().await;
     let mut config = h.config();
