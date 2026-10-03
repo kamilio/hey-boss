@@ -4071,6 +4071,88 @@ async fn ci_reuses_fresh_discovery_selectors_without_refreshing_full_rest_metada
 }
 
 #[tokio::test]
+async fn ci_final_validation_reuses_recent_selectors_but_rejects_older_evidence() {
+    for case in ["fresh", "stale", "revalidate"] {
+        let h = Harness::new().await;
+        h.mode("account-ci-selectors");
+        h.phase(2);
+        let c = h.client();
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let metadata = c
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        c.all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        let old = metadata.validated_at_ms - 20_000;
+        // The initial REST selector is fresh enough for this caller, but too
+        // old for the final 15-second check. Discovery has newer evidence.
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [old]).unwrap();
+        if case == "stale" {
+            let stale = metadata.validated_at_ms - 18_000;
+            db.execute("UPDATE cache SET response=json_set(response,'$.data.validatedAtByPr.\"acme/demo/7\"',?1) WHERE key='account-discovery-complete:v1'", [stale]).unwrap();
+            db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/graphql#%'", [stale]).unwrap();
+        }
+        let before = h.calls().len();
+        let report = c
+            .ci_for_pr(
+                "acme/demo",
+                7,
+                if case == "revalidate" {
+                    Freshness::Revalidate
+                } else {
+                    Freshness::MaxAge(Duration::from_secs(30))
+                },
+            )
+            .await
+            .unwrap();
+        assert!(report.complete, "{case}: {:?}", report.data.errors);
+        assert_eq!(report.data.head_sha, HEAD);
+        assert_eq!(report.data.merge_sha.as_deref(), Some(MERGE));
+        let calls = h.calls();
+        let reads = &calls[before..];
+        assert!(reads.iter().any(|call| call.path.contains("check-runs")));
+        assert!(!reads.iter().any(|call| call.path == "/graphql"));
+        assert_eq!(
+            reads
+                .iter()
+                .any(|call| call.path == "/repos/acme/demo/pulls/7"),
+            case != "fresh",
+            "{case}"
+        );
+        assert_eq!(
+            report
+                .validations
+                .iter()
+                .any(|v| v.resource.ends_with("#ci-selectors")),
+            case == "fresh",
+            "{case}"
+        );
+        if case == "fresh" {
+            let after = c
+                .pull_request("acme/demo", 7, Freshness::CachedOnly)
+                .await
+                .unwrap();
+            assert_eq!(
+                after.validated_at_ms, old,
+                "selector reuse cannot refresh other REST fields"
+            );
+            assert!(
+                report
+                    .validations
+                    .iter()
+                    .any(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms == old)
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn ci_discovery_reuse_rejects_missing_stale_or_inconsistent_selectors() {
     for case in [
         "stale-page",

@@ -481,13 +481,12 @@ impl Client {
                     let head = sha(pr.data(), "head")?;
                     let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
                     let data = self.ci_report(repository, &head, merge, policy).await?;
-                    let final_policy = if matches!(policy, Freshness::CachedOnly)
-                        || (matches!(policy, Freshness::MaxAge(_))
-                            && now_ms().saturating_sub(pr.validated_at()) < 15_000)
-                    {
-                        policy
-                    } else {
-                        Freshness::Revalidate
+                    // Another collection may have validated selectors while
+                    // these CI sources were loading. Apply the final freshness
+                    // bound to that evidence, not the initial observation.
+                    let final_policy = match policy {
+                        Freshness::MaxAge(age) => Freshness::MaxAge(age.min(std::time::Duration::from_secs(15))),
+                        other => other,
                     };
                     let final_pr = self.ci_metadata(repository, number, final_policy).await?;
                     if pr.data()["node_id"] != final_pr.data()["node_id"]
