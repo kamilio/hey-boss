@@ -127,6 +127,9 @@ impl Body {
 
 #[derive(Args)]
 struct ListFilters {
+    /// Return paginated summary fields without bodies, commits or provenance.
+    #[arg(long, requires = "json")]
+    compact: bool,
     #[arg(long, conflicts_with = "unassigned")]
     mine: bool,
     #[arg(long)]
@@ -149,6 +152,7 @@ struct ListFilters {
 impl ListFilters {
     fn operation(&self, state: &str, search: Option<&str>) -> Operation {
         Operation::List {
+            compact: self.compact,
             state: state.into(),
             mine: self.mine,
             unassigned: self.unassigned,
@@ -261,6 +265,9 @@ enum Action {
     /// Show a hidden project again.
     RestoreProject,
     /// List open issues in the current project.
+    #[command(
+        after_help = "Compact JSON: identity, lifecycle, assignment/allocation health, labels, parent/dependency IDs and PR URL/purpose/status. Bodies, commits, provenance and evidence are not loaded. Follow next_offset until null; omitted does not mean absent. Details: docs/compact-reads.md."
+    )]
     List {
         #[arg(long, default_value = "open", value_parser = ["active", "open", "blocked", "ready", "closed", "all", "deleted"])]
         state: String,

@@ -613,6 +613,7 @@ fn execute_single(
     let mut changed = false;
     match op {
         Operation::Batch { .. } => unreachable!("Batches are dispatched before single operations"),
+        Operation::ShowCompact { limit, offset } => return compact_graph(db, p, *limit, *offset),
         Operation::Show { .. } => {}
         Operation::View { node, body_mode } => {
             let mut node = select(db, p, node, false, now, &mut touched)?;
@@ -1529,4 +1530,97 @@ mod tests {
             assert!(commands < 30, "{count} issue nodes used {commands} RPCs");
         }
     }
+}
+
+/// Saved-node pagination deliberately avoids graph expansion. Related resources
+/// are summarized only after selecting the page; cross-link endpoints stay IDs.
+fn compact_graph(db: &Connection, p: &Project, limit: u32, offset: u32) -> Result<Value> {
+    let total: i64 = db.query_row(
+        "SELECT count(*) FROM mindmap_nodes WHERE project_id=?1",
+        [&p.id],
+        |r| r.get(0),
+    )?;
+    let mut nodes = db.query_collect::<_, _, rusqlite::Error>(
+        &format!("SELECT {} FROM mindmap_nodes WHERE project_id=?1 ORDER BY position,created_at,id LIMIT ?2 OFFSET ?3", projected_columns(BodyMode::None)),
+        params![p.id, limit, offset], projected_row,
+    )?;
+    // This reads only live issue summary columns; it does not render Markdown,
+    // hydrate archives, expand attached PR nodes or query artifact histories.
+    let mut references = BTreeMap::<String, Vec<i64>>::new();
+    for node in &nodes {
+        if node["kind"] == "issue" {
+            references
+                .entry(node["reference_project"].as_str().unwrap().into())
+                .or_default()
+                .push(
+                    node["reference"]
+                        .as_str()
+                        .unwrap()
+                        .parse()
+                        .map_err(|_| Error::invalid("Invalid saved issue reference"))?,
+                );
+        }
+    }
+    let mut live = BTreeMap::new();
+    for (project, numbers) in references {
+        for issue in super::compact::issues(db, &project, &numbers)? {
+            live.insert(
+                (
+                    project.clone(),
+                    issue["number"].as_i64().unwrap().to_string(),
+                ),
+                issue,
+            );
+        }
+    }
+    for node in &mut nodes {
+        node.as_object_mut().unwrap().remove("body");
+        if node["kind"] == "issue" {
+            let key = (
+                node["reference_project"].as_str().unwrap().to_owned(),
+                node["reference"].as_str().unwrap().to_owned(),
+            );
+            if let Some(issue) = live.get(&key) {
+                node["title"] = issue["title"].clone();
+                node["state"] = issue["state"].clone();
+                node["resource_version"] = issue["version"].clone();
+                node["issue"] = issue.clone();
+                node["resource_health"] = json!("available");
+                issue_display_title(node);
+            } else {
+                node["available"] = json!(false);
+                node["state"] = json!("unavailable");
+                node["resource_health"] = json!("missing_or_deleted");
+            }
+            // The map record's body is not the issue's body.
+            node.as_object_mut().unwrap().remove("has_body");
+        } else if node["kind"] == "notification" {
+            node["available"] = Value::Null;
+            node["resource_health"] = json!("not_checked");
+        } else if node["kind"] == "pr" {
+            let prs = db.query_collect::<_, _, rusqlite::Error>(
+                "SELECT project_id,issue_number,purpose,status,checked_at,error FROM issue_pull_requests WHERE rtrim(url,'/')=rtrim(?1,'/') ORDER BY project_id,issue_number",
+                [node["reference"].as_str().unwrap_or("")],
+                |r| Ok(json!({"project_id":r.get::<_,String>(0)?,"issue_number":r.get::<_,i64>(1)?,"purpose":r.get::<_,String>(2)?,"status":r.get::<_,String>(3)?,"checked_at":r.get::<_,Option<i64>>(4)?,"error":r.get::<_,Option<String>>(5)?})),
+            )?;
+            node["resource_health"] = json!(if prs.is_empty() {
+                "not_checked"
+            } else {
+                "stored_snapshot"
+            });
+            node["pull_requests"] = json!(prs);
+        }
+    }
+    let ids: Vec<_> = nodes.iter().map(|n| &n["id"]).collect();
+    let links = db.query_collect::<_, _, rusqlite::Error>(
+        "SELECT source,target,kind FROM mindmap_links WHERE source IN (SELECT value FROM json_each(?1)) OR target IN (SELECT value FROM json_each(?1)) ORDER BY source,target,kind",
+        [serde_json::to_string(&ids)?], |r| Ok(json!({"from":r.get::<_,String>(0)?,"to":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?})),
+    )?;
+    let next = u64::from(offset) + nodes.len() as u64;
+    let mut result = json!({"ok":true,"project":p,"version":version(db,&p.id)?,"nodes":nodes,"links":links,
+        "total":total,"next_offset":if next < total as u64 { Some(next) } else { None },
+        "scope":"saved_nodes","link_scope":"incident_to_page","notifications":{"available":null,"status":"not_checked"}});
+    super::compact::metadata(db, &mut result)?;
+    ReadBudget::default().charge(&result)?;
+    Ok(result)
 }

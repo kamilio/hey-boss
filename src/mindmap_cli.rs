@@ -87,8 +87,19 @@ struct Placement {
 #[derive(Subcommand)]
 enum Action {
     /// Show the nested outline, live resources and cross-links (also the default).
-    #[command(visible_alias = "list")]
+    #[command(
+        visible_alias = "list",
+        after_help = "Compact JSON pages saved nodes before resource hydration. Includes identity/parent/alias, live issue summaries, PR observations, incident link IDs, version and next_offset. Notification health is not checked. Bodies, automatic resource expansion and histories are not loaded. Details: docs/compact-reads.md."
+    )]
     Show {
+        /// Page saved nodes and live summaries, without bodies or resource histories (JSON only).
+        #[arg(long, requires = "json", conflicts_with = "bodies")]
+        compact: bool,
+        /// Saved nodes per compact page.
+        #[arg(long, requires = "compact", default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+        #[arg(long, requires = "compact", default_value_t = 0)]
+        offset: u32,
         /// Include bodies: default none in the terminal, full in JSON.
         #[arg(long, value_enum)]
         bodies: Option<BodyMode>,
@@ -303,7 +314,16 @@ impl Options {
             Some(Action::Export) => Operation::Show {
                 body_mode: BodyMode::Full,
             },
-            Some(Action::Show { bodies }) => Operation::Show {
+            Some(Action::Show {
+                compact: true,
+                limit,
+                offset,
+                ..
+            }) => Operation::ShowCompact {
+                limit: *limit,
+                offset: *offset,
+            },
+            Some(Action::Show { bodies, .. }) => Operation::Show {
                 body_mode: bodies.unwrap_or(if self.json {
                     BodyMode::Full
                 } else {
@@ -650,7 +670,8 @@ pub fn run(options: &Options) -> Result<()> {
             || matches!(
                 options.action,
                 Some(Action::Show {
-                    bodies: Some(BodyMode::Full | BodyMode::Preview)
+                    bodies: Some(BodyMode::Full | BodyMode::Preview),
+                    ..
                 })
             );
         outline(&graph, None, 0, export, include_bodies);

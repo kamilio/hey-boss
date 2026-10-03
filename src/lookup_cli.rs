@@ -71,6 +71,7 @@ pub fn run(options: &Options) -> Result<()> {
                 &route,
                 options,
                 Operation::List {
+                    compact: false,
                     state: route
                         .params
                         .get("state")
