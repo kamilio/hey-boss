@@ -21,6 +21,7 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
             missing(&value["if_version"])
         }
         "edit" => value["if_version"].is_null() && (supervisor || value["draft"] == true),
+        "move" => value["if_order_version"].is_null(),
         "reopen" | "set_blockers" => supervisor && value["if_version"].is_null(),
         "ready" => value["guard"].is_null(),
         "close" => supervisor && value["guard"].is_null(),
@@ -44,7 +45,8 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
 fn logical_command(value: &mut Value, template: &Value) {
     if let (Some(value), Some(template)) = (value.as_object_mut(), template.as_object()) {
         for (key, expected) in template {
-            if (key == "if_version" && missing(expected)) || (key == "guard" && expected.is_null())
+            if (key == "if_version" && missing(expected))
+                || (matches!(key.as_str(), "guard" | "if_order_version") && expected.is_null())
             {
                 value.remove(key);
             } else if let Some(actual) = value.get_mut(key) {
@@ -138,7 +140,10 @@ fn prepare(
     let automatic = needs_snapshot(&operation, supervisor);
     let template = operation.clone();
     let authority = supervisor
-        || matches!(operation["action"].as_str(), Some("assign" | "ready"))
+        || matches!(
+            operation["action"].as_str(),
+            Some("assign" | "ready" | "move")
+        )
         || (operation["action"] == "edit" && operation["draft"] == true);
     if automatic {
         let mut read = request.clone();
@@ -172,6 +177,8 @@ fn prepare(
             let current = call(&read, authority)?;
             if matches!(operation["action"].as_str(), Some("ready" | "close")) {
                 operation["guard"] = current["ready_guard"].clone();
+            } else if operation["action"] == "move" {
+                operation["if_order_version"] = current["order_version"].clone();
             } else {
                 operation["if_version"] = current["issue"]["version"].clone();
             }
@@ -183,7 +190,9 @@ fn prepare(
         && (supervisor
             || matches!(
                 request.operation,
-                Operation::Ready { guard: Some(_), .. } | Operation::Batch { .. }
+                Operation::Ready { guard: Some(_), .. }
+                    | Operation::Batch { .. }
+                    | Operation::Move { .. }
             ))
     {
         let key = serde_json::to_vec(&json!([
@@ -245,6 +254,56 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code, "conflict");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn move_captures_authoritative_queue_guard_and_replays_original_guard() {
+        let mut request = request(json!({"action":"move","number":3,"before":1}));
+        request.request_id = Some("move-once".into());
+        let mut captured = None;
+        let mut calls = 0;
+        prepare(&request, false, |r, authority| {
+            calls += 1;
+            match &r.operation {
+                Operation::RequestStatus { .. } => {
+                    assert!(authority);
+                    Ok(json!({"request":{"state":"not_recorded"}}))
+                }
+                Operation::View { number: 3 } => {
+                    assert!(authority);
+                    Ok(json!({"order_version":0}))
+                }
+                Operation::Move {
+                    if_order_version: Some(0),
+                    ..
+                } => {
+                    assert_eq!(r.request_id.as_deref(), Some("move-once"));
+                    captured = Some(serde_json::to_value(&r.operation).unwrap());
+                    Ok(json!({"ok":true}))
+                }
+                other => panic!("Unexpected request {other:?}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 3);
+        let captured = captured.unwrap();
+        let mut calls = 0;
+        prepare(&request, false, |r, authority| {
+            calls += 1;
+            match &r.operation {
+                Operation::RequestStatus { .. } => {
+                    assert!(authority);
+                    Ok(json!({"request":{"state":"recorded","operation":captured}}))
+                }
+                Operation::Move {
+                    if_order_version: Some(0),
+                    ..
+                } => Ok(json!({"ok":true})),
+                other => panic!("Must replay without reading a newer queue: {other:?}"),
+            }
+        })
+        .unwrap();
         assert_eq!(calls, 2);
     }
 

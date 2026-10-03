@@ -1495,14 +1495,15 @@ impl Store {
                 return Ok(result);
             }
         }
-        // Drafting and assignment are online authority operations on companions. Never make a
-        // local edit that cannot be accepted by the supervisor on replay.
+        // Drafting, assignment and queue moves require the online authority.
+        // Never acknowledge a replica edit the supervisor cannot accept on replay.
         if matches!(
             r.operation,
             Operation::Edit {
                 draft: Some(true),
                 ..
             } | Operation::Assign { .. }
+                | Operation::Move { .. }
         ) {
             validate(r)?;
             let companion: bool = self.db.query_row(
@@ -1522,10 +1523,10 @@ impl Store {
                         request.actor.as_ref().map(|a| &a.id),
                         request.operation
                     ]))?;
-                    let prefix = if matches!(request.operation, Operation::Assign { .. }) {
-                        "assign"
-                    } else {
-                        "draft"
+                    let prefix = match request.operation {
+                        Operation::Assign { .. } => "assign",
+                        Operation::Move { .. } => "move",
+                        _ => "draft",
                     };
                     request.request_id = Some(format!("{prefix}-{:x}", Sha256::digest(key)));
                 }
