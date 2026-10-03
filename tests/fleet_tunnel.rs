@@ -16,7 +16,12 @@ struct Fleet {
 }
 impl Fleet {
     fn new() -> Self {
-        let root = PathBuf::from(format!("/tmp/hb-tunnel-{}", std::process::id()));
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = PathBuf::from(format!(
+            "/tmp/hb-tunnel-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::create_dir(&root).unwrap();
         for side in ["main", "peer", "bin"] {
             fs::create_dir(root.join(side)).unwrap();
@@ -181,6 +186,198 @@ impl Drop for Fleet {
         }
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[test]
+fn companion_moves_persist_with_guarded_retries_and_no_offline_fallback() {
+    let mut f = Fleet::new();
+    f.start();
+    f.sql(
+        "main",
+        "UPDATE fleet_meta SET node='tunnel-main' WHERE id=1",
+    );
+    for title in ["One", "Two", "Three", "Four"] {
+        f.issue("main", &["create", "--at-bottom", "--title", title], 0);
+    }
+    let order = |f: &Fleet, side: &str| -> Vec<i64> {
+        f.issue(side, &["list"], 0)["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["number"].as_i64().unwrap())
+            .collect()
+    };
+    let wait_order = |f: &Fleet, expected: &[i64]| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let actual = order(&f, "peer");
+            if actual == expected {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Replica order {actual:?}, expected {expected:?}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    wait_order(&f, &[1, 2, 3, 4]);
+    let args = ["move", "3", "--before", "1", "--request-id", "move-once"];
+    let saved = f.issue("peer", &args, 0);
+    assert_eq!(saved["store"]["host"], "supervisor");
+    assert_eq!(order(&f, "main"), vec![3, 1, 2, 4]);
+    assert_eq!(
+        f.issue("peer", &["view", "3", "--supervisor"], 0)["issue"],
+        saved["issue"]
+    );
+    wait_order(&f, &[3, 1, 2, 4]);
+    assert_eq!(
+        f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_move"],
+        true
+    );
+
+    let version = saved["order_version"].as_i64().unwrap().to_string();
+    f.issue("main", &["move", "4", "--before", "3"], 0);
+    // Replaying a successful request must not undo a different agent's move.
+    assert_eq!(f.issue("peer", &args, 0), saved);
+    assert_eq!(order(&f, "main"), vec![4, 3, 1, 2]);
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "move",
+                "2",
+                "--before",
+                "1",
+                "--if-order-version",
+                &version,
+                "--request-id",
+                "stale-move"
+            ],
+            4
+        )["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(
+        f.issue(
+            "peer",
+            &["move", "3", "--after", "1", "--request-id", "move-once"],
+            4
+        )["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(order(&f, "main"), vec![4, 3, 1, 2]);
+    f.issue("peer", &["move", "3", "--after", "2", "--supervisor"], 0);
+    f.issue("peer", &["move", "4"], 0);
+    assert_eq!(order(&f, "main"), vec![1, 2, 3, 4]);
+    wait_order(&f, &[1, 2, 3, 4]);
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT count(*) FROM events WHERE action='reordered' AND actor='codex:tunnel-test'"
+        ),
+        json!([[4]])
+    );
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id='move-once'"
+        ),
+        json!([[0]])
+    );
+    assert_eq!(
+        f.sql("main", "SELECT count(*) FROM fleet_allocations"),
+        json!([[0]])
+    );
+
+    // A stale explicit guard races with another writer: exactly one can win.
+    let version = f.issue("main", &["list"], 0)["order_version"]
+        .as_i64()
+        .unwrap()
+        .to_string();
+    let a = f
+        .command(
+            "peer",
+            &[
+                "issue",
+                "--project",
+                "Tunnel QA",
+                "--agent",
+                "codex:tunnel-test",
+                "--json",
+                "move",
+                "3",
+                "--before",
+                "1",
+                "--if-order-version",
+                &version,
+                "--request-id",
+                "race-peer",
+            ],
+        )
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let b = f
+        .command(
+            "main",
+            &[
+                "issue",
+                "--project",
+                "Tunnel QA",
+                "--agent",
+                "codex:other",
+                "--json",
+                "move",
+                "2",
+                "--before",
+                "1",
+                "--if-order-version",
+                &version,
+            ],
+        )
+        .output()
+        .unwrap();
+    let a = a.wait_with_output().unwrap();
+    assert_eq!(
+        usize::from(a.status.success()) + usize::from(b.status.success()),
+        1
+    );
+    assert!(a.status.code() == Some(4) || b.status.code() == Some(4));
+    let final_order = order(&f, "main");
+    wait_order(&f, &final_order);
+
+    let mut supervisor = f.services.pop().unwrap();
+    unsafe {
+        libc::kill(supervisor.id() as i32, libc::SIGTERM);
+    }
+    assert!(supervisor.wait().unwrap().success());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(f.root.join("peer/fleet-authority.sock")).is_ok()
+    {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(50));
+    }
+    for extra in [vec![], vec!["--if-order-version", &version]] {
+        let mut args = vec!["move", "4", "--before", "1", "--request-id", "offline-move"];
+        args.extend(extra);
+        let denied = f.issue("peer", &args, 1);
+        assert_eq!(denied["error"]["code"], "fleet_unavailable");
+        assert!(
+            denied["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("No local fallback")
+        );
+    }
+    assert_eq!(order(&f, "peer"), final_order);
+    assert_eq!(
+        f.sql(
+            "peer",
+            "SELECT count(*) FROM requests WHERE request_id='offline-move'"
+        ),
+        json!([[0]])
+    );
 }
 
 #[test]

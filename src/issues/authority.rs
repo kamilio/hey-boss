@@ -13,6 +13,10 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
         // version. INSERT ON CONFLICT preserves an existing link's purpose.
         // Keep the local CLI's commit-URL alias outside this PR capability.
         Operation::AddPullRequest { url, .. } if !super::commits::is_commit_url(url) => {}
+        Operation::Move {
+            if_order_version: Some(version),
+            ..
+        } if *version >= 0 => {}
         Operation::Edit {
             draft: None | Some(true),
             if_version: Some(version),
@@ -41,7 +45,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, PR add/list, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, allocation, PR add/list, queue-version-guarded moves, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
@@ -75,7 +79,33 @@ pub(super) fn guard_unowned(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn moves_require_a_queue_guard_and_durable_receipt() {
+        let mut request: Request = serde_json::from_value(json!({
+            "version":1, "project":{"id":"named:Test","name":"Test"},
+            "request_id":"move-once",
+            "operation":{"action":"move","number":3,"before":1,"if_order_version":0}
+        }))
+        .unwrap();
+        validate(&request).unwrap();
+        request.request_id = None;
+        assert!(
+            validate(&request)
+                .unwrap_err()
+                .message
+                .contains("--request-id")
+        );
+        request.request_id = Some("move-once".into());
+        for version in [Value::Null, json!(-1)] {
+            request.operation = serde_json::from_value(json!({
+                "action":"move","number":3,"before":1,"if_order_version":version
+            }))
+            .unwrap();
+            assert_eq!(validate(&request).unwrap_err().code, "invalid_input");
+        }
+    }
 
     #[test]
     fn pr_capability_is_additive_and_requires_mutation_receipts() {

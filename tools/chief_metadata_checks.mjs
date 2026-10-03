@@ -345,6 +345,28 @@ try {
     }
     check('Authoritative lifecycle results converge to the companion viewer');
   }
+  if(process.argv.includes('--moves')) {
+    assert.equal((await cli(peer,['fleet','capabilities'])).capabilities.issue_move,true);
+    const moveIssue=(path,args,code=0)=>cli(path,['issue','--project','Queue movement QA','--agent','codex:chief-fixture','--json',...args],code);
+    for(const title of ['Browser rendering repair','Dependency prerequisite','Keyboard navigation','Phone layout']) {
+      await moveIssue(main,['create','--at-bottom','--title',title,'--body','Queue ordering verification.']);
+    }
+    const args=['move','3','--before','1','--request-id','priority-once'];
+    const saved=await moveIssue(peer,args);
+    assert.equal(saved.store.host,'supervisor');
+    assert.deepEqual((await moveIssue(peer,['view','3','--supervisor'])).issue,saved.issue);
+    await moveIssue(main,['move','4','--before','3']);
+    assert.deepEqual(await moveIssue(peer,args),saved);
+    const stale=await moveIssue(peer,['move','2','--before','1','--if-order-version',String(saved.order_version),'--request-id','priority-stale'],4);
+    assert.equal(stale.error.code,'conflict');
+    for(let attempt=0;;attempt++) {
+      const order=(await moveIssue(peer,['list'])).issues.map(issue=>issue.number);
+      if(JSON.stringify(order)==='[4,3,1,2]')break;
+      assert(attempt<300,'Priority move did not converge');await wait(100);
+    }
+    assert.deepEqual(await sql(peer,"SELECT count(*) FROM requests WHERE request_id='priority-once'"),[[0]]);
+    check('Priority moves commit on the authority, preserve unrelated reorders on retry, reject stale guards and converge');
+  }
   if(serve) {
     const web=start(peer,['issue','--project','Chief metadata QA','--agent','codex:chief-fixture','--json','web','--port','59651','--no-discovery']);web.stdout.resume();
     for(let attempt=0;;attempt++) {

@@ -4,6 +4,15 @@ A connected companion already has an authenticated route to its supervisor. It
 does not need a reverse SSH hostname, a running worker, or a work claim to edit
 issue metadata.
 
+`issue move NUMBER --before ANCHOR` (or `--after ANCHOR`, or neither for the end)
+automatically uses the supervisor on companions; `--supervisor` also works.
+It requires `issue_move` support. The CLI captures the authoritative queue version;
+a concurrent reorder fails without overwriting it. Browser moves use the displayed
+list's version. Success means the authority committed the move; ordinary replica
+lists converge on the next sync. Reuse the same `--request-id` and identical command
+after an uncertain response. Retries return the original receipt, preserving later
+moves. Disconnected moves fail without saving locally or queuing offline replay.
+
 ```sh
 hey-boss fleet capabilities
 hey-boss fleet status
@@ -97,3 +106,5 @@ Use `--lifecycle --serve` and `tools/lifecycle_tunnel_browser_checks.js` for
 Ready/close receipts, idle watcher handoffs, active-work guards and responsive
 replica rendering. Browser screenshots go to `/tmp/hb-lifecycle-visual`; remove
 them and stop the fixture and disposable browser after inspection.
+Use `--moves --serve` and `tools/move_tunnel_browser_checks.js` for authoritative
+queue movement, guarded retries, keyboard/pointer interaction and responsive layout.

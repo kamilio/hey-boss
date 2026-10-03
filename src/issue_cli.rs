@@ -296,6 +296,9 @@ enum Action {
         if_version: i64,
     },
     /// Move an issue before/after another issue; omit both to move to the end.
+    #[command(
+        after_help = "Companions use the supervisor tunnel and require issue_move support; --supervisor also works.\nThe CLI captures the queue version. Concurrent moves conflict; disconnection never saves locally.\nRetry uncertain results with the identical command and the same --request-id."
+    )]
     Move {
         number: i64,
         #[arg(long, conflicts_with = "after")]
@@ -1226,6 +1229,7 @@ pub fn run(options: &Options) -> Result<()> {
         if !matches!(
             options.action,
             Action::View { .. }
+                | Action::Move { .. }
                 | Action::Request { .. }
                 | Action::Allocation { .. }
                 | Action::Assign { .. }
@@ -1243,7 +1247,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, request, allocation, PR add/list, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
             ));
         }
     }
