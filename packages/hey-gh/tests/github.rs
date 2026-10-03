@@ -208,6 +208,34 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "account-slow-sources" {
         tokio::time::sleep(Duration::from_millis(900)).await;
     }
+    if mode == "account-multi-source" && path.ends_with("/jobs") {
+        return reply(
+            200,
+            json!({"jobs":[{"id":path.split('/').nth(6).unwrap().parse::<u64>().unwrap(),"status":"completed","conclusion":"success"}]}),
+            &[],
+        );
+    }
+    if mode.starts_with("completed-job-pages") && path.ends_with("/jobs") {
+        if query.contains("page=2") {
+            if phase == 2 && mode == "completed-job-pages" {
+                mock.release.notified().await;
+            }
+            return reply(
+                200,
+                json!({"jobs":[{"id":11,"status":if phase == 2 && mode == "completed-job-pages-pending" {"in_progress"} else {"completed"},"conclusion":"success"}]}),
+                &[],
+            );
+        }
+        let host = headers.get("host").unwrap().to_str().unwrap();
+        return reply(
+            200,
+            json!({"jobs":[{"id":10,"status":"completed","conclusion":"success"}]}),
+            &[(
+                "link",
+                &format!("<http://{host}{path}?per_page=100&page=2>; rel=\"next\""),
+            )],
+        );
+    }
     if matches!(mode.as_str(), "ruleset-only-policy" | "account-large")
         && path == "/foreground-gate"
     {
@@ -781,13 +809,15 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     let normalized = path
         .replace("/ACME/DEMO/", "/acme/demo/")
         .replace("/acme/other/", "/acme/demo/");
-    let normalized = if mode == "account-large" && path.starts_with("/repos/acme/watch") {
+    let normalized = if (mode == "account-large" && path.starts_with("/repos/acme/watch"))
+        || (mode == "account-multi-source" && path.starts_with("/repos/acme/foreground"))
+    {
         let repository = path.split('/').nth(3).unwrap();
         normalized.replace(&format!("/acme/{repository}/"), "/acme/demo/")
     } else {
         normalized
     };
-    let value = match normalized.as_str() {
+    let mut value = match normalized.as_str() {
         "/user" => json!({"id":42,"login":"me"}),
         "/repos/acme/demo/pulls" => json!([
             {"number":7,"user":{"login":"me"}}, {"number":8,"user":{"login":"other"}}]),
@@ -899,6 +929,30 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         }
         _ => json!({"answer":phase}),
     };
+    if mode.starts_with("completed-job-pages") && normalized.ends_with("/actions/runs") {
+        for run in value["workflow_runs"].as_array_mut().unwrap() {
+            run["updated_at"] = json!(if phase >= 4 {
+                "2026-09-19T01:00:00Z"
+            } else {
+                "2026-09-19T00:00:00Z"
+            });
+        }
+    }
+    if mode == "account-multi-source" {
+        if normalized.ends_with("/pulls/7") {
+            value["merge_commit_sha"] = json!(MERGE);
+            value["node_id"] = json!(format!("PR_{}_7", path.split('/').nth(3).unwrap()));
+        } else if normalized.ends_with("/actions/runs") {
+            let merge = query.contains(MERGE);
+            value = json!({"workflow_runs":(0..4).map(|i| json!({"id":100 + i + if merge {100} else {0},"workflow_id":i,"run_number":1,"run_attempt":1,"event":"pull_request","head_sha":if merge {MERGE} else {HEAD},"status":"completed","conclusion":"success"})).collect::<Vec<_>>()});
+        } else if normalized == "/repos/acme/demo/branches/main" {
+            value = json!({"commit":{"sha":BASE},"protected":false});
+        } else if normalized.ends_with("/protection/required_status_checks") {
+            return reply(404, json!({"message":"Branch not protected"}), &[]);
+        } else if normalized.ends_with("/rules/branches/main") {
+            value = json!([]);
+        }
+    }
     use sha2::Digest;
     let etag = format!(
         "\"{:x}\"",
@@ -2272,6 +2326,129 @@ async fn ci_batches_independent_sources_but_preserves_single_slot_queue_reads() 
         );
         assert!(h.calls().iter().all(|call| call.path != "/graphql"));
     }
+}
+
+#[tokio::test]
+async fn completed_job_pages_survive_a_cancelled_collection_without_repeated_requests() {
+    let h = Harness::new().await;
+    h.mode("completed-job-pages");
+    h.phase(2);
+    let c = h.client();
+    let reader = tokio::spawn({
+        let c = c.clone();
+        async move {
+            c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+                .await
+        }
+    });
+    until(|| {
+        h.calls()
+            .iter()
+            .any(|c| c.path.ends_with("/jobs") && c.query.contains("page=2"))
+    })
+    .await;
+    reader.abort();
+    let _ = reader.await;
+    h.phase(3);
+    h.mock.release.notify_waiters();
+    until(|| c.status().outstanding_requests == 0).await;
+    let jobs_count = || {
+        h.calls()
+            .iter()
+            .filter(|c| c.path.ends_with("/jobs"))
+            .count()
+    };
+    assert_eq!(jobs_count(), 2);
+    let report = c
+        .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+        .await
+        .unwrap();
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(report.data.jobs.len(), 2);
+    assert_eq!(
+        jobs_count(),
+        2,
+        "completed pages must survive cancellation, including a response arriving after the caller leaves"
+    );
+    assert!(
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    assert_eq!(
+        jobs_count(),
+        4,
+        "explicit refresh must still validate every page"
+    );
+    h.phase(4);
+    assert!(
+        c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+            .await
+            .unwrap()
+            .complete
+    );
+    assert_eq!(
+        jobs_count(),
+        6,
+        "a changed parent version must validate every page even on the same attempt"
+    );
+    h.phase(7);
+    assert!(
+        c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+            .await
+            .unwrap()
+            .complete
+    );
+    assert_eq!(jobs_count(), 8, "a new attempt must validate every page");
+}
+
+#[tokio::test]
+async fn completed_job_page_reuse_requires_terminal_nonempty_pages_for_the_completed_parent() {
+    let h = Harness::new().await;
+    h.mode("completed-job-pages-pending");
+    let c = h.client();
+    let freshness = Freshness::MaxAge(Duration::ZERO);
+    // Completed children of a still-running parent must not seed a terminal
+    // parent version. Its transition to completed requires all pages again.
+    assert!(
+        c.ci_for_pr("acme/demo", 7, freshness)
+            .await
+            .unwrap()
+            .complete
+    );
+    let count = |page_two| {
+        h.calls()
+            .iter()
+            .filter(|c| c.path.ends_with("/jobs") && c.query.contains("page=2") == page_two)
+            .count()
+    };
+    h.phase(2);
+    let pending = c.ci_for_pr("acme/demo", 7, freshness).await.unwrap();
+    assert!(pending.complete);
+    assert!(
+        pending
+            .data
+            .jobs
+            .iter()
+            .any(|j| j["status"] == "in_progress")
+    );
+    assert_eq!((count(false), count(true)), (2, 2));
+    h.phase(3);
+    let completed = c.ci_for_pr("acme/demo", 7, freshness).await.unwrap();
+    assert!(completed.complete);
+    assert!(
+        completed
+            .data
+            .jobs
+            .iter()
+            .all(|j| j["status"] == "completed")
+    );
+    assert_eq!(
+        (count(false), count(true)),
+        (2, 3),
+        "only the verified terminal page can be reused"
+    );
 }
 
 #[tokio::test]
@@ -5150,6 +5327,66 @@ async fn account_background_collections_finish_under_paced_foreground_contention
         details.succeeded > 0,
         "details made no complete progress: {details:?}"
     );
+}
+
+#[tokio::test]
+async fn large_interactive_ci_completes_under_paced_multi_source_policy_contention() {
+    let h = Harness::new().await;
+    h.mode("account-multi-source");
+    h.phase(2);
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(110);
+    config.queue_timeout = Duration::from_secs(110);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.get("paced-contention", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = hey_gh::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let foreground: Vec<_> = (0..4)
+        .map(|n| {
+            tokio::spawn({
+                let c = c.clone();
+                async move {
+                    loop {
+                        let result = c
+                            .required_checks_for_pr(
+                                &format!("acme/foreground{n}"),
+                                7,
+                                Freshness::MaxAge(Duration::ZERO),
+                            )
+                            .await
+                            .unwrap();
+                        assert!(result.errors.is_empty(), "{:?}", result.errors);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            })
+        })
+        .collect();
+    until(|| c.status().outstanding_requests >= 4).await;
+    let result = sdk
+        .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::ZERO))
+        .await;
+    for task in foreground {
+        assert!(!task.is_finished(), "contending policy reader failed");
+        task.abort();
+        let _ = task.await;
+    }
+    server.abort();
+    let report = result.unwrap();
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(report.data.head_sha, HEAD);
+    assert_eq!(report.data.merge_sha.as_deref(), Some(MERGE));
+    assert_eq!(report.data.workflow_runs.len(), 8);
+    assert_eq!(report.data.jobs.len(), 8);
 }
 
 #[tokio::test]

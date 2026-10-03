@@ -319,6 +319,16 @@ impl Client {
         body: Option<Value>,
         freshness: Freshness,
     ) -> Result<Response> {
+        self.request_versioned(url, body, freshness, None).await
+    }
+
+    async fn request_versioned(
+        &self,
+        url: String,
+        body: Option<Value>,
+        freshness: Freshness,
+        completed_version: Option<&str>,
+    ) -> Result<Response> {
         let repository = if let Some(body) = &body {
             let vars = &body["variables"];
             vars["owner"]
@@ -351,6 +361,10 @@ impl Client {
                 (format!("{url}#{}", digest(&body.to_string())), None)
             } else {
                 self.rest_cache_key(&url)?
+            };
+            let base_key = match completed_version {
+                Some(version) => format!("{base_key}#completed-jobs-version={version}"),
+                None => base_key,
             };
             let key = if generation == 0 {
                 base_key
@@ -627,6 +641,71 @@ impl Client {
         field: Option<&str>,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
+        self.collect_pages(path, field, freshness, None).await
+    }
+
+    pub(crate) async fn completed_job_pages(
+        &self,
+        path: &str,
+        version: &str,
+        freshness: Freshness,
+    ) -> Result<Vec<Value>> {
+        self.collect_pages(path, Some("jobs"), freshness, Some(version))
+            .await
+    }
+
+    // Each page is retained under the completed parent's version before the
+    // caller resumes. Cancellation cannot lose already dispatched progress or
+    // reuse a page fetched for an earlier, still-running parent.
+    async fn completed_job_page(
+        &self,
+        path: &str,
+        version: &str,
+        freshness: Freshness,
+    ) -> Result<Response> {
+        let url = self.rest_url(path)?.to_string();
+        if !matches!(freshness, Freshness::Revalidate) {
+            match self
+                .request_versioned(url.clone(), None, Freshness::CachedOnly, Some(version))
+                .await
+            {
+                Ok(response) => {
+                    if matches!(freshness, Freshness::CachedOnly) {
+                        crate::report::record_validation(&url, &response);
+                        return Ok(response);
+                    }
+                    if now_ms().saturating_sub(response.validated_at_ms) < 86400 * 1000
+                        && response.data["jobs"].as_array().is_some_and(|jobs| {
+                            !jobs.is_empty() && jobs.iter().all(|j| j["status"] == "completed")
+                        })
+                    {
+                        // The freshly read parent certifies this immutable
+                        // version, as with the whole completed-jobs memo.
+                        return Ok(response);
+                    }
+                }
+                Err(Error::CacheMiss) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if matches!(freshness, Freshness::CachedOnly) {
+            // Read-only compatibility with pages retained by older versions.
+            return self.get(path, freshness).await;
+        }
+        let response = self
+            .request_versioned(url.clone(), None, Freshness::Revalidate, Some(version))
+            .await?;
+        crate::report::record_validation(&url, &response);
+        Ok(response)
+    }
+
+    async fn collect_pages(
+        &self,
+        path: &str,
+        field: Option<&str>,
+        freshness: Freshness,
+        completed_version: Option<&str>,
+    ) -> Result<Vec<Value>> {
         let mut path = path.to_owned();
         let mut seen = std::collections::HashSet::new();
         let mut values = Vec::new();
@@ -635,7 +714,11 @@ impl Client {
             if !seen.insert(self.rest_url(&path)?.to_string()) {
                 return Err(Error::Invalid("pagination link cycle".into()));
             }
-            let response = self.get(&path, freshness).await?;
+            let response = if let Some(version) = completed_version {
+                self.completed_job_page(&path, version, freshness).await?
+            } else {
+                self.get(&path, freshness).await?
+            };
             bytes = bytes.saturating_add(response.data.to_string().len());
             if bytes > self.0.config.max_collection_bytes {
                 return Err(Error::Invalid(
