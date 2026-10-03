@@ -552,7 +552,16 @@ Conflict status is `clean`, `conflicting`, or `unknown`, based on GitHub mergeab
 
 ## Queue and caching
 
-Authenticated REST conditional requests with validators may bypass soft quota pacing while more than 100 requests remain. HTTP 304 responses preserve pacing debt from the last charged response. Primary exhaustion, shared secondary cooldowns, and minimum request spacing still apply.
+Charged reads are paced across the remaining quota window, including above 1,000 remaining. Parallel requests reserve separate pacing slots at dispatch. A validator alone does not bypass pacing: only a representation last validated with HTTP 304 may probe while more than 100 requests remain. A subsequent HTTP 200 revokes that exemption. HTTP 304 preserves existing pacing debt; primary exhaustion, shared secondary cooldowns, and minimum request spacing still apply.
+
+The `traffic` section of `logs --summary` counts retained dispatches and response
+headers separately from completed jobs, grouping endpoint, priority, conditional
+status, and completed-job cache decisions. Quota windows carry opaque auth and
+daemon instance identifiers and observed header ranges, never credentials or
+response bodies. Header movement includes other machines and clients; it is not
+a count of this daemon's charges. Check retention coverage and unmatched responses
+before comparing bounded windows. Older logs lack these records and cannot prove
+zero traffic. Cache hits remain visible in `status`; they do not dispatch requests.
 
 The daemon owns one bounded queue: active, waiting, and retrying distinct requests share its 256-request capacity. Identical in-flight requests share one operation, even when callers cancel. Eligible ready requests retain FIFO order within each bucket; an exhausted resource bucket does not block a ready request from another bucket. REST core, search, and GraphQL use separate budgets, refined from GitHub's `x-ratelimit-resource` header.
 
