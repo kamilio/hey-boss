@@ -25,7 +25,9 @@ for await (const line of createInterface({input:process.stdin})) {
     const original = cli(['view', number]).issue.body;
     cli(['edit', number, '--body', 'Published handoff notes\n\n' + original]);
     cli(['ready', number, '--acknowledge-requirements']);
+    cli(['comment', number, '--body', 'Reviewed delivery details before watcher handoff.']);
     cli(['assign', number, 'github']);
+    cli(['comment', number, '--body', 'Published delivery details after watcher handoff.']);
     send({id:message.id, result:{turn:{id:turn}}});
     send({method:'item/completed', params:{threadId:session, turnId:turn,
       item:{type:'agentMessage', text:JSON.stringify({status:'completed', summary:'Published delivery remains Ready for review.'})}}});

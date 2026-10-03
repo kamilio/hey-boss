@@ -944,6 +944,11 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
                 merged[k] = v.clone();
             }
             // A companion can finish before its next pull delivers a newer
+            // Version/clock-only journal entries (notably delayed comments)
+            // still advance canonical guards. Preserve a valid handoff only
+            // when this merge changes no issue field; foreign comment events
+            // independently invalidate it even if they arrive in a later batch.
+            let preserves_requirements = changed.is_empty();
             // GitHub event. Keep that event queued instead of parking the task.
             if merged["assignment_target"] == "github" && merged["assignee"] == "watcher:github" {
                 let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_github_watches WHERE project_id=?1 AND issue_number=?2 AND json_type(status,'$.event')='text' AND json_extract(status,'$.event') IS NOT ?3)",rusqlite::params![merged["project_id"].as_str(),merged["number"].as_i64(),merged["github_ack_event"].as_str()],|r|r.get(0))?;
@@ -979,6 +984,15 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
                 old["updated_at"]
                     .as_i64()
                     .unwrap()
+            if preserves_requirements {
+                crate::issues::Store::preserve_requirements_handoff(
+                    db,
+                    old["project_id"].as_str().unwrap(),
+                    old["number"].as_i64().unwrap(),
+                    None,
+                    crate::issues::worker::now(),
+                )?;
+            }
                     .max(after["updated_at"].as_i64().unwrap())
             );
             writer.put(table, &merged)?;

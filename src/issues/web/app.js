@@ -1557,6 +1557,7 @@ function openEditor(issue = null, options = {}) {
   $("#editor-submit").disabled = false;
   $("#editor-error").hidden = true;
   $("#editor-conflict").hidden = true;
+    requirements_preserved:"preserved the delivery handoff",
   $("#conflict-replace").textContent = options.parent ? "Create using the latest parent revision" : "Save my draft over this version";
   editorBusy(false);
   preview("editor", false);

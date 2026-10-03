@@ -7,6 +7,14 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 mod native;
+
+#[cfg(test)]
+pub(crate) fn test_replica(
+    db: &crate::database::Connection,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    native::replica_request(db, request).unwrap()
+}
 mod status;
 use status::status_text;
 

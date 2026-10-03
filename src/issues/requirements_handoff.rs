@@ -18,6 +18,14 @@ fn digest(issue: &Issue) -> Result<String> {
     ))
 }
 
+fn external_comments(db: &Connection, project: &str, number: i64, actor: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2 AND author<>?3",
+        params![project, number, actor],
+        |r| r.get(0),
+    )?)
+}
+
 pub(in crate::issues::store) fn capture(
     db: &Connection,
     project: &str,
@@ -35,11 +43,14 @@ pub(in crate::issues::store) fn capture(
             "Only the owning worker run can acknowledge requirements",
         ));
     }
-    Ok(json!({"run":run,"version":issue.version+1,"sha256":digest(issue)?}))
+    Ok(
+        json!({"run":run,"version":issue.version+1,"sha256":digest(issue)?,
+        "external_comments":external_comments(db, project, issue.number, &actor.id)?}),
+    )
 }
 
-// Consume only the latest lifecycle event, at its exact committed version.
-// Comments and unrelated metadata edits also require a fresh acknowledgement.
+// Consume only the latest lifecycle event. Later versions need an unbroken
+// transaction-recorded chain of harmless writes; unexplained drift still fails.
 pub(in crate::issues::store) fn current(
     db: &Connection,
     project: &str,
@@ -47,11 +58,11 @@ pub(in crate::issues::store) fn current(
     actor: &str,
     run: &str,
 ) -> Result<Option<Acknowledgement>> {
-    let event: Option<(String, String, String)> = db.query_row(
-        "SELECT actor,action,data FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1",
-        params![project,issue.number], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    let event: Option<(i64, String, String, String)> = db.query_row(
+        "SELECT id,actor,action,data FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1",
+        params![project,issue.number], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).optional()?;
-    let Some((author, action, data)) = event else {
+    let Some((id, author, action, data)) = event else {
         return Ok(None);
     };
     let data: Value = serde_json::from_str(&data)?;
@@ -73,12 +84,108 @@ pub(in crate::issues::store) fn current(
                 && (data["previous_assignee"] == actor
                     || data["previous_assignee"] == "human:boss")))
         && ack["run"] == run
-        && ack["version"] == issue.version
+        // Comment rows and their audit events can arrive in different sync
+        // batches. Append-only counts are portable across replica-local IDs.
+        && (ack.get("external_comments").is_none()
+            || ack["external_comments"] == external_comments(db, project, issue.number, actor)?)
+        && version_matches(db, project, issue, id, actor, ack)?
         && ack["sha256"].as_str() == Some(digest(issue)?.as_str());
     Ok(Some(Acknowledgement {
         snapshot: ack.clone(),
         valid,
     }))
+}
+
+fn version_matches(
+    db: &Connection,
+    project: &str,
+    issue: &Issue,
+    event: i64,
+    actor: &str,
+    ack: &Value,
+) -> Result<bool> {
+    let Some(mut version) = ack["version"]
+        .as_i64()
+        .filter(|v| *v > 0 && *v <= issue.version)
+    else {
+        return Ok(false);
+    };
+    let mut steps = std::collections::BTreeSet::new();
+    let mut stmt = db.prepare("SELECT actor,action,CASE WHEN action='requirements_preserved' THEN data ELSE '{}' END FROM events WHERE project_id=?1 AND issue_number=?2 AND id>?3 ORDER BY id")?;
+    let rows = stmt.query_map(params![project, issue.number, event], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (author, action, data) = row?;
+        // Prose is never evidence. Only the owning actor's own final notes are
+        // harmless; another actor's comment may contain new work or an approval.
+        if author == actor && action == "commented" {
+            continue;
+        }
+        if author != actor || action != "requirements_preserved" {
+            return Ok(false);
+        }
+        let data: Value = serde_json::from_str(&data)?;
+        if data["acknowledgement"] == *ack
+            && matches!(data["source"].as_str(), Some("owner_comment" | "replica"))
+            && let Some(previous) = data["previous_version"].as_i64()
+            && previous.checked_add(1) == data["version"].as_i64()
+        {
+            steps.insert(previous);
+        }
+    }
+    // Replica-local event IDs/order and duplicate local/canonical steps may
+    // differ after a pull. The exact version chain and acknowledgement do not.
+    while version < issue.version && steps.contains(&version) {
+        version += 1;
+    }
+    Ok(version == issue.version)
+}
+
+impl Store {
+    /// Called only before an owner's comment or a field-identical replica merge,
+    /// in the same transaction as its single issue-version increment. Never
+    /// repairs an already stale acknowledgement or accepts changed requirements.
+    pub(crate) fn preserve_requirements_handoff(
+        db: &Connection,
+        project: &str,
+        number: i64,
+        commenter: Option<&str>,
+        now: i64,
+    ) -> Result<()> {
+        let latest: Option<(String, String)> = db.query_row(
+            "SELECT e.actor,json_extract(e.data,'$.requirements_handoff.run') FROM issues i JOIN events e ON e.project_id=i.project_id AND e.issue_number=i.number WHERE i.project_id=?1 AND i.number=?2 AND i.state='ready' AND e.action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY e.id DESC LIMIT 1",
+            params![project, number], |r| Ok((r.get(0)?, r.get::<_,Option<String>>(1)?.unwrap_or_default())),
+        ).optional()?;
+        let Some((actor, run)) = latest else {
+            return Ok(());
+        };
+        if run.is_empty() || commenter.is_some_and(|commenter| commenter != actor) {
+            return Ok(());
+        }
+        let issue = get_issue(db, project, number, true)?;
+        if let Some(ack) = current(db, project, &issue, &actor, &run)?
+            && ack.valid
+        {
+            event(
+                db,
+                project,
+                number,
+                &actor,
+                "requirements_preserved",
+                now,
+                &json!({
+                    "acknowledgement":ack.snapshot, "previous_version":issue.version,
+                    "version":issue.version+1, "source":if commenter.is_some() {"owner_comment"} else {"replica"}
+                }),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub(in crate::issues::store) fn matches(
