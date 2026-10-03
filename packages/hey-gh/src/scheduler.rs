@@ -18,6 +18,7 @@ use tokio::{
 };
 
 pub(crate) const MAX_ACTIVE_BUCKETS: usize = 3;
+const QUOTA_RESERVE: u64 = 100;
 
 pub(crate) fn max_active_buckets(config: &Config) -> usize {
     if config.rest_url.host_str() == Some("api.github.com") {
@@ -179,6 +180,61 @@ struct Budget {
     remaining: u64,
     spacing: Duration,
     reset_at_seconds: u64,
+    usage: SharedUsage,
+}
+
+#[derive(Clone)]
+struct SharedUsage {
+    since: Instant,
+    remaining: u64,
+    charged: u64,
+    share: f64,
+}
+
+impl SharedUsage {
+    fn new(remaining: u64, now: Instant) -> Self {
+        Self {
+            since: now,
+            remaining,
+            charged: 0,
+            share: 1.0,
+        }
+    }
+
+    fn observe(&mut self, remaining: u64, charged: bool, now: Instant) {
+        self.charged += u64::from(charged);
+        let elapsed = now.duration_since(self.since);
+        if elapsed >= Duration::from_secs(30) {
+            // Response counts are an estimate of this client's charges, not an
+            // attribution of all account usage. The header delta includes other
+            // daemons and direct CLI traffic using the same shared allowance.
+            // Sparse/idle observations cannot estimate sustained local demand.
+            // Don't punish the first interactive read after an idle period with
+            // an entire interval of unrelated account traffic.
+            if self.charged >= 4 && elapsed <= Duration::from_secs(60) {
+                self.share = (self.remaining.saturating_sub(remaining) as f64
+                    / self.charged as f64)
+                    .max(1.0);
+            } else {
+                self.share = 1.0;
+            }
+            self.since = now;
+            self.remaining = remaining;
+            self.charged = 0;
+        }
+    }
+
+    fn spacing(&self, remaining: u64, seconds: u64) -> Duration {
+        // Keep headroom for preflight and other clients outside this daemon.
+        // This is the same reserve used by conditional probes. Read deadlines
+        // stay unchanged: delayed evidence remains explicitly unavailable.
+        let spendable = remaining.saturating_sub(QUOTA_RESERVE);
+        if spendable == 0 {
+            Duration::from_secs(seconds.saturating_add(1))
+        } else {
+            Duration::from_secs_f64((seconds as f64 * self.share / spendable as f64).min(86400.0))
+        }
+    }
 }
 
 // GitHub can return overlapping reset windows (including on ordinary REST
@@ -201,20 +257,29 @@ impl Budgets {
         windows.retain(|reset, budget| {
             reset.saturating_add(1) > seconds_now || (*reset == 0 && budget.next > now)
         });
-        let previous = windows.get(&reset);
+        let previous = windows.remove(&reset);
         // Parallel responses and cached upstream headers may arrive out of order.
         // Only expiry, never a higher header in a live window, restores capacity.
-        let remaining = previous.map_or(remaining, |b| b.remaining.min(remaining));
+        let remaining = previous
+            .as_ref()
+            .map_or(remaining, |b| b.remaining.min(remaining));
+        let mut usage = SharedUsage::new(remaining, now);
+        if let Some(previous) = &previous {
+            usage = previous.usage.clone();
+            usage.observe(remaining, !unchanged, now);
+        }
         let seconds = reset.saturating_sub(seconds_now);
         let spacing = if remaining == 0 {
             Duration::from_secs(seconds.saturating_add(1))
+        } else if resource == "core" {
+            usage.spacing(remaining, seconds)
         } else {
             Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
         };
         let next = if unchanged && remaining > 0 {
-            previous.map_or(now, |b| b.next)
+            previous.as_ref().map_or(now, |b| b.next)
         } else {
-            previous.map_or_else(
+            previous.as_ref().map_or_else(
                 || quota_deadline(spacing),
                 |b| b.next.max(quota_deadline(spacing)),
             )
@@ -226,6 +291,7 @@ impl Budgets {
                 remaining,
                 spacing,
                 reset_at_seconds: reset,
+                usage,
             },
         );
     }
@@ -251,6 +317,7 @@ impl Budgets {
                 remaining: 0,
                 spacing: wait,
                 reset_at_seconds: reset,
+                usage: SharedUsage::new(0, Instant::now()),
             },
         );
     }
@@ -770,7 +837,7 @@ fn conditional_budget_exempt(job: &Job, budget: &Budget) -> bool {
     // 200 on every poll. Only previously unchanged representations may probe
     // without pacing. A changed response revokes that exemption automatically.
     job.body.is_none()
-        && budget.remaining > 100
+        && budget.remaining > QUOTA_RESERVE
         && job.cached.as_ref().is_some_and(|cached| {
             matches!(cached.source, Source::Revalidated)
                 && (cached.etag.is_some() || cached.last_modified.is_some())
@@ -839,6 +906,70 @@ async fn read_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn three_consumers_share_a_full_quota_window_with_preflight_headroom() {
+        for direct_interval in [None, Some(3000)] {
+            let start = Instant::now();
+            let mut clients: Vec<_> = (0..3)
+                .map(|_| (SharedUsage::new(5000, start), 0u64, 0u64))
+                .collect();
+            let mut remaining = 5000;
+            // Same busy workload, three independent clients, one actual shared
+            // quota. This exercises production pacing with a deterministic clock.
+            for ms in (0..3_600_000).step_by(10) {
+                let now = start + Duration::from_millis(ms);
+                if direct_interval.is_some_and(|interval| ms % interval == 0) {
+                    remaining -= 1; // Coordinator/CLI reads outside every scheduler.
+                }
+                for (usage, next, calls) in &mut clients {
+                    if ms < *next || remaining == 0 {
+                        continue;
+                    }
+                    remaining -= 1;
+                    *calls += 1;
+                    usage.observe(remaining, true, now);
+                    *next = ms
+                        + usage
+                            .spacing(remaining, (3_600_000 - ms).div_ceil(1000))
+                            .as_millis() as u64;
+                }
+                // Independent in-flight requests may cross the reserve together.
+                assert!(
+                    remaining >= 50,
+                    "shared allowance depleted at {ms}ms: {remaining}"
+                );
+            }
+            assert!(
+                remaining < 300,
+                "use available capacity throughout the window"
+            );
+            assert!(
+                clients.iter().all(|(_, _, calls)| *calls > 1000),
+                "all consumers retain refresh coverage"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_usage_counts_charged_responses_and_ignores_free_validations() {
+        let start = Instant::now();
+        let mut usage = SharedUsage::new(5000, start);
+        for i in 1..=10 {
+            let now = start + Duration::from_secs(i * 3);
+            usage.observe(5000 - i * 3, false, now - Duration::from_millis(1));
+            usage.observe(5000 - i * 3, true, now);
+        }
+        assert_eq!(usage.share, 3.0);
+        assert_eq!(usage.spacing(1000, 900), Duration::from_secs(3));
+        assert_eq!(usage.spacing(100, 900), Duration::from_secs(901));
+        assert_eq!(usage.spacing(101, u64::MAX), Duration::from_secs(86400));
+        usage.observe(1000, true, start + Duration::from_secs(300));
+        assert_eq!(
+            usage.share, 1.0,
+            "an idle consumer can resume interactive work"
+        );
+    }
+
     #[test]
     fn quota_windows_keep_the_lowest_remaining_and_expire_independently() {
         let mut budgets = Budgets::default();
