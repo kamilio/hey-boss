@@ -1326,6 +1326,63 @@ fn validate_query(query: &str) -> Result<()> {
 #[cfg(test)]
 mod priority_tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    #[tokio::test]
+    async fn sequential_slow_responses_use_their_reserved_pacing_intervals() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let reset = now_ms() / 1000 + 450;
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    let remaining = 1000 - calls.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                    let mut response = axum::Json(serde_json::json!({"ok":true})).into_response();
+                    let headers = response.headers_mut();
+                    headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                    headers.insert(
+                        "x-ratelimit-remaining",
+                        remaining.to_string().parse().unwrap(),
+                    );
+                    headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        // Eight sequential reads need ~5.3s, including the initial unknown
+        // window. Charging the ~0.5s pacing again after each response takes
+        // ~8.3s and expires the same report, despite sufficient quota.
+        let result = tokio::time::timeout(Duration::from_secs(7), async {
+            for n in 0..8 {
+                client
+                    .get(&format!("read/{n}"), Freshness::Revalidate)
+                    .await
+                    .unwrap();
+            }
+        })
+        .await;
+        server.abort();
+        result.expect("reserved response latency must not consume the report budget twice");
+        assert_eq!(calls.load(Ordering::Relaxed), 8);
+    }
 
     #[tokio::test]
     async fn changed_conditional_probes_cannot_postpone_background_forever() {
