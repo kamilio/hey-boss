@@ -643,6 +643,43 @@ pub fn remove_one(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn candidate_eligible(
+    w: &Worktree,
+    main: &Path,
+    allowed: &[PathBuf],
+    active_paths: &[PathBuf],
+    table: &Table,
+    config: &Config,
+    at: u64,
+) -> io::Result<String> {
+    // Only absence at the candidate path is expected. Do not follow a final
+    // symlink or suppress NotFound from release, index or later Git inspection.
+    match std::fs::symlink_metadata(&w.path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(super::preserved("Missing checkout; metadata preserved"));
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
+    super::cleanup::release_status(&w.path)?;
+    if config.aggressive {
+        aggressive_eligible(w, main, allowed, active_paths, table, at)
+    } else {
+        eligible(
+            w,
+            main,
+            allowed,
+            active_paths,
+            table,
+            Policy {
+                min_age: config.worktree_min_age_days * 86400,
+                manual: false,
+            },
+            at,
+        )
+    }
+}
+
 pub fn clean(
     config: &Config,
     table: &Table,
@@ -695,20 +732,7 @@ pub fn clean(
         for w in trees.iter().skip(1) {
             let metadata = details(w, &repository, &github_url, at);
             let name = w.path.display().to_string();
-            let check = super::cleanup::release_status(&w.path).and_then(|()| {
-                eligible(
-                    w,
-                    &main,
-                    &allowed,
-                    &active_paths,
-                    table,
-                    Policy {
-                        min_age: config.worktree_min_age_days * 86400,
-                        manual: false,
-                    },
-                    at,
-                )
-            });
+            let check = candidate_eligible(w, &main, &allowed, &active_paths, table, config, at);
             let head = match check {
                 Ok(head) => head,
                 Err(detail) => {
@@ -830,6 +854,198 @@ fn publish_fixture(repo: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CandidateFixture {
+        root: PathBuf,
+        main: PathBuf,
+        work: Worktree,
+        admin: PathBuf,
+    }
+
+    impl CandidateFixture {
+        fn new(name: &str) -> Self {
+            let root = std::env::temp_dir()
+                .join(format!("harvester-candidate-{name}-{}", std::process::id()));
+            let main = root.join("main");
+            std::fs::create_dir_all(&main).unwrap();
+            let root = root.canonicalize().unwrap();
+            let main = main.canonicalize().unwrap();
+            git_text(&main, &["init", "-b", "main"]).unwrap();
+            git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
+            git_text(&main, &["config", "user.name", "Test"]).unwrap();
+            std::fs::write(main.join("file"), "committed").unwrap();
+            git_text(&main, &["add", "."]).unwrap();
+            git_text(&main, &["commit", "-m", "fixture"]).unwrap();
+            let path = root.join("work");
+            git_text(
+                &main,
+                &["worktree", "add", "-b", "work", path.to_str().unwrap()],
+            )
+            .unwrap();
+            let work = list(&main).unwrap().remove(1);
+            let admin =
+                PathBuf::from(git_text(&path, &["rev-parse", "--absolute-git-dir"]).unwrap());
+            publish_fixture(&main);
+            Self {
+                root,
+                main,
+                work,
+                admin,
+            }
+        }
+
+        fn check(&self, aggressive: bool, active: &[PathBuf]) -> io::Result<String> {
+            candidate_eligible(
+                &self.work,
+                &self.main,
+                std::slice::from_ref(&self.root),
+                active,
+                &Table::new(),
+                &Config {
+                    aggressive,
+                    worktree_min_age_days: 1,
+                    ..Config::default()
+                },
+                now() + 172800,
+            )
+        }
+
+        fn refusal(&self, aggressive: bool) -> Item {
+            ineligible_item(
+                self.work.path.display().to_string(),
+                self.check(aggressive, &[]).unwrap_err(),
+                details(&self.work, "", &None, now()),
+            )
+        }
+    }
+
+    impl Drop for CandidateFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    #[test]
+    fn candidate_missing_checkout_preserves_recovery_without_scan_errors() {
+        let fixture = CandidateFixture::new("missing");
+        let index = std::fs::read(fixture.admin.join("index")).unwrap();
+        let pointer = std::fs::read(fixture.work.path.join(".git")).unwrap();
+        let saved = fixture.root.join("saved-work");
+        std::fs::rename(&fixture.work.path, &saved).unwrap();
+        let registration = git_text(&fixture.main, &["worktree", "list", "--porcelain"]).unwrap();
+        assert_eq!(list(&fixture.main).unwrap().len(), 2);
+        for aggressive in [false, true] {
+            let item = fixture.refusal(aggressive);
+            assert!(!item.eligible);
+            assert_eq!(item.detail, "Missing checkout; metadata preserved");
+            assert!(item.error.is_none());
+            let mut snapshot = super::super::Snapshot {
+                worktrees: vec![item],
+                ..Default::default()
+            };
+            snapshot.collect_item_errors();
+            assert!(snapshot.errors.is_empty());
+            assert_eq!(std::fs::read(fixture.admin.join("index")).unwrap(), index);
+            assert_eq!(std::fs::read(saved.join(".git")).unwrap(), pointer);
+            assert_eq!(
+                std::fs::read_to_string(saved.join("file")).unwrap(),
+                "committed"
+            );
+            let current = git_text(&fixture.main, &["worktree", "list", "--porcelain"]).unwrap();
+            assert_eq!(current, registration);
+        }
+    }
+
+    #[test]
+    fn candidate_existing_checkout_keeps_release_and_ownership_checks() {
+        let fixture = CandidateFixture::new("release");
+        for aggressive in [false, true] {
+            let item = fixture.refusal(aggressive);
+            assert!(item.detail.contains("No readable explicit cleanup release"));
+            assert!(item.error.is_none());
+        }
+        super::super::cleanup::release_fixture(&fixture.work.path);
+        for aggressive in [false, true] {
+            assert_eq!(fixture.check(aggressive, &[]).unwrap(), fixture.work.head);
+            let error = fixture
+                .check(aggressive, std::slice::from_ref(&fixture.work.path))
+                .unwrap_err();
+            assert!(super::super::is_preserved(&error));
+            assert!(error.to_string().contains("Open in a process or agent"));
+        }
+        let release = std::fs::read_dir(&fixture.admin)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("cleanup-release-")
+            })
+            .unwrap();
+        let bytes = std::fs::read(&release).unwrap();
+        std::fs::write(&release, "malformed").unwrap();
+        for aggressive in [false, true] {
+            let item = fixture.refusal(aggressive);
+            assert!(item.detail.contains("Invalid cleanup release"));
+            assert!(item.error.is_none());
+        }
+        std::fs::write(&release, bytes).unwrap();
+        // An ENOENT after the checkout probe is still an inspection failure.
+        std::fs::rename(
+            fixture.admin.join("index"),
+            fixture.admin.join("saved-index"),
+        )
+        .unwrap();
+        for aggressive in [false, true] {
+            let item = fixture.refusal(aggressive);
+            assert!(item.error.is_some());
+            assert!(!item.detail.contains("Missing checkout"));
+            let mut snapshot = super::super::Snapshot {
+                worktrees: vec![item],
+                ..Default::default()
+            };
+            snapshot.collect_item_errors();
+            assert_eq!(snapshot.errors.len(), 1);
+        }
+    }
+
+    #[test]
+    fn candidate_symlinks_and_permission_failures_are_not_missing_checkouts() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let mut fixture = CandidateFixture::new("filesystem");
+        let checkout = fixture.work.path.clone();
+        let link = fixture.root.join("link");
+        symlink(&checkout, &link).unwrap();
+        fixture.work.path = link.clone();
+        for aggressive in [false, true] {
+            let item = fixture.refusal(aggressive);
+            assert!(item.detail.contains("Noncanonical cleanup target"));
+            assert!(item.error.is_none());
+        }
+        std::fs::remove_file(&link).unwrap();
+        symlink(fixture.root.join("absent"), &link).unwrap();
+        for aggressive in [false, true] {
+            assert!(fixture.refusal(aggressive).error.is_some());
+        }
+        fixture.work.path = checkout;
+        if unsafe { libc::geteuid() } != 0 {
+            let permissions = std::fs::metadata(&fixture.root).unwrap().permissions();
+            std::fs::set_permissions(&fixture.root, std::fs::Permissions::from_mode(0)).unwrap();
+            let results: Vec<_> = [false, true]
+                .into_iter()
+                .map(|mode| fixture.check(mode, &[]))
+                .collect();
+            std::fs::set_permissions(&fixture.root, permissions).unwrap();
+            for result in results {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert!(!super::super::is_preserved(&error));
+            }
+        }
+        assert!(fixture.work.path.join("file").exists());
+    }
+
     #[test]
     fn broken_checkout_inspection_is_reported_without_removal() {
         let root =
@@ -1751,9 +1967,15 @@ fn aggressive_clean(
         if !allowed.iter().any(|r| under(&w.path, r)) || w.bare {
             continue;
         }
-        if let Err(detail) = super::cleanup::release_status(&w.path).and_then(|()| {
-            aggressive_eligible(&w, &main, &allowed, &active_paths, &fresh_table, now())
-        }) {
+        if let Err(detail) = candidate_eligible(
+            &w,
+            &main,
+            &allowed,
+            &active_paths,
+            &fresh_table,
+            config,
+            now(),
+        ) {
             items.push(ineligible_item(name, detail, details(&w, "", &None, now())));
             continue;
         }
