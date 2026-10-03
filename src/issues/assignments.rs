@@ -893,7 +893,7 @@ pub(super) fn release_worker(
     let (_, status) = saved(db, &job.project.id, job.number())?;
     // A deliberate handoff can end with a blocked/interrupted result while
     // waiting for external input. Consume only that run's exact snapshot;
-    // later evidence and events never delivered to the worker stay runnable.
+    // later evidence not delivered to the worker stays runnable.
     let handed_off = db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee') IN (?3,'human:boss') AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|r.get::<_,bool>(0))?;
     let handed_off = handed_off
         && own_handoff(
@@ -901,8 +901,17 @@ pub(super) fn release_worker(
             job,
             &get_issue(db, &job.project.id, job.number(), true)?,
         )?;
-    let next = ((state == "completed" || handed_off) && delivered_to(db, &job.id, &status)?)
-        .then_some(WATCHER);
+    // Machine-assigned work can retain a watcher event in its launch snapshot
+    // without ever receiving GitHub steering. Only an explicit, run-scoped
+    // handoff may acknowledge that exact event; a later event still needs a
+    // delivery receipt (or the separately validated reviewed-evidence path).
+    let retained_handoff = handed_off
+        && status["event"]
+            .as_str()
+            .is_some_and(|event| job.issue["github_status"]["event"].as_str() == Some(event));
+    let next = (retained_handoff
+        || ((state == "completed" || handed_off) && delivered_to(db, &job.id, &status)?))
+    .then_some(WATCHER);
     if next.is_none() {
         db.execute("UPDATE issues SET state='open' WHERE project_id=?1 AND number=?2 AND assignee=?3 AND state='ready'",params![job.project.id,job.number(),job.actor.id])?;
     }

@@ -237,7 +237,9 @@ or reviews. Completed checks and later review findings also wake work. PRs witho
 checks can deliver review findings; an empty check list alone does not wake work. A running
 agent receives the latest update through steering; otherwise, the next event
 starts a fresh session. Successful work returns to watching after the current
-event is delivered; undelivered work remains queued. Claims and steering include
+event is delivered. An explicit handoff also acknowledges an unchanged event
+already present in that run's launch snapshot; newer undelivered work remains
+queued. Claims and steering include
 structured GitHub evidence, with size limits and explicit omission counts.
 Polling does not post status comments. Removing the last open PR returns waiting
 work to Boss; an active agent keeps its claim. Existing merged-fix auto-close

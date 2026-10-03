@@ -2403,6 +2403,171 @@ mod tests {
     }
 
     #[test]
+    fn machine_worker_retained_github_handoff_requires_its_exact_launch_event() {
+        for state in ["completed", "blocked", "interrupted", "failed"] {
+            for changed in [
+                "none",
+                "before",
+                "after",
+                "run",
+                "actor",
+                "body",
+                "missing_snapshot",
+                "no_handoff",
+            ] {
+                let mut f = HandoffFixture::new(true);
+                f.apply(Operation::Assign {
+                    reviewed_evidence: None,
+                    number: 1,
+                    target: "github".into(),
+                    if_version: f.issue().version,
+                });
+                watch_event(&mut f, "retained");
+                f.apply(Operation::Assign {
+                    reviewed_evidence: None,
+                    number: 1,
+                    target: "machine:unit".into(),
+                    if_version: f.issue().version,
+                });
+                f.job.issue =
+                    super::super::subtasks::worker_issue(&f.store.db, &f.job.project.id, 1)
+                        .unwrap();
+                assert_eq!(f.job.issue["assignment"]["kind"], "machine");
+                let retained = f.job.issue["github_status"]["event"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                if changed == "missing_snapshot" {
+                    f.job.issue.as_object_mut().unwrap().remove("github_status");
+                }
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE worker_runs SET job=?1",
+                        [serde_json::to_string(&f.job).unwrap()],
+                    )
+                    .unwrap();
+                f.apply(Operation::Claim {
+                    number: 1,
+                    force: false,
+                });
+                assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+                f.apply(Operation::Ready {
+                    number: 1,
+                    force: false,
+                    guard: None,
+                    clear_manual_hold: false,
+                    keep_draft: false,
+                });
+                if changed == "before" {
+                    f.apply(Operation::Assign {
+                        reviewed_evidence: None,
+                        number: 1,
+                        target: "github".into(),
+                        if_version: f.issue().version,
+                    });
+                    watch_event(&mut f, "new");
+                }
+                f.apply(Operation::Assign {
+                    reviewed_evidence: None,
+                    number: 1,
+                    target: "github".into(),
+                    if_version: f.issue().version,
+                });
+                match changed {
+                    "after" => watch_event(&mut f, "new"),
+                    "run" => {
+                        f.store.db.execute("UPDATE events SET data=json_set(data,'$.github_handoff.run','another-run') WHERE action='assigned'", []).unwrap();
+                    }
+                    "actor" => {
+                        f.store
+                            .db
+                            .execute(
+                                "UPDATE events SET actor='human:boss' WHERE action='assigned'",
+                                [],
+                            )
+                            .unwrap();
+                    }
+                    "body" => {
+                        f.store
+                            .db
+                            .execute("UPDATE issues SET body='Changed requirements'", [])
+                            .unwrap();
+                    }
+                    "no_handoff" => {
+                        f.store.db.execute("UPDATE events SET data=json_remove(data,'$.github_handoff') WHERE action='assigned'", []).unwrap();
+                    }
+                    _ => {}
+                }
+                assert_eq!(
+                    f.store
+                        .db
+                        .query_row("SELECT count(*) FROM agent_steering", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                f.store = Store::open(&f.root.join("issues.db")).unwrap();
+                let saved: String = f
+                    .store
+                    .db
+                    .query_row("SELECT job FROM worker_runs", [], |r| r.get(0))
+                    .unwrap();
+                f.job = serde_json::from_str(&saved).unwrap();
+                f.store
+                    .worker_finish(&f.job, state, "Explicit PR handoff")
+                    .unwrap();
+                let parked = changed == "none";
+                assert_eq!(
+                    f.issue().state,
+                    if parked { "ready" } else { "open" },
+                    "{state}/{changed}"
+                );
+                assert_eq!(
+                    f.issue().assignee.as_deref(),
+                    parked.then_some("watcher:github"),
+                    "{state}/{changed}"
+                );
+                let ack: Option<String> = f
+                    .store
+                    .db
+                    .query_row("SELECT github_ack_event FROM issues", [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(
+                    ack.as_deref(),
+                    parked.then_some(retained.as_str()),
+                    "{state}/{changed}"
+                );
+                if parked {
+                    let retry: Option<i64> = f
+                        .store
+                        .db
+                        .query_row("SELECT retry_at FROM worker_runs", [], |r| r.get(0))
+                        .unwrap();
+                    assert!(retry.is_none());
+                    assert_eq!(
+                        f.store
+                            .db
+                            .query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+                                .get::<_, i64>(0))
+                            .unwrap(),
+                        0
+                    );
+                    f.store
+                        .worker_finish(&f.job, state, "Duplicate completion")
+                        .unwrap();
+                    watch_event(&mut f, "retained");
+                    assert_eq!(f.issue().state, "ready");
+                    assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+                    watch_event(&mut f, "new");
+                    assert_eq!(f.issue().state, "open");
+                    assert!(f.issue().assignee.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ready_then_github_handoff_keeps_worker_alive_and_finishes() {
         for state in ["completed", "blocked", "interrupted", "failed"] {
             for late in [false, true] {
