@@ -55,6 +55,25 @@ Companions use the existing `issue_assignment` tunnel capability and never save
 an offline assignment. For uncertain responses, retry the identical command with
 the same `--request-id`; upgrade the supervisor if it still rejects your own handoff.
 
+When the watcher is behind the evidence you reviewed, add
+`--reviewed-evidence reviewed.json` to that GitHub assignment. The file is a JSON
+array of `{ "report": FULL_REPORT, "policy": REQUIRED_CHECKS_REPORT }` objects,
+one for every attached open GitHub PR. Capture raw reports with
+`hey-gh pr OWNER/REPO NUMBER` and `hey-gh required-checks OWNER/REPO NUMBER`, combine
+their JSON into the array, and review those exact saved snapshots before handoff.
+Projected PR lists, watcher summaries, and prose are not acknowledgement evidence.
+
+The transaction requires complete, settled evidence with matching PR, head, base,
+CI, and policy. It records the reviewed signal identities even if the watcher has
+never fetched them. An unchanged delayed scan stays quiet; a changed review,
+thread, head, rerun result, or required-check policy wakes work once. Incomplete
+or mismatched evidence rejects the whole handoff. Newer watcher findings absent
+from the supplied snapshot reject it too; inspect and reconcile those findings
+before retrying. This acknowledges handled evidence, including deliberately
+accepted optional failures, without asserting merge readiness. Companions require
+the `issue_reviewed_github_handoff` capability. Evidence files can be deleted after
+a confirmed handoff; retain them for an uncertain retry with the same request ID.
+
 Labels, including `PR ready` and `rework needed`, are metadata: a label-only
 batch preserves lifecycle and ownership. It advances the issue version, so an
 older Ready guard must be refreshed. Dependency reconciliation uses lifecycle,

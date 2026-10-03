@@ -1,5 +1,6 @@
 //! Assignment is a destination; the assignee is the session currently doing work.
 use super::*;
+use crate::issues::ReviewedGithubEvidence;
 
 const WATCHER: &str = "watcher:github";
 #[path = "github_watch_comments.rs"]
@@ -8,6 +9,8 @@ mod comments;
 mod evidence;
 #[path = "github_fetch.rs"]
 pub(super) mod fetch;
+#[path = "github_handoff.rs"]
+mod handoff;
 #[path = "assignment_lifecycle.rs"]
 mod lifecycle;
 
@@ -70,6 +73,7 @@ pub(super) fn assign(
     issue: &mut Issue,
     target: &str,
     version: i64,
+    reviewed_evidence: Option<&[ReviewedGithubEvidence]>,
     now: i64,
 ) -> Result<Value> {
     if issue.version != version {
@@ -158,6 +162,14 @@ pub(super) fn assign(
     if target == "boss" {
         ready::register_boss(db, actor, now)?;
     }
+    if let Some(evidence) = reviewed_evidence {
+        if target != "github" {
+            return Err(Error::invalid(
+                "Reviewed evidence requires GitHub assignment",
+            ));
+        }
+        handoff::acknowledge(db, &project.id, issue.number, evidence)?;
+    }
     let previous = issue.assignee.clone();
     issue.assignee = match target {
         "github" if retain_claim => retained_owner,
@@ -213,10 +225,28 @@ pub(super) fn assign(
         )?;
     }
     let mut data = json!({"target":target,"previous_assignee":previous,"assignee":issue.assignee});
+    if let Some(evidence) = reviewed_evidence {
+        data["reviewed_github"] = json!(
+            evidence
+                .iter()
+                .map(|snapshot| json!({
+                    "repository":snapshot.report.data.repository,
+                    "number":snapshot.report.data.number,
+                    "head":snapshot.report.data.ci.head_sha,
+                    "observed_at_ms":snapshot.report.observed_at_ms
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
     if retain_claim && (own_ready_handoff || previous.as_deref() == Some(&actor.id)) {
         // Assignment runs on the supervisor, including companion handoffs.
         // Scope the acknowledgement to this attempt, not a reusable session ID.
         if let Some(run) = live_issue_run(db, &project.id, issue.number, &actor.id)? {
+            if reviewed_evidence.is_some()
+                && let Some(id) = steering_id(&run, &status)
+            {
+                db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES(?1,?2,'session','','delivered',?3) ON CONFLICT(request_id) DO UPDATE SET state='delivered'",params![id,run,now])?;
+            }
             data["github_handoff"] = json!({"run":run,"event":status["event"]});
         }
     }
@@ -358,6 +388,8 @@ fn public_status(status: Value, monitoring: bool) -> Value {
     {
         if let Some(pr) = pr.as_object_mut() {
             pr.remove("seen");
+            pr.remove("signals");
+            pr.remove("review_signals");
         }
     }
     evidence::bounded(status)
@@ -610,7 +642,10 @@ fn observation_updates(
         }
         // A trailing slash changes the attached link, not the GitHub event.
         // Read both spellings so existing durable histories remain effective.
-        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value)")?
+        // The first policy identity establishes comparison state; it must not
+        // invent a policy-change event during upgrade. Existing CI/review
+        // signals still wake on a first scan, and reviewed handoffs seed policy.
+        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value) AND (s.value NOT LIKE 'policy:%' OR EXISTS(SELECT 1 FROM issue_github_signals baseline WHERE baseline.project_id=?1 AND baseline.issue_number=?2 AND baseline.url IN (?3,?3||'/') AND baseline.signal LIKE 'policy:%'))")?
             .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let wake = !new_signals.is_empty();
@@ -627,6 +662,33 @@ fn observation_updates(
             && (previous["evidence"] == *evidence
                 || same_ci_evidence(&previous["evidence"], evidence));
         let mut next = json!({"head":observation.head,"checked_at":previous["checked_at"],"evidence":if same_evidence {&previous["evidence"]} else {evidence}});
+        // Retain complete signal identities outside the bounded UI evidence.
+        // CI-only passes must not discard review identities.
+        next["review_signals"] = if evidence["complete"] == true {
+            json!(observation.feedback)
+        } else if previous["head"] == observation.head {
+            previous.get("review_signals").cloned().unwrap_or(json!([]))
+        } else {
+            json!([])
+        };
+        next["signals"] = if same_evidence
+            && !wake
+            && evidence["complete"] != true
+            && previous.get("signals").is_some()
+        {
+            previous["signals"].clone()
+        } else if evidence["complete"] == true {
+            json!(signal_keys(observation))
+        } else {
+            let mut known = next["review_signals"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            known.extend(signal_keys(observation).into_iter().map(|s| json!(s)));
+            known.sort_by_cached_key(Value::to_string);
+            known.dedup();
+            json!(known)
+        };
         attach_errors(&mut next, errors);
         if !wake && next == *previous {
             continue;
@@ -666,12 +728,19 @@ fn same_ci_evidence(previous: &Value, next: &Value) -> bool {
         })
 }
 
-fn signal_keys(observation: &hey_gh::watcher::Observation) -> Vec<&String> {
+fn signal_keys(observation: &hey_gh::watcher::Observation) -> Vec<&str> {
     observation
         .blocking
         .iter()
         .chain(&observation.completed)
         .chain(&observation.feedback)
+        .map(String::as_str)
+        .chain(
+            observation
+                .evidence
+                .get("policy_fingerprint")
+                .and_then(Value::as_str),
+        )
         .collect()
 }
 
@@ -881,6 +950,7 @@ pub(super) fn release_claim(
 
 #[cfg(test)]
 mod tests {
+    include!("github_handoff_tests.rs");
     use super::*;
     #[test]
     fn unchanged_watcher_lifecycle_batches_reads() {

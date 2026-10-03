@@ -2786,9 +2786,21 @@ fn mutate(
     let mut comment_id = None;
     match operation {
         Operation::Assign {
-            target, if_version, ..
+            target,
+            if_version,
+            reviewed_evidence,
+            ..
         } => {
-            data = assignments::assign(db, project, actor, &mut issue, target, *if_version, now)?;
+            data = assignments::assign(
+                db,
+                project,
+                actor,
+                &mut issue,
+                target,
+                *if_version,
+                reviewed_evidence.as_deref(),
+                now,
+            )?;
             action = "assigned";
         }
         Operation::SetYolo {

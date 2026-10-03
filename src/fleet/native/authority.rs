@@ -133,7 +133,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -233,6 +233,7 @@ impl Relay {
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                             "issue_assignment": message["capabilities"]["issue_assignment"] == true,
+                            "issue_reviewed_github_handoff": message["capabilities"]["issue_reviewed_github_handoff"] == true,
                             "issue_github_refresh": message["capabilities"]["issue_github_refresh"] == true,
                             "issue_archives": message["capabilities"]["issue_archives"] == true,
                         });
@@ -282,6 +283,7 @@ impl Relay {
                                     .then_some("issue_ready_keep_draft"),
                             )
                             .chain(matches!(metadata.operation,crate::issues::Operation::Assign{..}).then_some("issue_assignment"))
+                            .chain(matches!(metadata.operation,crate::issues::Operation::Assign{reviewed_evidence:Some(_),..}).then_some("issue_reviewed_github_handoff"))
                             .chain(matches!(metadata.operation,crate::issues::Operation::RefreshGithub{..}).then_some("issue_github_refresh"))
                         {
                             if message["capabilities"][capability] != true {
@@ -507,6 +509,16 @@ mod tests {
             "issue_github_refresh"
         );
         assert_eq!(error.details.unwrap()["sent"], false);
+        relay.configure(&json!({"build":"old-handoff-build","capabilities":{"authority_rpc":true,"issue_metadata":true,"issue_assignment":true}}));
+        let handoff = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"handoff-old","operation":{"action":"assign","number":1,"target":"github","if_version":1,"reviewed_evidence":[]}}});
+        let error = call(&ctx.state, &ctx.path, handoff).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_reviewed_github_handoff"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
+        relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
         let receipt = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"request_status","id":"original"}}});
         let error = call(&ctx.state, &ctx.path, receipt).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");

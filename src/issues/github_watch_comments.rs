@@ -84,6 +84,11 @@ fn body(url: &str, observation: &hey_gh::watcher::Observation, new: &[String]) -
             if feedback == 1 { "item" } else { "items" }
         ));
     }
+    if new.iter().any(|key| key.starts_with("policy:")) {
+        body.push_str(
+            "- **Head or required-check policy changed.** Review the current PR evidence.\n",
+        );
+    }
     body
 }
 
