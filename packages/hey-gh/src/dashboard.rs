@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+mod hydration;
 mod schedule;
 
 // PR updatedAt versions mutable PR metadata, not CI or mergeability. These
@@ -666,166 +667,65 @@ impl Client {
         let mut interrupted = 0usize;
         let mut deferred = 0usize;
         let mut work = work.into_iter();
-        while let Some(item) = work.next() {
-            if !seed_only && tokio::time::Instant::now() >= deadline {
-                // Unvisited PRs are deferred work, not failed observations.
-                // Preserve terminal follow-ups as well as the current roster.
-                let remaining = 1 + work.len();
-                deferred = remaining;
-                retry.insert(item.key, item.node);
-                retry.extend(work.map(|item| (item.key, item.node)));
-                errors.push(format!(
-                    "refresh cycle budget exhausted; {remaining} PRs remain queued"
-                ));
+        let cycle = hydration::Cycle {
+            client: self,
+            freshness,
+            ci_only,
+            seed_only,
+            details_only,
+            background,
+            authoritative_roster,
+            deadline,
+        };
+        // Let cached neighbors progress while one PR waits for quota or a
+        // socket. The scheduler still owns every request and its concurrency.
+        // Tiny embedded queues and explicit/discovery reads remain sequential.
+        let width = if background && !seed_only && self.status().queue_capacity >= 32 {
+            2
+        } else {
+            1
+        };
+        let mut active: Vec<hydration::Read<'_>> = Vec::new();
+        while work.len() > 0 || !active.is_empty() {
+            while active.len() < width {
+                let Some(item) = work.next() else {
+                    break;
+                };
+                if !seed_only && tokio::time::Instant::now() >= deadline {
+                    let remaining = 1 + work.len();
+                    deferred = remaining;
+                    retry.insert(item.key, item.node);
+                    retry.extend(work.by_ref().map(|item| (item.key, item.node)));
+                    errors.push(format!(
+                        "refresh cycle budget exhausted; {remaining} PRs remain queued"
+                    ));
+                    break;
+                }
+                if !seed_only {
+                    schedule.started(&item);
+                    self.save_derived(
+                        &schedule_key,
+                        serde_json::to_value(&schedule)
+                            .map_err(|e| Error::Storage(e.to_string()))?,
+                    )
+                    .await?;
+                }
+                let disappeared = !current.contains_key(&item.key);
+                attempted += 1;
+                // Caller-owned futures retain publication, priority and entity
+                // scopes; each PR gets its own independent stall allowance.
+                active.push(Box::pin(cycle.refresh(item, disappeared)));
+            }
+            if active.is_empty() {
                 break;
             }
-            if !seed_only {
-                schedule.started(&item);
-                self.save_derived(
-                    &schedule_key,
-                    serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
-                )
-                .await?;
-            }
+            let hydration::Completed {
+                item,
+                pr_started_at_ms,
+                result,
+                cycle_interrupted,
+            } = hydration::next(&mut active).await?;
             let ((repo, number), node) = (item.key, item.node);
-            attempted += 1;
-            let pr_started_at_ms = crate::now_ms();
-            // Deliberate scheduler waits consume the cycle budget, not the
-            // short per-PR stall allowance. Successful sources renew progress;
-            // slow sockets still rotate promptly and the cycle remains bounded.
-            let pr_deadline = deadline;
-            let previously_terminal = if seed_only {
-                self.stored_pr_snapshot(
-                    &format!("metadata://{}/{repo}/{number}", self.hostname()),
-                    &repo,
-                    node["id"].as_str(),
-                )
-                .await?
-                .is_some_and(|v| {
-                    v["pull_request"]["state"] == "closed" || v["pull_request"]["merged"] == true
-                })
-            } else {
-                false
-            };
-            let mut cycle_interrupted = false;
-            let refresh = async {
-                if seed_only
-                    && authoritative_roster
-                    && (!current.contains_key(&(repo.clone(), number)) || previously_terminal)
-                {
-                    tokio::time::timeout_at(
-                        deadline.min(tokio::time::Instant::now() + Duration::from_secs(5)),
-                        async {
-                            let response = self
-                                .pull_request(
-                                    &repo,
-                                    number,
-                                    if matches!(freshness, Freshness::CachedOnly) {
-                                        freshness
-                                    } else {
-                                        Freshness::Revalidate
-                                    },
-                                )
-                                .await?;
-                            let conflicts = match response.data["mergeable"].as_bool() {
-                                Some(true) => "clean",
-                                Some(false) => "conflicting",
-                                None => "unknown",
-                            };
-                            self.observe(
-                                &format!("metadata://{}/{repo}/{number}", self.hostname()),
-                                &json!({"pull_request":response.data,"conflicts":conflicts}),
-                            )
-                            .await?;
-                            Ok(())
-                        },
-                    )
-                    .await
-                    .unwrap_or(Err(Error::Deadline))
-                } else if seed_only {
-                    Ok(())
-                } else if ci_only {
-                    let result = tokio::time::timeout_at(pr_deadline, async {
-                        let report = self.ci_for_pr(&repo, number, freshness).await?;
-                        if !report.complete {
-                            return Err(Error::Invalid(format!(
-                                "incomplete CI: {}",
-                                json!(report.data.errors)
-                            )));
-                        }
-                        Ok(())
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        cycle_interrupted = true;
-                        Err(Error::Deadline)
-                    });
-                    if result.is_ok() && tokio::time::Instant::now() < pr_deadline {
-                        // Policy is best effort in the CI loop. A slow policy read
-                        // must not turn already observed CI into a timeout failure.
-                        let policy_deadline =
-                            pr_deadline.min(tokio::time::Instant::now() + Duration::from_secs(1));
-                        if let Err(error) = tokio::time::timeout_at(
-                            policy_deadline,
-                            self.required_checks_for_pr(&repo, number, freshness),
-                        )
-                        .await
-                        .unwrap_or(Err(Error::Deadline))
-                        {
-                            tracing::warn!(repository=%repo,number,error_code=error.diagnostic_code(),"account required-check refresh failed");
-                        }
-                    }
-                    result
-                } else {
-                    tokio::time::timeout_at(pr_deadline, async {
-                        if details_only {
-                            let errors = self.refresh_pr_details(&repo, number, freshness).await?;
-                            if !errors.is_empty() {
-                                return Err(Error::Invalid(format!(
-                                    "incomplete details: {}",
-                                    json!(errors)
-                                )));
-                            }
-                            return Ok(());
-                        }
-                        let report = self.pr_report(&repo, number, freshness).await?;
-                        if !report.complete {
-                            return Err(Error::Invalid(format!(
-                                "incomplete PR: {}",
-                                json!({"sources":report.data.errors,"ci":report.data.ci.errors})
-                            )));
-                        }
-                        Ok(())
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        cycle_interrupted = true;
-                        Err(Error::Deadline)
-                    })
-                }
-            };
-            let refresh = Box::pin(
-                crate::client::REQUEST_DEADLINE.scope(background.then_some(pr_deadline), refresh),
-            );
-            let result = if background {
-                let budget = crate::collection_budget::Budget::new();
-                crate::collection_budget::CURRENT
-                    .scope(budget.clone(), async {
-                        tokio::select! {
-                            result = refresh => result,
-                            _ = budget.exhausted() => Err(Error::Deadline),
-                        }
-                    })
-                    .await
-            } else {
-                refresh.await
-            };
-            // The scheduler may deliver its local deadline just before the
-            // outer timer fires, including a coalesced request from the other
-            // hydration lane. Both outcomes retain local interruption health.
-            if background && matches!(result, Err(Error::Deadline)) {
-                cycle_interrupted = true;
-            }
             if !seed_only && result.is_ok() && !matches!(freshness, Freshness::CachedOnly) {
                 // This conservative clock comes from the request freshness
                 // bound, never from publication time or cached availability.
