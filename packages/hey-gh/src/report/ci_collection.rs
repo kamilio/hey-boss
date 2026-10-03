@@ -109,11 +109,14 @@ impl Client {
                 });
             }
         }
-        let mut pending: VecDeque<_> = sources
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, s)| Task::Source(i, s))
+        // Resolve the dependencies for job pages early. Otherwise repeated
+        // limited reads can spend every turn revalidating mutable commit
+        // sources, never filling the missing completed-attempt cache.
+        let mut order: Vec<_> = (0..sources.len()).collect();
+        order.sort_by_key(|&index| sources[index].name != "workflow_runs");
+        let mut pending: VecDeque<_> = order
+            .into_iter()
+            .map(|index| Task::Source(index, sources[index].clone()))
             .collect();
         let mut results: Vec<Option<Result<Vec<Value>>>> =
             (0..sources.len()).map(|_| None).collect();
@@ -124,6 +127,7 @@ impl Client {
         let mut workflows = Vec::new();
         let mut job_results: Vec<Option<Result<Vec<Value>>>> = Vec::new();
         let mut active: Vec<Read<'_>> = Vec::new();
+        let mut active_jobs = 0;
         let width = if self.status().queue_capacity >= 32 {
             3
         } else {
@@ -131,9 +135,17 @@ impl Client {
         };
         while !pending.is_empty() || !active.is_empty() {
             while active.len() < width {
+                // A job may still be preparing its request in the cache. Do
+                // not let later commit reads overtake it in the HTTP queue.
+                if active_jobs > 0 && matches!(pending.front(), Some(Task::Source(..))) {
+                    break;
+                }
                 let Some(task) = pending.pop_front() else {
                     break;
                 };
+                if matches!(&task, Task::Jobs(..)) {
+                    active_jobs += 1;
+                }
                 // Poll in the caller's task so validation, entity fences and
                 // collection budgets remain shared. No private request queue.
                 active.push(Box::pin(async move {
@@ -184,6 +196,7 @@ impl Client {
                     }
                 }
                 Target::Jobs(index) => {
+                    active_jobs -= 1;
                     job_results[index] = Some(result);
                     false
                 }
@@ -209,9 +222,12 @@ impl Client {
                         .collect(),
                 );
                 job_results = (0..workflows.len()).map(|_| None).collect();
-                for (index, run) in workflows.iter().enumerate() {
+                // Keep active sources running, but admit newly ready jobs
+                // before the remaining commit sources. Reverse insertion keeps
+                // workflow order stable and does not expand the read window.
+                for (index, run) in workflows.iter().enumerate().rev() {
                     if run["id"].as_u64().is_some() && run["run_attempt"].as_u64().is_some() {
-                        pending.push_back(Task::Jobs(index, run.clone()));
+                        pending.push_front(Task::Jobs(index, run.clone()));
                     }
                 }
             }

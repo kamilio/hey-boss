@@ -568,6 +568,14 @@ Summaries are `success`, `failure`, `running`, `skipped`, or `unknown`. Missing 
 
 Default polling reuses completed jobs for up to 24 hours only after validating the completed workflow's version and attempt. A changed workflow version or new attempt fetches jobs again. A newly completed workflow validates every job page before establishing that dependency cache. Explicit `--refresh` also revalidates completed jobs.
 
+Full CI collections start workflow lists early, then admit their job reads ahead
+of remaining commit sources. This lets interrupted collections fill missing
+completed-attempt pages instead of repeatedly spending their budget on the same
+mutable sources. Active reads continue within the existing three-read bound;
+remaining commit reads wait for those jobs to finish, including their cache
+lookups. Output ordering, freshness, byte limits, and quota controls remain
+unchanged. Required-check policy does not read workflow jobs.
+
 Each CI collection keeps up to three independent source or workflow-job reads
 in flight through the shared queue, starting the next ready read when a slot
 opens. Head and test-merge reads do not wait for fixed batches to finish. Jobs

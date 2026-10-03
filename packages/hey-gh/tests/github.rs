@@ -185,7 +185,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     let path = uri.path().to_owned();
     let query = uri.query().unwrap_or_default().to_owned();
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let (phase, mode, call_number) = {
+    let (phase, mode, call_number, total_calls) = {
         let mut data = mock.data.lock().unwrap();
         data.calls.push(Call {
             path: path.clone(),
@@ -203,12 +203,17 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             data.phase,
             data.mode.clone(),
             data.calls.iter().filter(|c| c.path == path).count(),
+            data.calls.len(),
         )
     };
+    if mode == "account-multi-source-budget" && total_calls > 6 {
+        mock.release.notified().await;
+        return reply(503, json!({"message":"synthetic interrupted read"}), &[]);
+    }
     if mode == "account-slow-sources" {
         tokio::time::sleep(Duration::from_millis(900)).await;
     }
-    if mode == "account-multi-source" && path.ends_with("/jobs") {
+    if mode.starts_with("account-multi-source") && path.ends_with("/jobs") {
         return reply(
             200,
             json!({"jobs":[{"id":path.split('/').nth(6).unwrap().parse::<u64>().unwrap(),"status":"completed","conclusion":"success"}]}),
@@ -1076,7 +1081,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             value = json!({"workflow_runs":[]});
         }
     }
-    if mode == "account-multi-source" {
+    if mode.starts_with("account-multi-source") {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
             value["node_id"] = json!(format!("PR_{}_7", path.split('/').nth(3).unwrap()));
@@ -2499,6 +2504,73 @@ async fn ci_byte_budget_discards_superseded_workflows_before_counting_jobs() {
     assert!(report.errors.is_empty());
     assert_eq!(report.workflow_runs, baseline.workflow_runs);
     assert_eq!(report.jobs, baseline.jobs);
+}
+
+#[tokio::test]
+async fn interrupted_ci_collections_fill_missing_jobs_before_repeating_mutable_sources() {
+    let h = Harness::new().await;
+    h.phase(2);
+    h.mode("account-multi-source-budget");
+    let mut config = h.config();
+    config.max_attempts = 1;
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    let mut completed_jobs = std::collections::BTreeSet::new();
+    let mut rounds = Vec::new();
+    let mut completed = None;
+    for _ in 0..6 {
+        // Model time between limited collection attempts: mutable sources need
+        // validation again, while completed attempt pages keep their versions.
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/commits/%' OR key LIKE '%/actions/runs?%'", []).unwrap();
+        h.mock.data.lock().unwrap().calls.clear();
+        let read = tokio::spawn({
+            let c = c.clone();
+            async move {
+                c.ci_report(
+                    "acme/demo",
+                    HEAD,
+                    Some(MERGE),
+                    Freshness::MaxAge(Duration::from_secs(30)),
+                )
+                .await
+            }
+        });
+        until(|| read.is_finished() || h.calls().len() > 6).await;
+        rounds.push(
+            h.calls()
+                .iter()
+                .map(|call| format!("{}?{}", call.path, call.query))
+                .collect::<Vec<_>>(),
+        );
+        completed_jobs.extend(
+            h.calls()
+                .iter()
+                .take(6)
+                .filter(|call| call.path.ends_with("/jobs"))
+                .map(|call| call.path.clone()),
+        );
+        if read.is_finished() {
+            completed = Some(read.await.unwrap().unwrap());
+            break;
+        }
+        // The seventh response cannot arrive before this caller leaves. It
+        // fails afterwards, so an abandoned socket cannot warm an extra job.
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        h.mock.release.notify_waiters();
+        until(|| c.status().outstanding_requests == 0).await;
+        assert!(
+            h.calls().len() <= 7,
+            "canceled queued reads must not dispatch"
+        );
+    }
+    let report = completed.unwrap_or_else(|| panic!("CI kept repeating mutable sources; completed jobs: {completed_jobs:?}; rounds: {rounds:?}"));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.workflow_runs.len(), 8);
+    assert_eq!(report.jobs.len(), 8);
+    assert_eq!(completed_jobs.len(), 8);
+    assert_eq!(report.head_sha, HEAD);
+    assert_eq!(report.merge_sha.as_deref(), Some(MERGE));
 }
 
 #[tokio::test]
