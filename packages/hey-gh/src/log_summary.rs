@@ -7,6 +7,8 @@ use std::{
     path::Path,
 };
 
+mod traffic;
+
 const ERROR_CODES: &[&str] = &[
     "incomplete",
     "invalid",
@@ -29,6 +31,9 @@ type SourceFailureRecords = BTreeMap<String, BTreeMap<String, BTreeMap<String, u
 
 #[derive(Default, Serialize)]
 pub struct Summary {
+    /// Actual dispatch/response records, separate from completed jobs. Header
+    /// movement includes concurrent consumers and is never a local charge count.
+    pub traffic: traffic::Traffic,
     pub requested_start_at_ms: u64,
     pub sampled_at_ms: u64,
     pub atomic: bool,
@@ -161,6 +166,35 @@ fn allowed(value: Option<&str>, choices: &[&str]) -> String {
         .to_owned()
 }
 
+fn endpoint(line: &str) -> String {
+    allowed(
+        field(line, "endpoint"),
+        &[
+            "viewer",
+            "graphql",
+            "search",
+            "repository",
+            "pull_requests",
+            "pull_request",
+            "reviews",
+            "review_comments",
+            "comments",
+            "timeline",
+            "check_runs",
+            "commit_statuses",
+            "workflow_runs",
+            "workflow_jobs",
+            "branch_protection",
+            "branch_rules",
+            "branches",
+            "branch",
+            "commit",
+            "compare",
+            "rest_other",
+        ],
+    )
+}
+
 fn source_failure_record(line: &str) -> Option<(&'static str, String, String)> {
     let (mode, source) = if line.contains("PR detail source refresh failed") {
         (
@@ -223,6 +257,7 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
     let mut cycles = BTreeMap::<(String, u64, u64), Cycle>::new();
     let mut source_failure_lines = BTreeSet::new();
     let mut archives_found = BTreeSet::new();
+    let mut traffic = traffic::Records::default();
     for archive in (0..=4).rev() {
         let name = if archive == 0 {
             "hey-gh.log".to_owned()
@@ -266,6 +301,7 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
                     .latest_retained_at_ms
                     .map_or(at_ms, |old| old.max(at_ms)),
             );
+            traffic.observe(&line, at_ms, summary.requested_start_at_ms);
             if at_ms < summary.requested_start_at_ms {
                 continue;
             }
@@ -334,32 +370,7 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
                 succeeded,
                 http_status,
                 elapsed_ms: field(&line, "elapsed_ms").and_then(|ms| ms.parse::<u64>().ok()),
-                endpoint: allowed(
-                    field(&line, "endpoint"),
-                    &[
-                        "viewer",
-                        "graphql",
-                        "search",
-                        "repository",
-                        "pull_requests",
-                        "pull_request",
-                        "reviews",
-                        "review_comments",
-                        "comments",
-                        "timeline",
-                        "check_runs",
-                        "commit_statuses",
-                        "workflow_runs",
-                        "workflow_jobs",
-                        "branch_protection",
-                        "branch_rules",
-                        "branches",
-                        "branch",
-                        "commit",
-                        "compare",
-                        "rest_other",
-                    ],
-                ),
+                endpoint: endpoint(&line),
                 source: allowed(
                     field(&line, "source"),
                     &["network", "cache", "revalidated", "error"],
@@ -373,6 +384,7 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
             }
         }
     }
+    summary.traffic = traffic.summarize();
     if let Some(highest) = archives_found.last() {
         summary.archive_gaps = (0..=*highest)
             .filter(|archive| !archives_found.contains(archive))
