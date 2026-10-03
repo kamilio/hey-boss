@@ -487,7 +487,13 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 ("x-ratelimit-resource", "core"),
                 (
                     "x-ratelimit-remaining",
-                    if phase == 0 { "5000" } else { "500" },
+                    if path == "/paced-shared" {
+                        "1700"
+                    } else if phase == 0 {
+                        "5000"
+                    } else {
+                        "500"
+                    },
                 ),
                 ("x-ratelimit-reset", &reset),
             ],
@@ -5036,6 +5042,40 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
             .all(|row| row["sourceErrors"] == json!({})
                 && row["ci"]["summary"]["state"] == "success")
     );
+}
+
+#[tokio::test]
+async fn account_background_ci_completes_a_paced_collection_without_relaxing_freshness() {
+    let h = Harness::new().await;
+    h.mode("account");
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(40);
+    config.queue_timeout = Duration::from_secs(40);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    c.get("paced-shared", Freshness::Revalidate).await.unwrap();
+    h.phase(2);
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let cycle = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            if let Some(cycle) = c.account_refresh_cycle(true).await.unwrap() {
+                break cycle;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    api.stop().await;
+    assert!(cycle.succeeded > 0, "paced CI never completed: {cycle:?}");
+    let page = c
+        .pr_status_page(None, None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(page.pull_requests.iter().any(|row| {
+        row["ci"]["summary"]["state"] == "success" && row["sourceErrors"]["ci"].is_null()
+    }));
 }
 
 #[tokio::test]

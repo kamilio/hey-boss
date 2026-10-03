@@ -603,10 +603,10 @@ impl Client {
             attempted += 1;
             let pr_started_at_ms = crate::now_ms();
             // A large roster must not spend an entire cycle on one PR. Keep
-            // the existing rotation and retry sets, but bound background work
-            // per PR so later lifecycle/CI reads get a turn in this cycle.
+            // the existing rotation and retry sets, but allow a paced source
+            // collection to finish before rotating to the next PR.
             let pr_deadline = if background {
-                deadline.min(tokio::time::Instant::now() + Duration::from_secs(5))
+                deadline.min(tokio::time::Instant::now() + self.background_pr_timeout())
             } else {
                 deadline
             };
