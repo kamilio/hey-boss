@@ -1,6 +1,6 @@
 use crate::{
     ChangePage, Error, Response, Result, Source, Watch, digest, now_ms,
-    scheduler::{Inflight, Job, Metrics, Scheduler, Status},
+    scheduler::{Inflight, Job, Metrics, Scheduler, SharedResult, Status},
     store::Store,
 };
 use serde_json::Value;
@@ -533,7 +533,7 @@ impl Client {
                     .clone()
                     .try_acquire_owned()
                     .map_err(|_| self.queue_full())?;
-                let (notify, receiver) = watch::channel(None);
+                let (notify, receiver) = watch::channel(SharedResult::Queued);
                 let resource = if body.is_some() {
                     "graphql"
                 } else if Url::parse(&url).is_ok_and(|u| u.path().contains("/search/")) {
@@ -548,6 +548,7 @@ impl Client {
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let job = Job {
                     interactive: interactive.clone(),
+                    collection_slice: crate::collection_budget::CURRENT.try_with(|_| ()).is_ok(),
                     detail_lane: matches!(
                         endpoint,
                         "comments" | "review_comments" | "reviews" | "timeline"
@@ -575,9 +576,15 @@ impl Client {
                 receiver
             }
         };
+        let mut wait = crate::collection_budget::Wait::current(true);
         loop {
-            if let Some(result) = receiver.borrow_and_update().clone() {
-                return result.map(|r| (*r).clone());
+            match receiver.borrow_and_update().clone() {
+                SharedResult::Complete(result) => return result.map(|r| (*r).clone()),
+                state => {
+                    if let Some(wait) = &mut wait {
+                        wait.update(matches!(state, SharedResult::Queued));
+                    }
+                }
             }
             receiver.changed().await.map_err(|_| Error::Stopped)?;
         }
@@ -1011,18 +1018,6 @@ impl Client {
     }
     pub(crate) fn report_timeout(&self) -> Duration {
         self.0.config.report_timeout
-    }
-    pub(crate) fn background_pr_timeout(&self) -> Duration {
-        // A CI collection needs metadata plus three sources for each of the
-        // head and test-merge refs, followed by a metadata check. Allow those
-        // eight paced slots in addition to the ordinary five-second slice.
-        // Cap one PR at a quarter of the default cycle so stalls still rotate.
-        let spacing = self.0.metrics.core_spacing_ms.load(Ordering::Relaxed);
-        Duration::from_millis(
-            5_000u64
-                .saturating_add(spacing.saturating_mul(8))
-                .min(30_000),
-        )
     }
     pub(crate) fn collection_limit(&self) -> usize {
         self.0.config.max_collection_bytes

@@ -602,14 +602,9 @@ impl Client {
             }
             attempted += 1;
             let pr_started_at_ms = crate::now_ms();
-            // A large roster must not spend an entire cycle on one PR. Keep
-            // the existing rotation and retry sets, but allow a paced source
-            // collection to finish before rotating to the next PR.
-            let pr_deadline = if background {
-                deadline.min(tokio::time::Instant::now() + self.background_pr_timeout())
-            } else {
-                deadline
-            };
+            // Deliberate scheduler waits consume the cycle budget, not the
+            // short per-PR work allowance. Slow sockets still rotate promptly.
+            let pr_deadline = deadline;
             let previously_terminal = if seed_only {
                 self.stored_pr_snapshot(
                     &format!("metadata://{}/{repo}/{number}", self.hostname()),
@@ -720,9 +715,22 @@ impl Client {
                     })
                 }
             };
-            let result = crate::client::REQUEST_DEADLINE
-                .scope(background.then_some(pr_deadline), refresh)
-                .await;
+            let refresh = Box::pin(
+                crate::client::REQUEST_DEADLINE.scope(background.then_some(pr_deadline), refresh),
+            );
+            let result = if background {
+                let budget = crate::collection_budget::Budget::new();
+                crate::collection_budget::CURRENT
+                    .scope(budget.clone(), async {
+                        tokio::select! {
+                            result = refresh => result,
+                            _ = budget.exhausted() => Err(Error::Deadline),
+                        }
+                    })
+                    .await
+            } else {
+                refresh.await
+            };
             // The scheduler may deliver its local deadline just before the
             // outer timer fires, including a coalesced request from the other
             // hydration lane. Both outcomes retain local interruption health.
