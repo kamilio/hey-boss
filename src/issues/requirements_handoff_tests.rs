@@ -310,6 +310,7 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
         "watcher",
         "approval",
         "unexplained_version",
+        "version_collision",
     ] {
         let mut f = HandoffFixture::new(true);
         f.job.actor.machine = "peer".into();
@@ -414,7 +415,7 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
         if !matches!(case, "delayed_notes" | "external_delayed") {
             pull(&f.store, &peer, json!([]));
         }
-        if case == "final_notes" {
+        if matches!(case, "final_notes" | "version_collision") {
             comment(&mut peer, false);
         }
         if case == "external_comment" {
@@ -439,7 +440,7 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
                     )
                     .unwrap();
             }
-            "unexplained_version" => {
+            "unexplained_version" | "version_collision" => {
                 f.store
                     .db
                     .execute("UPDATE issues SET version=version+1", [])
