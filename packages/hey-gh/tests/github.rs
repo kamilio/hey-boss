@@ -416,6 +416,38 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "issue72-partial-auth-stall" && path.contains("/check-runs") {
         mock.release.notified().await;
     }
+    if path == "/quota-overlap" || path == "/quota-slow" {
+        let reset = *mock
+            .data
+            .lock()
+            .unwrap()
+            .quota_reset
+            .get_or_insert_with(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 3600
+            });
+        let reset = (if phase == 1 { reset - 3540 } else { reset }).to_string();
+        return reply(
+            if headers.contains_key("if-none-match") {
+                304
+            } else {
+                200
+            },
+            json!({"stable":true}),
+            &[
+                ("etag", "\"stable\""),
+                ("x-ratelimit-resource", "core"),
+                (
+                    "x-ratelimit-remaining",
+                    if path == "/quota-slow" { "101" } else { "5000" },
+                ),
+                ("x-ratelimit-reset", &reset),
+            ],
+        );
+    }
     if path == "/quota-reset" || path == "/quota-idle-reset" {
         let reset = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -5004,6 +5036,27 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
             .all(|row| row["sourceErrors"] == json!({})
                 && row["ci"]["summary"]["state"] == "success")
     );
+}
+
+#[tokio::test]
+async fn alternate_or_out_of_order_headers_cannot_erase_live_quota_debt() {
+    for phase in [0, 1] {
+        let h = Harness::new().await;
+        let c = h.client();
+        c.get("quota-overlap", Freshness::Revalidate).await.unwrap();
+        c.get("quota-overlap", Freshness::Revalidate).await.unwrap();
+        c.get("quota-slow", Freshness::Revalidate).await.unwrap();
+        h.phase(phase);
+        // A genuinely unchanged representation may validate freely, but its
+        // older/higher quota headers must not forgive a charged request's debt.
+        c.get("quota-overlap", Freshness::Revalidate).await.unwrap();
+        let calls = h.calls().len();
+        assert!(matches!(
+            c.get("quota-after", Freshness::Revalidate).await,
+            Err(Error::RateLimited { .. })
+        ));
+        assert_eq!(h.calls().len(), calls);
+    }
 }
 
 #[tokio::test]
