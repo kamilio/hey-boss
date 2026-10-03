@@ -1328,6 +1328,96 @@ mod priority_tests {
     use super::*;
 
     #[tokio::test]
+    async fn changed_conditional_probes_cannot_postpone_background_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let live = Arc::new(AtomicBool::new(false));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            let live = live.clone();
+            move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                let calls = calls.clone();
+                let live = live.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.lock().unwrap().push(uri.path().to_owned());
+                    let live = live.load(Ordering::Relaxed);
+                    let unchanged = !live && headers.contains_key("if-none-match");
+                    let mut response = if unchanged {
+                        axum::http::StatusCode::NOT_MODIFIED.into_response()
+                    } else {
+                        axum::Json(serde_json::json!({"live":live})).into_response()
+                    };
+                    let headers = response.headers_mut();
+                    headers.insert("etag", "\"synthetic\"".parse().unwrap());
+                    if live {
+                        headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-reset",
+                            (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
+                        );
+                    }
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::from_millis(20),
+                queue_timeout: Duration::from_secs(10),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        // Previously unchanged representations may bypass charged-call pacing.
+        // A stream of those probes returning 200 must not keep moving the
+        // background request's next eligible time beyond its deadline.
+        for n in 0..12 {
+            for _ in 0..2 {
+                client
+                    .get(&format!("probe/{n}"), Freshness::Revalidate)
+                    .await
+                    .unwrap();
+            }
+        }
+        calls.lock().unwrap().clear();
+        live.store(true, Ordering::Relaxed);
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+        let mut tasks = Vec::new();
+        for (path, interactive) in std::iter::once(("background".to_owned(), false))
+            .chain((0..12).map(|n| (format!("probe/{n}"), true)))
+        {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                INTERACTIVE_READ
+                    .scope(
+                        Arc::new(AtomicBool::new(interactive)),
+                        c.get(&path, Freshness::Revalidate),
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        server.abort();
+        let calls = calls.lock().unwrap();
+        let position = calls.iter().position(|path| path == "/background").unwrap();
+        assert!(
+            position <= 4,
+            "conditional probes starved background: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn background_details_share_core_fairness_with_foreground_and_background_ci() {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));

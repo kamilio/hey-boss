@@ -412,9 +412,30 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary_until);
+            // Conditional probes can return charged 200s and move the quota
+            // timer again. Once background work is owed a turn, let that timer
+            // elapse instead of letting more exempt foreground probes postpone
+            // it indefinitely. A busy lane or a retry backoff must not hold up
+            // unrelated foreground work.
+            let background_turns: std::collections::HashSet<_> = pending
+                .iter()
+                .filter(|job| {
+                    !job.interactive.load(Ordering::Relaxed)
+                        && interactive_streaks.get(&job.resource).copied().unwrap_or(0) >= 3
+                        && job.ready_at <= now
+                        && !lane_busy(&active, job, prod)
+                })
+                .map(|job| job.resource.as_str())
+                .collect();
+            let waiting_for_turn = |job: &Job| {
+                job.interactive.load(Ordering::Relaxed)
+                    && background_turns.contains(job.resource.as_str())
+            };
             let next = {
                 let eligible = |job: &Job| {
-                    ready(job, &budgets, global) <= now && !lane_busy(&active, job, prod)
+                    ready(job, &budgets, global) <= now
+                        && !lane_busy(&active, job, prod)
+                        && !waiting_for_turn(job)
                 };
                 // Prefer interactive policy, but admit an eligible background job
                 // after at most three foreground dispatches in the same quota.
@@ -506,9 +527,12 @@ impl Scheduler {
             let wake = pending
                 .iter()
                 .map(|job| {
-                    if active.len() >= max_active || lane_busy(&active, job, prod) {
-                        // Busy lanes wake on completion; never spin on their old
-                        // ready time. Their queued deadlines still expire on time.
+                    if active.len() >= max_active
+                        || lane_busy(&active, job, prod)
+                        || waiting_for_turn(job)
+                    {
+                        // A completion or the background timer wakes held work;
+                        // never spin on its old ready time. Deadlines still apply.
                         job.deadline()
                     } else {
                         ready(job, &budgets, global).min(job.deadline())
