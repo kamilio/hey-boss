@@ -133,7 +133,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -224,6 +224,7 @@ impl Relay {
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
+                            "issue_detail_compact": message["capabilities"]["issue_detail_compact"] == true,
                             "issue_pr_attachments": message["capabilities"]["issue_pr_attachments"] == true,
                             "issue_request_status": message["capabilities"]["issue_request_status"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
@@ -252,6 +253,7 @@ impl Relay {
                         let message = advertisement.lock().unwrap();
                         for capability in ["authority_rpc", "issue_metadata"]
                             .into_iter()
+                            .chain(matches!(metadata.operation, crate::issues::Operation::ViewCompact { .. }).then_some("issue_detail_compact"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::Move { .. }).then_some("issue_move"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::RequestStatus { .. }).then_some("issue_request_status"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::AddPullRequest { .. } | crate::issues::Operation::PullRequests { .. }).then_some("issue_pr_attachments"))
@@ -493,6 +495,15 @@ mod tests {
         assert_eq!(capabilities["route"], "supervisor_tunnel");
         assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
+        let compact = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"view_compact","number":1,"limit":20,"offset":0}}});
+        let error = call(&ctx.state, &ctx.path, compact).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_detail_compact"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
+        assert!(output.lock().unwrap().is_empty());
         let movement = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"move-old","operation":{"action":"move","number":3,"before":1,"if_order_version":0}}});
         let error = call(&ctx.state, &ctx.path, movement).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");

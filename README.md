@@ -488,6 +488,21 @@ guarded metadata edits through a companion's existing fleet connection. This
 requires no work claim or SSH hostname. See [supported operations and retry
 semantics](docs/chief-metadata-routing.md).
 
+For a detail read without expanding commit or attachment history, use
+`hey-boss issue view NUMBER --compact --json` (also supports `--supervisor`).
+It keeps the complete requirements, lifecycle, ownership/reservation guards,
+labels, dependencies and current PR links. `completeness` explicitly identifies
+omitted evidence; omission never means absence. The default view is unchanged.
+Comments select the newest 20, displayed chronologically, with a 64 KiB page
+target. A larger single comment and the issue body are always returned whole.
+Use `--comments-limit 1..100` and `--comments-offset` with the returned
+`completeness.comments.next_offset` to read other pages through the same route.
+Concurrent comments can shift offsets; `complete` is true only for the entire
+comment set. Use the default view or the dedicated history, commit and attachment
+commands when the omitted evidence is needed. Supervisor routing requires the
+`issue_detail_compact` fleet capability; older stores fail instead of returning
+an unbounded fallback.
+
 ## URL lookup
 
 Issue-store reads, store opening, and transaction acquisition retry transient

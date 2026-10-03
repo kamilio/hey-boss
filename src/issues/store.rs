@@ -19,6 +19,8 @@ pub(crate) mod chief;
 mod claim_recovery;
 #[path = "compact.rs"]
 mod compact;
+#[path = "compact_detail.rs"]
+mod compact_detail;
 #[path = "coordination.rs"]
 pub(crate) mod coordination;
 #[path = "../mindmap/store.rs"]
@@ -327,7 +329,27 @@ fn comment_page(
     limit: u32,
     offset: u32,
     sort: super::CommentSort,
-    mut bytes: usize,
+    bytes: usize,
+) -> Result<Value> {
+    comment_page_budget(
+        db,
+        project,
+        number,
+        limit,
+        offset,
+        sort,
+        (bytes, PAGE_BYTES),
+    )
+}
+
+fn comment_page_budget(
+    db: &Connection,
+    project: &Project,
+    number: i64,
+    limit: u32,
+    offset: u32,
+    sort: super::CommentSort,
+    (mut bytes, byte_target): (usize, usize),
 ) -> Result<Value> {
     let total: i64 = db.query_row(
         "SELECT CASE WHEN archive_key IS NOT NULL THEN archived_comments ELSE (SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2) END FROM issues WHERE project_id=?1 AND number=?2",
@@ -347,7 +369,7 @@ fn comment_page(
     while let Some(row) = rows.next()? {
         let comment = json!({"id":row.get::<_,i64>(0)?,"author":row.get::<_,String>(1)?,"body":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?});
         bytes += serde_json::to_vec(&comment)?.len();
-        if bytes > PAGE_BYTES && !comments.is_empty() {
+        if bytes > byte_target && !comments.is_empty() {
             break;
         }
         comments.push(comment);
@@ -862,6 +884,7 @@ fn validate(r: &Request) -> Result<()> {
         | Operation::Timeline { limit, .. }
         | Operation::StatusHistory { limit, .. }
         | Operation::Comments { limit, .. } => page(*limit)?,
+        Operation::ViewCompact { limit, .. } => page(*limit)?,
         _ => {}
     }
     match &r.operation {
@@ -2197,6 +2220,11 @@ impl Store {
                 outcome,
                 now,
             )?,
+            Operation::ViewCompact {
+                number,
+                limit,
+                offset,
+            } => compact_detail::read(&tx, &project, *number, *limit, *offset, actor)?,
             Operation::View { number } => {
                 // Forwarded reads retain the initiating actor. Actorless internal
                 // reads continue to inspect from this store's native machine.
@@ -2406,9 +2434,11 @@ impl Store {
         if let Some(issue) = result.get_mut("issue")
             && let Some(number) = issue["number"].as_i64()
         {
-            issue["pull_requests"] =
-                json!(registry::pull_requests(&tx, &response_project.id, number)?);
-            issue["commits"] = json!(super::commits::list(&tx, &response_project.id, number)?);
+            if !matches!(r.operation, Operation::ViewCompact { .. }) {
+                issue["pull_requests"] =
+                    json!(registry::pull_requests(&tx, &response_project.id, number)?);
+                issue["commits"] = json!(super::commits::list(&tx, &response_project.id, number)?);
+            }
             if issue["assignee"] == "human:boss" {
                 issue["assignee_name"] = settings["boss_name"].clone();
             }
