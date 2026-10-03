@@ -56,6 +56,14 @@ struct LogFile {
     _lock: File,
 }
 
+impl Drop for LogFile {
+    fn drop(&mut self) {
+        // A child between fork and exec can still hold this open description.
+        // Release ownership when the last writer exits, not when that child runs.
+        let _ = self._lock.unlock();
+    }
+}
+
 fn open_private(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -201,6 +209,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn last_writer_releases_lock_even_when_descriptor_was_inherited() {
+        let root = tempfile::tempdir().unwrap();
+        let writer = RotatingWriter::new(root.path(), 100).unwrap();
+        let cloned_writer = writer.clone();
+        let inherited = writer.0.lock().unwrap()._lock.try_clone().unwrap();
+        drop(writer);
+        assert!(RotatingWriter::new(root.path(), 100).is_err());
+        drop(cloned_writer);
+        let replacement = RotatingWriter::new(root.path(), 100).unwrap();
+        assert!(RotatingWriter::new(root.path(), 100).is_err());
+        drop(inherited);
+        assert!(RotatingWriter::new(root.path(), 100).is_err());
+        drop(replacement);
+        assert!(RotatingWriter::new(root.path(), 100).is_ok());
+    }
+
+    #[test]
     fn rotation_is_bounded_and_tail_survives_restart() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = RotatingWriter::new(root.path(), 4).unwrap();
@@ -259,19 +284,6 @@ mod tests {
             );
         }
         drop(writer);
-        // Concurrent lifecycle tests can briefly inherit the descriptor between
-        // fork and exec. CLOEXEC releases it; require eventual ownership rather
-        // than depending on that unrelated child's scheduling instant.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            if RotatingWriter::new(root.path(), 100).is_ok() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "log lock was not released"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        assert!(RotatingWriter::new(root.path(), 100).is_ok());
     }
 }
