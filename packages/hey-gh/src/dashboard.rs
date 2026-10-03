@@ -769,7 +769,7 @@ impl Client {
                 }
             }
             let error = if cycle_interrupted {
-                Some(if pr_deadline < deadline {
+                Some(if tokio::time::Instant::now() < deadline {
                     "PR refresh budget exhausted; retry queued; prior evidence retained".into()
                 } else {
                     "refresh cycle budget exhausted; retry queued; prior evidence retained".into()

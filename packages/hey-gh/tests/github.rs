@@ -5023,6 +5023,15 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
         .find(|row| row["repository"]["nameWithOwner"] == "acme/other")
         .unwrap();
     assert_eq!(other["ci"]["summary"]["state"], "success");
+    let stalled = page
+        .pull_requests
+        .iter()
+        .find(|row| row["repository"]["nameWithOwner"] == "acme/demo")
+        .unwrap();
+    assert_eq!(
+        stalled["sourceErrors"]["ci"],
+        "PR refresh budget exhausted; retry queued; prior evidence retained"
+    );
     api.stop().await;
     h.mock.release.notify_waiters();
     h.mode("account");
