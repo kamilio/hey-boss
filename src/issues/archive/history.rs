@@ -658,6 +658,120 @@ pub(crate) fn materialize_history(
     Ok(())
 }
 
+struct RestoreRow {
+    row: Value,
+    reference: Option<ReferenceOrigin>,
+}
+
+struct ReferenceOrigin {
+    event_origin: String,
+    event_origin_id: i64,
+    source_comment_id: i64,
+    comment_origin: String,
+    comment_origin_id: i64,
+}
+
+impl RestoreRow {
+    fn prepare(archive: &Archive, key: &str, table: &str, encoded: &str) -> Result<Self> {
+        let source: Value = serde_json::from_str(encoded)?;
+        // Read provenance before taking the hot writer lease. A native archive
+        // has no translation proof and must retain strict identity comparison.
+        let reference = if table == "events" {
+            let data: Value = serde_json::from_str(
+                source["data"]
+                    .as_str()
+                    .ok_or_else(|| unavailable("Invalid archived event data"))?,
+            )?;
+            archive.db.query_row(
+                "SELECT e.origin,e.origin_id,c.source_id,c.origin,c.origin_id FROM issue_origins e
+                 JOIN issue_origins c ON c.archive_key=e.archive_key AND c.kind='comments' AND c.source_id=?3 AND c.local_id IS NOT NULL
+                 WHERE e.archive_key=?1 AND e.kind='events' AND e.source_id=?2 AND e.local_id IS NOT NULL",
+                params![key, source["id"].as_i64(), data["comment_id"].as_i64()],
+                |r| Ok(ReferenceOrigin { event_origin: r.get(0)?, event_origin_id: r.get(1)?, source_comment_id: r.get(2)?, comment_origin: r.get(3)?, comment_origin_id: r.get(4)? }),
+            ).optional()?
+        } else {
+            None
+        };
+        Ok(Self {
+            row: local_record(archive, key, table, source)?,
+            reference,
+        })
+    }
+}
+
+/// Older replicas sometimes retained the sender's numeric comment reference,
+/// or an identical comment under a previous origin alias. Only the reference
+/// may change: event identity, scope, author, time and all user data must match.
+fn repair_reference(db: &HotConnection, saved: &RestoreRow, existing: &Value) -> Result<bool> {
+    let Some(proof) = &saved.reference else {
+        return Ok(false);
+    };
+    let row = &saved.row;
+    if !matches!(
+        row["action"].as_str(),
+        Some("commented" | "comment_resolved" | "comment_unresolved")
+    ) {
+        return Ok(false);
+    }
+    let expected: Value = serde_json::from_str(row["data"].as_str().unwrap())?;
+    let mut data: Value = serde_json::from_str(
+        existing["data"]
+            .as_str()
+            .ok_or_else(|| unavailable("Invalid hot event data"))?,
+    )?;
+    let (Some(comment), Some(previous)) =
+        (expected["comment_id"].as_i64(), data["comment_id"].as_i64())
+    else {
+        return Ok(false);
+    };
+    if comment == previous {
+        return Ok(false);
+    }
+    data["comment_id"] = json!(comment);
+    let mut repaired = existing.clone();
+    repaired["data"] = json!(data.to_string());
+    if !same_record("events", row, &repaired) || !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_row_ids WHERE origin=?1 AND table_name='events' AND origin_id=?2 AND local_id=?3)",
+        params![proof.event_origin, proof.event_origin_id, row["id"].as_i64()], |r| r.get::<_,bool>(0),
+    )? { return Ok(false); }
+    let comments = db.query_collect(
+        "SELECT * FROM comments WHERE id IN (?1,?2)",
+        params![comment, previous],
+        record,
+    )?;
+    let Some(target) = comments.iter().find(|r| r["id"] == comment) else {
+        return Ok(false);
+    };
+    if target["project_id"] != row["project_id"] || target["issue_number"] != row["issue_number"] {
+        return Ok(false);
+    }
+    let alias = comments
+        .iter()
+        .find(|r| r["id"] == previous)
+        .is_some_and(|old| {
+            target
+                .as_object()
+                .unwrap()
+                .iter()
+                .all(|(field, value)| field == "id" || old.get(field) == Some(value))
+        });
+    let untranslated = previous == proof.source_comment_id
+        || (previous == proof.comment_origin_id
+            && (proof.event_origin == proof.comment_origin
+                || (data["comment_origin"] == proof.comment_origin
+                    && data["comment_origin_id"] == proof.comment_origin_id)));
+    if !alias && !untranslated {
+        return Ok(false);
+    }
+    // syncing=2 suppresses journal/projection side effects. Preserve transport
+    // hints and every other byte of logical data; never modify either comment.
+    db.execute(
+        "UPDATE events SET data=?2 WHERE id=?1",
+        params![row["id"].as_i64(), data.to_string()],
+    )?;
+    Ok(true)
+}
+
 fn restore_rows(
     db: &HotConnection,
     archive: &Archive,
@@ -677,12 +791,7 @@ fn restore_rows(
             let mut bytes = 0;
             if let Some(encoded) = pending.take() {
                 bytes += String::len(&encoded);
-                batch.push(local_record(
-                    archive,
-                    key,
-                    table,
-                    serde_json::from_str::<Value>(&encoded)?,
-                )?);
+                batch.push(RestoreRow::prepare(archive, key, table, &encoded)?);
             }
             while batch.len() < 16 {
                 let Some(row) = rows.next()? else {
@@ -694,12 +803,7 @@ fn restore_rows(
                     break;
                 }
                 bytes += encoded.len();
-                batch.push(local_record(
-                    archive,
-                    key,
-                    table,
-                    serde_json::from_str::<Value>(&encoded)?,
-                )?);
+                batch.push(RestoreRow::prepare(archive, key, table, &encoded)?);
             }
             if batch.is_empty() {
                 break;
@@ -716,7 +820,14 @@ fn restore_rows(
             // triggers as well as the replication journal, within this lease.
             tx.execute("UPDATE fleet_meta SET syncing=2 WHERE id=1", [])?;
             for row in batch {
-                restore_row(&tx, table, &row)?;
+                restore_row(&tx, table, &row).map_err(|mut error| {
+                    if error.code == "archive_conflict" {
+                        let operation = if expected.is_some() { "restore" } else { "materialize" };
+                        error.message.push_str(&format!(" ({operation} issue {number}, archive {})", &key[..12]));
+                        error.details = Some(json!({"operation":operation,"table":table,"id":row.row["id"],"project":project,"number":number,"archive_key":key}));
+                    }
+                    error
+                })?;
             }
             tx.execute("UPDATE fleet_meta SET syncing=?1 WHERE id=1", [syncing])?;
             tx.commit()?;
@@ -725,7 +836,8 @@ fn restore_rows(
     Ok(true)
 }
 
-fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
+fn restore_row(db: &HotConnection, table: &str, saved: &RestoreRow) -> Result<()> {
+    let row = &saved.row;
     let id = match &row["id"] {
         Value::String(v) => SqlValue::Text(v.clone()),
         Value::Number(v) => SqlValue::Integer(
@@ -745,9 +857,23 @@ fn restore_row(db: &HotConnection, table: &str, row: &Value) -> Result<()> {
             return Ok(());
         }
         if !same_record(table, row, &existing) {
+            if table == "events" && repair_reference(db, saved, &existing)? {
+                return Ok(());
+            }
+            let fields = row
+                .as_object()
+                .unwrap()
+                .iter()
+                .filter(|(field, value)| existing.get(*field) != Some(*value))
+                .map(|(field, _)| field.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
             return Err(Error::new(
                 "archive_conflict",
-                "An archived history ID belongs to a different record",
+                format!(
+                    "Archived {table} ID {} differs from its hot record; fields={fields}",
+                    row["id"]
+                ),
             ));
         }
         return Ok(());
