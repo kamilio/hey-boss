@@ -78,6 +78,7 @@ fn ci_signals(
         && policy.merge_sha == ci.merge_sha
         && policy.repository.eq_ignore_ascii_case(repository)
         && policy.pull_number == number
+        && crate::policy::identity_matches(pull_request, policy.policy_identity.as_ref())
         && pull_request["number"]
             .as_u64()
             .is_none_or(|value| value == number)
@@ -220,6 +221,7 @@ fn ci_signals(
             "source_heads":{"pull_request":pull_request["head"]["sha"],"ci":ci.head_sha,"required":policy.head_sha},
             "source_merges":{"ci":ci.merge_sha,"required":policy.merge_sha},
             "source_bases":{"pull_request":{"ref":pull_request["base"]["ref"],"sha":pull_request["base"]["sha"]},"required":{"ref":policy.base_branch,"sha":policy.pr_base_sha}},
+            "policy_identity":policy.policy_identity,"policy_sha":policy.policy_sha,
             "complete":false,"ci_complete":complete,"ci_settled":settled,"has_checks":has_checks,"checks":checks,"statuses":statuses,"workflows":workflows,
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
@@ -241,6 +243,8 @@ fn policy_fingerprint(policy: &RequiredChecksReport) -> String {
             policy.base_branch,
             policy.base_sha,
             policy.pr_base_sha,
+            policy.policy_identity,
+            policy.policy_sha,
             policy.strict,
             rules,
             policy
@@ -274,7 +278,9 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
         feedback: Vec::new(),
         evidence: evidence::bounded(
             json!({"repository":policy.repository,"number":policy.pull_number,"head":policy.head_sha,
-            "complete":false,"required":policy.checks,"required_state":policy.state,"policy_errors":policy.errors}),
+            "complete":false,"required":policy.checks,"required_state":policy.state,"policy_errors":policy.errors,
+            "policy_identity":policy.policy_identity,"policy_sha":policy.policy_sha,
+            "source_bases":{"required":{"ref":policy.base_branch,"sha":policy.pr_base_sha}},"source_merges":{"required":policy.merge_sha}}),
         ),
     };
     if policy.pull_request_state.as_deref() == Some("open")

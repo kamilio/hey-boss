@@ -1251,9 +1251,45 @@ impl Client {
         } else {
             None
         };
+        let identity = crate::policy::policy_identity(pr);
+        let policy_tip = if policy.is_some()
+            && let Ok(identity) = &identity
+        {
+            if row["baseRefName"] == identity.branch {
+                policy_base_tip.clone()
+            } else {
+                match self
+                    .get(
+                        &format!(
+                            "repos/{repo}/branches/{}",
+                            crate::repository::segment(&identity.branch)
+                        ),
+                        Freshness::CachedOnly,
+                    )
+                    .await
+                {
+                    Ok(r) => r.data["commit"]["sha"]
+                        .as_str()
+                        .filter(|sha| crate::repository::valid_sha(sha))
+                        .map(str::to_owned),
+                    Err(Error::CacheMiss) => None,
+                    Err(error) => return Err(error),
+                }
+            }
+        } else {
+            None
+        };
         row["requiredChecks"] = policy
             .filter(|policy| {
                 metadata_current
+                    && identity.as_ref().is_ok_and(|identity| {
+                        if policy["policy_identity"].is_null() {
+                            identity.stack.is_none()
+                        } else {
+                            serde_json::to_value(identity).is_ok_and(|value| value == policy["policy_identity"])
+                                && policy_tip.as_deref().is_some_and(|sha| policy["policy_sha"] == sha)
+                        }
+                    })
                     && policy["head_sha"] == row["headRefOid"]
                     && row["baseRefName"].is_string()
                     && policy["base_branch"] == row["baseRefName"]
