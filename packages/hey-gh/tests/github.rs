@@ -1346,6 +1346,21 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
     assert!(graphql.is_ok());
     assert!(rest.is_ok());
     let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        text.matches("GitHub request dispatched").count(),
+        3,
+        "{text}"
+    );
+    assert_eq!(text.matches("GitHub response headers").count(), 3, "{text}");
+    for line in text
+        .lines()
+        .filter(|line| line.contains("GitHub request dispatched"))
+    {
+        assert!(line.contains("auth_scope="));
+        assert!(line.contains("instance="));
+        assert!(line.contains("request_key="));
+        assert!(line.contains("foreground=false"));
+    }
     for secret in [
         "synthetic-token",
         "private-query-value",
@@ -1406,7 +1421,10 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
     let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
     let policy = text
         .lines()
-        .find(|line| line.contains("endpoint=\"branch_protection\""))
+        .find(|line| {
+            line.contains("GitHub request finished")
+                && line.contains("endpoint=\"branch_protection\"")
+        })
         .unwrap();
     assert!(policy.contains("http_status=404"));
     assert!(policy.contains("succeeded=false"));

@@ -191,6 +191,8 @@ pub(crate) struct Scheduler {
 
 impl Scheduler {
     pub async fn run(self, mut rx: mpsc::Receiver<Job>) {
+        // Random process-local identifier; scope is already an opaque auth hash.
+        let instance = format!("{:032x}", fastrand::u128(..));
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, [usize; 2]>::new();
         let mut budgets = HashMap::<String, Budget>::new();
@@ -281,6 +283,12 @@ impl Scheduler {
                 };
                 job.attempts += 1;
                 job.http_status = None;
+                tracing::info!(request_id=%job.request_id, attempt=job.attempts,
+                    endpoint=job.endpoint, resource=%job.resource,
+                    foreground=job.interactive.load(Ordering::Relaxed),
+                    conditional=job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
+                    auth_scope=%self.scope, %instance, request_key=%crate::digest(&job.key),
+                    "GitHub request dispatched");
                 self.metrics.network.fetch_add(1, Ordering::Relaxed);
                 let mut request = if let Some(body) = &job.body {
                     self.http.post(&job.url).json(body)
@@ -385,6 +393,13 @@ impl Scheduler {
                         self.metrics.not_modified.fetch_add(1, Ordering::Relaxed);
                     }
                     let headers = response.headers().clone();
+                    tracing::info!(request_id=%job.request_id, attempt=job.attempts,
+                        http_status=status.as_u16(),
+                        remaining=number(&headers,"x-ratelimit-remaining"),
+                        used=number(&headers,"x-ratelimit-used"),
+                        limit=number(&headers,"x-ratelimit-limit"),
+                        reset=number(&headers,"x-ratelimit-reset"),
+                        "GitHub response headers");
                     if let Some(resource) = header(&headers, "x-ratelimit-resource") {
                         job.resource = resource;
                         if routes.len() >= 4096 {
