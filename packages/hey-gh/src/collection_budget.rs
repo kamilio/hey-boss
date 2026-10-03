@@ -1,9 +1,9 @@
-//! Bound collection work without charging deliberate scheduler queue waits.
+//! Bound collection stalls without charging deliberate scheduler queue waits.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::{sync::Notify, time::Instant};
 
-pub(crate) const WORK_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const STALL_LIMIT: Duration = Duration::from_secs(5);
 tokio::task_local! { pub(crate) static CURRENT: Arc<Budget>; }
 
 pub(crate) struct Budget {
@@ -32,7 +32,7 @@ impl Budget {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
-                remaining: WORK_LIMIT,
+                remaining: STALL_LIMIT,
                 updated: Instant::now(),
                 queued: 0,
                 active: 0,
@@ -115,6 +115,14 @@ impl Wait {
             self.queued = queued;
         }
     }
+
+    pub(crate) fn completed(&self) {
+        let mut state = self.budget.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.remaining = STALL_LIMIT;
+        state.updated = Instant::now();
+        drop(state);
+        self.budget.changed.notify_waiters();
+    }
 }
 
 impl Drop for Wait {
@@ -126,6 +134,25 @@ impl Drop for Wait {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_sources_renew_progress_but_the_next_stall_still_expires() {
+        let budget = Budget::new();
+        CURRENT
+            .scope(budget.clone(), async {
+                let wait = Wait::current(false).unwrap();
+                for _ in 0..3 {
+                    tokio::select! {
+                        _ = budget.exhausted() => panic!("healthy collection was interrupted"),
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => wait.completed(),
+                    }
+                }
+                let started = Instant::now();
+                budget.exhausted().await;
+                assert_eq!(Instant::now() - started, STALL_LIMIT);
+            })
+            .await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn queued_time_is_free_but_active_siblings_and_dropped_waiters_are_charged() {

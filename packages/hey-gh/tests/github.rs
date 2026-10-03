@@ -205,6 +205,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             data.calls.iter().filter(|c| c.path == path).count(),
         )
     };
+    if mode == "account-slow-sources" {
+        tokio::time::sleep(Duration::from_millis(900)).await;
+    }
     if matches!(mode.as_str(), "ruleset-only-policy" | "account-large")
         && path == "/foreground-gate"
     {
@@ -4992,6 +4995,7 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
     let mut config = h.config();
     config.report_timeout = Duration::from_secs(8);
     config.request_timeout = Duration::from_secs(10);
+    config.queue_timeout = Duration::from_secs(10);
     let c = Client::with_token(config, "synthetic-token".into()).unwrap();
     c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
     h.mode("account-slow-one");
@@ -5145,6 +5149,36 @@ async fn account_background_collections_finish_under_paced_foreground_contention
     assert!(
         details.succeeded > 0,
         "details made no complete progress: {details:?}"
+    );
+}
+
+#[tokio::test]
+async fn account_background_details_finish_when_each_source_makes_healthy_progress() {
+    let h = Harness::new().await;
+    h.mode("account");
+    h.phase(2);
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(40);
+    config.queue_timeout = Duration::from_secs(40);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    h.mode("account-slow-sources");
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let cycle = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            if let Some(cycle) = c.account_refresh_cycle(false).await.unwrap() {
+                break cycle;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    api.stop().await;
+    let cycle = cycle.unwrap();
+    assert_eq!(
+        cycle.succeeded, 2,
+        "healthy sources never completed: {cycle:?}"
     );
 }
 

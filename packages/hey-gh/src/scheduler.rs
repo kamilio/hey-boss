@@ -464,7 +464,7 @@ impl Scheduler {
                         .request_timeout
                         .min(
                             if job.collection_slice && !job.interactive.load(Ordering::Relaxed) {
-                                crate::collection_budget::WORK_LIMIT
+                                crate::collection_budget::STALL_LIMIT
                             } else {
                                 self.config.request_timeout
                             },
