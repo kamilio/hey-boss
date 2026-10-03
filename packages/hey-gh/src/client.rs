@@ -1012,6 +1012,18 @@ impl Client {
     pub(crate) fn report_timeout(&self) -> Duration {
         self.0.config.report_timeout
     }
+    pub(crate) fn background_pr_timeout(&self) -> Duration {
+        // A CI collection needs metadata plus three sources for each of the
+        // head and test-merge refs, followed by a metadata check. Allow those
+        // eight paced slots in addition to the ordinary five-second slice.
+        // Cap one PR at a quarter of the default cycle so stalls still rotate.
+        let spacing = self.0.metrics.core_spacing_ms.load(Ordering::Relaxed);
+        Duration::from_millis(
+            5_000u64
+                .saturating_add(spacing.saturating_mul(8))
+                .min(30_000),
+        )
+    }
     pub(crate) fn collection_limit(&self) -> usize {
         self.0.config.max_collection_bytes
     }

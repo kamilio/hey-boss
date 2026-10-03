@@ -83,6 +83,7 @@ pub(crate) struct Metrics {
     pub conditional: AtomicU64,
     pub not_modified: AtomicU64,
     pub active: AtomicU64,
+    pub core_spacing_ms: AtomicU64,
     pub limits: Mutex<BTreeMap<String, RateLimit>>,
 }
 
@@ -572,6 +573,16 @@ impl Scheduler {
                             reset,
                             status == StatusCode::NOT_MODIFIED,
                         );
+                        if job.resource == "core" {
+                            self.metrics.core_spacing_ms.store(
+                                budgets
+                                    .for_resource("core")
+                                    .map(|budget| budget.spacing.as_millis().min(30_000) as u64)
+                                    .max()
+                                    .unwrap_or(0),
+                                Ordering::Relaxed,
+                            );
+                        }
                     }
                     if status == StatusCode::NOT_MODIFIED {
                         let result = if let Some(mut cached) = job.cached.clone() {
