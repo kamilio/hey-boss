@@ -62,6 +62,13 @@ External comments, changed requirements and unexplained revision gaps require a
 fresh acknowledgment. Ready and assignment commands still check exact versions
 and reservations; final notes never acknowledge another actor's new work.
 
+Version receipts require a worker that reads them. Installing the CLI and fleet
+service does not replace code in an already running pool; routine upgrades load
+at that pool's natural idle point. Verify its reported worker build separately.
+`tools/requirements_handoff_install_checks.mjs BINARY BUILD --worker-binary PATH`
+tests that exact worker executable with the installed service in disposable state.
+A passing fresh-worker check does not establish that an older resident pool is fixed.
+
 When the watcher is behind the evidence you reviewed, add
 `--reviewed-evidence reviewed.json` to that GitHub assignment. The file is a JSON
 array of `{ "report": FULL_REPORT, "policy": REQUIRED_CHECKS_REPORT }` objects,
