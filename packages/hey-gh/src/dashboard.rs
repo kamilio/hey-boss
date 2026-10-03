@@ -183,9 +183,14 @@ struct Discovery {
     pulls: Vec<Value>,
     validated_at: u64,
     validated_by_pr: BTreeMap<String, u64>,
+    page_after_by_pr: BTreeMap<String, Option<String>>,
 }
 
 impl Client {
+    pub(crate) async fn cached_discovery_page(&self, after: Value) -> Result<crate::Response> {
+        self.peek_graphql(MY_PRS, json!({"after":after})).await
+    }
+
     /// Read private, durable account-cycle progress without GitHub requests or
     /// observation-cursor changes. Discovery-only preparation does not replace it.
     pub async fn account_refresh_cycle(
@@ -271,6 +276,12 @@ impl Client {
                             })?
                             .unwrap_or_default(),
                     ),
+                    // Optional lookup hints never determine roster health.
+                    page_after_by_pr: cached
+                        .data
+                        .get("pageAfterByPr")
+                        .and_then(|value| serde_json::from_value(value.clone()).ok())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -291,6 +302,7 @@ impl Client {
             json!({
                 "pulls": scan.pulls, "validatedAtMs": scan.validated_at,
                 "validatedAtByPr": scan.validated_by_pr,
+                "pageAfterByPr": scan.page_after_by_pr,
             })
         });
         // Finish the small durable transaction after the network budget. A
@@ -325,6 +337,7 @@ impl Client {
                 pulls: Vec::new(),
                 validated_at: boundary.validated_at_ms,
                 validated_by_pr: BTreeMap::new(),
+                page_after_by_pr: BTreeMap::new(),
             });
         }
         let tail = nodes
@@ -337,7 +350,9 @@ impl Client {
         let mut pulls = BTreeMap::new();
         let mut validated_at = boundary.validated_at_ms;
         let mut validated_by_pr = BTreeMap::new();
+        let mut page_after_by_pr = BTreeMap::new();
         for page in 0..1000 {
+            let page_after = after.as_str().map(str::to_owned);
             let response = self
                 .graphql(MY_PRS, json!({"after":after}), freshness)
                 .await?;
@@ -384,6 +399,8 @@ impl Client {
                     format!("{}/{}", identity.0, identity.1),
                     response.validated_at_ms,
                 );
+                page_after_by_pr
+                    .insert(format!("{}/{}", identity.0, identity.1), page_after.clone());
                 if node["state"] != "OPEN" || pulls.insert(identity, node.clone()).is_some() {
                     return Err(Error::Invalid(
                         "invalid or repeated PR in discovery; retry".into(),
@@ -413,6 +430,7 @@ impl Client {
                     pulls,
                     validated_at,
                     validated_by_pr,
+                    page_after_by_pr,
                 });
             }
             if !has_next {

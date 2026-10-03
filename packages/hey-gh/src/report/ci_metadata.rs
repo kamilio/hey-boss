@@ -104,7 +104,7 @@ impl Client {
             return Ok(None);
         };
         let key = format!("{repository}/{number}");
-        let Some(validated_at) = scan.data["validatedAtByPr"]
+        let Some(mut validated_at) = scan.data["validatedAtByPr"]
             .as_object()
             .and_then(|clocks| {
                 clocks
@@ -115,6 +115,50 @@ impl Client {
         else {
             return Ok(None);
         };
+        let mut node = node.clone();
+        let page_after = scan.data["pageAfterByPr"].as_object().and_then(|pages| {
+            pages
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&key))
+                .map(|(_, after)| after)
+        });
+        if let Some(after) = page_after
+            .filter(|after| after.is_null() || after.as_str().is_some_and(|s| !s.is_empty()))
+        {
+            match self.cached_discovery_page(after.clone()).await {
+                Ok(page) if page.validated_at_ms > validated_at => {
+                    // A point observation does not need a complete account scan.
+                    // The old cursor is only a hint: membership can move between
+                    // pages, so require exactly one matching identity again.
+                    let mut matches = page.data["data"]["viewer"]["pullRequests"]["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|candidate| {
+                            candidate["number"] == number
+                                && candidate["repository"]["nameWithOwner"]
+                                    .as_str()
+                                    .is_some_and(|repo| repo.eq_ignore_ascii_case(repository))
+                        });
+                    let Some(candidate) = matches.next() else {
+                        return Ok(None);
+                    };
+                    if matches.next().is_some() {
+                        return Ok(None);
+                    }
+                    node = candidate.clone();
+                    validated_at = page.validated_at_ms;
+                }
+                Ok(_) | Err(Error::CacheMiss) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error_code = error.diagnostic_code(),
+                        "CI discovery page unavailable; validating REST metadata"
+                    );
+                    return Ok(None);
+                }
+            }
+        }
         if validated_at == 0
             || validated_at < cached.validated_at_ms
             || now_ms()
