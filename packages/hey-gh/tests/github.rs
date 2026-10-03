@@ -3758,6 +3758,181 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
 }
 
 #[tokio::test]
+async fn ci_reuses_newer_discovery_pages_before_the_account_scan_finishes() {
+    for repository in ["acme/demo", "acme/other"] {
+        ci_discovery_page_scenario(repository, "valid").await;
+    }
+}
+
+#[tokio::test]
+async fn ci_rejects_stale_ambiguous_or_changed_cached_discovery_pages() {
+    for case in [
+        "stale",
+        "future",
+        "moved",
+        "duplicate",
+        "head",
+        "identity",
+        "missing",
+        "corrupt",
+        "invalid-hint",
+    ] {
+        ci_discovery_page_scenario("acme/demo", case).await;
+    }
+}
+
+async fn ci_discovery_page_scenario(repository: &str, case: &str) {
+    let h = Harness::new().await;
+    h.mode("account-ci-selectors");
+    h.phase(2);
+    let c = h.client();
+    c.ci_for_pr(repository, 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    let page = h
+        .calls()
+        .into_iter()
+        .find(|call| {
+            call.body["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("query MyOpenPullRequests("))
+                && call.body["variables"]["after"].is_null() == (repository == "acme/demo")
+        })
+        .unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    db.execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0)",
+        [],
+    )
+    .unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,?1,1) WHERE key='account-discovery-complete:v1'", [format!("$.data.validatedAtByPr.\"{repository}/7\"")]).unwrap();
+    // Only one page of the next scan has arrived. The authoritative
+    // complete roster must remain untouched, but its PR selectors are fresh.
+    let fresh = c
+        .graphql(
+            page.body["query"].as_str().unwrap(),
+            page.body["variables"].clone(),
+            Freshness::Revalidate,
+        )
+        .await
+        .unwrap();
+    let (page_key, raw): (String, String) = db.query_row(
+        "SELECT key,response FROM cache WHERE key LIKE '%/graphql#%' AND json_extract(response,'$.validated_at_ms')=?1",
+        [fresh.validated_at_ms], |r| Ok((r.get(0)?,r.get(1)?)),
+    ).unwrap();
+    let mut cached_page: Value = serde_json::from_str(&raw).unwrap();
+    match case {
+        "stale" => cached_page["validated_at_ms"] = json!(2),
+        "future" => cached_page["validated_at_ms"] = json!(u64::MAX),
+        "moved" => cached_page["data"]["data"]["viewer"]["pullRequests"]["nodes"] = json!([]),
+        "duplicate" => {
+            let nodes = cached_page["data"]["data"]["viewer"]["pullRequests"]["nodes"]
+                .as_array_mut()
+                .unwrap();
+            nodes.push(nodes[0].clone());
+        }
+        "head" => {
+            cached_page["data"]["data"]["viewer"]["pullRequests"]["nodes"][0]["headRefOid"] =
+                json!(NEW_HEAD)
+        }
+        "identity" => {
+            cached_page["data"]["data"]["viewer"]["pullRequests"]["nodes"][0]["id"] =
+                json!("PR_replaced")
+        }
+        "invalid-hint" => {
+            db.execute("UPDATE cache SET response=json_set(response,'$.data.pageAfterByPr.acme/demo/7',42) WHERE key='account-discovery-complete:v1'", []).unwrap();
+        }
+        "valid" | "missing" | "corrupt" => {}
+        _ => unreachable!(),
+    }
+    if case == "missing" {
+        db.execute("DELETE FROM cache WHERE key=?1", [&page_key])
+            .unwrap();
+    } else {
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE key=?2",
+            [
+                if case == "corrupt" {
+                    "{".to_owned()
+                } else {
+                    cached_page.to_string()
+                },
+                page_key,
+            ],
+        )
+        .unwrap();
+    }
+    // The hint and page cache must work after reopening the client too.
+    drop(c);
+    let c = h.client();
+    let memo_before: String = db
+        .query_row(
+            "SELECT response FROM cache WHERE key='account-discovery-complete:v1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let before = h.calls().len();
+    let report = c
+        .ci_for_pr(repository, 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(report.complete, "{case}: {:?}", report.data.errors);
+    assert!(
+        h.calls()[before..]
+            .iter()
+            .all(|call| call.path != "/graphql"),
+        "{case}: selector lookup must never dispatch discovery"
+    );
+    assert_eq!(
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path == format!("/repos/{repository}/pulls/7")),
+        case != "valid",
+        "{case}: REST fallback"
+    );
+    assert_eq!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("#ci-selectors")
+                && v.validated_at_ms == fresh.validated_at_ms),
+        case == "valid",
+        "{case}: consumed selector validation"
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .all(|v| v.resource != format!("{}graphql", h.url)),
+        "a cache peek must not record an unconsumed validation"
+    );
+    if case == "valid" {
+        assert_eq!(
+            c.pull_request(repository, 7, Freshness::CachedOnly)
+                .await
+                .unwrap()
+                .validated_at_ms,
+            0
+        );
+    }
+    let memo_after: String = db
+        .query_row(
+            "SELECT response FROM cache WHERE key='account-discovery-complete:v1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        memo_after, memo_before,
+        "partial discovery cannot replace the complete roster"
+    );
+}
+
+#[tokio::test]
 async fn ci_reuses_fresh_discovery_selectors_without_refreshing_full_rest_metadata() {
     let h = Harness::new().await;
     h.mode("account-ci-selectors");
@@ -3871,7 +4046,10 @@ async fn ci_discovery_reuse_rejects_missing_stale_or_inconsistent_selectors() {
                 node["potentialMergeCommit"]["parents"]["nodes"][1]["oid"] = json!(NEW_HEAD)
             }
             "closed" => node["state"] = json!("CLOSED"),
-            "stale-page" => memo["data"]["validatedAtByPr"]["acme/demo/7"] = json!(1),
+            "stale-page" => {
+                memo["data"]["validatedAtByPr"]["acme/demo/7"] = json!(1);
+                db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',1) WHERE key LIKE '%/graphql#%'", []).unwrap();
+            }
             "missing-clock" => {
                 memo["data"]["validatedAtByPr"]
                     .as_object_mut()

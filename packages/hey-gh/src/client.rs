@@ -309,18 +309,31 @@ impl Client {
         variables: Value,
         freshness: Freshness,
     ) -> Result<Response> {
+        let response = self.graphql_response(query, variables, freshness).await?;
+        crate::report::record_validation(self.0.config.graphql_url.as_str(), &response);
+        Ok(response)
+    }
+
+    pub(crate) async fn peek_graphql(&self, query: &str, variables: Value) -> Result<Response> {
+        self.graphql_response(query, variables, Freshness::CachedOnly)
+            .await
+    }
+
+    async fn graphql_response(
+        &self,
+        query: &str,
+        variables: Value,
+        freshness: Freshness,
+    ) -> Result<Response> {
         // Read-only queries only: retries must never replay mutations.
         let query = query.trim();
         validate_query(query)?;
-        let response = self
-            .request(
-                self.0.config.graphql_url.to_string(),
-                Some(serde_json::json!({"query":query,"variables":variables})),
-                freshness,
-            )
-            .await?;
-        crate::report::record_validation(self.0.config.graphql_url.as_str(), &response);
-        Ok(response)
+        self.request(
+            self.0.config.graphql_url.to_string(),
+            Some(serde_json::json!({"query":query,"variables":variables})),
+            freshness,
+        )
+        .await
     }
 
     async fn request(

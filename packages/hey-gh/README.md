@@ -60,6 +60,11 @@ CI reads can reuse recent account-discovery selectors when the PR identity, head
 base, and validated test-merge commit match cached REST metadata. Freshness uses
 that PR's discovery page time; unrelated REST metadata keeps its original clock.
 These validations appear as `my-open-prs://HOST/OWNER/REPO/NUMBER#ci-selectors`.
+Completed scans retain each PR's page cursor as a cache lookup hint. CI can use
+a newer validated page before the next scan finishes, without making a GraphQL
+request or replacing the authoritative account roster. The hinted page must
+still contain exactly one matching PR; moved or ambiguous entries fall back to
+REST. The original page validation time remains the freshness boundary.
 Missing, stale, or inconsistent selectors fall back to REST. Explicit refresh and
 cached-only behavior are unchanged, and CI still confirms selectors after
 collecting checks.
