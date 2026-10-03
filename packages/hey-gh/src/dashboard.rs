@@ -1,4 +1,5 @@
 //! Account-wide PR status and a replayable feed of complete PR replacements.
+
 use crate::{Client, Error, Freshness, Result, Watch, WatchKind, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1502,7 +1503,7 @@ impl Client {
                 }
             }
         }
-        let page = self.bootstrap_prefix(&prefix, fields).await?;
+        let page = self.bootstrap_open_prs(&prefix, repository, fields).await?;
         let pulls: Vec<_> = page
             .snapshots
             .into_iter()
@@ -1675,6 +1676,136 @@ fn activity(old: &Value, new: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pr_bootstrap_filters_before_charging_its_snapshot_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::Config {
+            cache_path: dir.path().join("cache.sqlite"),
+            ..Default::default()
+        };
+        config.max_collection_bytes = 1024;
+        let client = Client::with_token(config, "synthetic-token".into()).unwrap();
+        let row = |number, repository: &str, state: &str, removed, bytes| {
+            json!({"pullRequest":{"number":number,"repository":{"nameWithOwner":repository},
+            "state":state,"removed":removed,"body":"x".repeat(bytes),
+            "complete":true,"sourceErrors":{}}})
+        };
+        let selected = "pr-status://github.com/Acme/Demo/1";
+        client
+            .observe(selected, &row(1, "Acme/Demo", "OPEN", false, 0))
+            .await
+            .unwrap();
+        for (number, state, removed) in
+            [(2, "CLOSED", true), (3, "MERGED", true), (4, "OPEN", true)]
+        {
+            client
+                .observe(
+                    &format!("pr-status://github.com/Acme/Demo/{number}"),
+                    &row(number, "Acme/Demo", state, removed, 5000),
+                )
+                .await
+                .unwrap();
+        }
+        let account = client
+            .pr_status_page(None, None, 1000, Duration::ZERO)
+            .await
+            .expect("terminal and removed rows must not overflow the open-list budget");
+        assert_eq!(account.pull_requests.len(), 1);
+        client
+            .observe(
+                "pr-status://github.com/acme/other/5",
+                &row(5, "acme/other", "OPEN", false, 5000),
+            )
+            .await
+            .unwrap();
+        let scoped = client
+            .pr_status_page(Some("ACME/DEMO"), None, 1000, Duration::ZERO)
+            .await
+            .expect("unrelated repositories must not overflow the selected-list budget");
+        assert_eq!(scoped.pull_requests, account.pull_requests);
+        let projected = client
+            .pr_status_page_projected(
+                Some("acme/demo"),
+                None,
+                1000,
+                Duration::ZERO,
+                Some(&["number"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(projected.cursor, scoped.cursor);
+        assert_eq!(projected.pull_requests.len(), 1);
+        assert_eq!(projected.pull_requests[0]["number"], 1);
+        assert!(projected.pull_requests[0].get("body").is_none());
+        assert!(
+            client
+                .pr_status_page_projected(None, None, 1000, Duration::ZERO, Some(&["number"]))
+                .await
+                .is_err(),
+            "projection cannot bypass selected rows' stored-byte limit"
+        );
+        let empty = client
+            .pr_status_page(Some("acme/missing"), None, 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(empty.pull_requests.is_empty());
+        let no_change = client
+            .pr_status_page(
+                Some("acme/demo"),
+                Some(&scoped.cursor),
+                1000,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        assert!(
+            no_change.changes.is_empty(),
+            "bootstrap uses the global atomic feed head"
+        );
+        assert!(
+            client
+                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .await
+                .is_err(),
+            "selected open rows still obey their original stored-byte budget"
+        );
+        client
+            .observe(selected, &row(1, "Acme/Demo", "CLOSED", true, 0))
+            .await
+            .unwrap();
+        let closed = client
+            .pr_status_page(
+                Some("acme/demo"),
+                Some(&scoped.cursor),
+                1000,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        assert_eq!(closed.changes.len(), 1);
+        assert_eq!(closed.changes[0].pull_request["state"], "CLOSED");
+        client
+            .observe(selected, &row(1, "Acme/Demo", "OPEN", false, 0))
+            .await
+            .unwrap();
+        let reopened = client
+            .pr_status_page(
+                Some("acme/demo"),
+                Some(&closed.cursor),
+                1000,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reopened.changes.len(), 1);
+        assert_eq!(reopened.changes[0].pull_request["state"], "OPEN");
+        assert_eq!(
+            client.status().network_requests,
+            0,
+            "bootstrap and deltas remain local reads"
+        );
+    }
 
     #[test]
     fn older_envelopes_do_not_invent_coverage_or_discovery_success() {
