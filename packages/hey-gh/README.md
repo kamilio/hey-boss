@@ -554,9 +554,12 @@ Summaries are `success`, `failure`, `running`, `skipped`, or `unknown`. Missing 
 
 Default polling reuses completed jobs for up to 24 hours only after validating the completed workflow's version and attempt. A changed workflow version or new attempt fetches jobs again. A newly completed workflow validates every job page before establishing that dependency cache. Explicit `--refresh` also revalidates completed jobs.
 
-Independent check-run, commit-status, and workflow-run reads for each immutable
-commit use batches of three through the shared queue. Small embedded queues
-remain sequential. Source errors, head revalidation, and collection byte limits
+Each CI collection keeps up to three independent source or workflow-job reads
+in flight through the shared queue, starting the next ready read when a slot
+opens. Head and test-merge reads do not wait for fixed batches to finish. Jobs
+start once both workflow lists are collected and superseded runs are removed;
+unrelated check sources can still be pending. Small embedded queues remain
+sequential. Source errors, head revalidation, and collection byte limits
 still apply. Rotated logs include CI source timing and result counts, including
 job fetches, without request credentials or response bodies.
 Individual background watches hydrate comments/reviews separately from CI,
@@ -604,8 +607,9 @@ Retain saved feed cursors on failure; a later complete targeted read can publish
 recovery without clearing unrelated source failures. A cached read does not
 establish freshness, and even complete CI does not establish merge readiness.
 
-At most three network attempts are active: two ordinary quota buckets and one
-REST comment/review lane. The detail lane shares core quota and minimum spacing
+For `api.github.com`, at most eight network attempts are active, with separate
+limits for core CI/lifecycle, GraphQL, and REST comment/review work. Other hosts
+use at most three attempts. The detail lane shares core quota and minimum spacing
 with lifecycle and CI reads, but a stalled review request or body cannot hold
 their socket. FIFO ordering applies within each lane. Throttle headers update
 budgets and shared cooldowns before reading the body. `status` distinguishes
