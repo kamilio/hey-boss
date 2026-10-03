@@ -894,6 +894,196 @@ fn imported_archives_preserve_local_history_ids_and_resolved_comment_links() {
     );
 }
 
+fn imported_reference_collision(alias: bool) -> (Fixture, String) {
+    let source = Fixture::new();
+    source
+        .db
+        .execute("UPDATE fleet_meta SET node='controller'", [])
+        .unwrap();
+    source.archive();
+    let key: String = source
+        .db
+        .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let target = Fixture::new();
+    target
+        .db
+        .execute_batch(
+            "UPDATE fleet_meta SET node='companion',role='agent';
+        UPDATE comments SET id=id+100;
+        UPDATE events SET id=id+200;
+        INSERT INTO fleet_row_ids SELECT 'controller','comments',id-100,id FROM comments;
+        INSERT INTO fleet_row_ids SELECT 'controller','events',id-200,id FROM events;",
+        )
+        .unwrap();
+    if alias {
+        target.db.execute_batch("INSERT INTO comments SELECT id+200,project_id,issue_number,author,body,created_at FROM comments;
+            UPDATE events SET data=json_set(data,'$.comment_id',json_extract(data,'$.comment_id')+300) WHERE json_type(data,'$.comment_id')='integer';").unwrap();
+    } else {
+        // A source numeric reference can point at unrelated local history.
+        target.db.execute("INSERT INTO comments VALUES(1,'named:Archive',2,'human:boss','Unrelated private body',99)", []).unwrap();
+    }
+    let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+    assert!(
+        incoming
+            .receive(
+                &transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null).unwrap()
+            )
+            .unwrap()
+    );
+    drop(incoming);
+    transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+    target
+        .db
+        .execute(
+            "UPDATE issues SET archive_key=?1,archived_comments=2,archive_cleanup=1 WHERE number=1",
+            [&key],
+        )
+        .unwrap();
+    (target, key)
+}
+
+#[test]
+fn imported_reference_collisions_restore_idempotently_without_rewriting_history() {
+    for variant in ["source", "alias", "origin"] {
+        let (target, key) = imported_reference_collision(variant == "alias");
+        if variant == "origin" {
+            let archive = Archive::open(&archive_path(&target.db).unwrap()).unwrap();
+            archive
+                .db
+                .execute(
+                    "UPDATE issue_origins SET origin_id=origin_id+500 WHERE kind='comments'",
+                    [],
+                )
+                .unwrap();
+            target.db.execute_batch("UPDATE fleet_row_ids SET origin_id=origin_id+500 WHERE table_name='comments';
+                UPDATE events SET data=json_set(data,'$.comment_id',json_extract(data,'$.comment_id')+500) WHERE json_type(data,'$.comment_id')='integer';").unwrap();
+        }
+        let comments = target
+            .db
+            .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        target.db.execute_batch("CREATE TRIGGER interrupt_reference_repair BEFORE UPDATE ON events WHEN OLD.id=204 BEGIN SELECT RAISE(ABORT,'interrupted reference repair'); END;").unwrap();
+        let interrupted =
+            restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 101).unwrap_err();
+        assert!(interrupted.message.contains("interrupted reference repair"));
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT syncing FROM fleet_meta", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        target
+            .db
+            .execute_batch("DROP TRIGGER interrupt_reference_repair")
+            .unwrap();
+        for _ in 0..3 {
+            restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 102).unwrap();
+            materialize_history(&target.db, &key, "named:Archive", 1).unwrap();
+        }
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            comments
+        );
+        assert_eq!(
+            target
+                .db
+                .query_row(
+                    "SELECT json_extract(data,'$.comment_id') FROM events WHERE id=204",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            101
+        );
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let archive = Archive::read(&archive_path(&target.db).unwrap()).unwrap();
+        history::verify_copy(&archive, &key, "named:Archive", 1).unwrap();
+    }
+}
+
+#[test]
+fn imported_reference_repair_rejects_different_events_and_unproven_links() {
+    for damage in ["body", "scope", "mapping", "reference"] {
+        let (target, _) = imported_reference_collision(false);
+        match damage {
+            "body" => {
+                target.db.execute("UPDATE events SET data=json_set(data,'$.body','private altered payload') WHERE id=202", []).unwrap();
+            }
+            "scope" => {
+                target
+                    .db
+                    .execute("UPDATE events SET issue_number=2 WHERE id=202", [])
+                    .unwrap();
+            }
+            "mapping" => {
+                target
+                    .db
+                    .execute(
+                        "DELETE FROM fleet_row_ids WHERE table_name='events' AND local_id=202",
+                        [],
+                    )
+                    .unwrap();
+            }
+            _ => {
+                target
+                    .db
+                    .execute(
+                        "UPDATE events SET data=json_set(data,'$.comment_id',102) WHERE id=202",
+                        [],
+                    )
+                    .unwrap();
+            }
+        }
+        let before: String = target
+            .db
+            .query_row("SELECT data FROM events WHERE id=202", [], |r| r.get(0))
+            .unwrap();
+        let error = restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 101).unwrap_err();
+        assert_eq!(error.code, "archive_conflict");
+        assert!(error.message.contains("events") && error.message.contains("202"));
+        assert!(!error.message.contains("private"));
+        assert_eq!(
+            target
+                .db
+                .query_row("SELECT data FROM events WHERE id=202", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            before
+        );
+        assert!(
+            target
+                .db
+                .query_row(
+                    "SELECT archive_key IS NOT NULL FROM issues WHERE number=1",
+                    [],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+}
+
 #[test]
 fn imported_history_reserves_unused_ids_before_new_local_comments() {
     let source = Fixture::new();

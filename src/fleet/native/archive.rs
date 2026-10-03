@@ -8,6 +8,10 @@ use crate::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+#[path = "archive_sync_tests.rs"]
+mod tests;
+
 pub(super) fn local_column(column: &str) -> bool {
     matches!(
         column,
@@ -105,6 +109,25 @@ pub(super) fn validate_pull(db: &Connection, payload: &Value) -> issues::Result<
 }
 
 pub(super) fn prepare_pull(
+    db: &Connection,
+    payload: &Value,
+    fetch: impl FnMut(&str, &str, i64, &Value) -> issues::Result<Value>,
+) -> issues::Result<Value> {
+    prepare_pull_inner(db, payload, fetch).map_err(|mut error| {
+        if error.code == "archive_conflict" {
+            error
+                .message
+                .push_str(&format!(" during fleet pull cursor {}", payload["cursor"]));
+            if let Some(details) = error.details.as_mut() {
+                details["sync_operation"] = json!("pull");
+                details["cursor"] = payload["cursor"].clone();
+            }
+        }
+        error
+    })
+}
+
+fn prepare_pull_inner(
     db: &Connection,
     payload: &Value,
     mut fetch: impl FnMut(&str, &str, i64, &Value) -> issues::Result<Value>,
