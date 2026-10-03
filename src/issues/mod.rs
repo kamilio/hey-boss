@@ -390,6 +390,13 @@ pub enum Operation {
     View {
         number: i64,
     },
+    // A separate wire operation prevents old stores from ignoring the projection
+    // and silently returning unbounded history.
+    ViewCompact {
+        number: i64,
+        limit: u32,
+        offset: u32,
+    },
     HoldAttempt {
         number: i64,
         if_version: i64,
@@ -629,6 +636,7 @@ impl Operation {
                 | Self::List { .. }
                 | Self::ReadPlan { .. }
                 | Self::View { .. }
+                | Self::ViewCompact { .. }
                 | Self::InspectAttempt { .. }
                 | Self::Allocation { .. }
                 | Self::Subtasks { .. }
@@ -685,6 +693,7 @@ impl Operation {
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }
             | Self::View { number }
+            | Self::ViewCompact { number, .. }
             | Self::HoldAttempt { number, .. }
             | Self::InspectAttempt { number }
             | Self::ReconcileAttempt { number, .. }

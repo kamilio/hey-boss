@@ -309,7 +309,21 @@ enum Action {
         if_order_version: Option<i64>,
     },
     /// Show the complete Markdown body and the latest 20 comments.
-    View { number: i64 },
+    #[command(
+        after_help = "Use --compact --json for full requirements, current guards, dependencies and PR links without commit/provenance or attachment histories.\nComments page from newest to oldest, displayed chronologically within each page.\nThe comment page targets 64 KiB; a single larger comment is returned whole. Bodies are never truncated.\nRead completeness and next_offset; omitted evidence is not absent evidence. Pages may shift as comments arrive.\nWorks with --supervisor; both ends must support issue_detail_compact."
+    )]
+    View {
+        number: i64,
+        /// Return bounded detail with explicit omissions and comment pagination.
+        #[arg(long)]
+        compact: bool,
+        /// Maximum comments in a compact page (also limited by its byte target).
+        #[arg(long, requires = "compact", value_parser = clap::value_parser!(u32).range(1..=100))]
+        comments_limit: Option<u32>,
+        /// Skip this many newest comments in compact detail.
+        #[arg(long, requires = "compact")]
+        comments_offset: Option<u32>,
+    },
     /// Inspect fleet allocation without claiming, synchronizing, or changing workers.
     Allocation { number: i64 },
     /// Read comments without audit events; newest first by default.
@@ -980,7 +994,25 @@ impl Options {
                 destination: destination.clone(),
                 if_version: *if_version,
             },
-            Action::View { number } => Operation::View { number: *number },
+            Action::View {
+                number,
+                compact,
+                comments_limit,
+                comments_offset,
+            } => {
+                if *compact {
+                    if !self.json {
+                        return Err(Error::invalid("--compact requires --json"));
+                    }
+                    Operation::ViewCompact {
+                        number: *number,
+                        limit: comments_limit.unwrap_or(20),
+                        offset: comments_offset.unwrap_or(0),
+                    }
+                } else {
+                    Operation::View { number: *number }
+                }
+            }
             Action::Allocation { number } => Operation::Allocation {
                 number: *number,
                 machine: issues::identity::machine()?,
@@ -1373,7 +1405,10 @@ pub fn run(options: &Options) -> Result<()> {
         } else {
             issues::identity::project(&cwd, &machine)?
         };
-        let inspection = matches!(operation, Operation::View { .. }) && !interactive;
+        let inspection = matches!(
+            operation,
+            Operation::View { .. } | Operation::ViewCompact { .. }
+        ) && !interactive;
         let mut actor = if operation.needs_actor() || interactive || inspection {
             Some(if inspection {
                 issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?

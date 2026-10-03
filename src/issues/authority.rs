@@ -4,6 +4,7 @@ use super::{BatchAssignment, Error, Operation, Request, Result};
 pub(crate) fn validate(request: &Request) -> Result<()> {
     match &request.operation {
         Operation::View { .. }
+        | Operation::ViewCompact { .. }
         | Operation::Allocation { .. }
         | Operation::RequestStatus { .. }
         | Operation::PullRequests { .. } => {

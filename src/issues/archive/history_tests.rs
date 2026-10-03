@@ -60,6 +60,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn compact_detail_reads_full_archived_requirements_and_comment_pages() {
+    let mut f = Fixture::new();
+    let before = f.read(json!({"action":"view","number":1}));
+    f.archive();
+    let page = f.read(json!({"action":"view_compact","number":1,"limit":1,"offset":0}));
+    assert_eq!(page["issue"]["body"], before["issue"]["body"]);
+    assert_eq!(page["issue"]["state"], "closed");
+    assert_eq!(page["issue"]["closed_by"], before["issue"]["closed_by"]);
+    assert_eq!(page["ready_guard"], before["ready_guard"]);
+    assert_eq!(page["comments"], json!([before["comments"][1]]));
+    assert_eq!(page["completeness"]["comments"]["total"], 2);
+    assert_eq!(page["completeness"]["comments"]["next_offset"], 1);
+    let tail = f.read(json!({"action":"view_compact","number":1,"limit":1,"offset":1}));
+    assert_eq!(tail["comments"], json!([before["comments"][0]]));
+    assert_eq!(tail["comments"][0]["resolved"], true);
+    assert!(tail["completeness"]["comments"]["next_offset"].is_null());
+}
+
+#[test]
 fn maintenance_archives_eligible_issues_and_recovers_interrupted_restores() {
     let mut f = Fixture::new();
     let _owner = crate::database::Owner::start(&f.root.join("issues.db"))
