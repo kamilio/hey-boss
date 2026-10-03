@@ -178,6 +178,7 @@ struct Budget {
     next: Instant,
     remaining: u64,
     spacing: Duration,
+    reset_at_seconds: u64,
 }
 
 pub(crate) struct Scheduler {
@@ -276,6 +277,8 @@ impl Scheduler {
             {
                 let mut job = pending.remove(index).expect("existing queue entry");
                 if let Some(budget) = budgets.get_mut(&job.resource)
+                    && budget.remaining > 0
+                    && budget.reset_at_seconds > now_ms() / 1000
                     && !conditional_budget_exempt(&job, budget)
                 {
                     // Reserve at dispatch, not response: parallel sockets must
@@ -436,12 +439,16 @@ impl Scheduler {
                         };
                         // Authenticated REST 304 validations do not consume primary
                         // quota. Preserve pacing debt from the last charged result.
+                        // A pacing reservation belongs to its quota window.
+                        // Never renew an exhausted/expired window's long wait
+                        // when dispatch resumes after reset or a quiet period.
+                        let previous = budgets
+                            .get(&job.resource)
+                            .filter(|budget| budget.reset_at_seconds == reset);
                         let next = if status == StatusCode::NOT_MODIFIED && remaining > 0 {
-                            budgets
-                                .get(&job.resource)
-                                .map_or(Instant::now(), |budget| budget.next)
+                            previous.map_or(Instant::now(), |budget| budget.next)
                         } else {
-                            budgets.get(&job.resource).map_or_else(
+                            previous.map_or_else(
                                 || quota_deadline(wait),
                                 |budget| budget.next.max(quota_deadline(wait)),
                             )
@@ -452,6 +459,7 @@ impl Scheduler {
                                 next,
                                 remaining,
                                 spacing: wait,
+                                reset_at_seconds: reset,
                             },
                         );
                     }
@@ -499,6 +507,8 @@ impl Scheduler {
                                     next: quota_deadline(wait),
                                     remaining: 0,
                                     spacing: wait,
+                                    reset_at_seconds: number(&headers, "x-ratelimit-reset")
+                                        .unwrap_or(0),
                                 },
                             );
                             if let Some(retry) = retry {
@@ -592,6 +602,7 @@ impl Scheduler {
                             next: quota_deadline(wait),
                             remaining: 0,
                             spacing: wait,
+                            reset_at_seconds: number(&headers, "x-ratelimit-reset").unwrap_or(0),
                         },
                     );
                     // Retry-After always pauses shared traffic, even when
