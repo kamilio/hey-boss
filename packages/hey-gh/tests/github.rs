@@ -711,6 +711,90 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 }
                 node
             };
+            if body["query"]
+                .as_str()
+                .unwrap()
+                .contains("MyOpenPullRequestsBoundary")
+            {
+                let (total, tail) = if mode == "account-page-timeout" {
+                    (60, Some("acme/page59"))
+                } else if mode == "account-large" {
+                    (25, Some("acme/watch23"))
+                } else if mode.starts_with("account-growing") && phase >= 1 {
+                    (3, Some("acme/new"))
+                } else if phase >= 9 {
+                    (0, None)
+                } else if phase >= 8 || (mode == "account-state-version" && phase == 7) {
+                    (1, Some("acme/other"))
+                } else {
+                    (2, Some("acme/other"))
+                };
+                let nodes: Vec<_> = tail
+                    .map(|repo| json!({"id":node(repo)["id"]}))
+                    .into_iter()
+                    .collect();
+                return reply(
+                    200,
+                    json!({"data":{"viewer":{"pullRequests":{
+                        "totalCount":total,"nodes":nodes
+                    }}}}),
+                    &[],
+                );
+            }
+            if mode.starts_with("account-growing") {
+                let (nodes, next, total) = if body["variables"]["after"] == "PR-new" {
+                    (vec![node("acme/new")], None, 3)
+                } else if body["variables"]["after"] == "PR-next" && mode == "account-growing-page"
+                {
+                    (vec![node("acme/other")], Some("PR-new"), 3)
+                } else if body["variables"]["after"] == "PR-next" {
+                    (vec![node("acme/other"), node("acme/new")], None, 3)
+                } else {
+                    (
+                        vec![node("acme/demo")],
+                        Some("PR-next"),
+                        if phase == 0 { 2 } else { 3 },
+                    )
+                };
+                return reply(
+                    200,
+                    json!({"data":{"viewer":{"pullRequests":{
+                        "totalCount":total,"nodes":nodes,
+                        "pageInfo":{"hasNextPage":next.is_some(),"endCursor":next}
+                    }}}}),
+                    &[],
+                );
+            }
+            if mode.starts_with("account-cohort-") {
+                let (mut nodes, total) = match mode.as_str() {
+                    "account-cohort-missing-tail" => (vec![node("acme/demo"), node("acme/new")], 2),
+                    "account-cohort-shrinking" => (vec![node("acme/other")], 1),
+                    "account-cohort-missing-member" => {
+                        (vec![node("acme/other"), node("acme/new")], 3)
+                    }
+                    "account-cohort-extra-member" => (
+                        vec![node("acme/demo"), node("acme/reopened"), node("acme/other")],
+                        3,
+                    ),
+                    "account-cohort-duplicate" => (
+                        vec![node("acme/demo"), node("acme/demo"), node("acme/other")],
+                        3,
+                    ),
+                    "account-cohort-closed" => (vec![node("acme/demo"), node("acme/other")], 2),
+                    _ => unreachable!(),
+                };
+                if mode == "account-cohort-closed" {
+                    nodes[0]["state"] = json!("CLOSED");
+                }
+                return reply(
+                    200,
+                    json!({"data":{"viewer":{"pullRequests":{
+                        "totalCount":total,"nodes":nodes,
+                        "pageInfo":{"hasNextPage":false,"endCursor":null}
+                    }}}}),
+                    &[],
+                );
+            }
             if mode == "account-page-timeout" {
                 let size: usize = body["query"]
                     .as_str()
@@ -3236,8 +3320,8 @@ async fn cold_account_discovery_publishes_pending_prs_before_ci_is_available() {
                 .as_str()
                 .is_some_and(|q| q.contains("MyOpenPullRequests")))
             .count(),
-        2,
-        "projection reuses the one paginated scan"
+        3,
+        "projection reuses the boundary and paginated scan"
     );
     api.stop().await;
 }
@@ -3478,6 +3562,82 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
 }
 
 #[tokio::test]
+async fn discovery_finishes_its_starting_cohort_when_new_prs_are_appended() {
+    for mode in ["account-growing", "account-growing-page"] {
+        let h = Harness::new().await;
+        h.mode(mode);
+        let c = h.client();
+        let first = c
+            .all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(
+            first
+                .iter()
+                .all(|pr| pr["repository"]["nameWithOwner"] != "acme/new")
+        );
+        let calls = h.calls().len();
+        assert_eq!(calls, 3, "no pages beyond the starting tail are requested");
+        assert_eq!(
+            h.client()
+                .all_my_open_pull_requests(Freshness::CachedOnly)
+                .await
+                .unwrap(),
+            first
+        );
+        assert_eq!(h.calls().len(), calls);
+        h.phase(1);
+        let next = c
+            .all_my_open_pull_requests(Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(next.len(), 3);
+        assert!(
+            next.iter()
+                .any(|pr| pr["repository"]["nameWithOwner"] == "acme/new")
+        );
+    }
+}
+
+#[tokio::test]
+async fn discovery_rejects_inconsistent_cohorts_and_keeps_the_last_complete_scan() {
+    let h = Harness::new().await;
+    let c = h.client();
+    h.mode("account");
+    let good = c
+        .all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    for mode in [
+        "missing-tail",
+        "shrinking",
+        "missing-member",
+        "extra-member",
+        "duplicate",
+        "closed",
+    ] {
+        h.mode(&format!("account-cohort-{mode}"));
+        assert!(
+            c.all_my_open_pull_requests(Freshness::Revalidate)
+                .await
+                .is_err(),
+            "{mode}"
+        );
+        let calls = h.calls().len();
+        assert_eq!(
+            h.client()
+                .all_my_open_pull_requests(Freshness::CachedOnly)
+                .await
+                .unwrap(),
+            good,
+            "{mode}"
+        );
+        assert_eq!(h.calls().len(), calls);
+    }
+}
+
+#[tokio::test]
 async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     let h = Harness::new().await;
     h.mode("account-page-timeout");
@@ -3494,11 +3654,11 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     assert_eq!(first[59]["repository"]["nameWithOwner"], "acme/page59");
     assert_eq!(
         h.calls().len(),
-        3,
-        "each page is fetched once without retries"
+        4,
+        "the boundary and each page are fetched once without retries"
     );
-    assert_eq!(h.calls()[1].body["variables"]["after"], "25");
-    assert_eq!(h.calls()[2].body["variables"]["after"], "50");
+    assert_eq!(h.calls()[2].body["variables"]["after"], "25");
+    assert_eq!(h.calls()[3].body["variables"]["after"], "50");
     assert_eq!(
         h.client()
             .all_my_open_pull_requests(Freshness::CachedOnly)
@@ -3507,7 +3667,7 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
         first,
         "the full roster remains durable across client reconstruction"
     );
-    assert_eq!(h.calls().len(), 3);
+    assert_eq!(h.calls().len(), 4);
 }
 
 #[tokio::test]
@@ -3524,11 +3684,11 @@ async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failur
     assert_eq!(b.unwrap().len(), 2);
     assert_eq!(
         h.calls().len(),
-        2,
-        "one paginated scan, shared by both callers"
+        3,
+        "one boundary and paginated scan, shared by both callers"
     );
     assert!(
-        h.calls()[0].body["query"]
+        h.calls()[1].body["query"]
             .as_str()
             .unwrap()
             .contains("first: 25")
@@ -3544,7 +3704,7 @@ async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failur
             .len(),
         2
     );
-    assert_eq!(h.calls().len(), 2);
+    assert_eq!(h.calls().len(), 3);
     h.mode("account-discovery-errors");
     assert!(
         restarted
@@ -6350,7 +6510,7 @@ async fn later_discovery_page_wins_over_rest_observed_between_pages_without_curs
             call.path == "/graphql"
                 && call.body["query"]
                     .as_str()
-                    .is_some_and(|q| q.contains("MyOpenPullRequests"))
+                    .is_some_and(|q| q.contains("MyOpenPullRequests("))
         })
         .collect();
     // Cache a first-page new-head observation, then publish old-head REST

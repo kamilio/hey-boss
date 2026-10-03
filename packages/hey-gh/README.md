@@ -185,8 +185,12 @@ and PR number is opened as a new PR and cannot reuse the old node's CI evidence.
 Cached-only preparation keeps terminal follow-up probes entirely in the cache.
 
 Account discovery paginates the viewer's authored PR connection rather than
-using Search. Default reads first collect batched metadata and head-check
-rollups, then register a durable account watch automatically. Its independent
+using Search. Each scan records the starting count and last PR in creation
+order, then reads through that boundary. PRs appended during the scan are picked
+up on the next pass. Missing boundaries, duplicate PRs, and inconsistent counts
+fail explicitly and retain the last complete collection. Default reads first
+collect batched metadata and head-check rollups, then register a durable account
+watch automatically. Its independent
 CI and detail loops hydrate the richer REST CI, comments, and reviews in the
 background. `headCiState` is GitHub's observed head-commit rollup, **not** a
 merge-eligibility verdict; `statusCheckRollupComplete=false` indicates that the
