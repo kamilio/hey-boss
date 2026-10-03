@@ -26,6 +26,8 @@ struct Fixture {
     denied: bool,
     classic: bool,
     strict: bool,
+    protection: Value,
+    next_protection: Option<Value>,
     calls: Vec<String>,
 }
 async fn handler(State(state): State<Arc<Mutex<Fixture>>>, uri: Uri) -> impl IntoResponse {
@@ -64,7 +66,12 @@ async fn handler(State(state): State<Arc<Mutex<Fixture>>>, uri: Uri) -> impl Int
             json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":s.strict,"required_status_checks":[{"context":"pre-commit","integration_id":15368}]}}])
         }
     } else if path.contains("/branches/") {
-        json!({"protected":!path.ends_with("/layer"),"commit":{"sha":if path.ends_with("/layer") {BASE} else {TRUNK}}})
+        let protection = s.protection.clone();
+        if let Some(next) = s.next_protection.take() {
+            s.protection = next;
+            s.classic = true;
+        }
+        json!({"protected":!path.ends_with("/layer"),"protection":protection,"commit":{"sha":if path.ends_with("/layer") {BASE} else {TRUNK}}})
     } else if path.contains("/compare/") {
         json!({"merge_base_commit":{"sha":TRUNK}})
     } else if path.ends_with("/check-runs") {
@@ -93,6 +100,8 @@ async fn fixture(
         denied: false,
         classic: false,
         strict: false,
+        protection: Value::Null,
+        next_protection: None,
         calls: vec![],
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -112,6 +121,129 @@ async fn fixture(
     let app = Router::new().fallback(handler).with_state(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (client, state, dir, task)
+}
+
+#[tokio::test]
+async fn explicit_disabled_classic_checks_avoid_redundant_404_but_keep_trunk_rules() {
+    let (c, s, _dir, task) = fixture(stack("main")).await;
+    s.lock().unwrap().protection = json!({"enabled":false,"required_status_checks":{
+        "enforcement_level":"off","contexts":[],"checks":[]
+    }});
+    let report = c
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(report.state, "failure");
+    assert_eq!(report.checks[0].context, "pre-commit");
+    assert_eq!(report.checks[0].sha.as_deref(), Some(MERGE));
+    assert!(report.errors.is_empty());
+    let calls = &s.lock().unwrap().calls;
+    assert!(
+        calls
+            .iter()
+            .any(|p| p == "/repos/acme/demo/rules/branches/main")
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|p| p.contains("/protection/required_status_checks"))
+            .count(),
+        0,
+        "fresh branch metadata already proves classic checks are disabled"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn absent_enabled_or_inconsistent_classic_metadata_keeps_the_policy_probe() {
+    for protection in [
+        Value::Null,
+        json!({"enabled":false}),
+        json!({"enabled":true,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}),
+        json!({"enabled":"false","required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}),
+        json!({"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":["classic"],"checks":[]}}),
+        json!({"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[{"context":"classic"}]}}),
+        json!({"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[],"strict":true}}),
+    ] {
+        let (c, s, _dir, task) = fixture(stack("main")).await;
+        {
+            let mut state = s.lock().unwrap();
+            state.protection = protection.clone();
+            state.classic = true;
+        }
+        let report = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(
+            report.checks.iter().any(|c| c.context == "classic"),
+            "{protection}"
+        );
+        assert_eq!(
+            s.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|p| p.contains("/protection/required_status_checks"))
+                .count(),
+            1
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn disabled_classic_metadata_does_not_hide_denied_rulesets() {
+    let (c, s, _dir, task) = fixture(stack("main")).await;
+    {
+        let mut state = s.lock().unwrap();
+        state.protection = json!({"enabled":false,"required_status_checks":{
+            "enforcement_level":"off","contexts":[],"checks":[]
+        }});
+        state.denied = true;
+    }
+    let report = c
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(report.state, "unknown");
+    assert!(report.errors.iter().any(|e| e.source == "rulesets"));
+    assert!(
+        !s.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|p| p.contains("/protection/required_status_checks"))
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn classic_policy_enabled_without_a_commit_change_is_recollected() {
+    let (c, s, _dir, task) = fixture(stack("main")).await;
+    {
+        let mut state = s.lock().unwrap();
+        state.protection = json!({"enabled":false,"required_status_checks":{
+            "enforcement_level":"off","contexts":[],"checks":[]
+        }});
+        state.next_protection = Some(json!({"enabled":true}));
+    }
+    let report = c
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(report.checks.iter().any(|c| c.context == "classic"));
+    assert_eq!(report.policy_sha.as_deref(), Some(TRUNK));
+    assert!(
+        s.lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|p| p.as_str() == "/repos/acme/demo/branches/main")
+            .count()
+            >= 4
+    );
+    task.abort();
 }
 
 #[tokio::test]
