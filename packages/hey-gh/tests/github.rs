@@ -2426,6 +2426,179 @@ async fn authenticated_cli_reads_and_restart_preserve_watches_and_cursors() {
 }
 
 #[tokio::test]
+async fn ci_byte_budget_discards_superseded_workflows_before_counting_jobs() {
+    let h = Harness::new().await;
+    h.phase(2);
+    let c = h.client();
+    let baseline = c
+        .ci_report("acme/demo", HEAD, None, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let mut sources = Vec::new();
+    for (path, field) in [
+        (
+            format!("repos/acme/demo/commits/{HEAD}/check-runs?filter=latest&per_page=100"),
+            "check_runs",
+        ),
+        (
+            format!("repos/acme/demo/commits/{HEAD}/status?per_page=100"),
+            "statuses",
+        ),
+        (
+            format!("repos/acme/demo/actions/runs?head_sha={HEAD}&per_page=100"),
+            "workflow_runs",
+        ),
+    ] {
+        let mut values = c
+            .pages(&path, Some(field), Freshness::CachedOnly)
+            .await
+            .unwrap();
+        if field == "statuses" {
+            for value in &mut values {
+                value["observed_sha"] = json!(HEAD);
+            }
+        }
+        sources.extend(values);
+    }
+    let source_bytes: usize = sources.iter().map(|v| v.to_string().len()).sum();
+    let report_bytes: usize = baseline
+        .check_runs
+        .iter()
+        .chain(&baseline.commit_statuses)
+        .chain(&baseline.workflow_runs)
+        .chain(&baseline.jobs)
+        .map(|v| v.to_string().len())
+        .sum();
+    let mut config = h.config();
+    config.max_collection_bytes = source_bytes.max(report_bytes) + 1;
+    assert!(
+        source_bytes
+            + baseline
+                .jobs
+                .iter()
+                .map(|v| v.to_string().len())
+                .sum::<usize>()
+            > config.max_collection_bytes
+    );
+    let limited = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let report = limited
+        .ci_report("acme/demo", HEAD, None, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(report.errors.is_empty());
+    assert_eq!(report.workflow_runs, baseline.workflow_runs);
+    assert_eq!(report.jobs, baseline.jobs);
+}
+
+#[tokio::test]
+async fn ci_queues_ready_merge_sources_and_jobs_while_an_unrelated_check_is_stalled() {
+    for warm_merge in [false, true] {
+        let h = Harness::new().await;
+        h.phase(2);
+        h.mode("ci-batch-blocked-checks");
+        let mut config = h.config();
+        config.queue_timeout = Duration::from_secs(5);
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        for sha in [HEAD, MERGE] {
+            if sha == MERGE && !warm_merge {
+                continue;
+            }
+            for (path, field) in [
+                (
+                    format!("repos/acme/demo/commits/{sha}/status?per_page=100"),
+                    "statuses",
+                ),
+                (
+                    format!("repos/acme/demo/actions/runs?head_sha={sha}&per_page=100"),
+                    "workflow_runs",
+                ),
+            ] {
+                c.pages(&path, Some(field), Freshness::Revalidate)
+                    .await
+                    .unwrap();
+            }
+            if sha == MERGE {
+                c.pages(
+                    &format!("repos/acme/demo/commits/{sha}/check-runs?filter=latest&per_page=100"),
+                    Some("check_runs"),
+                    Freshness::Revalidate,
+                )
+                .await
+                .unwrap();
+            }
+        }
+        let read = tokio::spawn({
+            let c = c.clone();
+            async move {
+                c.ci_report(
+                    "acme/demo",
+                    HEAD,
+                    Some(MERGE),
+                    Freshness::MaxAge(Duration::from_secs(30)),
+                )
+                .await
+            }
+        });
+        until(|| {
+            h.calls()
+                .iter()
+                .any(|call| call.path == format!("/repos/acme/demo/commits/{HEAD}/check-runs"))
+        })
+        .await;
+        // The synthetic origin has one REST socket. Independent work should
+        // already be queued behind it, even while this check holds that socket.
+        // With both workflow lists cached, that ready work is the jobs read.
+        let ready = tokio::time::timeout(Duration::from_secs(1), async {
+            while c.status().outstanding_requests < if warm_merge { 2 } else { 3 } {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            ready.is_ok(),
+            "ready CI work waited for an unrelated check (warm_merge={warm_merge})"
+        );
+        assert!(c.status().outstanding_requests <= 3);
+        let competitor = if warm_merge {
+            let c = c.clone();
+            Some(tokio::spawn(async move {
+                c.get("slow", Freshness::Revalidate).await
+            }))
+        } else {
+            None
+        };
+        if competitor.is_some() {
+            until(|| c.status().outstanding_requests == 3).await;
+        }
+        h.mock.release.notify_one();
+        // Jobs were ready before this later contender. The report must finish
+        // without waiting for that contender's deliberately blocked response.
+        let report = tokio::time::timeout(Duration::from_secs(2), read).await;
+        if let Some(competitor) = competitor {
+            until(|| h.calls().iter().any(|call| call.path == "/slow")).await;
+            h.mock.release.notify_one();
+            competitor.await.unwrap().unwrap();
+        }
+        let report = report
+            .expect("CI waited for a later unrelated request")
+            .unwrap()
+            .unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.summary.state, "success");
+        assert_eq!(
+            report
+                .check_runs
+                .iter()
+                .map(|c| c["head_sha"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [HEAD, MERGE]
+        );
+        assert_eq!(report.workflow_runs.len(), 1);
+        assert_eq!(report.jobs.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn ci_batches_independent_sources_but_preserves_single_slot_queue_reads() {
     for capacity in [1, 256] {
         let h = Harness::new().await;
