@@ -110,17 +110,28 @@ fn version_matches(
     else {
         return Ok(false);
     };
+    let (role, node, authority): (String, String, String) = db.query_row(
+        "SELECT role,node,coalesce((SELECT origin FROM fleet_row_ids WHERE table_name='events' AND local_id=?1 ORDER BY rowid LIMIT 1),node) FROM fleet_meta WHERE id=1",
+        [event], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    )?;
+    // Versions are local until the journal is accepted. A peer's coincident
+    // number cannot explain a supervisor write, or survive a canonical pull.
+    let local_pending = role == "agent" && db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_outbox WHERE table_name IN ('issues','comments','events','issue_status_updates') AND json_extract(coalesce(after_json,before_json),'$.project_id')=?1 AND coalesce(json_extract(coalesce(after_json,before_json),'$.number'),json_extract(coalesce(after_json,before_json),'$.issue_number'))=?2 AND table_name='issues')",
+        params![project, issue.number], |r| r.get::<_,bool>(0),
+    )?;
     let mut steps = std::collections::BTreeSet::new();
-    let mut stmt = db.prepare("SELECT actor,action,CASE WHEN action='requirements_preserved' THEN data ELSE '{}' END FROM events WHERE project_id=?1 AND issue_number=?2 AND id>?3 ORDER BY id")?;
-    let rows = stmt.query_map(params![project, issue.number, event], |r| {
+    let mut stmt = db.prepare("SELECT actor,action,CASE WHEN action='requirements_preserved' THEN data ELSE '{}' END,coalesce((SELECT origin FROM fleet_row_ids WHERE table_name='events' AND local_id=events.id ORDER BY rowid LIMIT 1),?4) FROM events WHERE project_id=?1 AND issue_number=?2 AND id>?3 ORDER BY id")?;
+    let rows = stmt.query_map(params![project, issue.number, event, node], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
         ))
     })?;
     for row in rows {
-        let (author, action, data) = row?;
+        let (author, action, data, origin) = row?;
         // Prose is never evidence. Only the owning actor's own final notes are
         // harmless; another actor's comment may contain new work or an approval.
         if author == actor && action == "commented" {
@@ -130,7 +141,9 @@ fn version_matches(
             return Ok(false);
         }
         let data: Value = serde_json::from_str(&data)?;
-        if data["acknowledgement"] == *ack
+        let canonical = if role == "agent" { &authority } else { &node };
+        if (origin == *canonical || (local_pending && origin == node))
+            && data["acknowledgement"] == *ack
             && matches!(data["source"].as_str(), Some("owner_comment" | "replica"))
             && let Some(previous) = data["previous_version"].as_i64()
             && previous.checked_add(1) == data["version"].as_i64()
