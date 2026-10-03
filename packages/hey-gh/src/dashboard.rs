@@ -880,14 +880,21 @@ impl Client {
         }
         let resource = format!("{}{repository}/{number}", self.status_prefix());
         if let Some(snapshot) = self.stored_snapshot(&resource).await? {
-            self.publish_pr_status(
-                (repository, number),
-                (&snapshot["pullRequest"], 0),
-                None,
-                true,
-                health,
-            )
-            .await?;
+            // Reusing cached policy to project the dashboard is separate from
+            // collecting this caller's evidence. Its older branch validations
+            // must not make freshly fetched CI or reviews appear stale.
+            crate::report::VALIDATIONS
+                .scope(
+                    std::cell::RefCell::new(Vec::new()),
+                    self.publish_pr_status(
+                        (repository, number),
+                        (&snapshot["pullRequest"], 0),
+                        None,
+                        true,
+                        health,
+                    ),
+                )
+                .await?;
         }
         Ok(())
     }
