@@ -105,6 +105,7 @@ fn main() -> Result<()> {
                 limit: 50,
                 offset: 0,
                 all: false,
+                compact: false,
             },
         ),
         ("issue_view", Operation::View { number }),
