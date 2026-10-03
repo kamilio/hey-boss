@@ -11,6 +11,8 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 mod scaleft;
 
+mod services;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Process {
     pub pid: u32,
@@ -1515,6 +1517,33 @@ pub(super) fn aggressive_harvest(
     observations: &mut BTreeMap<String, Observation>,
     apply: bool,
 ) -> io::Result<(Vec<Item>, usize)> {
+    let (mut items, killed) = aggressive_expiration(
+        table,
+        pressure,
+        apply,
+        |table, refresh| {
+            if refresh {
+                services::Guard::refresh(table)
+            } else {
+                services::Guard::read(table)
+            }
+        },
+        signal,
+    )?;
+    let (browser_items, browser_exited) = harvest(table, config, observations, apply)?;
+    items.extend(browser_items);
+    let (idle_items, exited) = super::codex::graceful_idle(table, config, observations, apply)?;
+    items.extend(idle_items);
+    Ok((items, killed + browser_exited + exited))
+}
+
+fn aggressive_expiration(
+    table: &Table,
+    pressure: &str,
+    apply: bool,
+    mut inspect_services: impl FnMut(&Table, bool) -> io::Result<services::Guard>,
+    mut send: impl FnMut(&Process, i32) -> io::Result<bool>,
+) -> io::Result<(Vec<Item>, usize)> {
     let uid = unsafe { libc::geteuid() };
     let mut protected = super::codex::family(table);
     let mut pid = std::process::id();
@@ -1561,6 +1590,21 @@ pub(super) fn aggressive_harvest(
         }
     }
     let mut items = Vec::new();
+    let services = inspect_services(table, false)?;
+    selected.retain(|pid| {
+        if let Some(reason) = services.protection(&table[pid]) {
+            items.push(Item {
+                name: format!("Protected service · PID {pid}"),
+                detail: reason.into(),
+                eligible: false,
+                worktree: None,
+                error: None,
+            });
+            false
+        } else {
+            true
+        }
+    });
     for (pid, protection) in
         super::workload_ownership::protected(table, &selected, &BTreeSet::new())
     {
@@ -1574,10 +1618,26 @@ pub(super) fn aggressive_harvest(
         });
     }
     let mut signaled = Vec::new();
+    // One bounded inventory for the whole signal batch, refreshed after workload
+    // inspection and again before escalation. Failure preserves every candidate.
+    let term_services = (apply && !selected.is_empty()).then(|| inspect_services(table, true));
     for pid in selected {
         let p = &table[&pid];
+        if let Some(protection) = term_services
+            .as_ref()
+            .and_then(|guard| services::protection(guard, p))
+        {
+            items.push(Item {
+                name: format!("Protected service · PID {pid}"),
+                error: protection.uncertain.then(|| protection.reason.clone()),
+                detail: protection.reason,
+                eligible: false,
+                worktree: None,
+            });
+            continue;
+        }
         let detail = if apply {
-            match signal(p, libc::SIGTERM) {
+            match send(p, libc::SIGTERM) {
                 Ok(true) => {
                     signaled.push(p);
                     "Sent TERM; checking exit".into()
@@ -1600,10 +1660,18 @@ pub(super) fn aggressive_harvest(
         std::thread::sleep(Duration::from_secs(1));
     }
     let pending: BTreeSet<_> = signaled.iter().map(|p| p.pid).collect();
-    let newly_owned = super::workload_ownership::protected(table, &pending, &BTreeSet::new());
+    let mut newly_owned = super::workload_ownership::protected(table, &pending, &BTreeSet::new());
+    if !signaled.is_empty() {
+        let kill_services = inspect_services(table, true);
+        for p in &signaled {
+            if let Some(protection) = services::protection(&kill_services, p) {
+                newly_owned.insert(p.pid, protection);
+            }
+        }
+    }
     for p in &signaled {
         if !newly_owned.contains_key(&p.pid) {
-            signal(p, libc::SIGKILL)?;
+            send(p, libc::SIGKILL)?;
         }
     }
     if !signaled.is_empty() {
@@ -1629,11 +1697,7 @@ pub(super) fn aggressive_harvest(
             }
         }
     }
-    let (browser_items, browser_exited) = harvest(table, config, observations, apply)?;
-    items.extend(browser_items);
-    let (idle_items, exited) = super::codex::graceful_idle(table, config, observations, apply)?;
-    items.extend(idle_items);
-    Ok((items, killed + browser_exited + exited))
+    Ok((items, killed))
 }
 
 #[cfg(test)]

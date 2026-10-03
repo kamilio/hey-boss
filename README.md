@@ -1021,6 +1021,13 @@ JSON status distinguish the responding binary (`reporting_build`) from the worke
 that began the last scan (`scan_build`); old snapshots retain an unknown scan build
 until a new check runs. Compare both IDs after deployment before trusting telemetry.
 
+On macOS, aggressive process expiration preserves launchd-managed services and
+their descendants, including interpreter-backed agents and daemons. It inventories
+the GUI, user and system domains before selection and refreshes ownership and
+process identity before each TERM/KILL batch. Unavailable or incomplete service
+inspection preserves candidates; domain environment and service arguments are
+never included in diagnostics.
+
 With `configure --aggressive true`, explicitly released clean linked worktrees become eligible after
 4 hours without tracked-source or Git activity. Tracked edits, unpushed commits,
 locks and active processes prevent removal. Untracked/ignored output neither blocks
