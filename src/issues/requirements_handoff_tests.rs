@@ -25,6 +25,11 @@ fn edit_handoff_notes(f: &mut HandoffFixture) {
     );
 }
 
+// Resident workers predating preservation receipts compare these exact values.
+fn handoff_version_is_current(store: &Store, project: &str) -> bool {
+    store.db.query_row("SELECT i.version=json_extract(e.data,'$.requirements_handoff.version') FROM issues i JOIN events e ON e.project_id=i.project_id AND e.issue_number=i.number WHERE i.project_id=?1 AND i.number=1 AND e.action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY e.id DESC LIMIT 1", [project], |r| r.get::<_,Option<bool>>(0)).unwrap().unwrap_or(false)
+}
+
 #[test]
 fn requirements_handoff_reconciles_only_an_explicit_current_snapshot() {
     for outcome in ["completed", "blocked", "interrupted", "failed"] {
@@ -233,6 +238,7 @@ fn requirements_handoff_owner_comments_preserve_exact_guarded_completion() {
                 if_version: f.issue().version,
             });
         }
+        assert!(handoff_version_is_current(&f.store, &f.job.project.id));
         f.store
             .worker_finish(&f.job, "completed", "Delivered")
             .unwrap();
@@ -264,6 +270,9 @@ fn requirements_handoff_preservation_cannot_cover_a_gap_or_changed_binding() {
             body: "Published delivery details".into(),
             allow_long_comment: false,
         });
+        // Exercise receipts retained from the earlier, version-advancing writer.
+        // Zero-delta audit notes cannot authorize a revision advance at all.
+        f.store.db.execute_batch("UPDATE events SET data=json_set(data,'$.version',json_extract(data,'$.previous_version')+1) WHERE action='requirements_preserved'; UPDATE issues SET version=version+1;").unwrap();
         match change {
             "run" => {
                 f.store.db.execute("UPDATE events SET data=json_set(data,'$.acknowledgement.run','another-run') WHERE action='requirements_preserved'", []).unwrap();
@@ -305,6 +314,8 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
         "final_notes",
         "external_comment",
         "external_delayed",
+        "external_rows_first",
+        "external_events_first",
         "requirements",
         "owner",
         "watcher",
@@ -342,8 +353,52 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
                 &json!({"replica":"pull","node":"peer","payload":payload,"receipts":receipts}),
             );
         };
+        let project_id = f.job.project.id.clone();
         let sync = |main: &Store, peer: &Store| {
             let changes: Vec<Value> = peer.db.prepare("SELECT seq,table_name,before_json,after_json,created_at FROM fleet_outbox ORDER BY seq").unwrap().query_map([], |r| Ok(json!({"seq":r.get::<_,i64>(0)?,"table_name":r.get::<_,String>(1)?,"before_json":r.get::<_,Option<String>>(2)?,"after_json":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?}))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            if matches!(case, "external_rows_first" | "external_events_first") {
+                let table = if case == "external_rows_first" {
+                    "comments"
+                } else {
+                    "events"
+                };
+                let first: Vec<_> = changes
+                    .iter()
+                    .filter(|c| c["table_name"] == table || c["table_name"] == "agents")
+                    .cloned()
+                    .collect();
+                let cursor: i64 = main
+                    .db
+                    .query_row("SELECT coalesce(max(seq),0) FROM fleet_outbox", [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                let request = json!({"replica":"accept","node":"peer","changes":first});
+                let result = replica(&main.db, &request);
+                assert!(
+                    result
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|r| r["state"] == "applied"),
+                    "{case}: {result}"
+                );
+                assert!(
+                    !handoff_version_is_current(main, &project_id),
+                    "Legacy reader must reject the first split batch: {case}"
+                );
+                let first_delta: String = main.db.query_row("SELECT table_name FROM fleet_outbox WHERE seq>?1 AND table_name IN ('issues','comments','events') ORDER BY seq LIMIT 1", [cursor], |r| r.get(0)).unwrap();
+                assert_eq!(
+                    first_delta, "issues",
+                    "Canonical pulls must invalidate before exposing history"
+                );
+                let version = get_issue(&main.db, &project_id, 1, true).unwrap().version;
+                assert_eq!(replica(&main.db, &request), result);
+                assert_eq!(
+                    get_issue(&main.db, &project_id, 1, true).unwrap().version,
+                    version
+                );
+            }
             let request = json!({"replica":"accept","node":"peer","changes":changes});
             let receipts = replica(&main.db, &request);
             assert!(
@@ -402,8 +457,12 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
                 })
                 .unwrap();
         };
-        if matches!(case, "delayed_notes" | "external_delayed") {
-            comment(&mut peer, case == "external_delayed");
+        let delayed = matches!(
+            case,
+            "delayed_notes" | "external_delayed" | "external_rows_first" | "external_events_first"
+        );
+        if delayed {
+            comment(&mut peer, case != "delayed_notes");
         }
         requirements_ready(&mut f, true).unwrap();
         f.apply(Operation::Assign {
@@ -412,7 +471,7 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
             target: "github".into(),
             if_version: f.issue().version,
         });
-        if !matches!(case, "delayed_notes" | "external_delayed") {
+        if !delayed {
             pull(&f.store, &peer, json!([]));
         }
         if matches!(case, "final_notes" | "version_collision") {
@@ -451,6 +510,19 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
         }
         sync(&f.store, &peer);
         peer = Store::open(&f.root.join("peer.db")).unwrap();
+        if matches!(
+            case,
+            "control_edited" | "control_unchanged" | "delayed_notes" | "final_notes"
+        ) {
+            assert!(
+                handoff_version_is_current(&f.store, &f.job.project.id),
+                "Supervisor legacy reader: {case}"
+            );
+            assert!(
+                handoff_version_is_current(&peer, &f.job.project.id),
+                "Companion legacy reader: {case}"
+            );
+        }
         peer.worker_finish(
             &f.job,
             "completed",
@@ -510,6 +582,44 @@ fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
             assert_eq!(issue.assignee.as_deref(), Some("human:boss"));
         }
     }
+}
+
+#[test]
+fn requirements_handoff_suppressed_external_history_does_not_invalidate() {
+    let mut f = HandoffFixture::new(true);
+    requirements_ready(&mut f, true).unwrap();
+    let replica = crate::fleet::test_replica;
+    replica(
+        &f.store.db,
+        &json!({"replica":"capture","role":"controller","node":"main"}),
+    );
+    f.store.db.execute_batch("CREATE TRIGGER suppress_fixture_note BEFORE INSERT ON comments WHEN NEW.body='Obsolete fixture note' BEGIN SELECT RAISE(IGNORE); END;").unwrap();
+    let before = f.issue().version;
+    let cursor: i64 = f
+        .store
+        .db
+        .query_row("SELECT coalesce(max(seq),0) FROM fleet_outbox", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let row = json!({"id":901,"project_id":f.job.project.id,"issue_number":1,"author":"human:boss","body":"Obsolete fixture note","created_at":1});
+    let request = json!({"replica":"accept","node":"peer","changes":[{"seq":1,"table_name":"comments","before_json":null,"after_json":row.to_string(),"created_at":1}]});
+    let result = replica(&f.store.db, &request);
+    assert_eq!(result[0]["state"], "applied", "{result}");
+    assert!(result[0]["suppressed"].is_string());
+    assert_eq!(replica(&f.store.db, &request), result);
+    assert_eq!(f.issue().version, before);
+    assert!(handoff_version_is_current(&f.store, &f.job.project.id));
+    assert_eq!(
+        f.store
+            .db
+            .query_row("SELECT coalesce(max(seq),0) FROM fleet_outbox", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        cursor
+    );
 }
 
 #[test]
