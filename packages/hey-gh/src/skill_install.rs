@@ -15,7 +15,11 @@ pub fn install(mut roots: Vec<PathBuf>) -> io::Result<Vec<PathBuf>> {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
-        roots = vec![codex_home.join("skills"), home.join(".agents/skills")];
+        roots = vec![
+            codex_home.join("skills"),
+            home.join(".agents/skills"),
+            home.join(".claude/skills"),
+        ];
     }
     if roots.iter().any(|root| root.as_os_str().is_empty()) {
         return Err(io::Error::other("--skills-dir must not be empty"));

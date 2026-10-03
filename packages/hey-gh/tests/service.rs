@@ -129,3 +129,29 @@ fn racing_daemons_reuse_cache_and_only_one_authenticates() {
         1
     );
 }
+
+#[test]
+fn default_skill_install_updates_every_agent_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = ["custom-codex/skills", ".agents/skills", ".claude/skills"];
+    for root in roots {
+        let skill = dir.path().join(root).join("hey-gh");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "obsolete startup guidance").unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+        .arg("install")
+        .env("HOME", dir.path())
+        .env("CODEX_HOME", dir.path().join("custom-codex"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    for root in roots {
+        let skill = std::fs::read_to_string(dir.path().join(root).join("hey-gh/SKILL.md")).unwrap();
+        assert!(
+            skill.contains("hey-gh service start"),
+            "stale skill in {root}"
+        );
+        assert!(!skill.contains("background terminal"));
+    }
+}
