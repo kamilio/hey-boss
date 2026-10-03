@@ -31,6 +31,13 @@ pub use store::coordination::{Coordinate, coordinate};
 
 pub const BODY_LIMIT: usize = 1024 * 1024;
 pub const WIRE_LIMIT: usize = 16 * 1024 * 1024;
+/// Full, unprojected evidence explicitly reconciled by the handoff caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedGithubEvidence {
+    pub report: hey_gh::Report,
+    pub policy: hey_gh::RequiredChecksReport,
+}
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -406,6 +413,8 @@ pub enum Operation {
         number: i64,
         target: String,
         if_version: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reviewed_evidence: Option<Vec<ReviewedGithubEvidence>>,
     },
     ReleaseAllocation {
         number: i64,

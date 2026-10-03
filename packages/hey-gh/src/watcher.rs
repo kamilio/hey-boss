@@ -209,7 +209,7 @@ fn ci_signals(
             )
         ]))
     });
-    Observation {
+    let mut observation = Observation {
         head: ci.head_sha.clone(),
         blocking,
         completed,
@@ -224,7 +224,32 @@ fn ci_signals(
             "required":policy.checks,"required_state":policy.state,"failures":ci.failures,
             "policy_errors":policy.errors,"ci_errors":ci.errors}),
         ),
+    };
+    if current {
+        observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
     }
+    observation
+}
+
+fn policy_fingerprint(policy: &RequiredChecksReport) -> String {
+    let mut rules = policy.rules.clone();
+    rules.sort_by_cached_key(Value::to_string);
+    format!(
+        "policy:{}",
+        fingerprint(&json!([
+            policy.head_sha,
+            policy.base_branch,
+            policy.base_sha,
+            policy.pr_base_sha,
+            policy.strict,
+            rules,
+            policy
+                .checks
+                .iter()
+                .map(|check| (&check.context, check.app_id))
+                .collect::<std::collections::BTreeSet<_>>()
+        ]))
+    )
 }
 
 /// Policy collection reads check results and statuses, but never workflow jobs
@@ -242,7 +267,7 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
     }
     blocking.sort();
     blocking.dedup();
-    Observation {
+    let mut observation = Observation {
         head: policy.head_sha.clone(),
         blocking,
         completed: None,
@@ -251,7 +276,14 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
             json!({"repository":policy.repository,"number":policy.pull_number,"head":policy.head_sha,
             "complete":false,"required":policy.checks,"required_state":policy.state,"policy_errors":policy.errors}),
         ),
+    };
+    if policy.pull_request_state.as_deref() == Some("open")
+        && policy.errors.is_empty()
+        && !policy.head_sha.is_empty()
+    {
+        observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
     }
+    observation
 }
 
 /// Detect required failures without collecting reviews. A completion signal is

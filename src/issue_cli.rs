@@ -392,6 +392,9 @@ enum Action {
     Assign {
         number: i64,
         target: String,
+        /// JSON array of full {report, policy} snapshots you reconciled. GitHub only.
+        #[arg(long)]
+        reviewed_evidence: Option<PathBuf>,
         /// Current issue version from issue view.
         #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
@@ -1053,10 +1056,23 @@ impl Options {
                 number,
                 target,
                 if_version,
+                reviewed_evidence,
             } => Operation::Assign {
                 number: *number,
                 target: target.clone(),
                 if_version: *if_version,
+                reviewed_evidence: reviewed_evidence
+                    .as_ref()
+                    .map(|path| {
+                        if target != "github" {
+                            return Err(Error::invalid(
+                                "--reviewed-evidence requires the github target",
+                            ));
+                        }
+                        let text = read_text(std::fs::File::open(path)?, issues::WIRE_LIMIT / 2)?;
+                        Ok(serde_json::from_str(&text)?)
+                    })
+                    .transpose()?,
             },
             Action::Ready {
                 number,

@@ -1884,6 +1884,7 @@ mod tests {
     fn watching_fixture() -> HandoffFixture {
         let mut f = HandoffFixture::new(true);
         f.apply(Operation::Assign {
+            reviewed_evidence: None,
             number: 1,
             target: "github".into(),
             if_version: f.issue().version,
@@ -2120,6 +2121,7 @@ mod tests {
         for state in ["blocked", "interrupted", "failed", "completed"] {
             let mut f = watching_fixture();
             f.apply(Operation::Assign {
+                reviewed_evidence: None,
                 number: 1,
                 target: "github".into(),
                 if_version: f.issue().version,
@@ -2175,6 +2177,7 @@ mod tests {
                 watch_event(&mut f, "late");
             }
             f.apply(Operation::Assign {
+                reviewed_evidence: None,
                 number: 1,
                 target: "github".into(),
                 if_version: f.issue().version,
@@ -2204,6 +2207,7 @@ mod tests {
         for changed in ["run", "body"] {
             let mut f = watching_fixture();
             f.apply(Operation::Assign {
+                reviewed_evidence: None,
                 number: 1,
                 target: "github".into(),
                 if_version: f.issue().version,
@@ -2258,6 +2262,7 @@ mod tests {
             .unwrap();
         f.store.db.execute("INSERT OR REPLACE INTO fleet_state VALUES('machines',?1)", [json!([{"workers":[{"runs":[{"id":f.job.id,"project_id":f.job.project.id,"number":1,"actor_id":f.job.actor.id,"finished_at":null}]}]}]).to_string()]).unwrap();
         f.apply(Operation::Assign {
+            reviewed_evidence: None,
             number: 1,
             target: "github".into(),
             if_version: f.issue().version,
@@ -2276,6 +2281,7 @@ mod tests {
     fn github_watcher_explicit_approval_hold_still_requires_user_action() {
         let mut f = watching_fixture();
         f.apply(Operation::Assign {
+            reviewed_evidence: None,
             number: 1,
             target: "github".into(),
             if_version: f.issue().version,
@@ -2383,6 +2389,7 @@ mod tests {
         let mut f = watching_fixture();
         watch_event(&mut f, "late");
         f.apply(Operation::Assign {
+            reviewed_evidence: None,
             number: 1,
             target: "github".into(),
             if_version: f.issue().version,
@@ -2408,6 +2415,7 @@ mod tests {
                     keep_draft: false,
                 });
                 f.apply(Operation::Assign {
+                    reviewed_evidence: None,
                     number: 1,
                     target: "github".into(),
                     if_version: f.issue().version,
