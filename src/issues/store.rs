@@ -17,6 +17,8 @@ mod agent_launches;
 pub(crate) mod chief;
 #[path = "claim_recovery.rs"]
 mod claim_recovery;
+#[path = "compact.rs"]
+mod compact;
 #[path = "coordination.rs"]
 pub(crate) mod coordination;
 #[path = "../mindmap/store.rs"]
@@ -379,8 +381,21 @@ const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,cre
 // overflow pages. All persisted summary fields fit in this covering index.
 const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target,archive_key,archived_comments)";
 
+#[cfg(test)]
 fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
-    let summary_columns = COLUMNS.replacen("body,", "'' AS body,", 1);
+    list_query_projection(search, owner, unassigned, false)
+}
+fn list_query_projection(
+    search: bool,
+    owner: Option<&str>,
+    unassigned: bool,
+    compact: bool,
+) -> String {
+    let summary_columns = if compact {
+        compact::COLUMNS.to_owned()
+    } else {
+        COLUMNS.replacen("body,", "'' AS body,", 1)
+    };
     let body_search = if search {
         " OR instr(lower(body),lower(?5))>0"
     } else {
@@ -1885,7 +1900,14 @@ impl Store {
                 now,
                 prepared_import.as_ref(),
             )?,
-            Operation::Mindmap { operation } => mindmap::execute(&tx, &project, operation, now)?,
+            Operation::Mindmap { operation } => {
+                let result = mindmap::execute(&tx, &project, operation, now)?;
+                if matches!(operation, crate::mindmap::Operation::ShowCompact { .. }) {
+                    tx.commit()?;
+                    return Ok(result);
+                }
+                result
+            }
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
             | Operation::ControlWorker { .. }
@@ -2000,6 +2022,7 @@ impl Store {
             }
             Operation::Whoami => json!({"ok":true,"project":project,"agent":actor}),
             Operation::List {
+                compact,
                 state,
                 mine,
                 unassigned,
@@ -2018,7 +2041,7 @@ impl Store {
                 let archived_matches =
                     super::archive::search_bodies(&tx, &project.id, state, search.as_deref())?;
                 let mut found = tx.query_collect::<_, _, rusqlite::Error>(
-                    &list_query(search.is_some(), owner, *unassigned),
+                    &list_query_projection(search.is_some(), owner, *unassigned, *compact),
                     params![
                         project.id,
                         state,
@@ -2030,7 +2053,15 @@ impl Store {
                         if *all { 0 } else { *offset },
                         serde_json::to_string(&archived_matches)?
                     ],
-                    |row| Ok((row_issue(row)?, row.get::<_, i64>("comment_count")?)),
+                    |row| {
+                        let value = if *compact {
+                            compact::row(row)?
+                        } else {
+                            serde_json::to_value(row_issue(row)?)
+                                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+                        };
+                        Ok((value, row.get::<_, i64>("comment_count")?))
+                    },
                 )?;
                 let more = !*all && found.len() > *limit as usize;
                 if !*all {
@@ -2038,7 +2069,7 @@ impl Store {
                 }
                 let mut items = Vec::new();
                 for (issue, comment_count) in found {
-                    let mut value = serde_json::to_value(&issue)?;
+                    let mut value = issue;
                     value.as_object_mut().unwrap().remove("body");
                     value["comment_count"] = json!(comment_count);
                     items.push(value);
@@ -2048,7 +2079,14 @@ impl Store {
                     [&project.id],
                     |r| r.get(0),
                 )?;
-                json!({"ok":true,"project":project,"order_version":order_version,"issues":items,"next_offset":if more { Some(u64::from(*offset) + u64::from(*limit)) } else { None }})
+                let mut result = json!({"ok":true,"project":project,"order_version":order_version,"issues":items,"next_offset":if more { Some(u64::from(*offset) + u64::from(*limit)) } else { None }});
+                if *compact {
+                    compact::enrich(&tx, &project.id, result["issues"].as_array_mut().unwrap())?;
+                    compact::metadata(&tx, &mut result)?;
+                    tx.commit()?;
+                    return Ok(result);
+                }
+                result
             }
             Operation::Move {
                 number,

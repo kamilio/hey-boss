@@ -362,6 +362,8 @@ pub enum Operation {
     },
     Whoami,
     List {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        compact: bool,
         state: String,
         mine: bool,
         unassigned: bool,

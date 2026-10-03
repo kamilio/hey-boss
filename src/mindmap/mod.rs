@@ -142,6 +142,10 @@ pub enum Operation {
         edits: Vec<BatchEdit>,
         if_version: Option<i64>,
     },
+    ShowCompact {
+        limit: u32,
+        offset: u32,
+    },
     Show {
         #[serde(default)]
         body_mode: BodyMode,
@@ -210,11 +214,20 @@ impl Operation {
     pub fn writes(&self) -> bool {
         !matches!(
             self,
-            Self::Show { .. } | Self::View { .. } | Self::Projects | Self::Links { .. }
+            Self::ShowCompact { .. }
+                | Self::Show { .. }
+                | Self::View { .. }
+                | Self::Projects
+                | Self::Links { .. }
         )
     }
     pub fn validate(&self) -> Result<()> {
         let version = match self {
+            Self::ShowCompact { limit, .. } if !(1..=100).contains(limit) => {
+                return Err(Error::invalid(
+                    "Compact page limit must be between 1 and 100",
+                ));
+            }
             Self::Batch {
                 edits, if_version, ..
             } => {
@@ -498,6 +511,9 @@ pub fn enrich_notifications(graph: &mut Value, snapshot: Result<Value>) -> Resul
 }
 
 pub fn needs_inbox(graph: &Value) -> bool {
+    if graph["projection"] == "compact" {
+        return false;
+    }
     ["nodes", "external_nodes"].iter().any(|field| {
         graph[*field]
             .as_array()
