@@ -30,11 +30,20 @@ async page => {
     await ready.press('Enter');
     const receipt = await (await response).json();
     check(receipt.issue?.state === 'ready' && receipt.store?.host === 'supervisor', 'Browser receives the authoritative Ready receipt');
-    await page.locator('.state-pill.ready').first().waitFor();
+    await page.locator('.state-pill.ready').first().waitFor().catch(error => { throw Error('Ready receipt was not rendered: '+error.message); });
     check(await page.evaluate(() => model.detail.issue.assignee === 'human:boss'), 'Keyboard Ready hands off through the companion tunnel');
-    await page.waitForFunction(async () => (await api({action:'view',number:8})).issue.state === 'ready');
+    // Playwright's predicate treats a returned Promise as truthy. Await each
+    // replica read explicitly before reloading and discarding the receipt cache.
+    await page.evaluate(async () => {
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        if ((await api({action:'view',number:8})).issue.state === 'ready') return;
+        await new Promise(resolve => setTimeout(resolve,100));
+      }
+      throw Error('Ready did not converge to the companion replica');
+    });
     await page.reload();
-    await page.locator('.state-pill.ready').first().waitFor();
+    await page.locator('.state-pill.ready').first().waitFor().catch(error => { throw Error('Ready was lost after reload: '+error.message); });
     check(await page.evaluate(() => model.detail.issue.state === 'ready'), 'Ready survives replica reload');
     await page.screenshot({path:'/tmp/hb-lifecycle-visual/keyboard-ready-phone.png',fullPage:true});
     check(errors.length === 0, 'No browser runtime errors');
