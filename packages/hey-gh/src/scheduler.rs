@@ -181,6 +181,81 @@ struct Budget {
     reset_at_seconds: u64,
 }
 
+// GitHub can return overlapping reset windows (including on ordinary REST
+// responses). A different reset is not proof that the prior window expired.
+#[derive(Default)]
+struct Budgets(HashMap<String, BTreeMap<u64, Budget>>);
+
+impl Budgets {
+    fn for_resource(&self, resource: &str) -> impl Iterator<Item = &Budget> {
+        self.0
+            .get(resource)
+            .into_iter()
+            .flat_map(|windows| windows.values())
+    }
+
+    fn observe(&mut self, resource: &str, remaining: u64, reset: u64, unchanged: bool) {
+        let now = Instant::now();
+        let seconds_now = now_ms() / 1000;
+        let windows = self.0.entry(resource.to_owned()).or_default();
+        windows.retain(|reset, budget| {
+            reset.saturating_add(1) > seconds_now || (*reset == 0 && budget.next > now)
+        });
+        let previous = windows.get(&reset);
+        // Parallel responses and cached upstream headers may arrive out of order.
+        // Only expiry, never a higher header in a live window, restores capacity.
+        let remaining = previous.map_or(remaining, |b| b.remaining.min(remaining));
+        let seconds = reset.saturating_sub(seconds_now);
+        let spacing = if remaining == 0 {
+            Duration::from_secs(seconds.saturating_add(1))
+        } else {
+            Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
+        };
+        let next = if unchanged && remaining > 0 {
+            previous.map_or(now, |b| b.next)
+        } else {
+            previous.map_or_else(
+                || quota_deadline(spacing),
+                |b| b.next.max(quota_deadline(spacing)),
+            )
+        };
+        windows.insert(
+            reset,
+            Budget {
+                next,
+                remaining,
+                spacing,
+                reset_at_seconds: reset,
+            },
+        );
+    }
+
+    fn reserve(&mut self, job: &Job) {
+        if let Some(windows) = self.0.get_mut(&job.resource) {
+            for budget in windows.values_mut() {
+                if budget.remaining > 0
+                    && budget.reset_at_seconds > now_ms() / 1000
+                    && !conditional_budget_exempt(job, budget)
+                {
+                    budget.next = quota_deadline(budget.spacing);
+                }
+            }
+        }
+    }
+
+    fn exhausted(&mut self, resource: &str, reset: u64, wait: Duration) {
+        self.0.entry(resource.to_owned()).or_default().insert(
+            reset,
+            Budget {
+                next: quota_deadline(wait),
+                remaining: 0,
+                spacing: wait,
+                reset_at_seconds: reset,
+            },
+        );
+    }
+}
+
 pub(crate) struct Scheduler {
     pub config: Config,
     pub http: reqwest::Client,
@@ -197,7 +272,7 @@ impl Scheduler {
         let instance = format!("{:032x}", fastrand::u128(..));
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, [usize; 2]>::new();
-        let mut budgets = HashMap::<String, Budget>::new();
+        let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
         let mut secondary_until = Instant::now();
@@ -240,8 +315,8 @@ impl Scheduler {
                 let ready = ready(&job, &budgets, global_next.max(secondary_until));
                 let quota_blocked = secondary_until > now
                     || budgets
-                        .get(&job.resource)
-                        .is_some_and(|b| b.next > now && !conditional_budget_exempt(&job, b));
+                        .for_resource(&job.resource)
+                        .any(|b| b.next > now && !conditional_budget_exempt(&job, b));
                 let error = if quota_blocked {
                     Error::RateLimited {
                         retry_after_seconds: ceil_seconds(ready.saturating_duration_since(now)),
@@ -276,15 +351,8 @@ impl Scheduler {
                 && let Some(index) = next
             {
                 let mut job = pending.remove(index).expect("existing queue entry");
-                if let Some(budget) = budgets.get_mut(&job.resource)
-                    && budget.remaining > 0
-                    && budget.reset_at_seconds > now_ms() / 1000
-                    && !conditional_budget_exempt(&job, budget)
-                {
-                    // Reserve at dispatch, not response: parallel sockets must
-                    // not all spend the same pacing slot before headers arrive.
-                    budget.next = quota_deadline(budget.spacing);
-                }
+                // Reserve every live window before another socket can dispatch.
+                budgets.reserve(&job);
                 let streak = interactive_streaks.entry(job.resource.clone()).or_default();
                 let streak = &mut streak[usize::from(job.detail_lane)];
                 *streak = if job.interactive.load(Ordering::Relaxed) {
@@ -431,36 +499,11 @@ impl Scheduler {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(job.resource.clone(), limit);
-                        let seconds = reset.saturating_sub(now_ms() / 1000);
-                        let wait = if remaining == 0 {
-                            Duration::from_secs(seconds.saturating_add(1))
-                        } else {
-                            Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
-                        };
-                        // Authenticated REST 304 validations do not consume primary
-                        // quota. Preserve pacing debt from the last charged result.
-                        // A pacing reservation belongs to its quota window.
-                        // Never renew an exhausted/expired window's long wait
-                        // when dispatch resumes after reset or a quiet period.
-                        let previous = budgets
-                            .get(&job.resource)
-                            .filter(|budget| budget.reset_at_seconds == reset);
-                        let next = if status == StatusCode::NOT_MODIFIED && remaining > 0 {
-                            previous.map_or(Instant::now(), |budget| budget.next)
-                        } else {
-                            previous.map_or_else(
-                                || quota_deadline(wait),
-                                |budget| budget.next.max(quota_deadline(wait)),
-                            )
-                        };
-                        budgets.insert(
-                            job.resource.clone(),
-                            Budget {
-                                next,
-                                remaining,
-                                spacing: wait,
-                                reset_at_seconds: reset,
-                            },
+                        budgets.observe(
+                            &job.resource,
+                            remaining,
+                            reset,
+                            status == StatusCode::NOT_MODIFIED,
                         );
                     }
                     if status == StatusCode::NOT_MODIFIED {
@@ -501,15 +544,10 @@ impl Scheduler {
                             })
                         };
                         if exhausted {
-                            budgets.insert(
-                                job.resource.clone(),
-                                Budget {
-                                    next: quota_deadline(wait),
-                                    remaining: 0,
-                                    spacing: wait,
-                                    reset_at_seconds: number(&headers, "x-ratelimit-reset")
-                                        .unwrap_or(0),
-                                },
+                            budgets.exhausted(
+                                &job.resource,
+                                number(&headers, "x-ratelimit-reset").unwrap_or(0),
+                                wait,
                             );
                             if let Some(retry) = retry {
                                 secondary_until = secondary_until.max(quota_deadline(retry));
@@ -596,14 +634,10 @@ impl Scheduler {
                 };
                 tracing::info!(request_id=%job.request_id,resource=%job.resource,retry_after_seconds=ceil_seconds(wait),"GitHub request cooldown scheduled");
                 if exhausted {
-                    budgets.insert(
-                        job.resource.clone(),
-                        Budget {
-                            next: quota_deadline(wait),
-                            remaining: 0,
-                            spacing: wait,
-                            reset_at_seconds: number(&headers, "x-ratelimit-reset").unwrap_or(0),
-                        },
+                    budgets.exhausted(
+                        &job.resource,
+                        number(&headers, "x-ratelimit-reset").unwrap_or(0),
+                        wait,
                     );
                     // Retry-After always pauses shared traffic, even when
                     // GitHub also reports an exhausted primary bucket.
@@ -715,16 +749,20 @@ impl Scheduler {
     }
 }
 
-fn ready(job: &Job, budgets: &HashMap<String, Budget>, global: Instant) -> Instant {
-    job.ready_at
-        .max(global)
-        .max(budgets.get(&job.resource).map_or(job.ready_at, |budget| {
-            if conditional_budget_exempt(job, budget) {
-                job.ready_at
-            } else {
-                budget.next
-            }
-        }))
+fn ready(job: &Job, budgets: &Budgets, global: Instant) -> Instant {
+    job.ready_at.max(global).max(
+        budgets
+            .for_resource(&job.resource)
+            .map(|budget| {
+                if conditional_budget_exempt(job, budget) {
+                    job.ready_at
+                } else {
+                    budget.next
+                }
+            })
+            .max()
+            .unwrap_or(job.ready_at),
+    )
 }
 
 fn conditional_budget_exempt(job: &Job, budget: &Budget) -> bool {
@@ -801,6 +839,27 @@ async fn read_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quota_windows_keep_the_lowest_remaining_and_expire_independently() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 100, reset, false);
+        budgets.observe("core", 5000, reset, true);
+        let budget = budgets.for_resource("core").next().unwrap();
+        assert_eq!(budget.remaining, 100);
+        assert!(budget.spacing > Duration::from_secs(35));
+        budgets.observe("core", 5000, reset + 60, true);
+        assert_eq!(budgets.for_resource("core").count(), 2);
+        // Simulate expiry without sleeping or restarting the scheduler. Only
+        // that window's reservation may be forgotten by the next observation.
+        let mut expired = budgets.0.get_mut("core").unwrap().remove(&reset).unwrap();
+        expired.reset_at_seconds = 1;
+        budgets.0.get_mut("core").unwrap().insert(1, expired);
+        budgets.observe("core", 4999, reset + 60, false);
+        assert_eq!(budgets.for_resource("core").count(), 1);
+        assert_eq!(budgets.for_resource("core").next().unwrap().remaining, 4999);
+    }
+
     #[test]
     fn retry_after_accepts_seconds_and_http_dates() {
         let mut headers = HeaderMap::new();
