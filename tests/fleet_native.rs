@@ -750,9 +750,14 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
             .unwrap(),
         0
     );
+    // Guarded close is supported over the authority stream. Repeating it on a
+    // closed issue must succeed without changing metadata or its version.
+    let closed = issue(&peer, &["--supervisor", "view", "1"], 0);
+    let repeated = issue(&peer, &["--supervisor", "close", "1"], 0);
+    assert_eq!(repeated["changed"], false);
+    assert_eq!(repeated["issue"], closed["issue"]);
     for args in [
         vec!["--supervisor", "claim", "2", "--force"],
-        vec!["--supervisor", "close", "1"],
         vec![
             "--supervisor",
             "edit",
