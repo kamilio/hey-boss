@@ -297,26 +297,6 @@ fn api(endpoint: &str, fields: &[(&str, &str)], pages: bool) -> io::Result<Value
     }
 }
 
-#[cfg(test)]
-mod response_tests {
-    use super::*;
-    #[test]
-    fn paginated_headers_and_json_are_kept_per_response() {
-        let parsed = responses("HTTP/2.0 200 OK\r\nX-RateLimit-Remaining: 1\r\n\r\n[{\"key\":\"first\"}]\nHTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 200\r\n\r\n{\"message\":\"API rate limit exceeded\"}").unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].body[0]["key"], "first");
-        assert_eq!(parsed[1].status, 403);
-        assert_eq!(parsed[1].headers["x-ratelimit-reset"], "200");
-        let parsed = responses("HTTP/1.1 200 OK\n\n[]\nHTTP/1.1 200 OK\n\n[1]").unwrap();
-        assert_eq!(parsed[1].body[0], 1);
-        assert_eq!(
-            responses("HTTP/2.0 429\r\nRetry-After: 60\r\n\r\n<html>Busy</html>").unwrap()[0]
-                .headers["retry-after"],
-            "60"
-        );
-    }
-}
-
 struct Response {
     status: u16,
     headers: BTreeMap<String, String>,
@@ -892,4 +872,24 @@ pub fn check_worker(cwd: &Path) -> io::Result<()> {
             ))
         }
     })
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    #[test]
+    fn paginated_headers_and_json_are_kept_per_response() {
+        let parsed = responses("HTTP/2.0 200 OK\r\nX-RateLimit-Remaining: 1\r\n\r\n[{\"key\":\"first\"}]\nHTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 200\r\n\r\n{\"message\":\"API rate limit exceeded\"}").unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].body[0]["key"], "first");
+        assert_eq!(parsed[1].status, 403);
+        assert_eq!(parsed[1].headers["x-ratelimit-reset"], "200");
+        let parsed = responses("HTTP/1.1 200 OK\n\n[]\nHTTP/1.1 200 OK\n\n[1]").unwrap();
+        assert_eq!(parsed[1].body[0], 1);
+        assert_eq!(
+            responses("HTTP/2.0 429\r\nRetry-After: 60\r\n\r\n<html>Busy</html>").unwrap()[0]
+                .headers["retry-after"],
+            "60"
+        );
+    }
 }
