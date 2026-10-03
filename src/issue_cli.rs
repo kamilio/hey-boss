@@ -412,6 +412,9 @@ enum Action {
     )]
     Ready {
         number: i64,
+        /// Acknowledge the current requirements for your owning run; later edits invalidate it.
+        #[arg(long)]
+        acknowledge_requirements: bool,
         /// Legacy flag; never overrides a Ready ownership or reservation guard.
         #[arg(long)]
         force: bool,
@@ -1083,6 +1086,7 @@ impl Options {
             },
             Action::Ready {
                 number,
+                acknowledge_requirements,
                 force,
                 if_version,
                 expected_assignee,
@@ -1091,6 +1095,7 @@ impl Options {
                 keep_draft,
             } => Operation::Ready {
                 number: *number,
+                acknowledge_requirements: *acknowledge_requirements,
                 force: *force,
                 guard: if_version.map(|version| issues::ReadyGuard {
                     if_version: version,
