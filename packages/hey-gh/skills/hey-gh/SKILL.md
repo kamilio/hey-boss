@@ -7,8 +7,9 @@ description: Post GitHub comments and read PR activity, CI status, and conflicts
 
 Use `hey-gh` for posting GitHub comments and GitHub PR monitoring. Reads share a persistent cache,
 request queue, and rate-limit backoff through a local daemon; authentication uses
-the existing `gh` login. If the daemon is unavailable, start `hey-gh serve` in a
-background terminal. Use `hey-gh COMMAND --help` for options.
+the existing `gh` login. Use `hey-gh service start` to install/start the durable
+per-user service and reuse an existing listener. Check `hey-gh service status`;
+`hey-gh service restart` recovers only that managed service. Use `hey-gh COMMAND --help` for options.
 
 Comments: max 300 characters and 2 lines. Write so user can understand it, who is gonna read this? Do not sound like a robot.
 
