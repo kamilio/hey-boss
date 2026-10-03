@@ -568,6 +568,15 @@ snapshots from cached CI without additional CI network requests. A cached
 projection cannot clear the independent CI loop's failure health; detail polling
 can succeed while CI remains explicitly incomplete.
 
+Account CI and detail loops alternate new or changed PR heads with their ordinary
+rotation. Each loop persists its own observed heads, unfinished priority work,
+next lane, and ordinary cursor before starting a PR read. Discovery updates and
+daemon restarts cannot consume that priority; unsuccessful attempts rotate to the
+back of the priority queue, and successful attempts leave it. Each PR is attempted
+at most once per cycle. New arrivals and repeatedly failing PRs cannot monopolize
+the ordinary rotation. This changes refresh order without adding requests to the
+cycle budget or changing source freshness and error reporting.
+
 Conflict status is `clean`, `conflicting`, or `unknown`, based on GitHub mergeability. GitHub can return unknown while calculating it. CI failures, pending reviews, and branch-protection blocks are separate from merge conflicts. Reports expose per-resource validation times and whether data came from cache, network, or conditional revalidation.
 
 ## Queue and caching
