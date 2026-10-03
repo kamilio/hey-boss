@@ -489,6 +489,8 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     "x-ratelimit-remaining",
                     if path == "/paced-shared" {
                         "1700"
+                    } else if path == "/paced-contention" {
+                        "3700"
                     } else if phase == 0 {
                         "5000"
                     } else {
@@ -5076,6 +5078,65 @@ async fn account_background_ci_completes_a_paced_collection_without_relaxing_fre
     assert!(page.pull_requests.iter().any(|row| {
         row["ci"]["summary"]["state"] == "success" && row["sourceErrors"]["ci"].is_null()
     }));
+}
+
+#[tokio::test]
+async fn account_background_collections_finish_under_paced_foreground_contention() {
+    let h = Harness::new().await;
+    h.mode("account");
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(110);
+    config.queue_timeout = Duration::from_secs(110);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    c.get("paced-contention", Freshness::Revalidate)
+        .await
+        .unwrap();
+    h.phase(2);
+    // Policy reads promote their own requests to foreground. An unrelated PR
+    // keeps those calls from satisfying the background collections by coalescing.
+    let foreground: Vec<_> = (0..4)
+        .map(|n| {
+            tokio::spawn({
+                let c = c.clone();
+                async move {
+                    loop {
+                        let _ = c
+                            .required_checks_for_pr(
+                                &format!("acme/foreground{n}"),
+                                7,
+                                Freshness::Revalidate,
+                            )
+                            .await;
+                    }
+                }
+            })
+        })
+        .collect();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let cycles = tokio::time::timeout(Duration::from_secs(115), async {
+        loop {
+            let ci = c.account_refresh_cycle(true).await.unwrap();
+            let details = c.account_refresh_cycle(false).await.unwrap();
+            if let (Some(ci), Some(details)) = (ci, details) {
+                break (ci, details);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    for task in foreground {
+        task.abort();
+        let _ = task.await;
+    }
+    api.stop().await;
+    let (ci, details) = cycles.unwrap();
+    assert!(ci.succeeded > 0, "CI made no complete progress: {ci:?}");
+    assert!(
+        details.succeeded > 0,
+        "details made no complete progress: {details:?}"
+    );
 }
 
 #[tokio::test]

@@ -28,7 +28,12 @@ pub(crate) fn max_active_buckets(config: &Config) -> usize {
     }
 }
 
-pub(crate) type SharedResult = Option<Result<Arc<Response>>>;
+#[derive(Clone)]
+pub(crate) enum SharedResult {
+    Queued,
+    Active,
+    Complete(Result<Arc<Response>>),
+}
 pub(crate) type Inflight = Arc<
     Mutex<
         HashMap<
@@ -83,7 +88,6 @@ pub(crate) struct Metrics {
     pub conditional: AtomicU64,
     pub not_modified: AtomicU64,
     pub active: AtomicU64,
-    pub core_spacing_ms: AtomicU64,
     pub limits: Mutex<BTreeMap<String, RateLimit>>,
 }
 
@@ -91,6 +95,7 @@ pub(crate) struct Job {
     // Shared with coalesced readers so interactive use can promote queued work.
     pub interactive: Arc<AtomicBool>,
     pub detail_lane: bool,
+    pub collection_slice: bool,
     /// Random per-job correlation, independent of credentials and request data.
     pub request_id: String,
     /// Fixed endpoint class; never contains caller-controlled request data.
@@ -335,6 +340,16 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    fn abandoned_collection(&self, job: &Job) -> bool {
+        if !job.collection_slice {
+            return false;
+        }
+        // Admission inserts the registry receiver while holding this lock.
+        // Do not mistake a newly sent job for one whose last caller left.
+        let _inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        job.notify.receiver_count() <= 1
+    }
+
     pub async fn run(self, mut rx: mpsc::Receiver<Job>) {
         // Random process-local identifier; scope is already an opaque auth hash.
         let instance = format!("{:032x}", fastrand::u128(..));
@@ -376,7 +391,8 @@ impl Scheduler {
             // Expiry is independent of quota availability, including exhausted
             // buckets whose next reset might be an hour away.
             if let Some(index) = pending.iter().position(|j| {
-                j.deadline() <= now
+                self.abandoned_collection(j)
+                    || j.deadline() <= now
                     || ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline()
             }) {
                 let job = pending.remove(index).expect("existing queue entry");
@@ -385,7 +401,7 @@ impl Scheduler {
                     || budgets
                         .for_resource(&job.resource)
                         .any(|b| b.next > now && !conditional_budget_exempt(&job, b));
-                let error = if quota_blocked {
+                let error = if quota_blocked && !self.abandoned_collection(&job) {
                     Error::RateLimited {
                         retry_after_seconds: ceil_seconds(ready.saturating_duration_since(now)),
                     }
@@ -427,6 +443,7 @@ impl Scheduler {
                 };
                 job.attempts += 1;
                 job.http_status = None;
+                job.notify.send_replace(SharedResult::Active);
                 tracing::info!(request_id=%job.request_id, attempt=job.attempts,
                     endpoint=job.endpoint, resource=%job.resource,
                     foreground=job.interactive.load(Ordering::Relaxed),
@@ -445,6 +462,13 @@ impl Scheduler {
                 .timeout(
                     self.config
                         .request_timeout
+                        .min(
+                            if job.collection_slice && !job.interactive.load(Ordering::Relaxed) {
+                                crate::collection_budget::WORK_LIMIT
+                            } else {
+                                self.config.request_timeout
+                            },
+                        )
                         .min(job.deadline().saturating_duration_since(now)),
                 );
                 if let Some(cache) = &job.cached
@@ -513,7 +537,12 @@ impl Scheduler {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,timed_out=e.is_timeout(),"GitHub transport attempt failed");
-                            if Instant::now() >= job.deadline() {
+                            if Instant::now() >= job.deadline()
+                                || self.abandoned_collection(&job)
+                                || (e.is_timeout()
+                                    && job.collection_slice
+                                    && !job.interactive.load(Ordering::Relaxed))
+                            {
                                 self.finish(job, Err(Error::Deadline));
                                 continue;
                             }
@@ -521,6 +550,7 @@ impl Scheduler {
                                 && Instant::now() < job.deadline()
                             {
                                 job.ready_at = Instant::now() + transient_backoff(job.attempts);
+                                job.notify.send_replace(SharedResult::Queued);
                                 pending.push_back(job);
                             } else {
                                 self.finish(
@@ -570,16 +600,6 @@ impl Scheduler {
                             reset,
                             status == StatusCode::NOT_MODIFIED,
                         );
-                        if job.resource == "core" {
-                            self.metrics.core_spacing_ms.store(
-                                budgets
-                                    .for_resource("core")
-                                    .map(|budget| budget.spacing.as_millis().min(30_000) as u64)
-                                    .max()
-                                    .unwrap_or(0),
-                                Ordering::Relaxed,
-                            );
-                        }
                     }
                     if status == StatusCode::NOT_MODIFIED {
                         let result = if let Some(mut cached) = job.cached.clone() {
@@ -733,6 +753,7 @@ impl Scheduler {
                     );
                 } else {
                     job.ready_at = quota_deadline(wait);
+                    job.notify.send_replace(SharedResult::Queued);
                     pending.push_back(job);
                 }
                 continue;
@@ -741,6 +762,7 @@ impl Scheduler {
                 tracing::warn!(request_id=%job.request_id,resource=%job.resource,status=status.as_u16(),attempt=job.attempts,"GitHub server error; retry scheduled");
                 job.ready_at =
                     quota_deadline(transient_backoff(job.attempts).max(retry.unwrap_or_default()));
+                job.notify.send_replace(SharedResult::Queued);
                 pending.push_back(job);
                 continue;
             }
@@ -819,7 +841,8 @@ impl Scheduler {
         tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,"GitHub request finished");
         let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         drop(job._permit);
-        job.notify.send_replace(Some(result.map(Arc::new)));
+        job.notify
+            .send_replace(SharedResult::Complete(result.map(Arc::new)));
         inflight.remove(&job.key);
     }
 }
