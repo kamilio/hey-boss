@@ -149,15 +149,26 @@ fn requirements_handoff_reconciles_only_an_explicit_current_snapshot() {
 }
 
 #[test]
-fn requirements_handoff_rejects_stale_transfer_and_can_be_explicitly_renewed() {
+fn requirements_handoff_rejects_external_transfer_and_can_be_explicitly_renewed() {
     let mut f = HandoffFixture::new(true);
     edit_handoff_notes(&mut f);
     requirements_ready(&mut f, true).unwrap();
-    f.apply(Operation::Comment {
-        number: 1,
-        body: "Later handoff detail".into(),
-        allow_long_comment: false,
-    });
+    let mut external = f.job.actor.clone();
+    external.id = "human:boss".into();
+    f.store
+        .execute(&Request {
+            version: 1,
+            project: f.job.project.clone(),
+            project_override: None,
+            actor: Some(external),
+            request_id: None,
+            operation: Operation::Comment {
+                number: 1,
+                body: "Parent advanced; restack".into(),
+                allow_long_comment: false,
+            },
+        })
+        .unwrap();
     let before = f.issue();
     let request = Request {
         version: 1,
@@ -193,6 +204,311 @@ fn requirements_handoff_rejects_stale_transfer_and_can_be_explicitly_renewed() {
         .unwrap();
     assert_eq!(f.issue().state, "ready");
     assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+}
+
+#[test]
+fn requirements_handoff_owner_comments_preserve_exact_guarded_completion() {
+    for before_assignment in [false, true] {
+        let mut f = HandoffFixture::new(true);
+        edit_handoff_notes(&mut f);
+        requirements_ready(&mut f, true).unwrap();
+        if !before_assignment {
+            f.apply(Operation::Assign {
+                reviewed_evidence: None,
+                number: 1,
+                target: "github".into(),
+                if_version: f.issue().version,
+            });
+        }
+        f.apply(Operation::Comment {
+            number: 1,
+            body: "Published delivery details".into(),
+            allow_long_comment: false,
+        });
+        if before_assignment {
+            f.apply(Operation::Assign {
+                reviewed_evidence: None,
+                number: 1,
+                target: "github".into(),
+                if_version: f.issue().version,
+            });
+        }
+        f.store
+            .worker_finish(&f.job, "completed", "Delivered")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().state, "ready");
+        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
+    }
+}
+
+#[test]
+fn requirements_handoff_preservation_cannot_cover_a_gap_or_changed_binding() {
+    for change in ["gap", "run", "actor", "digest", "source", "external_row"] {
+        let mut f = HandoffFixture::new(true);
+        requirements_ready(&mut f, true).unwrap();
+        f.apply(Operation::Assign {
+            reviewed_evidence: None,
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        if change == "gap" {
+            f.store
+                .db
+                .execute("UPDATE issues SET version=version+1", [])
+                .unwrap();
+        }
+        f.apply(Operation::Comment {
+            number: 1,
+            body: "Published delivery details".into(),
+            allow_long_comment: false,
+        });
+        match change {
+            "run" => {
+                f.store.db.execute("UPDATE events SET data=json_set(data,'$.acknowledgement.run','another-run') WHERE action='requirements_preserved'", []).unwrap();
+            }
+            "actor" => {
+                f.store.db.execute("UPDATE events SET actor='human:boss' WHERE action='requirements_preserved'", []).unwrap();
+            }
+            "digest" => {
+                f.store.db.execute("UPDATE events SET data=json_set(data,'$.acknowledgement.sha256','changed') WHERE action='requirements_preserved'", []).unwrap();
+            }
+            "source" => {
+                f.store.db.execute("UPDATE events SET data=json_set(data,'$.source','prose') WHERE action='requirements_preserved'", []).unwrap();
+            }
+            // A split replica batch can deliver the comment before its event
+            // and version bump. Do not consume an obsolete acknowledgement.
+            "external_row" => {
+                f.store.db.execute("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES(?1,1,'human:boss','Parent advanced; restack',1)", [&f.job.project.id]).unwrap();
+            }
+            _ => {}
+        }
+        f.store
+            .worker_finish(&f.job, "completed", "Delivered")
+            .unwrap();
+        assert_eq!(f.state(), "blocked", "{change}");
+        assert_ne!(
+            f.issue().assignee.as_deref(),
+            Some("watcher:github"),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn requirements_handoff_two_store_completion_preserves_only_unchanged_work() {
+    for case in [
+        "control_edited",
+        "control_unchanged",
+        "delayed_notes",
+        "final_notes",
+        "external_comment",
+        "external_delayed",
+        "requirements",
+        "owner",
+        "watcher",
+        "approval",
+        "unexplained_version",
+    ] {
+        let mut f = HandoffFixture::new(true);
+        f.job.actor.machine = "peer".into();
+        f.job.machine = "peer".into();
+        if case != "control_unchanged" {
+            edit_handoff_notes(&mut f);
+        }
+        let mut peer = Store::open(&f.root.join("peer.db")).unwrap();
+        let replica = crate::fleet::test_replica;
+        replica(
+            &f.store.db,
+            &json!({"replica":"capture","role":"controller","node":"main"}),
+        );
+        replica(
+            &peer.db,
+            &json!({"replica":"capture","role":"agent","node":"peer"}),
+        );
+        f.store
+            .db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES(?1,1,'peer')",
+                [&f.job.project.id],
+            )
+            .unwrap();
+        let pull = |main: &Store, peer: &Store, receipts: Value| {
+            let payload = replica(&main.db, &json!({"replica":"snapshot","node":"peer"}));
+            replica(
+                &peer.db,
+                &json!({"replica":"pull","node":"peer","payload":payload,"receipts":receipts}),
+            );
+        };
+        let sync = |main: &Store, peer: &Store| {
+            let changes: Vec<Value> = peer.db.prepare("SELECT seq,table_name,before_json,after_json,created_at FROM fleet_outbox ORDER BY seq").unwrap().query_map([], |r| Ok(json!({"seq":r.get::<_,i64>(0)?,"table_name":r.get::<_,String>(1)?,"before_json":r.get::<_,Option<String>>(2)?,"after_json":r.get::<_,Option<String>>(3)?,"created_at":r.get::<_,i64>(4)?}))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+            let request = json!({"replica":"accept","node":"peer","changes":changes});
+            let receipts = replica(&main.db, &request);
+            assert!(
+                receipts
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["state"] == "applied"),
+                "{case}: {receipts}"
+            );
+            assert_eq!(
+                replica(&main.db, &request),
+                receipts,
+                "Idempotent replay: {case}"
+            );
+            pull(main, peer, receipts);
+            assert_eq!(
+                peer.db
+                    .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        };
+        pull(&f.store, &peer, json!([]));
+        peer.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,claimed_at) VALUES(?1,?2,1,?3,?4,'running',1,'start','peer',0,0,0)", params![f.job.id,f.job.project.id,serde_json::to_string(&f.job).unwrap(),f.job.actor.id]).unwrap();
+        // The supervisor sees the companion's reservation through its real fleet shape.
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET finished_at=1", [])
+            .unwrap();
+        f.store.db.execute("INSERT OR REPLACE INTO fleet_state VALUES('machines',?1)", [json!([{"workers":[{"runs":[{"id":f.job.id,"project_id":f.job.project.id,"number":1,"actor_id":f.job.actor.id,"finished_at":null}]}]}]).to_string()]).unwrap();
+        let job = f.job.clone();
+        let comment = |store: &mut Store, external: bool| {
+            let mut actor = job.actor.clone();
+            if external {
+                actor.id = "human:reviewer".into();
+            }
+            store
+                .execute(&Request {
+                    version: 1,
+                    project: job.project.clone(),
+                    project_override: None,
+                    actor: Some(actor),
+                    request_id: None,
+                    operation: Operation::Comment {
+                        number: 1,
+                        body: if external {
+                            "Parent advanced; restack"
+                        } else {
+                            "Published delivery details"
+                        }
+                        .into(),
+                        allow_long_comment: false,
+                    },
+                })
+                .unwrap();
+        };
+        if matches!(case, "delayed_notes" | "external_delayed") {
+            comment(&mut peer, case == "external_delayed");
+        }
+        requirements_ready(&mut f, true).unwrap();
+        f.apply(Operation::Assign {
+            reviewed_evidence: None,
+            number: 1,
+            target: "github".into(),
+            if_version: f.issue().version,
+        });
+        if !matches!(case, "delayed_notes" | "external_delayed") {
+            pull(&f.store, &peer, json!([]));
+        }
+        if case == "final_notes" {
+            comment(&mut peer, false);
+        }
+        if case == "external_comment" {
+            comment(&mut f.store, true);
+        }
+        match case {
+            "requirements" => {
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE issues SET body='New requirements',version=version+1",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "owner" => {
+                f.store
+                    .db
+                    .execute(
+                        "UPDATE issues SET assignee='human:boss',version=version+1",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "unexplained_version" => {
+                f.store
+                    .db
+                    .execute("UPDATE issues SET version=version+1", [])
+                    .unwrap();
+            }
+            "watcher" => watch_event(&mut f, "new-evidence"),
+            _ => {}
+        }
+        sync(&f.store, &peer);
+        peer = Store::open(&f.root.join("peer.db")).unwrap();
+        peer.worker_finish(
+            &f.job,
+            "completed",
+            if case == "approval" {
+                "Codex needs input or approval: billing"
+            } else {
+                "Delivered"
+            },
+        )
+        .unwrap();
+        let issue = get_issue(&peer.db, &f.job.project.id, 1, true).unwrap();
+        let parked = matches!(
+            case,
+            "control_edited" | "control_unchanged" | "delayed_notes" | "final_notes"
+        );
+        assert_eq!(
+            issue.assignee.as_deref() == Some("watcher:github"),
+            parked,
+            "{case}"
+        );
+        if parked {
+            assert_eq!(issue.state, "ready", "{case}");
+            let (state, retry): (String, Option<i64>) = peer
+                .db
+                .query_row("SELECT state,retry_at FROM worker_runs", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap();
+            assert_eq!(state, "completed", "{case}");
+            assert_eq!(retry, None, "{case}");
+            sync(&f.store, &peer);
+            assert_eq!(f.issue().state, "ready", "{case}");
+            assert_eq!(
+                f.issue().assignee.as_deref(),
+                Some("watcher:github"),
+                "{case}"
+            );
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            peer.worker_finish(&f.job, "completed", "Duplicate callback")
+                .unwrap();
+            assert_eq!(
+                peer.db
+                    .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        if case == "owner" {
+            assert_eq!(issue.assignee.as_deref(), Some("human:boss"));
+        }
+    }
 }
 
 #[test]

@@ -55,6 +55,13 @@ Companions use the existing `issue_assignment` tunnel capability and never save
 an offline assignment. For uncertain responses, retry the identical command with
 the same `--request-id`; upgrade the supervisor if it still rejects your own handoff.
 
+An explicit `--acknowledge-requirements` handoff remains bound to its actor, run,
+requirements and GitHub evidence. The owner's later comments and field-identical
+replica merges can preserve it through transaction-recorded version advances.
+External comments, changed requirements and unexplained revision gaps require a
+fresh acknowledgment. Ready and assignment commands still check exact versions
+and reservations; final notes never acknowledge another actor's new work.
+
 When the watcher is behind the evidence you reviewed, add
 `--reviewed-evidence reviewed.json` to that GitHub assignment. The file is a JSON
 array of `{ "report": FULL_REPORT, "policy": REQUIRED_CHECKS_REPORT }` objects,

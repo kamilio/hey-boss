@@ -3054,6 +3054,7 @@ fn mutate(
             comment_id: id,
             resolved,
             ..
+            Store::preserve_requirements_handoff(db, &project.id, number, Some(&actor.id), now)?;
         } => {
             let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM comments WHERE project_id=?1 AND issue_number=?2 AND id=?3)", params![project.id,number,id], |row| row.get(0))?;
             if !exists {
