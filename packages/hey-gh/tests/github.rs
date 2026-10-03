@@ -6297,6 +6297,67 @@ async fn stalled_rest_review_hydration_does_not_block_ci_or_terminal_lifecycle()
 }
 
 #[tokio::test]
+async fn background_cached_ci_progresses_while_another_pr_waits_for_metadata() {
+    let h = Harness::new().await;
+    h.mode("account");
+    h.phase(2);
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(12);
+    config.request_timeout = Duration::from_secs(10);
+    config.queue_timeout = Duration::from_secs(10);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    // Warm source pages without publishing a complete CI observation. This
+    // neighbor needs no network while the first PR occupies the REST socket.
+    let pr = c
+        .pull_request("acme/other", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    c.ci_report(
+        "acme/other",
+        HEAD,
+        pr.data["merge_commit_sha"].as_str(),
+        Freshness::Revalidate,
+    )
+    .await
+    .unwrap();
+    let before = h.calls().len();
+    h.mode("account-slow-one");
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    until(|| {
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path == "/repos/acme/demo/pulls/7")
+    })
+    .await;
+    let ready = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let page = c
+                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .await
+                .unwrap();
+            if page.pull_requests.iter().any(|row| {
+                row["repository"]["nameWithOwner"] == "acme/other"
+                    && row["ci"]["summary"]["state"] == "success"
+                    && row["sourceErrors"]["ci"].is_null()
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    api.stop().await;
+    h.mock.release.notify_waiters();
+    assert!(
+        ready.is_ok(),
+        "cached CI waited for an unrelated PR's metadata"
+    );
+    assert_eq!(c.status().queue_full_rejections, 0);
+}
+
+#[tokio::test]
 async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
     let h = Harness::new().await;
     h.mode("account");

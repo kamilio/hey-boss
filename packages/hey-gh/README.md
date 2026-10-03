@@ -54,6 +54,12 @@ hey-gh status
 
 PR numbers above are examples. `watch` registrations and discovery state survive restarts. A repository watch discovers new PRs and refreshes a previously tracked PR once after it closes or merges; unsuccessful refreshes remain tracked for retry. CI polling runs independently of the full comment/review scan. Background account hydration allows five seconds without source progress, excluding deliberate scheduler queue waits; each cycle remains bounded and unfinished work stays queued. `/v1/watches` reports each loop's last successful refresh and errors. Covered individual watches report stale or pending evidence when their lane's conservative validation clock is unknown or older than two watch intervals (at least 60 seconds), even if cached data is complete.
 
+Each background account lane hydrates at most two PRs at once, so a cached PR
+can finish while another waits for metadata or quota. Each PR keeps its own
+stall budget; admission advances the durable rotation before work starts.
+Small embedded queues remain sequential. Request concurrency, queue capacity,
+quota pacing, freshness, and foreground reservations still use the shared scheduler.
+
 `pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without issuing GraphQL or comment requests. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
 
 CI reads can reuse recent account-discovery selectors when the PR identity, head,
