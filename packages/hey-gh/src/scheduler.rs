@@ -283,6 +283,19 @@ impl Budgets {
         windows.retain(|reset, budget| {
             reset.saturating_add(1) > seconds_now || (*reset == 0 && budget.next > now)
         });
+        // Every live window paces the entire resource in reserve(), even when
+        // this response reports another window. Use that same population for
+        // the local charge estimate; a rare window must not multiply the wait
+        // on all requests by counting only its own responses. Free validations
+        // and other resources do not contribute, and each header delta stays
+        // scoped to its window.
+        if !unchanged {
+            for (other_reset, budget) in windows.iter_mut() {
+                if *other_reset != reset {
+                    budget.usage.charged += 1;
+                }
+            }
+        }
         let previous = windows.remove(&reset);
         // Parallel responses and cached upstream headers may arrive out of order.
         // Only expiry, never a higher header in a live window, restores capacity.
@@ -1202,6 +1215,92 @@ mod tests {
         budgets.observe("core", 4999, reset + 60, false, None);
         assert_eq!(budgets.for_resource("core").count(), 1);
         assert_eq!(budgets.for_resource("core").next().unwrap().remaining, 4999);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn overlapping_windows_estimate_the_whole_paced_resource() {
+        for other_charged_resource in ["core", "search"] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe("core", 4000, reset, true, None);
+            budgets.observe(other_charged_resource, 5000, reset + 60, true, None);
+            for i in 1..=20 {
+                tokio::time::advance(Duration::from_millis(1500)).await;
+                budgets.observe(other_charged_resource, 5000 - i, reset + 60, false, None);
+                // Free validations must not dilute the charged-call estimate.
+                budgets.observe("core", 5000 - i, reset + 60, true, None);
+                if i % 5 == 0 {
+                    budgets.observe("core", 4000 - i - 3, reset, false, None);
+                }
+            }
+            let budget = &budgets.0["core"][&reset];
+            let expected_share = if other_charged_resource == "core" {
+                1.0 // 23 allowance units / 24 local core responses, floored at 1.
+            } else {
+                5.75 // Search has separate pacing: only four core responses.
+            };
+            assert_eq!(budget.usage.share, expected_share);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mixed_window_traffic_uses_capacity_without_depleting_either_allowance() {
+        for direct_interval in [None, Some(3000)] {
+            let reset = now_ms() / 1000 + 3600;
+            let mut clients: Vec<_> = (0..3)
+                .map(|_| {
+                    let mut budgets = Budgets::default();
+                    for window in 0..2 {
+                        budgets.observe("core", 5000, reset + window, true, None);
+                    }
+                    (budgets, 0u64, 0u64)
+                })
+                .collect();
+            let mut remaining = [5000u64; 2];
+            let mut direct_calls = 0;
+            let mut advanced_ms = 0;
+            for ms in (0u64..3_600_000).step_by(10) {
+                let direct_due = direct_interval.is_some_and(|interval| ms % interval == 0);
+                if !direct_due && clients.iter().all(|(_, next, _)| ms < *next) {
+                    continue;
+                }
+                tokio::time::advance(Duration::from_millis(ms - advanced_ms)).await;
+                advanced_ms = ms;
+                if direct_due {
+                    remaining[usize::from(direct_calls % 4 == 0)] -= 1;
+                    direct_calls += 1;
+                }
+                for (budgets, next, calls) in &mut clients {
+                    if ms < *next {
+                        continue;
+                    }
+                    let window = usize::from(*calls % 4 == 0);
+                    remaining[window] -= 1;
+                    *calls += 1;
+                    budgets.observe(
+                        "core",
+                        remaining[window],
+                        reset + window as u64,
+                        false,
+                        None,
+                    );
+                    // Supply simulated wall-clock time; Tokio's paused clock
+                    // advances the production estimator's observation intervals.
+                    let spacing = budgets
+                        .for_resource("core")
+                        .map(|b| {
+                            b.usage
+                                .spacing(b.remaining, (3_600_000 - ms).div_ceil(1000))
+                        })
+                        .max()
+                        .unwrap();
+                    *next = ms + spacing.as_millis() as u64;
+                }
+                assert!(remaining.iter().all(|left| *left >= 50));
+            }
+            assert!(remaining[0] < 300, "unused primary capacity: {remaining:?}");
+            assert!(clients.iter().all(|(_, _, calls)| *calls > 1400));
+        }
     }
 
     #[test]
