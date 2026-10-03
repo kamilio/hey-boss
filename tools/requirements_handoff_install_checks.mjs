@@ -102,7 +102,13 @@ try {
       });
     });
     console.log(JSON.stringify({url:info.url,fixture_pid:process.pid}));
-    await interrupt;
+    // Keep unexpected service exits on the normal finally/cleanup path.
+    // An unresolved top-level await alone exits Node without running finally.
+    assert(web.exitCode === null && web.signalCode === null, 'Web fixture exited during startup');
+    await Promise.race([interrupt, new Promise((_,reject) => {
+      web.once('exit',(code,signal) => reject(Error(`Web fixture exited (code ${code}, signal ${signal})`)));
+      owner.once('exit',(code,signal) => reject(Error(`Database fixture exited (code ${code}, signal ${signal})`)));
+    })]);
   }
 } finally {
   for (const child of children.reverse()) await stop(child);
