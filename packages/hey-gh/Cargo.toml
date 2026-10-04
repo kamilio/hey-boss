@@ -17,7 +17,7 @@ getrandom = "0.4"
 subtle = "2"
 httpdate = "1"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -29,4 +29,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 tempfile = "3"
