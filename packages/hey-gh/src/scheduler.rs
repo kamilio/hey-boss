@@ -125,6 +125,10 @@ pub(crate) struct Job {
 // retain their lane; headers reach the scheduler before any body wait so quota
 // exhaustion and shared cooldowns take effect immediately.
 impl Job {
+    fn background_collection(&self) -> bool {
+        self.collection_slice && !self.interactive.load(Ordering::Relaxed)
+    }
+
     fn quota(&self) -> String {
         if self.installation {
             format!("installation/{}", self.resource)
@@ -409,6 +413,7 @@ pub(crate) struct Scheduler {
     pub store: Store,
     pub inflight: Inflight,
     pub metrics: Arc<Metrics>,
+    pub changed: Arc<tokio::sync::Notify>,
 }
 
 impl Scheduler {
@@ -476,15 +481,22 @@ impl Scheduler {
             // its actual deadline: a coalescing reader may extend it, and early
             // rejection can otherwise fail an entire account's remaining rows
             // in the last pacing interval of a background cycle.
+            // Collection work also waits out hard quota/cooldowns within that
+            // deadline, keeping untouched PRs queued instead of sweeping the
+            // roster with local failures. Other callers retain prompt feedback.
             if let Some(index) = pending.iter().position(|j| {
                 self.abandoned_request(j)
                     || j.deadline() <= now
-                    || (quota_blocked(j)
+                    || (!j.background_collection()
+                        && quota_blocked(j)
                         && ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline())
             }) {
                 let job = pending.remove(index).expect("existing queue entry");
                 let ready = ready(&job, &budgets, global_next.max(secondary_until));
-                let error = if quota_blocked(&job) && !self.abandoned_request(&job) {
+                let error = if quota_blocked(&job)
+                    && !job.background_collection()
+                    && !self.abandoned_request(&job)
+                {
                     Error::RateLimited {
                         retry_after_seconds: ceil_seconds(ready.saturating_duration_since(now)),
                     }
@@ -657,13 +669,11 @@ impl Scheduler {
                 .timeout(
                     self.config
                         .request_timeout
-                        .min(
-                            if job.collection_slice && !job.interactive.load(Ordering::Relaxed) {
-                                crate::collection_budget::STALL_LIMIT
-                            } else {
-                                self.config.request_timeout
-                            },
-                        )
+                        .min(if job.background_collection() {
+                            crate::collection_budget::STALL_LIMIT
+                        } else {
+                            self.config.request_timeout
+                        })
                         .min(job.deadline().saturating_duration_since(now)),
                 );
                 if let Some(cache) = &job.cached
@@ -719,6 +729,7 @@ impl Scheduler {
             let completed = tokio::select! {
                 biased;
                 completed = next_attempt(&mut active), if !active.is_empty() => Some(completed),
+                _ = self.changed.notified() => None,
                 job = rx.recv(), if !rx.is_closed() => {
                     if let Some(mut job) = job {
                         if let Some(resource) = routes.get(&job.key) { job.resource.clone_from(resource); }
@@ -1029,7 +1040,7 @@ impl Scheduler {
                     secondary_until = secondary_until.max(quota_deadline(wait));
                 }
                 if job.attempts >= self.config.max_attempts
-                    || quota_deadline(wait) >= job.deadline()
+                    || (!job.background_collection() && quota_deadline(wait) >= job.deadline())
                 {
                     self.finish(
                         job,

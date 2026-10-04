@@ -104,6 +104,7 @@ struct Inner {
     scope: String,
     store: Store,
     queue: mpsc::Sender<Job>,
+    queue_changed: Arc<tokio::sync::Notify>,
     permits: Arc<Semaphore>,
     inflight: Inflight,
     read_priorities: Mutex<HashMap<String, Weak<AtomicBool>>>,
@@ -226,6 +227,7 @@ impl Client {
         let inflight = Arc::new(Mutex::new(HashMap::new()));
         let permits = Arc::new(Semaphore::new(config.queue_capacity));
         let (queue, rx) = mpsc::channel(config.queue_capacity);
+        let queue_changed = Arc::new(tokio::sync::Notify::new());
         let http = reqwest::Client::builder()
             .user_agent(concat!("hey-gh/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
@@ -240,6 +242,7 @@ impl Client {
                 store: store.clone(),
                 inflight: inflight.clone(),
                 metrics: metrics.clone(),
+                changed: queue_changed.clone(),
             }
             .run(rx)
             .with_current_subscriber(),
@@ -249,6 +252,7 @@ impl Client {
             scope,
             store,
             queue,
+            queue_changed,
             permits,
             inflight,
             read_priorities: Mutex::new(HashMap::new()),
@@ -288,8 +292,8 @@ impl Client {
             .get(&key)
             .and_then(Weak::upgrade)
             .unwrap_or_else(|| Arc::new(AtomicBool::new(interactive)));
-        if interactive {
-            priority.store(true, Ordering::Relaxed);
+        if interactive && !priority.swap(true, Ordering::Relaxed) {
+            self.0.queue_changed.notify_one();
         }
         priorities.insert(key, Arc::downgrade(&priority));
         priority
@@ -568,6 +572,9 @@ impl Client {
                     *deadline_guard = caller_deadline;
                 }
                 drop(deadline_guard);
+                // No new job enters the channel when callers coalesce. Wake
+                // the scheduler to reconsider promoted priority/deadlines now.
+                self.0.queue_changed.notify_one();
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
                 receiver.clone()
             } else {
@@ -1493,6 +1500,186 @@ mod priority_tests {
             .await;
         assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
         assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn background_collection_defers_throttle_and_preserves_foreground_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move |uri: axum::http::Uri| {
+                let calls = calls.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    if uri.path() == "/seed" {
+                        axum::Json(serde_json::json!({"ok":true})).into_response()
+                    } else {
+                        (
+                            axum::http::StatusCode::FORBIDDEN,
+                            axum::Json(serde_json::json!({"message":"secondary rate limit"})),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(2),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let waiting = tokio::spawn({
+            let client = client.clone();
+            async move {
+                crate::collection_budget::CURRENT
+                    .scope(
+                        crate::collection_budget::Budget::new(),
+                        REQUEST_DEADLINE.scope(
+                            Some(started + Duration::from_millis(300)),
+                            client.get("throttled", Freshness::Revalidate),
+                        ),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while calls.load(Ordering::Relaxed) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiting.is_finished(),
+            "throttled collection returned early and would churn the roster"
+        );
+        let cached = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.get("seed", Freshness::CachedOnly),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(cached.source, Source::Cache));
+        assert!(matches!(waiting.await.unwrap(), Err(Error::Deadline)));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            2,
+            "a retry bypassed the cooldown"
+        );
+
+        // A foreground coalescer retains prompt hard-throttle feedback, even
+        // when the queued job originated in a background collection.
+        let waiting = tokio::spawn({
+            let client = client.clone();
+            async move {
+                crate::collection_budget::CURRENT
+                    .scope(
+                        crate::collection_budget::Budget::new(),
+                        client.get("shared", Freshness::Revalidate),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.status().outstanding_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let foreground = tokio::time::timeout(
+            Duration::from_millis(300),
+            INTERACTIVE_READ.scope(
+                foreground_priority(),
+                client.get("shared", Freshness::Revalidate),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(foreground, Err(Error::RateLimited { .. })));
+        assert!(matches!(
+            waiting.await.unwrap(),
+            Err(Error::RateLimited { .. })
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(client.status().coalesced_requests, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn background_collection_resumes_after_cooldown_without_spending_its_stall_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "6")],
+                            axum::Json(serde_json::json!({"message":"secondary rate limit"})),
+                        )
+                            .into_response()
+                    } else {
+                        axum::Json(serde_json::json!({"ok":true})).into_response()
+                    }
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(8),
+                max_attempts: 2,
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let budget = crate::collection_budget::Budget::new();
+        let started = tokio::time::Instant::now();
+        let response = crate::collection_budget::CURRENT
+            .scope(budget.clone(), async {
+                tokio::select! {
+                    result = client.get("recover", Freshness::Revalidate) => result,
+                    _ = budget.exhausted() => Err(Error::Deadline),
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.data["ok"], true);
+        assert!(
+            started.elapsed() >= Duration::from_secs(6),
+            "retry bypassed Retry-After"
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         server.abort();
     }
