@@ -197,8 +197,13 @@ enum Attempt {
     Body {
         status: StatusCode,
         headers: HeaderMap,
-        bytes: Result<Vec<u8>>,
+        bytes: std::result::Result<Vec<u8>, BodyError>,
     },
+}
+
+enum BodyError {
+    Transport(reqwest::Error),
+    TooLarge,
 }
 
 async fn next_attempt(active: &mut [Active]) -> (usize, Job, Attempt) {
@@ -464,6 +469,48 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    fn transport_failed(&self, mut job: Job, error: reqwest::Error, pending: &mut VecDeque<Job>) {
+        if job.minting {
+            let error = if error.is_timeout() {
+                Error::Deadline
+            } else {
+                Error::Transport("GitHub App token exchange failed".into())
+            };
+            self.config
+                .installation
+                .as_ref()
+                .unwrap()
+                .failed(error.clone());
+            self.finish(job, Err(error));
+            return;
+        }
+        tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,
+            timed_out=error.is_timeout(),response_body=job.http_status.is_some(),
+            "GitHub transport attempt failed");
+        if Instant::now() >= job.deadline()
+            || self.abandoned_request(&job)
+            || (error.is_timeout() && job.background_collection())
+        {
+            self.finish(job, Err(Error::Deadline));
+            return;
+        }
+        // Only replay reads. A known permanent HTTP failure is not made
+        // retryable by a broken body; quota/cooldown headers still gate every
+        // queued attempt. Partial bytes and their validators are discarded.
+        let retryable_status = job
+            .http_status
+            .is_none_or(|status| (200..300).contains(&status) || (500..600).contains(&status));
+        if retryable_status && job.attempts < self.config.max_attempts {
+            job.ready_at = job
+                .ready_at
+                .max(Instant::now() + transient_backoff(job.attempts));
+            job.notify.send_replace(SharedResult::Queued);
+            pending.push_back(job);
+        } else {
+            self.finish(job, Err(Error::Transport(error.without_url().to_string())));
+        }
+    }
+
     fn abandoned_request(&self, job: &Job) -> bool {
         // Admission inserts the registry receiver while holding this lock.
         // Do not mistake a newly sent job for one whose last caller left.
@@ -798,41 +845,8 @@ impl Scheduler {
                         Err(e) => {
                             if job.minting {
                                 minting = false;
-                                let error = if e.is_timeout() {
-                                    Error::Deadline
-                                } else {
-                                    Error::Transport("GitHub App token exchange failed".into())
-                                };
-                                self.config
-                                    .installation
-                                    .as_ref()
-                                    .unwrap()
-                                    .failed(error.clone());
-                                self.finish(job, Err(error));
-                                continue;
                             }
-                            tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,timed_out=e.is_timeout(),"GitHub transport attempt failed");
-                            if Instant::now() >= job.deadline()
-                                || self.abandoned_request(&job)
-                                || (e.is_timeout()
-                                    && job.collection_slice
-                                    && !job.interactive.load(Ordering::Relaxed))
-                            {
-                                self.finish(job, Err(Error::Deadline));
-                                continue;
-                            }
-                            if job.attempts < self.config.max_attempts
-                                && Instant::now() < job.deadline()
-                            {
-                                job.ready_at = Instant::now() + transient_backoff(job.attempts);
-                                job.notify.send_replace(SharedResult::Queued);
-                                pending.push_back(job);
-                            } else {
-                                self.finish(
-                                    job,
-                                    Err(Error::Transport(e.without_url().to_string())),
-                                );
-                            }
+                            self.transport_failed(job, e, &mut pending);
                             continue;
                         }
                     };
@@ -964,12 +978,28 @@ impl Scheduler {
             let bytes = match bytes {
                 Ok(bytes) => bytes,
                 Err(_) if header_limited => Vec::new(),
-                Err(e) => {
+                Err(BodyError::Transport(error)) => {
                     if job.minting {
                         minting = false;
-                        self.config.installation.as_ref().unwrap().failed(e.clone());
                     }
-                    self.finish(job, Err(e));
+                    if let Some(wait) = retry {
+                        job.ready_at = job.ready_at.max(quota_deadline(wait));
+                    }
+                    self.transport_failed(job, error, &mut pending);
+                    continue;
+                }
+                Err(BodyError::TooLarge) => {
+                    let error =
+                        Error::Invalid("GitHub response exceeds configured body limit".into());
+                    if job.minting {
+                        minting = false;
+                        self.config
+                            .installation
+                            .as_ref()
+                            .unwrap()
+                            .failed(error.clone());
+                    }
+                    self.finish(job, Err(error));
                     continue;
                 }
             };
@@ -1270,30 +1300,28 @@ fn ceil_seconds(duration: Duration) -> u64 {
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
 }
 
-async fn read_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+async fn read_body(
+    mut response: reqwest::Response,
+    max: usize,
+) -> std::result::Result<Vec<u8>, BodyError> {
     if response
         .content_length()
         .is_some_and(|len| len > max as u64)
     {
-        return Err(Error::Invalid(
-            "GitHub response exceeds configured body limit".into(),
-        ));
+        return Err(BodyError::TooLarge);
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| Error::Transport(e.without_url().to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(BodyError::Transport)? {
         if chunk.len() > max.saturating_sub(bytes.len()) {
-            return Err(Error::Invalid(
-                "GitHub response exceeds configured body limit".into(),
-            ));
+            return Err(BodyError::TooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+mod transport_tests;
 
 #[cfg(test)]
 mod tests {
