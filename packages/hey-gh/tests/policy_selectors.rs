@@ -1,0 +1,511 @@
+use axum::{
+    Router,
+    body::Bytes,
+    extract::State,
+    http::{StatusCode, Uri},
+    response::{IntoResponse, Response},
+};
+use hey_gh::{Client, Config, Freshness};
+use serde_json::{Value, json};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const MERGE: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+fn metadata() -> Value {
+    json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
+        "head":{"sha":HEAD},"base":{"ref":"main","sha":BASE,"repo":{"id":123,"node_id":"R_demo","full_name":"acme/demo"}},
+        "merge_commit_sha":MERGE,"stack":null})
+}
+
+fn selectors() -> Value {
+    json!({"data":{"repository":{"id":"R_demo","databaseId":123,"nameWithOwner":"acme/demo","pullRequest":{
+        "id":"PR_demo_7","number":7,"state":"OPEN","merged":false,"mergeable":"MERGEABLE",
+        "headRefOid":HEAD,"baseRefOid":BASE,"baseRefName":"main",
+        "baseRepository":{"id":"R_demo","databaseId":123,"nameWithOwner":"acme/demo"},
+        "potentialMergeCommit":{"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":BASE},{"oid":HEAD}]}},
+        "stack":null,"stackEntry":null
+    }}}})
+}
+
+struct Data {
+    rest: Value,
+    graph: Value,
+    deny_rest: bool,
+    stall_rest: bool,
+    stall_graph: bool,
+    calls: Vec<(String, Value)>,
+}
+
+async fn handler(State(state): State<Arc<Mutex<Data>>>, uri: Uri, body: Bytes) -> Response {
+    let (value, denied, stalled) = {
+        let mut s = state.lock().unwrap();
+        let path = uri.path();
+        s.calls.push((
+            path.into(),
+            serde_json::from_slice(&body).unwrap_or(Value::Null),
+        ));
+        if path == "/graphql" {
+            (s.graph.clone(), false, s.stall_graph)
+        } else if path.ends_with("/pulls/7") {
+            (s.rest.clone(), s.deny_rest, s.stall_rest)
+        } else if path.contains("/branches/") && !path.contains("/rules/") {
+            (
+                json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
+                false,
+                false,
+            )
+        } else if path.ends_with("/check-runs") {
+            let sha = path.rsplit('/').nth(1).unwrap();
+            (
+                json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":"success"}]}),
+                false,
+                false,
+            )
+        } else if path.ends_with("/status") {
+            (json!({"statuses":[]}), false, false)
+        } else if path.contains("/rules/branches/") {
+            (
+                json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),
+                false,
+                false,
+            )
+        } else {
+            (json!([]), false, false)
+        }
+    };
+    if stalled {
+        std::future::pending::<()>().await;
+    }
+    if denied {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(json!({"message":"metadata inaccessible"})),
+        )
+            .into_response();
+    }
+    axum::Json(value).into_response()
+}
+
+struct Fixture {
+    client: Client,
+    data: Arc<Mutex<Data>>,
+    dir: tempfile::TempDir,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let data = Arc::new(Mutex::new(Data {
+            rest: metadata(),
+            graph: selectors(),
+            deny_rest: false,
+            stall_rest: false,
+            stall_graph: false,
+            calls: vec![],
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(5),
+                report_timeout: Duration::from_secs(5),
+                max_attempts: 1,
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let router = Router::new().fallback(handler).with_state(data.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        Self {
+            client,
+            data,
+            dir,
+            server,
+        }
+    }
+
+    async fn seed(&self) -> u64 {
+        let report = self
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(report.state, "satisfied");
+        let old = report.observed_at_ms.unwrap() - 120_000;
+        rusqlite::Connection::open(self.dir.path().join("cache.sqlite")).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [old]
+        ).unwrap();
+        self.data.lock().unwrap().calls.clear();
+        old
+    }
+}
+
+#[tokio::test]
+async fn standalone_policy_confirms_selectors_without_freshening_or_waiting_for_rest() {
+    let f = Fixture::new().await;
+    let old = f.seed().await;
+    let before = f
+        .client
+        .bootstrap()
+        .await
+        .unwrap()
+        .snapshots
+        .into_iter()
+        .find(|s| s.resource.starts_with("metadata://"))
+        .unwrap();
+    f.data.lock().unwrap().stall_rest = true;
+    let report = tokio::time::timeout(
+        Duration::from_millis(750),
+        f.client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+    )
+    .await
+    .expect("standalone selector validation waited for REST metadata")
+    .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert!(report.errors.is_empty());
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/graphql") && v.validated_at_ms > old)
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .all(|v| !v.resource.ends_with("/pulls/7")),
+        "selector validation cannot freshen the full REST resource"
+    );
+    let cached = f
+        .client
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(cached.validated_at_ms, old);
+    assert_eq!(cached.data, metadata());
+    let after = f
+        .client
+        .bootstrap()
+        .await
+        .unwrap()
+        .snapshots
+        .into_iter()
+        .find(|s| s.resource == before.resource)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap(),
+        "selector validation must not republish the full REST observation"
+    );
+    let s = f.data.lock().unwrap();
+    assert_eq!(s.calls.len(), 1);
+    assert_eq!(s.calls[0].0, "/graphql");
+    assert_eq!(
+        s.calls[0].1["variables"],
+        json!({"owner":"acme","repo":"demo","number":7})
+    );
+}
+
+#[tokio::test]
+async fn changed_or_incomplete_graphql_selectors_require_an_independent_rest_confirmation() {
+    let prefix = "/data/repository/pullRequest";
+    for (field, value) in [
+        ("id", json!("PR_replaced")),
+        ("number", json!(8)),
+        ("state", json!("CLOSED")),
+        ("merged", json!(true)),
+        ("mergeable", json!("UNKNOWN")),
+        ("headRefOid", json!(BASE)),
+        ("baseRefOid", json!(HEAD)),
+        ("baseRefName", json!("release")),
+        ("baseRepository/id", json!("R_other")),
+        ("baseRepository/databaseId", json!(456)),
+        ("baseRepository/nameWithOwner", json!("acme/other")),
+        ("potentialMergeCommit/oid", json!(HEAD)),
+        ("potentialMergeCommit/parents/totalCount", json!(1)),
+        (
+            "potentialMergeCommit/parents/nodes",
+            json!([{"oid":BASE},{"oid":MERGE}]),
+        ),
+        (
+            "potentialMergeCommit/parents/nodes",
+            json!([{"oid":"invalid"},{"oid":HEAD}]),
+        ),
+        ("stack", json!({"id":"S_native"})),
+        ("stackEntry", json!({"id":"SE_native"})),
+    ] {
+        let f = Fixture::new().await;
+        f.seed().await;
+        {
+            let mut s = f.data.lock().unwrap();
+            *s.graph.pointer_mut(&format!("{prefix}/{field}")).unwrap() = value;
+            s.deny_rest = true;
+        }
+        assert!(
+            f.client
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+                .is_err(),
+            "accepted changed {field}"
+        );
+        let calls = &f.data.lock().unwrap().calls;
+        assert_eq!(
+            calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(),
+            vec!["/graphql", "/repos/acme/demo/pulls/7"],
+            "{field}"
+        );
+    }
+    for field in [
+        "stack",
+        "stackEntry",
+        "baseRepository",
+        "potentialMergeCommit",
+    ] {
+        let f = Fixture::new().await;
+        f.seed().await;
+        {
+            let mut s = f.data.lock().unwrap();
+            s.graph
+                .pointer_mut(prefix)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            s.deny_rest = true;
+        }
+        assert!(
+            f.client
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+                .is_err(),
+            "accepted missing {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn graphql_partial_permission_errors_cannot_use_matching_data_or_fall_back_around_denial() {
+    let f = Fixture::new().await;
+    f.seed().await;
+    f.data.lock().unwrap().graph["errors"] =
+        json!([{"type":"FORBIDDEN","message":"repository access denied"}]);
+    assert!(matches!(
+        f.client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await,
+        Err(hey_gh::Error::GraphQL {
+            access_denied: true,
+            ..
+        })
+    ));
+    let s = f.data.lock().unwrap();
+    assert_eq!(s.calls.len(), 1);
+    assert_eq!(s.calls[0].0, "/graphql");
+}
+
+#[tokio::test]
+async fn selector_change_recollects_the_new_head_before_returning() {
+    let f = Fixture::new().await;
+    f.seed().await;
+    let head = "dddddddddddddddddddddddddddddddddddddddd";
+    let merge = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    {
+        let mut s = f.data.lock().unwrap();
+        s.rest["head"]["sha"] = json!(head);
+        s.rest["merge_commit_sha"] = json!(merge);
+        let node = &mut s.graph["data"]["repository"]["pullRequest"];
+        node["headRefOid"] = json!(head);
+        node["potentialMergeCommit"]["oid"] = json!(merge);
+        node["potentialMergeCommit"]["parents"]["nodes"][1]["oid"] = json!(head);
+    }
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert_eq!(report.head_sha, head);
+    assert_eq!(report.merge_sha.as_deref(), Some(merge));
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|c| c.sha.as_deref() == Some(merge)),
+        "recollected checks used an old commit: {:?}",
+        report.checks
+    );
+    let calls = &f.data.lock().unwrap().calls;
+    assert_eq!(calls.iter().filter(|c| c.0 == "/graphql").count(), 1);
+    assert_eq!(
+        calls.iter().filter(|c| c.0.ends_with("/pulls/7")).count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn selector_cache_obeys_both_the_completion_bound_and_a_stricter_caller_age() {
+    let f = Fixture::new().await;
+    f.seed().await;
+    f.data.lock().unwrap().stall_rest = true;
+    for _ in 0..2 {
+        assert_eq!(
+            f.client
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+                .unwrap()
+                .state,
+            "satisfied"
+        );
+    }
+    assert_eq!(
+        f.data.lock().unwrap().calls.len(),
+        1,
+        "fresh selectors should be shared"
+    );
+    for (elapsed, age) in [(16_000, 30), (2_000, 1)] {
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - elapsed;
+        rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/graphql#%'",[old]
+        ).unwrap();
+        let before = f.data.lock().unwrap().calls.len();
+        assert_eq!(
+            f.client
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(age)))
+                .await
+                .unwrap()
+                .state,
+            "satisfied"
+        );
+        assert_eq!(
+            f.data.lock().unwrap().calls.len(),
+            before + 1,
+            "stale selectors were reused"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_graphql_falls_back_to_real_rest_evidence_within_the_report_budget() {
+    let f = Fixture::new().await;
+    let old = f.seed().await;
+    f.data.lock().unwrap().stall_graph = true;
+    let report = tokio::time::timeout(
+        Duration::from_secs(3),
+        f.client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+    )
+    .await
+    .expect("optional GraphQL validation consumed the report deadline")
+    .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms > old)
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .all(|v| !v.resource.ends_with("/graphql"))
+    );
+    assert!(
+        f.client
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap()
+            .validated_at_ms
+            > old
+    );
+}
+
+#[tokio::test]
+async fn explicit_offline_native_and_already_fresh_rest_reads_keep_their_existing_source() {
+    for freshness in [
+        Freshness::Revalidate,
+        Freshness::MaxAge(Duration::ZERO),
+        Freshness::CachedOnly,
+    ] {
+        let f = Fixture::new().await;
+        f.seed().await;
+        f.data.lock().unwrap().deny_rest = true;
+        let result = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, freshness)
+            .await;
+        if matches!(freshness, Freshness::CachedOnly) {
+            assert_eq!(result.unwrap().state, "satisfied");
+        } else {
+            assert!(result.is_err());
+        }
+        assert!(
+            f.data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|c| c.0 != "/graphql")
+        );
+    }
+    let f = Fixture::new().await;
+    f.data.lock().unwrap().rest["stack"] =
+        json!({"id":1,"number":1,"position":1,"size":2,"base":{"ref":"main","sha":BASE}});
+    f.seed().await;
+    f.data.lock().unwrap().deny_rest = true;
+    assert!(
+        f.client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .is_err()
+    );
+    assert!(
+        f.data
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|c| c.0 != "/graphql")
+    );
+
+    let f = Fixture::new().await;
+    f.seed().await;
+    f.client
+        .pull_request("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    f.data.lock().unwrap().calls.clear();
+    assert_eq!(
+        f.client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap()
+            .state,
+        "satisfied"
+    );
+    assert!(f.data.lock().unwrap().calls.is_empty());
+}

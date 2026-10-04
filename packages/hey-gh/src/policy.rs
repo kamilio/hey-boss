@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+mod selectors;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredCheck {
@@ -483,8 +484,8 @@ impl Client {
             } else {
                 "satisfied"
             };
-            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
-                (pr.clone(), None)
+            let (final_rest_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
+                (None, None)
             } else {
                 // Other readers may have refreshed these selectors while CI
                 // and policy were collected. Bound the newest cached evidence,
@@ -506,13 +507,14 @@ impl Client {
                 let (pr_res, branch_res) = crate::client::COMPLETION_VALIDATION
                     .scope((), async {
                         tokio::join!(
-                            self.pull_request(repository, number, pr_policy),
+                            self.confirm_policy_pr(repository, number, &pr, pr_policy),
                             self.get(&policy_path, branch_policy),
                         )
                     })
                     .await;
                 (pr_res?, Some(branch_res))
             };
+            let final_pr = final_rest_pr.as_ref().unwrap_or(&pr);
             if pr.data["node_id"] != final_pr.data["node_id"]
                 || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
                 // Repository counters and pushed_at can change for unrelated
@@ -586,9 +588,10 @@ impl Client {
             }
             let suffix = format!("{}/{repository}/{number}", self.hostname());
             let mut observations = vec![(format!("required_checks://{suffix}"), value)];
-            if !matches!(freshness, Freshness::CachedOnly) {
+            if let Some(final_pr) = &final_rest_pr {
                 // Publish the confirmed lifecycle/selectors, not a full CI
                 // result. Cached policy reads must not overwrite newer metadata.
+                // A GraphQL selector check never republishes the seeded body.
                 let conflicts = match final_pr.data["mergeable"].as_bool() {
                     Some(true) => "clean",
                     Some(false) => "conflicting",
