@@ -258,6 +258,13 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     {
         mock.release.notified().await;
     }
+    if mode == "ruleset-only-policy"
+        && phase == 10
+        && path.contains("/rules/branches/")
+        && call_number == 2
+    {
+        mock.release.notified().await;
+    }
     if mode == "scheduler-slow-graphql" && path == "/graphql" {
         mock.release.notified().await;
     }
@@ -955,6 +962,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         mock.release.notified().await;
     }
     let current_head = if (mode == "push-during-report" && call_number >= 2)
+        || (mode == "ruleset-only-policy" && phase == 11)
         || ((mode == "account-head-change" || mode == "account-page-order") && phase >= 1)
         || (mode == "account-priority-head" && phase >= 3 && path.contains("/acme/other/"))
     {
@@ -1041,7 +1049,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             );
         }
         "/repos/acme/demo/branches/main" if mode == "ruleset-only-policy" => {
-            json!({"commit":{"sha":BASE},"protected":true})
+            json!({"commit":{"sha":if phase == 11 {NEW_HEAD} else {BASE}},"protected":true})
         }
         p if mode == "ruleset-only-policy" && p.ends_with("/protection/required_status_checks") => {
             return reply(
@@ -10306,6 +10314,135 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
     .unwrap();
     api.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn required_policy_final_validation_reuses_newer_shared_cache_evidence() {
+    for (pr_age, branch_age, changed, expected_pr, expected_branch) in [
+        (0, 0, false, 1, 1),
+        (20_000, 0, false, 2, 1),
+        (0, 40_000, false, 1, 2),
+        (0, 0, true, 3, 3),
+    ] {
+        let h = Harness::new().await;
+        h.mode("ruleset-only-policy");
+        h.phase(8);
+        let c = h.client();
+        let initial = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(initial.state, "failure");
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        let old = initial.observed_at_ms.unwrap() - if changed { 0 } else { 40_000 };
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7' OR key LIKE '%/branches/main'", [old]).unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/rules/branches/main'", []).unwrap();
+        h.phase(10);
+        let before = h.calls().len();
+        let worker = c.clone();
+        let read = tokio::spawn(async move {
+            worker
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(60)))
+                .await
+        });
+        until(|| {
+            h.calls()[before..]
+                .iter()
+                .any(|call| call.path.contains("/rules/branches/"))
+        })
+        .await;
+        // A second SDK client shares the credential-scoped cache while the
+        // first report waits for policy. These are actual HTTP validations.
+        let other = h.client();
+        if changed {
+            h.phase(11);
+        }
+        let pr = other
+            .pull_request("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let branch = other
+            .get("repos/acme/demo/branches/main", Freshness::Revalidate)
+            .await
+            .unwrap();
+        if pr_age > 0 {
+            db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [pr.validated_at_ms - pr_age]).unwrap();
+        }
+        if branch_age > 0 {
+            db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/branches/main' AND key NOT LIKE '%/rules/%'", [branch.validated_at_ms - branch_age]).unwrap();
+        }
+        h.mock.release.notify_one();
+        let report = read.await.unwrap().unwrap();
+        assert_eq!(report.state, "failure", "{:?}", report.errors);
+        assert_eq!(report.head_sha, if changed { NEW_HEAD } else { HEAD });
+        assert_eq!(
+            report.policy_sha.as_deref(),
+            Some(if changed { NEW_HEAD } else { BASE })
+        );
+        let calls = h.calls();
+        for (path, expected) in [
+            ("/repos/acme/demo/pulls/7", expected_pr),
+            ("/repos/acme/demo/branches/main", expected_branch),
+        ] {
+            assert_eq!(
+                calls[before..]
+                    .iter()
+                    .filter(|call| call.path == path)
+                    .count(),
+                expected,
+                "pr age {pr_age}, branch age {branch_age}: {path}"
+            );
+        }
+        for (suffix, clock) in [
+            ("/pulls/7", pr.validated_at_ms),
+            ("/branches/main", branch.validated_at_ms),
+        ] {
+            assert!(
+                report
+                    .validations
+                    .iter()
+                    .any(|v| v.resource.ends_with(suffix) && v.validated_at_ms >= clock)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn required_policy_final_validation_preserves_explicit_and_offline_reads() {
+    for (freshness, expected) in [
+        (Freshness::Revalidate, 2),
+        (Freshness::MaxAge(Duration::ZERO), 2),
+        (Freshness::MaxAge(Duration::from_secs(1)), 0),
+        (Freshness::CachedOnly, 0),
+    ] {
+        let h = Harness::new().await;
+        h.mode("ruleset-only-policy");
+        h.phase(8);
+        let c = h.client();
+        c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let before = h.calls().len();
+        let report = c
+            .required_checks_for_pr("acme/demo", 7, freshness)
+            .await
+            .unwrap();
+        assert_eq!(report.state, "failure");
+        let calls = h.calls();
+        for path in ["/repos/acme/demo/pulls/7", "/repos/acme/demo/branches/main"] {
+            assert_eq!(
+                calls[before..]
+                    .iter()
+                    .filter(|call| call.path == path)
+                    .count(),
+                expected,
+                "{freshness:?}: {path}"
+            );
+        }
+        if expected == 0 {
+            assert_eq!(calls.len(), before);
+        }
+    }
 }
 
 #[tokio::test]

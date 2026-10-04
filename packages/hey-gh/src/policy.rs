@@ -446,32 +446,22 @@ impl Client {
             } else {
                 "satisfied"
             };
-            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly)
-                || (matches!(freshness, Freshness::MaxAge(_))
-                    && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
-                    && branch
-                        .as_ref()
-                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000)
-                    && identity.stack.is_none())
-            {
+            let (final_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
                 (pr.clone(), None)
             } else {
-                let pr_policy = if identity.stack.is_none()
-                    && matches!(freshness, Freshness::MaxAge(_))
-                    && crate::now_ms().saturating_sub(pr.validated_at_ms) < 15_000
-                {
-                    freshness
-                } else {
-                    Freshness::Revalidate
+                // Other readers may have refreshed these selectors while CI
+                // and policy were collected. Bound the newest cached evidence,
+                // not the initial copies; compare identities below either way.
+                // Native stack membership still requires an explicit check.
+                let pr_policy = match freshness {
+                    Freshness::MaxAge(age) if identity.stack.is_none() => {
+                        Freshness::MaxAge(age.min(Duration::from_secs(15)))
+                    }
+                    _ => Freshness::Revalidate,
                 };
-                let branch_policy = if matches!(freshness, Freshness::MaxAge(_))
-                    && branch
-                        .as_ref()
-                        .is_ok_and(|b| crate::now_ms().saturating_sub(b.validated_at_ms) < 30_000)
-                {
-                    freshness
-                } else {
-                    Freshness::Revalidate
+                let branch_policy = match freshness {
+                    Freshness::MaxAge(age) => Freshness::MaxAge(age.min(Duration::from_secs(30))),
+                    _ => Freshness::Revalidate,
                 };
                 let (pr_res, branch_res) = tokio::join!(
                     self.pull_request(repository, number, pr_policy),
