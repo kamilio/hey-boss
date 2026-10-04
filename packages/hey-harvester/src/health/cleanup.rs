@@ -18,14 +18,30 @@ struct Release {
     fingerprint: String,
 }
 
+fn git_admin(root: &Path) -> io::Result<PathBuf> {
+    // Inspect this marker explicitly: discovery can skip a corrupt .git directory
+    // and silently return a different enclosing repository.
+    worktrees::git_text(root, &["--git-dir=.git", "rev-parse", "--absolute-git-dir"])
+        .map(PathBuf::from)
+}
+
 fn checkout(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     if !path.is_absolute() || path.canonicalize()? != path || !fs::symlink_metadata(path)?.is_dir()
     {
         return Err(preserved("Noncanonical cleanup target; preserved"));
     }
-    let root = path
-        .ancestors()
-        .find(|p| p.join(".git").exists())
+    let mut root = None;
+    for parent in path.ancestors() {
+        match fs::symlink_metadata(parent.join(".git")) {
+            Ok(_) => {
+                root = Some(parent);
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let root = root
         .ok_or_else(|| preserved("Unknown checkout ownership; preserved"))?
         .to_path_buf();
     if path != root && path.file_name().is_none_or(|n| n != "node_modules") {
@@ -33,10 +49,7 @@ fn checkout(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
             "Only a checkout or its node_modules may be released; preserved",
         ));
     }
-    let admin = PathBuf::from(worktrees::git_text(
-        &root,
-        &["rev-parse", "--absolute-git-dir"],
-    )?);
+    let admin = git_admin(&root)?;
     if admin.canonicalize()? != admin {
         return Err(preserved("Symlinked Git administration; preserved"));
     }
@@ -87,11 +100,23 @@ fn verify(path: &Path, active: &[PathBuf], released: bool) -> io::Result<()> {
         }
     }
     // Parent checkout locks also protect nested dependencies/checkouts.
-    for parent in root.ancestors().filter(|p| p.join(".git").exists()) {
-        let git = PathBuf::from(worktrees::git_text(
-            parent,
-            &["rev-parse", "--absolute-git-dir"],
-        )?);
+    for parent in root.ancestors() {
+        let marker = parent.join(".git");
+        let metadata = match fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        // Only an ordinary, provably empty ancestor directory is inert. Target
+        // markers and symlinks still require valid Git metadata; inspection errors
+        // and partial metadata fail closed.
+        if parent != root
+            && metadata.is_dir()
+            && fs::read_dir(&marker)?.next().transpose()?.is_none()
+        {
+            continue;
+        }
+        let git = git_admin(parent)?;
         match fs::read_to_string(git.join("locked")) {
             Ok(reason) => {
                 return Err(preserved(format!(
@@ -395,6 +420,24 @@ mod tests {
             fs::write(path.join("node_modules/.bin/tsc"), "fixture").unwrap();
             Self(path)
         }
+
+        fn worktree_under(&self, ancestor: &Path) -> PathBuf {
+            fs::create_dir_all(ancestor.join(".git")).unwrap();
+            let root = ancestor.join("checkout");
+            worktrees::git_text(
+                &self.0,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    root.to_str().unwrap(),
+                    "HEAD",
+                ],
+            )
+            .unwrap();
+            fs::create_dir(root.join("node_modules")).unwrap();
+            root
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -440,6 +483,121 @@ mod tests {
                 .contains("release")
         );
         assert!(path.join(".bin/tsc").exists());
+    }
+
+    #[test]
+    fn empty_ancestor_marker_reaches_release_gate_for_registered_worktree() {
+        let f = Fixture::new();
+        let ancestor = Fixture::new();
+        fs::remove_dir_all(ancestor.0.join(".git")).unwrap();
+        let root = f.worktree_under(&ancestor.0);
+        for path in [&root, &root.join("node_modules")] {
+            assert!(
+                verify(path, &[], true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("No readable explicit cleanup release")
+            );
+            release(path, "finished-session", &[]).unwrap();
+            verify(path, &[], true).unwrap();
+            assert!(
+                verify(path, std::slice::from_ref(&root), true)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("retained owner")
+            );
+        }
+        assert!(
+            fs::read_dir(ancestor.0.join(".git"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_ancestor_does_not_hide_real_parent_lock_or_later_metadata_changes() {
+        let f = Fixture::new();
+        let parent = f.worktree_under(&f.0.join("parent"));
+        let ancestor = parent.join("ancestor");
+        let root = f.worktree_under(&ancestor);
+        let path = root.join("node_modules");
+        release(&path, "finished-session", &[]).unwrap();
+        verify(&path, &[], true).unwrap();
+        worktrees::git_text(
+            &f.0,
+            &[
+                "worktree",
+                "lock",
+                parent.to_str().unwrap(),
+                "--reason",
+                "parent validation",
+            ],
+        )
+        .unwrap();
+        assert!(
+            verify(&path, &[], true)
+                .unwrap_err()
+                .to_string()
+                .contains("parent validation")
+        );
+        worktrees::git_text(&f.0, &["worktree", "unlock", parent.to_str().unwrap()]).unwrap();
+        fs::write(ancestor.join(".git/HEAD"), "corrupt").unwrap();
+        assert!(verify(&path, &[], true).is_err());
+        let (_, admin) = checkout(&path).unwrap();
+        assert!(release_path(&path, &admin).exists());
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn uncertain_ancestor_markers_are_not_treated_as_empty_directories() {
+        for kind in ["nonempty", "file", "symlink", "dangling"] {
+            let f = Fixture::new();
+            let root = f.worktree_under(&f.0.join("ancestor"));
+            let marker = f.0.join("ancestor/.git");
+            fs::remove_dir(&marker).unwrap();
+            match kind {
+                "nonempty" => {
+                    fs::create_dir(&marker).unwrap();
+                    fs::write(marker.join("HEAD"), "corrupt").unwrap();
+                }
+                "file" => fs::write(&marker, "corrupt").unwrap(),
+                _ => {
+                    let destination = f.0.join("empty");
+                    if kind == "symlink" {
+                        fs::create_dir(&destination).unwrap();
+                    }
+                    std::os::unix::fs::symlink(destination, &marker).unwrap();
+                }
+            }
+            assert!(verify(&root, &[], false).is_err(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn empty_ancestor_does_not_allow_corrupt_target_or_administration() {
+        for kind in ["empty", "gitfile", "admin", "dangling"] {
+            let f = Fixture::new();
+            let root = f.worktree_under(&f.0.join("ancestor"));
+            let (_, admin) = checkout(&root).unwrap();
+            match kind {
+                "empty" => {
+                    fs::remove_file(root.join(".git")).unwrap();
+                    fs::create_dir(root.join(".git")).unwrap();
+                }
+                "gitfile" => fs::write(root.join(".git"), "corrupt").unwrap(),
+                "dangling" => {
+                    fs::remove_file(root.join(".git")).unwrap();
+                    std::os::unix::fs::symlink(root.join("missing"), root.join(".git")).unwrap();
+                }
+                _ => fs::remove_file(admin.join("HEAD")).unwrap(),
+            }
+            assert!(verify(&root, &[], false).is_err(), "{kind}");
+            assert!(
+                verify(&root.join("node_modules"), &[], false).is_err(),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
