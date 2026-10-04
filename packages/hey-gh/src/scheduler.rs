@@ -147,7 +147,21 @@ struct Active {
     resource: String,
     detail_lane: bool,
     reservation: Option<Reservation>,
+    probe: Option<ProbeTurn>,
     future: Pin<Box<dyn Future<Output = (Job, Attempt)> + Send>>,
+}
+
+// A known unchanged validator may borrow a paced turn's wait. If it returns a
+// charged response, repay the full interval from the existing future slot,
+// rather than replacing that debt with an interval starting at the response.
+struct PacingProbe {
+    quota: String,
+    windows: Vec<(u64, Instant)>,
+}
+
+struct ProbeTurn {
+    quota: String,
+    owed: String,
 }
 
 struct Reservation {
@@ -331,6 +345,31 @@ impl SharedUsage {
 struct Budgets(HashMap<String, BTreeMap<u64, Budget>>);
 
 impl Budgets {
+    fn probe(&self, quota: &str) -> PacingProbe {
+        PacingProbe {
+            quota: quota.to_owned(),
+            windows: self
+                .for_resource(quota)
+                .map(|budget| (budget.reset_at_seconds, budget.next))
+                .collect(),
+        }
+    }
+
+    fn charge_probe(&mut self, probe: &PacingProbe) {
+        let now = Instant::now();
+        if let Some(windows) = self.0.get_mut(&probe.quota) {
+            for (reset, prior_slot) in &probe.windows {
+                if let Some(budget) = windows.get_mut(reset) {
+                    let debt = now
+                        .max(*prior_slot)
+                        .checked_add(budget.spacing)
+                        .unwrap_or_else(|| quota_deadline(Duration::from_secs(86400)));
+                    budget.next = budget.next.max(debt);
+                }
+            }
+        }
+    }
+
     fn for_resource(&self, resource: &str) -> impl Iterator<Item = &Budget> {
         let seconds_now = now_ms() / 1000;
         self.0
@@ -527,6 +566,7 @@ impl Scheduler {
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
+        let mut blocked_probes = HashMap::<String, String>::new();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
@@ -561,6 +601,10 @@ impl Scheduler {
                 }
             }
             let now = Instant::now();
+            // Only the exact borrowed turn can renew this allowance. A stream
+            // of completion checks must not keep lending the same older read's
+            // slot to changed probes. Cancellation/expiry also releases it.
+            blocked_probes.retain(|_, owed| pending.iter().any(|job| job.request_id == *owed));
             let quota_blocked = |job: &Job| {
                 secondary.until > now
                     || budgets.for_resource(&job.quota()).any(|budget| {
@@ -601,9 +645,8 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary.until);
-            // Choose each quota's turn before considering pacing. Otherwise a
-            // newer conditional probe can overtake older paced work, return a
-            // charged 200, and move that work's slot again indefinitely.
+            // Choose each quota's turn before considering pacing. A charged
+            // conditional probe must not keep moving an older turn forever.
             // Keep foreground/background and completion/ordinary alternation;
             // ties retain queue order. Busy lanes and retry backoffs do not
             // reserve a turn, so unrelated work can still use its own capacity.
@@ -627,11 +670,37 @@ impl Scheduler {
                     *turn = (priority, index);
                 }
             }
+            let probing_quotas: std::collections::HashSet<_> = active
+                .iter()
+                .filter_map(|attempt| attempt.probe.as_ref().map(|probe| probe.quota.clone()))
+                .collect();
+            let can_probe = |index: usize, job: &Job| {
+                let quota = job.quota();
+                let Some((_, selected)) = turns.get(&quota) else {
+                    return false;
+                };
+                let turn = &pending[*selected];
+                index != *selected
+                    && !blocked_probes.contains_key(&quota)
+                    && !probing_quotas.contains(&quota)
+                    && job.interactive.load(Ordering::Relaxed) == turn.interactive.load(Ordering::Relaxed)
+                    && job.completion_validation.load(Ordering::Relaxed) == turn.completion_validation.load(Ordering::Relaxed)
+                    // The class's turn is held by soft pacing, not by a retry,
+                    // socket, global spacing or a different priority class.
+                    && ready(turn, &budgets, now) > now
+                    && budgets.for_resource(&quota).next().is_some()
+                    && budgets.for_resource(&quota).all(|budget| {
+                        conditional_budget_exempt(job, budget)
+                            // Leave a charged slot for the turn being borrowed.
+                            && budget.remaining > QUOTA_RESERVE + 1
+                    })
+            };
             let waiting_for_turn = |index: usize, job: &Job| {
                 job.ready_at <= now
                     && turns
                         .get(&job.quota())
                         .is_some_and(|(_, selected)| *selected != index)
+                    && !can_probe(index, job)
             };
             let next = {
                 let eligible = |index: usize, job: &Job| {
@@ -679,6 +748,11 @@ impl Scheduler {
             if active.len() < max_active
                 && let Some(index) = next
             {
+                let probe = can_probe(index, &pending[index]).then(|| {
+                    let quota = pending[index].quota();
+                    let owed = pending[turns[&quota].1].request_id.clone();
+                    ProbeTurn { quota, owed }
+                });
                 let mut job = pending.remove(index).expect("existing queue entry");
                 let token = if job.installation {
                     match self
@@ -706,6 +780,7 @@ impl Scheduler {
                 };
                 // Reserve every live window before another socket can dispatch.
                 let reservation = (!job.minting).then(|| budgets.reserve(&job));
+                let probe = probe.filter(|_| !job.minting);
                 let streak = interactive_streaks.entry(job.quota()).or_default();
                 *streak = if job.interactive.load(Ordering::Relaxed) {
                     streak.saturating_add(1)
@@ -738,6 +813,7 @@ impl Scheduler {
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
                     foreground=job.interactive.load(Ordering::Relaxed),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
+                    pacing_probe=probe.is_some(),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
                     auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope }, %instance, request_key=%crate::digest(&job.key),
                     // Total job age; on the first attempt this is queue time.
@@ -800,6 +876,7 @@ impl Scheduler {
                     resource: job.resource.clone(),
                     detail_lane: job.detail_lane,
                     reservation,
+                    probe,
                     future: Box::pin(async move { (job, Attempt::Headers(request.send().await)) }),
                 };
                 // Start the socket now, rather than treating an unpolled
@@ -851,12 +928,21 @@ impl Scheduler {
             let Some((index, mut job, outcome)) = completed else {
                 continue;
             };
-            let reservation = active.remove(index).reservation;
+            let Active {
+                reservation, probe, ..
+            } = active.remove(index);
+            // Include normal reservations made while this probe was in flight,
+            // before its own response headers update the observed quota debt.
+            let probe = probe.map(|turn| (budgets.probe(&turn.quota), turn));
             let (status, headers, bytes) = match outcome {
                 Attempt::Headers(response) => {
                     let response = match response {
                         Ok(r) => r,
                         Err(e) => {
+                            if let Some((debt, turn)) = &probe {
+                                budgets.charge_probe(debt);
+                                blocked_probes.insert(turn.quota.clone(), turn.owed.clone());
+                            }
                             if job.minting {
                                 minting = false;
                             }
@@ -909,6 +995,12 @@ impl Scheduler {
                                 .as_ref()
                                 .and_then(|r| r.for_window(&job.quota(), reset)),
                         );
+                    }
+                    if let Some((debt, turn)) = &probe
+                        && status != StatusCode::NOT_MODIFIED
+                    {
+                        budgets.charge_probe(debt);
+                        blocked_probes.insert(turn.quota.clone(), turn.owed.clone());
                     }
                     if status == StatusCode::NOT_MODIFIED && !job.minting {
                         let result = if let Some(mut cached) = job.cached.clone() {
@@ -965,6 +1057,7 @@ impl Scheduler {
                         resource: job.resource.clone(),
                         detail_lane: job.detail_lane,
                         reservation: None,
+                        probe: None,
                         future: Box::pin(async move {
                             let bytes = read_body(response, max_body_bytes).await;
                             (
@@ -1495,6 +1588,66 @@ mod tests {
         let budget = budgets.for_resource("core").next().unwrap();
         assert_eq!(budget.next, first.dispatched_at + budget.spacing);
         assert!(budget.next > later);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_pacing_probe_repays_a_full_slot_after_later_reservations() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, false, None);
+        // A normal turn may dispatch while a slow speculative probe is in
+        // flight. Its future slot must survive the probe's charged headers.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        budgets.reserve(&core_job());
+        let prior = budgets.for_resource("core").next().unwrap().next;
+        let probe = budgets.probe("core");
+        budgets.observe("core", 4999, reset, false, None);
+        budgets.charge_probe(&probe);
+        let budget = budgets.for_resource("core").next().unwrap();
+        assert_eq!(budget.next, prior + budget.spacing);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_probe_debt_preserves_overlapping_windows_and_separate_auth_quotas() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        for window in [reset, reset + 600] {
+            budgets.observe("core", 5000, window, false, None);
+        }
+        budgets.observe("installation/core", 15000, reset, false, None);
+        let app_slot = budgets
+            .for_resource("installation/core")
+            .next()
+            .unwrap()
+            .next;
+        let probe = budgets.probe("core");
+        budgets.observe("core", 4999, reset, false, None);
+        budgets.charge_probe(&probe);
+        for (window, prior) in probe.windows {
+            let budget = &budgets.0["core"][&window];
+            assert_eq!(budget.next, prior + budget.spacing);
+        }
+        assert_eq!(
+            budgets
+                .for_resource("installation/core")
+                .next()
+                .unwrap()
+                .next,
+            app_slot
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_pacing_probe_conservatively_repays_debt_after_transport_failure() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, false, None);
+        let probe = budgets.probe("core");
+        let prior = probe.windows[0].1;
+        // No headers establish whether GitHub charged the failed attempt.
+        budgets.charge_probe(&probe);
+        let budget = budgets.for_resource("core").next().unwrap();
+        assert_eq!(budget.next, prior + budget.spacing);
     }
 
     #[tokio::test(start_paused = true)]
