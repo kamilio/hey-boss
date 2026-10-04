@@ -6446,6 +6446,65 @@ async fn background_cached_ci_progresses_while_another_pr_waits_for_metadata() {
 }
 
 #[tokio::test]
+async fn paced_cycle_defers_cold_rows_without_failing_the_roster_or_blocking_cached_ci() {
+    let h = Harness::new().await;
+    h.mode("account-large");
+    h.phase(2);
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(1);
+    config.queue_timeout = Duration::from_secs(5);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    // The first PR is cold; the next one can finish entirely from fresh pages.
+    assert!(
+        c.ci_for_pr("acme/watch00", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    c.get("paced-shared", Freshness::Revalidate).await.unwrap();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let cycle = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if let Some(cycle) = c.account_refresh_cycle(true).await.unwrap() {
+                break cycle;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    api.stop().await;
+    assert_eq!(cycle.total, 25);
+    assert_eq!(
+        cycle.failed, 0,
+        "local pacing became upstream failures: {cycle:?}"
+    );
+    assert_eq!(
+        cycle.succeeded, 1,
+        "cached neighbor did not finish: {cycle:?}"
+    );
+    assert!(
+        cycle.attempted <= 3,
+        "expired admission swept the cold roster: {cycle:?}"
+    );
+    assert!(cycle.deferred >= 22);
+    assert!(cycle.cycle_budget_exhausted);
+    let page = c
+        .pr_status_page(None, None, 1000, Duration::ZERO)
+        .await
+        .unwrap();
+    let cached = page
+        .pull_requests
+        .iter()
+        .find(|row| row["repository"]["nameWithOwner"] == "acme/watch00")
+        .unwrap();
+    assert!(cached["sourceErrors"]["ci"].is_null());
+    assert_eq!(cached["ci"]["summary"]["state"], "success");
+}
+
+#[tokio::test]
 async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
     let h = Harness::new().await;
     h.mode("account");
@@ -6802,7 +6861,7 @@ async fn alternate_or_out_of_order_headers_cannot_erase_live_quota_debt() {
         let calls = h.calls().len();
         assert!(matches!(
             c.get("quota-after", Freshness::Revalidate).await,
-            Err(Error::RateLimited { .. })
+            Err(Error::Deadline)
         ));
         assert_eq!(h.calls().len(), calls);
     }
@@ -6873,7 +6932,7 @@ async fn changed_conditional_requests_obey_pacing_even_above_old_threshold() {
             .unwrap();
         assert!(matches!(
             c.get("conditional-changed", Freshness::Revalidate).await,
-            Err(Error::RateLimited { .. })
+            Err(Error::Deadline)
         ));
         assert_eq!(
             h.calls().len(),

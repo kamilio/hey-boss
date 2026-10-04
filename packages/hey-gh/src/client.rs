@@ -1404,6 +1404,100 @@ mod priority_tests {
     use std::sync::atomic::AtomicU64;
 
     #[tokio::test]
+    async fn ordinary_pacing_waits_for_the_deadline_and_allows_late_coalescing() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    let mut response = axum::Json(serde_json::json!({"ok":true})).into_response();
+                    let headers = response.headers_mut();
+                    headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                    headers.insert("x-ratelimit-remaining", "1900".parse().unwrap());
+                    headers.insert(
+                        "x-ratelimit-reset",
+                        (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
+                    );
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(5),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+
+        // Pacing needs two seconds. A short background turn must remain
+        // available for coalescing instead of reporting an immediate throttle.
+        let waiting = tokio::spawn({
+            let client = client.clone();
+            async move {
+                REQUEST_DEADLINE
+                    .scope(
+                        Some(tokio::time::Instant::now() + Duration::from_millis(300)),
+                        client.get("shared", Freshness::Revalidate),
+                    )
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiting.is_finished(),
+            "ordinary pacing prematurely rejected queued work"
+        );
+        assert_eq!(client.status().outstanding_requests, 1);
+        let cached = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.get("seed", Freshness::CachedOnly),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(cached.source, Source::Cache));
+        let foreground = INTERACTIVE_READ
+            .scope(
+                foreground_priority(),
+                client.get("shared", Freshness::Revalidate),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreground.data["ok"], true);
+        assert!(waiting.await.unwrap().is_ok());
+        assert_eq!(client.status().coalesced_requests, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        // Without another caller, expiration is a local deadline, not evidence
+        // that GitHub rejected a request. Cached neighbors still remain usable.
+        let started = tokio::time::Instant::now();
+        let result = REQUEST_DEADLINE
+            .scope(
+                Some(started + Duration::from_millis(150)),
+                client.get("expires", Freshness::Revalidate),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn completion_checks_promote_coalesced_work_but_yield_to_other_reads_and_backoff() {
         completion_checks_yield(true).await;
     }

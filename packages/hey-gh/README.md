@@ -606,6 +606,9 @@ and quota. Coalesced checks inherit that priority; foreground/background fairnes
 still applies.
 Priority never bypasses quota exhaustion, cooldowns, lane limits or deadlines,
 and cannot preempt an already active socket.
+Ordinary quota pacing keeps requests queued until their actual deadline, allowing
+a later coalescing reader to extend the shared work. Expiry is a local deadline;
+exhausted quota, reserved headroom and GitHub cooldowns remain rate-limit errors.
 An explicit GitHub `404: Branch not protected` establishes absence of legacy
 protection even when rulesets mark the branch protected; generic 404 and 403
 remain errors. Ancestry is fetched only when the combined policy is strict.
