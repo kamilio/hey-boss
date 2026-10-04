@@ -160,17 +160,26 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             .find(|(key, _)| key == "head_sha")
             .map(|(_, value)| value.into_owned());
         if let Some(head) = head_query {
-            if mode == "publication_progress" {
+            let rechecking = {
+                let calls = mock.calls.lock().unwrap();
+                calls
+                    .iter()
+                    .filter(|p| p.contains(&format!("head_sha={head}")))
+                    .count()
+                    > 1
+                    || calls.iter().any(|p| p.contains("created="))
+            };
+            if mode == "publication_progress" && rechecking {
                 rows[0]["conclusion"] = json!("failure");
                 rows[0]["updated_at"] = json!("2026-10-04T04:00:00Z");
             }
-            if mode == "new_run" {
+            if mode == "new_run" && rechecking {
                 let mut new = run(4, C, "success");
                 new["status"] = json!("pending");
                 new["conclusion"] = Value::Null;
                 rows.insert(0, new);
             }
-            if mode == "rerun" {
+            if mode == "rerun" && rechecking {
                 rows[0]["run_attempt"] = json!(2);
                 rows[0]["status"] = json!("in_progress");
                 rows[0]["conclusion"] = Value::Null;
@@ -358,6 +367,21 @@ async fn a_small_release_batch_uses_its_existing_budget_for_paced_metadata() {
 }
 
 #[tokio::test]
+async fn a_release_at_the_branch_tip_uses_complete_head_history_without_scanning_other_days() {
+    let h = Harness::new("").await;
+    let batch = h.report(&[C]).await;
+    assert_eq!(batch.reports[0].state, "verified");
+    assert!(
+        !h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.contains("created="))
+    );
+}
+
+#[tokio::test]
 async fn a_complete_branch_roster_limits_comparisons_to_possible_successors() {
     let h = Harness::new("branch_roster").await;
     let batch = h.report(&[A]).await;
@@ -464,9 +488,11 @@ async fn a_safe_main_advance_does_not_restart_a_valid_release_observation() {
 #[tokio::test]
 async fn truncated_roster_and_denied_access_do_not_certify() {
     for mode in ["truncated", "forbidden"] {
-        let h = Harness::new(mode).await;
-        let batch = h.report(&[A]).await;
-        assert_ne!(batch.reports[0].state, "verified");
+        for target in [A, C] {
+            let h = Harness::new(mode).await;
+            let batch = h.report(&[target]).await;
+            assert_ne!(batch.reports[0].state, "verified");
+        }
     }
 }
 #[tokio::test]

@@ -63,7 +63,9 @@ Completed entries remain available for rerun detection until explicitly removed.
 
 History is paginated and dense date windows are split below GitHub's 1,000
 result search cap. Missing pages, changing counts, limits, permission errors,
-and deadlines never establish success. History older than a year or requiring
+and deadlines never establish success. A complete small branch comparison uses
+per-commit workflow history directly, avoiding unrelated days. Date-based
+history older than a year or requiring
 over 100 listing requests per workflow is reported incomplete. Cached progress
 is reused on subsequent polls.
 

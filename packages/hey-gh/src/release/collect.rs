@@ -70,7 +70,11 @@ impl Client {
         let final_check = crate::client::REQUEST_DEADLINE
             .scope(
                 Some(deadline),
-                tokio::time::timeout_at(deadline, collector.validate_branch(&mut reports)),
+                tokio::time::timeout_at(
+                    deadline,
+                    crate::client::COMPLETION_VALIDATION
+                        .scope((), collector.validate_branch(&mut reports)),
+                ),
             )
             .await;
         let error = match final_check {
@@ -276,7 +280,12 @@ impl Collector<'_> {
             return Ok(());
         }
         for gate in &self.project.gates {
-            let (runs, history_complete) = self.runs(&gate.workflow, &since).await?;
+            let (runs, history_complete) =
+                if let Some(heads) = branch_commits.as_ref().filter(|s| s.len() <= 4) {
+                    self.runs_for_heads(&gate.workflow, heads).await?
+                } else {
+                    self.runs(&gate.workflow, &since).await?
+                };
             let mut observed = GateReport {
                 name: gate.name.clone(),
                 purpose: gate.purpose,
@@ -493,6 +502,102 @@ impl Collector<'_> {
         }
         Ok(())
     }
+    async fn runs_for_heads(
+        &mut self,
+        workflow: &str,
+        heads: &HashSet<String>,
+    ) -> Result<(Vec<Value>, bool)> {
+        // Complete branch ancestry bounds the candidate SHAs. Query a small
+        // candidate set directly, including every run/attempt regardless of date.
+        let mut heads: Vec<_> = heads.iter().collect();
+        heads.sort();
+        let mut all = Vec::new();
+        let mut complete = true;
+        for head in heads {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("head_sha", head)
+                .append_pair("branch", &self.project.branch)
+                .append_pair("per_page", "100")
+                .append_pair("exclude_pull_requests", "true")
+                .finish();
+            let first = format!(
+                "repos/{}/actions/workflows/{workflow}/runs?{query}",
+                self.project.repository
+            );
+            if let Some((rows, done)) = self.pages.get(&first) {
+                all.extend(rows.clone());
+                complete &= done;
+                continue;
+            }
+            let mut path = first.clone();
+            let mut rows = Vec::new();
+            let mut seen = HashSet::new();
+            let mut ids = HashSet::new();
+            let mut expected = None;
+            let mut done = true;
+            let mut bytes = 0;
+            loop {
+                if seen.len() >= 10 || !seen.insert(path.clone()) {
+                    done = false;
+                    break;
+                }
+                let response = self.client.get(&path, self.freshness).await?;
+                bytes += response.data.to_string().len();
+                if bytes > self.client.collection_limit() {
+                    return Err(Error::Invalid(
+                        "release head history exceeds collection byte limit".into(),
+                    ));
+                }
+                let total = number_allow_zero(&response.data, "total_count")?;
+                if total >= 1000 {
+                    done = false;
+                    break;
+                }
+                if expected.is_some_and(|old| old != total) {
+                    done = false;
+                }
+                expected = Some(total);
+                for run in response.data["workflow_runs"]
+                    .as_array()
+                    .ok_or_else(|| Error::Invalid("missing workflow head history".into()))?
+                {
+                    if run["head_sha"] != *head
+                        || run["head_branch"] != self.project.branch
+                        || run["path"] != format!(".github/workflows/{workflow}")
+                        || run["repository"]["full_name"]
+                            .as_str()
+                            .is_none_or(|s| !s.eq_ignore_ascii_case(&self.project.repository))
+                    {
+                        return Err(Error::Invalid(
+                            "workflow head history identity mismatch".into(),
+                        ));
+                    }
+                    if !ids.insert(number(run, "id")?) {
+                        done = false;
+                    }
+                    if matches!(
+                        run["event"].as_str(),
+                        Some("push" | "workflow_dispatch" | "schedule")
+                    ) {
+                        rows.push(run.clone());
+                    }
+                }
+                match response.link.as_deref().and_then(crate::client::next_link) {
+                    Some(next) => path = self.client.pagination_path(&first, &next)?,
+                    None => {
+                        if ids.len() as u64 != total {
+                            done = false;
+                        }
+                        break;
+                    }
+                }
+            }
+            self.pages.insert(first, (rows.clone(), done));
+            all.extend(rows);
+            complete &= done;
+        }
+        Ok((all, complete))
+    }
     async fn runs(&mut self, workflow: &str, since: &str) -> Result<(Vec<Value>, bool)> {
         let key = format!("{workflow}:{since}");
         if let Some(value) = self.pages.get(&key) {
@@ -538,6 +643,7 @@ impl Collector<'_> {
                 "repos/{}/actions/workflows/{workflow}/runs?{query}",
                 self.project.repository
             );
+            let first_path = path.clone();
             let mut expected = None;
             let mut window_ids = HashSet::new();
             loop {
@@ -594,7 +700,7 @@ impl Collector<'_> {
                     }
                 }
                 match response.link.as_deref().and_then(crate::client::next_link) {
-                    Some(next) => path = next,
+                    Some(next) => path = self.client.pagination_path(&first_path, &next)?,
                     None => {
                         if window_ids.len() as u64 != total {
                             complete = false;
@@ -640,6 +746,7 @@ impl Collector<'_> {
                     at.timestamp_millis() >= 0
                         && crate::now_ms().saturating_sub(at.timestamp_millis() as u64) > 600_000
                 });
+        let first_path = path.clone();
         let mut path = path;
         let mut rows = Vec::new();
         let mut seen = HashSet::new();
@@ -691,7 +798,7 @@ impl Collector<'_> {
                 return Err(Error::Invalid("release jobs exceed item limit".into()));
             }
             match response.link.as_deref().and_then(crate::client::next_link) {
-                Some(next) => path = next,
+                Some(next) => path = self.client.pagination_path(&first_path, &next)?,
                 None => {
                     if rows.len() as u64 != total {
                         return Err(Error::Invalid("incomplete release job pagination".into()));
