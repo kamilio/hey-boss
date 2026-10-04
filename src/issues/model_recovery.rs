@@ -13,6 +13,33 @@ pub(crate) struct Recovery {
     scanning: bool,
 }
 
+fn recovery_session<'a>(id: &str, metadata: &'a Value) -> Option<&'a str> {
+    let saved = metadata["session_id"].as_str()?;
+    let actor_session = id.strip_prefix("codex:");
+    if valid_session(saved) {
+        return (!actor_session.is_some_and(|s| valid_session(s) && s != saved)).then_some(saved);
+    }
+    // Before aliases had a separate session field, explicit codex:UUID:NAME
+    // identities copied UUID:NAME verbatim into session_id. Recognize only
+    // that exact legacy shape; the transcript header must still match UUID.
+    if actor_session != Some(saved)
+        || !matches!(
+            metadata["source"].as_str(),
+            Some("--agent" | "HEY_BOSS_AGENT_ID")
+        )
+    {
+        return None;
+    }
+    let (session, suffix) = saved.split_once(':')?;
+    (valid_session(session)
+        && !suffix.is_empty()
+        && suffix.len() <= 128
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
+    .then_some(session)
+}
+
 impl Recovery {
     /// At most 128 agent rows, 256 directory entries and four 8 MiB tails per
     /// step. No Codex database, subprocess, request-path work or write-held I/O.
@@ -41,17 +68,9 @@ impl Recovery {
                 {
                     continue;
                 }
-                let Some(session) = metadata["session_id"].as_str().filter(|s| valid_session(s))
-                else {
+                let Some(session) = recovery_session(&id, &metadata) else {
                     continue;
                 };
-                if id
-                    .strip_prefix("codex:")
-                    .filter(|s| valid_session(s))
-                    .is_some_and(|s| s != session)
-                {
-                    continue;
-                }
                 self.pending
                     .entry(session.into())
                     .or_default()
@@ -170,7 +189,9 @@ pub(crate) fn merge_recovered(
         }
         return Ok(merged);
     }
-    let session = incoming["session_id"].as_str().filter(|s| valid_session(s));
+    let session = after["id"]
+        .as_str()
+        .and_then(|id| recovery_session(id, &incoming));
     if session.is_none()
         || incoming["machine"] != node
         || incoming["model"].as_str().and_then(model_name).is_none()
@@ -181,7 +202,7 @@ pub(crate) fn merge_recovered(
         return Ok(after.clone());
     }
     let mut metadata = parse(old)?;
-    if metadata["machine"] != node || metadata["session_id"].as_str() != session {
+    if metadata["machine"] != node || metadata["session_id"] != incoming["session_id"] {
         return Err(super::Error::invalid(
             "Recovered model no longer matches the saved agent",
         ));
@@ -198,6 +219,94 @@ pub(crate) fn merge_recovered(
 mod tests {
     use super::*;
     const SESSION: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    #[test]
+    fn legacy_recovery_rejects_unrelated_or_malformed_session_ids() {
+        let alias = format!("{SESSION}:ci_review_watch");
+        let id = format!("codex:{alias}");
+        let metadata = json!({"session_id":alias,"source":"--agent"});
+        assert_eq!(recovery_session(&id, &metadata), Some(SESSION));
+        assert_eq!(recovery_session("codex:unrelated", &metadata), None);
+        for saved in [
+            format!("{SESSION}:"),
+            format!("{SESSION}:../other"),
+            "invalid:alias".into(),
+        ] {
+            assert_eq!(
+                recovery_session(
+                    &format!("codex:{saved}"),
+                    &json!({"session_id":saved,"source":"--agent"})
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            recovery_session(&id, &json!({"session_id":alias,"source":"CODEX_THREAD_ID"})),
+            None
+        );
+        assert_eq!(
+            recovery_session(
+                &format!("codex:{SESSION}"),
+                &json!({"session_id":"ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"})
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_suffixed_session_recovers_and_syncs_without_changing_identity() {
+        let root =
+            std::env::temp_dir().join(format!("model-recovery-alias-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let alias = format!("{SESSION}:ci_review_watch");
+        let id = format!("codex:{alias}");
+        let metadata =
+            json!({"id":id,"kind":"codex","machine":"local","session_id":alias,"source":"--agent"});
+        let before = json!({"id":id,"metadata":metadata.to_string(),"last_seen":123});
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents(id TEXT PRIMARY KEY,metadata TEXT,last_seen INTEGER)",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agents VALUES(?1,?2,123)",
+            rusqlite::params![id, metadata.to_string()],
+        )
+        .unwrap();
+        let path = root.join(format!("sessions/rollout-{SESSION}.jsonl"));
+        let transcript = |session| {
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":session}}),
+                json!({"type":"turn_context","payload":{"model":"gpt-6-astra"}})
+            )
+        };
+        for (header, expected) in [
+            ("ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee", None),
+            (SESSION, Some("gpt-6-astra")),
+        ] {
+            std::fs::write(&path, transcript(header)).unwrap();
+            let mut recovery = Recovery::default();
+            while !recovery.step(&db, "local", &root).unwrap() {}
+            let raw: String = db
+                .query_row("SELECT metadata FROM agents", [], |r| r.get(0))
+                .unwrap();
+            let recovered: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(recovered["model"], json!(expected));
+            assert_eq!(recovered["session_id"], alias);
+            assert_eq!(recovered["id"], id);
+            if expected.is_some() {
+                let mut after = before.clone();
+                after["metadata"] = json!(recovered.to_string());
+                assert_eq!(
+                    merge_recovered(&before, &before, &after, "local").unwrap(),
+                    after
+                );
+                assert!(merge_recovered(&before, &before, &after, "remote").is_err());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn recovery_merge_rejects_foreign_evidence_and_preserves_newer_capture() {
