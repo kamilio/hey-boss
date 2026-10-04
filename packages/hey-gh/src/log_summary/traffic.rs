@@ -98,7 +98,10 @@ impl Records {
                     .into(),
                     scope: opaque(line, "auth_scope", 64),
                     instance: opaque(line, "instance", 32),
-                    resource: allowed(field(line, "resource"), &["core", "search", "graphql"]),
+                    resource: allowed(
+                        field(line, "resource"),
+                        &["core", "search", "graphql", "app_auth"],
+                    ),
                 },
             );
         } else if line.contains("GitHub response headers")

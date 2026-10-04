@@ -35,6 +35,9 @@ pub(crate) fn foreground_priority() -> Arc<AtomicBool> {
 
 #[derive(Clone)]
 pub struct Config {
+    /// Optional read-only installation for explicitly selected REST repositories.
+    /// Discovery and GraphQL continue using the user's gh authentication.
+    pub installation: Option<crate::AppInstallation>,
     pub gh_program: PathBuf,
     pub hostname: String,
     pub rest_url: Url,
@@ -57,6 +60,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            installation: None,
             gh_program: PathBuf::from("gh"),
             hostname: "github.com".into(),
             rest_url: Url::parse("https://api.github.com/").expect("static URL"),
@@ -197,10 +201,13 @@ impl Client {
                 "REST and GraphQL must share their GitHub origin".into(),
             ));
         }
-        let scope = digest(&format!(
+        let mut scope = digest(&format!(
             "{}\0{}\0{}\0{}",
             config.rest_url, config.graphql_url, config.api_version, token
         ));
+        if let Some(app) = &config.installation {
+            scope = digest(&format!("{scope}\0{}", app.scope()));
+        }
         if config.change_retention.is_zero()
             || config.change_retention > Duration::from_secs(365 * 86400)
             || !(1..=1_000_000).contains(&config.max_change_events)
@@ -584,6 +591,17 @@ impl Client {
                     .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let job = Job {
+                    installation: body.is_none()
+                        && self.request_repository(&url).is_some_and(|repo| {
+                            self.0
+                                .config
+                                .installation
+                                .as_ref()
+                                .is_some_and(|app| app.covers(&repo))
+                        }),
+                    minting: false,
+                    auth_attempts: 0,
+                    auth_generation: 0,
                     interactive: interactive.clone(),
                     collection_slice: crate::collection_budget::CURRENT.try_with(|_| ()).is_ok(),
                     detail_lane: matches!(
