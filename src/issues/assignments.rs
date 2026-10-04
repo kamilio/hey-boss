@@ -260,6 +260,11 @@ pub(super) fn assign(
                 db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES(?1,?2,'session','','delivered',?3) ON CONFLICT(request_id) DO UPDATE SET state='delivered'",params![id,run,now])?;
             }
             data["github_handoff"] = json!({"run":run,"event":status["event"]});
+            if reviewed_evidence.is_some() {
+                // Completion runs on the companion, whose steering table is
+                // local. Carry the validated receipt with the replicated event.
+                data["github_handoff"]["reviewed"] = json!(true);
+            }
         }
     }
     Ok(data)
@@ -913,7 +918,7 @@ pub(super) fn release_worker(
     // A deliberate handoff can end with a blocked/interrupted result while
     // waiting for external input. Consume only that run's exact snapshot;
     // later evidence not delivered to the worker stays runnable.
-    let handed_off = db.query_row("SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee') IN (?3,'human:boss') AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|r.get::<_,bool>(0))?;
+    let (handed_off, reviewed) = db.query_row("SELECT coalesce(actor=?3 AND json_extract(data,'$.target')='github' AND json_extract(data,'$.previous_assignee') IN (?3,'human:boss') AND json_extract(data,'$.github_handoff.run')=?4 AND json_extract(data,'$.github_handoff.event') IS ?5,0),coalesce(json_extract(data,'$.github_handoff.reviewed')=1,0) FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('assigned','claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1",params![job.project.id,job.number(),job.actor.id,job.id,status["event"].as_str()],|r|Ok((r.get::<_,bool>(0)?,r.get::<_,bool>(1)?))).optional()?.unwrap_or_default();
     let handed_off = handed_off
         && own_handoff(
             db,
@@ -925,9 +930,10 @@ pub(super) fn release_worker(
     // handoff may acknowledge that exact event; a later event still needs a
     // delivery receipt (or the separately validated reviewed-evidence path).
     let retained_handoff = handed_off
-        && status["event"]
-            .as_str()
-            .is_some_and(|event| job.issue["github_status"]["event"].as_str() == Some(event));
+        && (reviewed
+            || status["event"]
+                .as_str()
+                .is_some_and(|event| job.issue["github_status"]["event"].as_str() == Some(event)));
     let next = (retained_handoff
         || ((state == "completed" || handed_off) && delivered_to(db, &job.id, &status)?))
     .then_some(WATCHER);

@@ -26,6 +26,14 @@ fn external_comments(db: &Connection, project: &str, number: i64, actor: &str) -
     )?)
 }
 
+fn requirements_comments(db: &Connection, project: &str, number: i64, actor: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT count(*) FROM comments WHERE project_id=?1 AND issue_number=?2 AND author NOT IN (?3,'watcher:github')",
+        params![project, number, actor],
+        |r| r.get(0),
+    )?)
+}
+
 pub(in crate::issues::store) fn capture(
     db: &Connection,
     project: &str,
@@ -45,7 +53,8 @@ pub(in crate::issues::store) fn capture(
     }
     Ok(
         json!({"run":run,"version":issue.version+1,"sha256":digest(issue)?,
-        "external_comments":external_comments(db, project, issue.number, &actor.id)?}),
+        "external_comments":external_comments(db, project, issue.number, &actor.id)?,
+        "requirements_comments":requirements_comments(db, project, issue.number, &actor.id)?}),
     )
 }
 
@@ -84,10 +93,15 @@ pub(in crate::issues::store) fn current(
                 && (data["previous_assignee"] == actor
                     || data["previous_assignee"] == "human:boss")))
         && ack["run"] == run
-        // Comment rows and their audit events can arrive in different sync
-        // batches. Append-only counts are portable across replica-local IDs.
-        && (ack.get("external_comments").is_none()
-            || ack["external_comments"] == external_comments(db, project, issue.number, actor)?)
+        // Generated GitHub notes can be absent from a replica's history. Their
+        // evidence is guarded by the handoff's exact watcher event instead.
+        // Keep the legacy count for acknowledgements written by older builds.
+        && (if let Some(count) = ack.get("requirements_comments") {
+            *count == requirements_comments(db, project, issue.number, actor)?
+        } else {
+            ack.get("external_comments").is_none()
+                || ack["external_comments"] == external_comments(db, project, issue.number, actor)?
+        })
         && version_matches(db, project, issue, id, actor, ack)?
         && ack["sha256"].as_str() == Some(digest(issue)?.as_str());
     Ok(Some(Acknowledgement {
@@ -132,9 +146,12 @@ fn version_matches(
     })?;
     for row in rows {
         let (author, action, data, origin) = row?;
-        // Prose is never evidence. Only the owning actor's own final notes are
-        // harmless; another actor's comment may contain new work or an approval.
-        if author == actor && action == "commented" {
+        // GitHub notes describe separately guarded watcher evidence. An older
+        // note arriving late must not masquerade as a new requirement either.
+        if action == "commented"
+            && (author == actor
+                || (author == "watcher:github" && ack.get("requirements_comments").is_some()))
+        {
             continue;
         }
         if author != actor || action != "requirements_preserved" {
