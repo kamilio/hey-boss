@@ -644,6 +644,11 @@ at most once per cycle. New arrivals and repeatedly failing PRs cannot monopoliz
 the ordinary rotation. This changes refresh order without adding requests to the
 cycle budget or changing source freshness and error reporting.
 
+An incomplete CI refresh that retains newly validated completed-job pages earns
+one earlier continuation in the next cycle, using the priority lane. Cached pages
+and mutable sources do not renew it. Starting the continuation consumes it, and a
+changed head discards it; ordinary rotation still gets its alternating turn.
+
 Conflict status is `clean`, `conflicting`, or `unknown`, based on GitHub mergeability. GitHub can return unknown while calculating it. CI failures, pending reviews, and branch-protection blocks are separate from merge conflicts. Reports expose per-resource validation times and whether data came from cache, network, or conditional revalidation.
 
 ## Queue and caching

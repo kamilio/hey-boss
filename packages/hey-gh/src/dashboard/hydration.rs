@@ -27,6 +27,7 @@ pub(super) struct Completed {
     pub pr_started_at_ms: u64,
     pub result: Result<()>,
     pub cycle_interrupted: bool,
+    pub retained_job_pages: bool,
 }
 
 pub(super) type Read<'a> = Pin<Box<dyn Future<Output = Result<Completed>> + Send + 'a>>;
@@ -173,16 +174,19 @@ impl Cycle<'_> {
         let refresh = Box::pin(
             crate::client::REQUEST_DEADLINE.scope(background.then_some(deadline), refresh),
         );
+        let mut retained_job_pages = false;
         let result = if background {
             let budget = crate::collection_budget::Budget::new();
-            crate::collection_budget::CURRENT
+            let result = crate::collection_budget::CURRENT
                 .scope(budget.clone(), async {
                     tokio::select! {
                         result = refresh => result,
                         _ = budget.exhausted() => Err(Error::Deadline),
                     }
                 })
-                .await
+                .await;
+            retained_job_pages = ci_only && budget.has_retained_pages();
+            result
         } else {
             refresh.await
         };
@@ -197,6 +201,7 @@ impl Cycle<'_> {
             pr_started_at_ms,
             result,
             cycle_interrupted,
+            retained_job_pages,
         })
     }
 }

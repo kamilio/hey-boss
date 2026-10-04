@@ -223,8 +223,15 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             &[],
         );
     }
-    if mode.starts_with("completed-job-pages") && path.ends_with("/jobs") {
+    if (mode.starts_with("completed-job-pages")
+        || (mode == "account-large-progress" && path.starts_with("/repos/acme/demo/")))
+        && path.ends_with("/jobs")
+    {
         if query.contains("page=2") {
+            if phase == 2 && mode == "account-large-progress" {
+                mock.release.notified().await;
+                return reply(503, json!({"message":"synthetic interrupted page"}), &[]);
+            }
             if phase == 2 && mode == "completed-job-pages" {
                 mock.release.notified().await;
             }
@@ -733,7 +740,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             {
                 let (total, tail) = if mode == "account-page-timeout" {
                     (60, Some("acme/page59"))
-                } else if mode == "account-large" {
+                } else if mode.starts_with("account-large") {
                     (25, Some("acme/watch23"))
                 } else if mode.starts_with("account-growing") && phase >= 1 {
                     (3, Some("acme/new"))
@@ -843,7 +850,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     &[],
                 );
             }
-            let (nodes, next, total) = if mode == "account-large" {
+            let (nodes, next, total) = if mode.starts_with("account-large") {
                 let mut nodes = vec![node("acme/demo")];
                 nodes.extend((0..24).map(|n| node(&format!("acme/watch{n:02}"))));
                 (nodes, None, 25)
@@ -946,7 +953,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     let normalized = path
         .replace("/ACME/DEMO/", "/acme/demo/")
         .replace("/acme/other/", "/acme/demo/");
-    let normalized = if (mode == "account-large" && path.starts_with("/repos/acme/watch"))
+    let normalized = if (mode.starts_with("account-large") && path.starts_with("/repos/acme/watch"))
         || (mode == "account-multi-source" && path.starts_with("/repos/acme/foreground"))
     {
         let repository = path.split('/').nth(3).unwrap();
@@ -959,7 +966,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         "/repos/acme/demo/pulls" => json!([
             {"number":7,"user":{"login":"me"}}, {"number":8,"user":{"login":"other"}}]),
         "/repos/acme/demo/pulls/7" => {
-            json!({"node_id":if mode=="account-large" {format!("PR_acme/{}_7",path.split('/').nth(3).unwrap())} else {(if mode=="account-new-identity" {if other {"PR_acme/other_new_7"} else {"PR_acme/demo_new_7"}} else if other {"PR_acme/other_7"} else {"PR_acme/demo_7"}).to_owned()},"number":7,"title":if mode=="account-version-change" && phase>=4 {"Latest REST title"} else {"A PR"},"state":if mode=="account-state-version" && phase>=1 || mode.starts_with("account") && ((!other && phase>=8) || (other && phase>=9)) {"closed"} else {"open"},
+            json!({"node_id":if mode.starts_with("account-large") {format!("PR_acme/{}_7",path.split('/').nth(3).unwrap())} else {(if mode=="account-new-identity" {if other {"PR_acme/other_new_7"} else {"PR_acme/demo_new_7"}} else if other {"PR_acme/other_7"} else {"PR_acme/demo_7"}).to_owned()},"number":7,"title":if mode=="account-version-change" && phase>=4 {"Latest REST title"} else {"A PR"},"state":if mode=="account-state-version" && phase>=1 || mode.starts_with("account") && ((!other && phase>=8) || (other && phase>=9)) {"closed"} else {"open"},
             "merged":mode.starts_with("account") && other && phase>=9,"merged_at":if mode.starts_with("account") && other && phase>=9 {json!("2026-09-19T02:00:00Z")} else {Value::Null},
             "closed_at":if mode=="account-state-version" && phase>=8 {json!("2026-09-19T00:00:03Z")} else if mode=="account-state-version" && phase>=1 {json!("2026-09-19T00:00:01Z")} else if mode.starts_with("account") && ((!other && phase>=8) || (other && phase>=9)) {json!("2026-09-19T02:00:00Z")} else {Value::Null},
             "updated_at":if mode=="account-state-version" && phase>=8 {"2026-09-19T00:00:03Z"} else if mode=="account-state-version" && phase>=1 {"2026-09-19T00:00:01Z"} else if mode=="account-version-change" && phase>=4 {"2026-09-19T00:00:02Z"} else {"2026-09-19T00:00:00Z"},
@@ -6507,6 +6514,93 @@ async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
             .iter()
             .all(|row| row["sourceErrors"] == json!({})
                 && row["ci"]["summary"]["state"] == "success")
+    );
+}
+
+#[tokio::test]
+async fn account_resumes_retained_job_pages_before_starting_another_cold_batch() {
+    let h = Harness::new().await;
+    h.mode("account-large-progress");
+    h.phase(2);
+    let mut config = h.config();
+    config.report_timeout = Duration::from_secs(1);
+    config.queue_timeout = Duration::from_secs(1);
+    config.min_spacing = Duration::from_millis(20);
+    config.max_attempts = 1;
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if let Some(cycle) = c.account_refresh_cycle(true).await.unwrap() {
+                break cycle;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    api.stop().await;
+    h.mock.release.notify_waiters();
+    until(|| c.status().outstanding_requests == 0).await;
+    assert!(
+        h.calls()
+            .iter()
+            .any(|call| call.path.starts_with("/repos/acme/demo/")
+                && call.path.ends_with("/jobs")
+                && call.query.contains("page=2")),
+        "fixture must retain the first completed page before interruption"
+    );
+    let pages_before = h
+        .calls()
+        .iter()
+        .filter(|call| {
+            call.path.starts_with("/repos/acme/demo/")
+                && call.path.ends_with("/jobs")
+                && !call.query.contains("page=2")
+        })
+        .count();
+    assert_eq!(pages_before, 1);
+    h.phase(3);
+    // Starting the persisted watch gives the next cycle a fresh budget. The
+    // interrupted PR should finish using its retained page, alongside ordinary
+    // rotation, instead of waiting behind the other 24 cold PRs.
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if c.account_refresh_cycle(true)
+                .await
+                .unwrap()
+                .is_some_and(|cycle| cycle.started_at_ms > first.started_at_ms)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    api.stop().await;
+    let cached = c
+        .ci_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert!(
+        cached.complete,
+        "retained work was left behind the cold batch: {:?}",
+        cached.data.errors
+    );
+    assert_eq!(cached.data.jobs.len(), 2);
+    assert_eq!(
+        h.calls()
+            .iter()
+            .filter(|call| call.path.starts_with("/repos/acme/demo/")
+                && call.path.ends_with("/jobs")
+                && !call.query.contains("page=2"))
+            .count(),
+        pages_before,
+        "continuation must reuse the completed page"
     );
 }
 
