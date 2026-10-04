@@ -278,13 +278,30 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Vec<SourceError>> {
         let suffix = format!("{}/{repository}/{number}", self.hostname());
-        let pr = self.pull_request(repository, number, freshness).await?;
+        let seed = self.cached_pr_seed(repository, number, freshness).await?;
+        let seeded = seed.is_some();
+        let pr = match seed {
+            Some(pr) => pr,
+            None => self.pull_request(repository, number, freshness).await?,
+        };
         crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
-        self.observe(
-            &format!("metadata://{suffix}"),
-            &json!({"pull_request":pr.data,"conflicts":conflicts(&pr.data)}),
-        )
-        .await?;
+        // Conversation sources need an identity, not current commit selectors.
+        // Start them without spending a second metadata request. A seed cannot
+        // publish lifecycle evidence; final REST validation below still must
+        // succeed before this collection is complete.
+        if seeded {
+            tracing::info!(
+                repository,
+                number,
+                "PR detail collection using cached identity"
+            );
+        } else {
+            self.observe(
+                &format!("metadata://{suffix}"),
+                &json!({"pull_request":pr.data,"conflicts":conflicts(&pr.data)}),
+            )
+            .await?;
+        }
         let prefix = format!("repos/{repository}");
         let mut errors = Vec::new();
         let mut reviews = None;
