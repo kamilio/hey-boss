@@ -733,6 +733,7 @@ mod tests {
     use super::*;
 
     include!("requirements_handoff_tests.rs");
+    include!("companion_handoff_tests.rs");
 
     #[test]
     fn quota_deadline_survives_result_recovery_without_relabeling_or_losing_session() {
