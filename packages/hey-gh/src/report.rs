@@ -293,6 +293,8 @@ impl Client {
                 "comments",
                 format!("{prefix}/issues/{number}/comments?per_page=100"),
             ),
+            ("review_events", String::new()),
+            ("review_threads", String::new()),
             (
                 "review_comments",
                 format!("{prefix}/pulls/{number}/comments?per_page=100"),
@@ -305,8 +307,6 @@ impl Client {
                 "timeline",
                 format!("{prefix}/issues/{number}/timeline?per_page=100"),
             ),
-            ("review_events", String::new()),
-            ("review_threads", String::new()),
         ];
         // Independent sources can share a queue round. Keep tiny embedded
         // queues sequential rather than making their own reads overload them.
@@ -315,36 +315,50 @@ impl Client {
         } else {
             1
         };
-        // Fetch issue comments first: an upstream stall in reviews must not
-        // get ahead of new comments on the daemon's serial transport queue.
-        for group in sources[..1].chunks(1).chain(sources[1..].chunks(width)) {
-            let fetch = |index: usize| async move {
-                if let Some((source, path)) = group.get(index) {
-                    self.refresh_pr_detail_source(repository, number, source, path, freshness)
-                        .await
-                } else {
-                    Ok(Vec::new())
-                }
-            };
-            let (a, b, c) = tokio::join!(fetch(0), fetch(1), fetch(2));
-            for ((source, _), result) in group.iter().zip([a, b, c]) {
-                match result {
-                    Ok(values) => {
-                        if *source == "reviews" {
-                            reviews = Some(values);
-                        } else if *source == "review_threads" {
-                            threads = Some(values);
-                        }
-                    }
-                    Err(error) => {
-                        errors.push(SourceError {
-                            source: (*source).into(),
-                            message: error.to_string(),
-                        });
+        // Start comments first, alongside the independent GraphQL sources.
+        // Refill each freed slot immediately: a paced REST read must not keep
+        // healthy siblings behind a batch barrier. Poll in this caller's task
+        // so entity fencing, validation clocks and collection budgets survive.
+        let fetch = |index: usize| {
+            let (source, path) = &sources[index];
+            Box::pin(self.refresh_pr_detail_source(repository, number, source, path, freshness))
+        };
+        let mut next = 0;
+        let mut active = Vec::new();
+        while next < sources.len() || !active.is_empty() {
+            while next < sources.len() && active.len() < width {
+                active.push((next, fetch(next)));
+                next += 1;
+            }
+            let (position, result) = std::future::poll_fn(|cx| {
+                for (position, (_, read)) in active.iter_mut().enumerate() {
+                    if let std::task::Poll::Ready(result) = read.as_mut().poll(cx) {
+                        return std::task::Poll::Ready((position, result));
                     }
                 }
+                std::task::Poll::Pending
+            })
+            .await;
+            let (index, _) = active.remove(position);
+            match result {
+                Ok(values) => {
+                    if sources[index].0 == "reviews" {
+                        reviews = Some(values);
+                    } else if sources[index].0 == "review_threads" {
+                        threads = Some(values);
+                    }
+                }
+                Err(error) => errors.push((
+                    index,
+                    SourceError {
+                        source: sources[index].0.into(),
+                        message: error.to_string(),
+                    },
+                )),
             }
         }
+        errors.sort_by_key(|(index, _)| *index);
+        let errors = errors.into_iter().map(|(_, error)| error).collect();
         let final_pr = self
             .final_pull_request(
                 repository,
