@@ -32,6 +32,18 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Configure a read-only GitHub App installation for repository REST reads.
+    App {
+        #[arg(long, default_value = "github.com")]
+        hostname: String,
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        installation_id: u64,
+        /// Selected repositories in this installation (repeat for each).
+        #[arg(long = "repository", required = true)]
+        repositories: Vec<String>,
+    },
     /// Manage the durable, per-user shared daemon on localhost:8787.
     Service {
         #[command(subcommand)]
@@ -306,6 +318,22 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {}
     }
+    if let Some(Command::App {
+        hostname,
+        client_id,
+        installation_id,
+        repositories,
+    }) = &args.command
+    {
+        hey_gh::app_auth::configure(
+            hostname,
+            client_id.clone(),
+            *installation_id,
+            repositories.clone(),
+        )?;
+        println!("GitHub App configured. Run hey-gh service restart to activate it.");
+        return Ok(());
+    }
     if let Some(Command::Logs {
         tail,
         path,
@@ -361,6 +389,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         tracing::info!(version=env!("CARGO_PKG_VERSION"),%listen,%hostname,log_directory=%log_dir.unwrap_or_else(|| logging::directory(listen.port())).display(),"daemon starting");
         let mut config = Config {
+            installation: hey_gh::app_auth::load(&hostname)?,
             hostname: hostname.clone(),
             queue_capacity,
             ..Config::default()
@@ -535,6 +564,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Command::Snapshot => serde_json::to_value(api.bootstrap().await?)?,
         Command::Status => serde_json::to_value(api.status().await?)?,
         Command::Serve { .. }
+        | Command::App { .. }
         | Command::Service { .. }
         | Command::Install { .. }
         | Command::Logs { .. }
