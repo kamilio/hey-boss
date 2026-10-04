@@ -602,10 +602,9 @@ impl Client {
                 let job = Job {
                     completion_validation: completion.clone(),
                     installation: body.is_none()
-                        // Classic protection needs Administration permission.
-                        // Keep it, and unclassified SDK reads, on the user's
-                        // existing grants; the App only covers known reads.
-                        && !matches!(endpoint, "branch_protection" | "rest_other")
+                        // The installation quota is only for CI status reads.
+                        // All other activity retains the user's authentication.
+                        && matches!(endpoint, "check_runs" | "commit_statuses" | "workflow_runs" | "workflow_jobs")
                         && self.request_repository(&url).is_some_and(|repo| {
                             self.0
                                 .config

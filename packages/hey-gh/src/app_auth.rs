@@ -147,7 +147,7 @@ impl AppInstallation {
             .map_err(|_| Error::Invalid("invalid GitHub App API URL".into()))?;
         Ok(http.post(url).bearer_auth(jwt).json(&json!({
             "repositories":self.0.repositories.iter().map(|r| r.split_once('/').unwrap().1).collect::<Vec<_>>(),
-            "permissions":{"actions":"read", "checks":"read", "contents":"read", "pull_requests":"read", "statuses":"read", "issues":"read", "metadata":"read"}
+            "permissions":{"actions":"read", "checks":"read", "statuses":"read", "metadata":"read"}
         })))
     }
 
@@ -285,6 +285,10 @@ mod tests {
                 .unwrap()
                 .values()
                 .all(|v| v == "read")
+        );
+        assert_eq!(
+            body["permissions"],
+            json!({"actions":"read","checks":"read","statuses":"read","metadata":"read"})
         );
         assert!(app.covers("ACME/demo"));
         assert!(!app.covers("acme/demolition"));
