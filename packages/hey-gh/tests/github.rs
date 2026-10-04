@@ -10521,6 +10521,55 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
 }
 
 #[tokio::test]
+async fn ci_seed_starts_checks_while_metadata_is_waiting() {
+    let h = Harness::new().await;
+    let c = h.client();
+    let warm = c
+        .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(warm.complete);
+    rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%repos/%'", [],
+    ).unwrap();
+    let before = h.calls().len();
+    h.mode("issue72-stall-metadata");
+    let worker = c.clone();
+    let read = tokio::spawn(async move {
+        worker
+            .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+    });
+    let checks_started = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            // The mock permits only one core socket. Queued CI proves the
+            // collection has started even while metadata holds that socket.
+            if c.status().outstanding_requests > 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        checks_started.is_ok(),
+        "CI collection waited for initial metadata"
+    );
+    assert!(!read.is_finished(), "expired metadata must not certify CI");
+    h.mock.release.notify_one();
+    let report = read.await.unwrap().unwrap();
+    assert!(report.complete);
+    assert!(
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path.ends_with("/check-runs"))
+    );
+    assert_eq!(report.data.head_sha, warm.data.head_sha);
+    assert_eq!(report.data.merge_sha, warm.data.merge_sha);
+    assert!(report.validations.iter().all(|v| v.validated_at_ms > 0));
+}
+
+#[tokio::test]
 async fn report_seed_starts_details_while_metadata_is_waiting() {
     let h = Harness::new().await;
     let c = h.client();
@@ -10568,7 +10617,7 @@ async fn report_seed_starts_details_while_metadata_is_waiting() {
 }
 
 #[tokio::test]
-async fn report_seed_rejects_changed_selectors_and_never_certifies_expired_metadata() {
+async fn report_and_ci_seeds_reject_changed_selectors_and_never_certify_expired_metadata() {
     for changed in [
         "none",
         "node",
@@ -10617,6 +10666,27 @@ async fn report_seed_rejects_changed_selectors_and_never_certifies_expired_metad
             db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
                 .unwrap();
         }
+        let ci = c
+            .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap_or_else(|e| panic!("CI {changed}: {e:?}"));
+        assert!(ci.complete, "CI {changed}: {:?}", ci.data.errors);
+        assert_eq!(ci.data.head_sha, HEAD, "CI {changed}");
+        assert_eq!(ci.data.merge_sha, None, "CI {changed}");
+        assert!(
+            ci.validations.iter().all(|v| v.validated_at_ms > 0),
+            "CI {changed}"
+        );
+        // Restore the same seed to exercise the full report independently.
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE scope=?2 AND key=?3",
+            rusqlite::params![seed.to_string(), scope, key],
+        )
+        .unwrap();
+        if changed == "cold" {
+            db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
+                .unwrap();
+        }
         let report = c
             .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
             .await
@@ -10639,6 +10709,59 @@ async fn report_seed_rejects_changed_selectors_and_never_certifies_expired_metad
                 .any(|v| v.resource.ends_with("/pulls/7"))
         );
     }
+}
+
+#[tokio::test]
+async fn ci_seed_preserves_explicit_offline_and_denied_reads() {
+    for freshness in [
+        Freshness::Revalidate,
+        Freshness::MaxAge(Duration::ZERO),
+        Freshness::CachedOnly,
+    ] {
+        let h = Harness::new().await;
+        let c = h.client();
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%repos/%'", [],
+        ).unwrap();
+        let before = h.calls().len();
+        h.mode("issue72-stall-metadata");
+        if matches!(freshness, Freshness::CachedOnly) {
+            let ci = c.ci_for_pr("acme/demo", 7, freshness).await.unwrap();
+            assert!(ci.complete);
+            assert_eq!(h.calls().len(), before);
+            assert!(ci.validations.iter().any(|v| v.validated_at_ms == 0));
+        } else {
+            let worker = c.clone();
+            let read =
+                tokio::spawn(async move { worker.ci_for_pr("acme/demo", 7, freshness).await });
+            until(|| h.calls().len() > before).await;
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            assert_eq!(
+                c.status().outstanding_requests,
+                1,
+                "explicit validation must precede CI"
+            );
+            read.abort();
+            let _ = read.await;
+        }
+    }
+    let h = Harness::new().await;
+    let c = h.client();
+    c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'", [],
+    ).unwrap();
+    h.mode("sdk-upstream-403");
+    assert!(matches!(
+        c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await,
+        Err(Error::GitHub { status: 403, .. })
+    ));
 }
 
 #[tokio::test]
