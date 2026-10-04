@@ -5,6 +5,14 @@
 use super::Result;
 use crate::database::Connection;
 
+// A local watermark rearms a notice after its effective blockers change. History
+// remains immutable and canonical fleet history is still replayed in full.
+pub(super) const REWORK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dependency_notice_resets(
+    project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,event_id INTEGER NOT NULL,
+    PRIMARY KEY(project_id,issue_number));
+    CREATE INDEX IF NOT EXISTS issue_dependency_rework ON events(project_id,issue_number,id DESC)
+    WHERE action='dependency_rework';";
+
 const PREFIX: &str = "Dependency rework: upstream tasks ";
 const SUFFIX: &str = " need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.";
 pub(super) const REJECTION: &str = "This dependency notice used obsolete sibling scheduling. The current declared dependencies remain in effect; your running claim is unchanged.";
@@ -43,12 +51,40 @@ fn obsolete(project: &str, number: &str, list: &str, entry: &str) -> String {
         AND NOT EXISTS(SELECT 1 FROM descendants d WHERE d.number={entry})))")
 }
 
+// Ignore model metadata, upstream versions, list ordering and caller identity.
+fn canonical(list: &str, entry: &str) -> String {
+    format!(
+        "(SELECT json_group_array(number) FROM (SELECT DISTINCT {entry} AS number FROM json_each({list}) dependency ORDER BY number))"
+    )
+}
+
+fn duplicate(list: &str, entry: &str) -> String {
+    let incoming = canonical(list, entry);
+    let saved = canonical(
+        "CASE WHEN json_valid(e.data) THEN coalesce(json_extract(e.data,'$.dependencies'),'[]') ELSE '[]' END",
+        "json_extract(dependency.value,'$[0]')",
+    );
+    format!("EXISTS(SELECT 1 FROM events e WHERE e.id=(SELECT id FROM events
+        WHERE project_id=NEW.project_id AND issue_number=NEW.issue_number AND action='dependency_rework' ORDER BY id DESC LIMIT 1)
+        AND e.id>coalesce((SELECT event_id FROM dependency_notice_resets WHERE project_id=NEW.project_id AND issue_number=NEW.issue_number),0)
+        AND {incoming}<>'[]' AND {incoming}={saved})")
+}
+
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode' OR (name='dependency_notice_comment' AND instr(sql,'syncing')=0)) FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
+    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode' OR (name='dependency_notice_comment' AND instr(sql,'dependency_notice_resets')=0)) FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
         return Ok(());
     }
     let tx =
         crate::database::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    let duplicate_comment = duplicate(&numbers("NEW.body"), "dependency.value");
+    let duplicate_commented = duplicate(
+        &numbers("json_extract(NEW.data,'$.body')"),
+        "dependency.value",
+    );
+    let duplicate_event = duplicate(
+        "coalesce(json_extract(NEW.data,'$.dependencies'),'[]')",
+        "json_extract(dependency.value,'$[0]')",
+    );
     let comment = obsolete(
         "NEW.project_id",
         "NEW.issue_number",
@@ -96,10 +132,10 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         DROP TRIGGER IF EXISTS dependency_notice_delivery;
         DROP VIEW IF EXISTS obsolete_dependency_steering;
         CREATE TRIGGER dependency_notice_comment BEFORE INSERT ON comments
-        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND {comment} BEGIN SELECT RAISE(IGNORE); END;
+        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND ({comment} OR {duplicate_comment}) BEGIN SELECT RAISE(IGNORE); END;
         DROP TRIGGER IF EXISTS dependency_notice_event;
         CREATE TRIGGER dependency_notice_event BEFORE INSERT ON events
-        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN {commented} WHEN 'dependency_rework' THEN {event} WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
+        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN ({commented} OR {duplicate_commented}) WHEN 'dependency_rework' THEN ({event} OR {duplicate_event}) WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
         BEGIN SELECT RAISE(IGNORE); END;
         -- Old reconcilers continue after ignored notices. Reject an automatic
         -- transition with no unfinished declared prerequisite or descendant.

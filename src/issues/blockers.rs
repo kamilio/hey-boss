@@ -23,10 +23,16 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
         [], |r| r.get(0),
     )?;
     let indexed: bool = db.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='index' AND name IN ('issue_dependency_sources','issue_active_graph')", [], |r|r.get(0))?;
-    if present && !stale_capture && indexed {
+    let notices: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_resets')",
+        [],
+        |r| r.get(0),
+    )?;
+    if present && !stale_capture && indexed && notices {
         return Ok(());
     }
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(super::dependency_notices::REWORK_SCHEMA)?;
     let added = !tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('issues') WHERE name='blockers')",
         [],
@@ -537,6 +543,33 @@ fn reconcile_graph(
     rework: bool,
 ) -> Result<()> {
     let graph = Graph::load_active(db, project)?;
+    // One indexed lookup per active issue, batched across the database service.
+    // Only issues with a notice need full blocker identities for comparison.
+    let notices = db.query_collect("SELECT e.issue_number,e.id,e.data FROM json_each(?2) n
+        CROSS JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=?1 AND issue_number=n.value AND action='dependency_rework' ORDER BY id DESC LIMIT 1)
+        WHERE e.id>coalesce((SELECT event_id FROM dependency_notice_resets WHERE project_id=?1 AND issue_number=e.issue_number),0)",
+        params![project,serde_json::to_string(&graph.issues.keys().collect::<Vec<_>>())?],
+        |r| -> rusqlite::Result<_> { Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)) })?;
+    let mut notified = BTreeSet::new();
+    for (number, id, data) in notices {
+        let data: Value = serde_json::from_str(&data)?;
+        let previous = data["dependencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry[0].as_i64())
+            .collect::<BTreeSet<_>>();
+        let active = graph
+            .active(number)
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if !active.is_empty() && active == previous {
+            notified.insert(number);
+        } else {
+            db.execute("INSERT INTO dependency_notice_resets VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET event_id=excluded.event_id", params![project,number,id])?;
+        }
+    }
     for (&number, issue) in &graph.issues {
         if !issue["deleted_at"].is_null() || issue["state"] == "closed" {
             continue;
@@ -562,9 +595,7 @@ fn reconcile_graph(
                 || issue["reserved"] == true)
         {
             let dependencies = json!({"dependencies":blockers.keys().map(|n| json!([n,graph.issues.get(n).map(|i| &i["version"])])).collect::<Vec<_>>()});
-            let signature = serde_json::to_string(&dependencies)?;
-            let notified: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE project_id=?1 AND issue_number=?2 AND action='dependency_rework' AND data=?3)", params![project,number,signature], |r| r.get(0))?;
-            if !notified {
+            if !notified.contains(&number) {
                 let author = actor.unwrap_or(issue["created_by"].as_str().unwrap());
                 let body = format!(
                     "Dependency rework: upstream tasks {:?} need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.",

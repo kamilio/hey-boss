@@ -38,7 +38,7 @@ impl Fixture {
     fn run(&mut self, operation: Value) -> Value {
         let request: Request = serde_json::from_value(json!({"version":1,
             "project":{"id":"named:Notices","name":"Notices"},
-            "actor":{"id":"codex:notice-test","kind":"codex","session_id":"notice-test","machine":"test","host":"test","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},
+            "actor":{"id":"codex:notice-test","kind":"codex","model":"test-model","session_id":"notice-test","machine":"test","host":"test","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},
             "operation":operation})).unwrap();
         self.store.execute(&request).unwrap()
     }
@@ -386,4 +386,111 @@ fn state_guard_upgrade_is_idempotent_and_rejects_implicit_blocking() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn unchanged_rework_stabilizes_across_models_versions_handoff_and_restart() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2],"force":false}));
+    f.run(json!({"action":"add_pull_request","number":2,"url":"https://github.com/example/repo/pull/2"}));
+    f.run(json!({"action":"ready","number":2,"force":false}));
+    f.run(json!({"action":"claim","number":4,"force":false}));
+    f.reserve(4);
+    f.db.execute("UPDATE agents SET metadata=json_set(metadata,'$.model','test-model') WHERE id='codex:notice-test'", []).unwrap();
+    f.run(json!({"action":"reopen","number":2}));
+    let before = f.run(json!({"action":"view","number":4}))["issue"].clone();
+    for _ in 0..4 {
+        f.run(json!({"action":"configure_project","prs_enabled":true}));
+    }
+    assert_eq!(
+        f.notices("comments", 4),
+        1,
+        "Actor metadata must not defeat deduplication"
+    );
+    f.db.execute_batch(
+        "INSERT OR IGNORE INTO agents SELECT 'human:boss',json_set(metadata,'$.id','human:boss','$.kind','human'),0 FROM agents WHERE id='codex:notice-test'; INSERT OR IGNORE INTO agents SELECT 'watcher:github',json_set(metadata,'$.id','watcher:github','$.kind','system'),0 FROM agents WHERE id='codex:notice-test';",
+    )
+    .unwrap();
+    f.db.execute(
+        "UPDATE issues SET version=version+1,assignee='human:boss' WHERE number=2",
+        [],
+    )
+    .unwrap();
+    f.db.execute("UPDATE worker_runs SET finished_at=1 WHERE id='run-4'", [])
+        .unwrap();
+    f.db.execute(
+        "UPDATE issues SET assignee='watcher:github' WHERE number=4",
+        [],
+    )
+    .unwrap();
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    for _ in 0..3 {
+        f.run(json!({"action":"configure_project","prs_enabled":true}));
+        f.legacy_notice(4, &[2]);
+    }
+    assert_eq!(f.notices("comments", 4), 1);
+    let after = f.run(json!({"action":"view","number":4}))["issue"].clone();
+    assert_eq!(after["version"], before["version"]);
+    assert_eq!(after["assignee"], "watcher:github");
+    assert_eq!(after["blocked_by"][0]["number"], 2);
+    assert_eq!(
+        f.run(json!({"action":"view","number":2}))["issue"]["assignee"],
+        "human:boss"
+    );
+    assert_eq!(
+        f.db.query_row(
+            "SELECT count(*) FROM events WHERE issue_number=4 AND action='dependency_rework'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn rework_notifies_again_for_changed_set_and_later_blocking_transition() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2],"force":false}));
+    f.run(json!({"action":"add_pull_request","number":2,"url":"https://github.com/example/repo/pull/2"}));
+    f.run(json!({"action":"ready","number":2,"force":false}));
+    f.run(json!({"action":"claim","number":4,"force":false}));
+    f.run(json!({"action":"reopen","number":2}));
+    assert_eq!(f.notices("comments", 4), 1);
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2,3],"force":false}));
+    assert_eq!(f.notices("comments", 4), 2);
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2],"force":false}));
+    assert_eq!(f.notices("comments", 4), 3);
+    f.run(json!({"action":"ready","number":2,"force":false}));
+    f.run(json!({"action":"reopen","number":2}));
+    assert_eq!(f.notices("comments", 4), 4);
+}
+
+#[test]
+fn reordered_legacy_notices_do_not_scan_older_history() {
+    let mut f = Fixture::new();
+    f.explicit();
+    f.run(json!({"action":"set_blockers","number":4,"blockers":[2,3],"force":false}));
+    f.legacy_notice(4, &[2, 3]);
+    let mut work = Vec::new();
+    for count in [0, 5000] {
+        // Unrelated history must not make admission grow with total history.
+        if count > 0 {
+            f.db.execute_batch(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<5000)
+                INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+                SELECT 'named:Notices',4,'codex:notice-test','edited',1,'{}' FROM n;",
+            )
+            .unwrap();
+        }
+        let body = "Dependency rework: upstream tasks [3, 2] need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.";
+        let mut insert = f.db.prepare("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('named:Notices',4,'codex:notice-test',?1,123)").unwrap();
+        assert_eq!(insert.execute([body]).unwrap(), 0);
+        work.push(insert.get_status(rusqlite::StatementStatus::VmStep));
+    }
+    assert_eq!(work[0], work[1], "Admission scanned unrelated history");
+    assert!(work[0] < 1000, "Unexpected notice admission work: {work:?}");
+    assert_eq!(f.notices("comments", 4), 1);
 }
