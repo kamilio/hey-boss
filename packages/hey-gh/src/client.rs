@@ -557,7 +557,10 @@ impl Client {
         };
         let completion_validation = COMPLETION_VALIDATION.try_with(|_| ()).is_ok()
             && body.is_none()
-            && endpoint_class(&url, false, &self.0.config.rest_url) == "pull_request";
+            && matches!(
+                endpoint_class(&url, false, &self.0.config.rest_url),
+                "pull_request" | "branch"
+            );
         let mut receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
@@ -1797,15 +1800,17 @@ mod priority_tests {
         for number in 10..=12 {
             let c = client.clone();
             tasks.push(tokio::spawn(async move {
+                let path = if number == 11 {
+                    "repos/acme/demo/branches/main".to_owned()
+                } else {
+                    format!("repos/acme/demo/pulls/{number}")
+                };
                 COMPLETION_VALIDATION
                     .scope(
                         (),
                         INTERACTIVE_READ.scope(
                             Arc::new(AtomicBool::new(interactive)),
-                            c.get(
-                                &format!("repos/acme/demo/pulls/{number}"),
-                                Freshness::Revalidate,
-                            ),
+                            c.get(&path, Freshness::Revalidate),
                         ),
                     )
                     .await
@@ -1835,7 +1840,7 @@ mod priority_tests {
                     "/repos/acme/demo/pulls/10",
                     "/work/0",
                     "/background",
-                    "/repos/acme/demo/pulls/11",
+                    "/repos/acme/demo/branches/main",
                     "/work/1",
                     "/repos/acme/demo/pulls/12",
                 ]
@@ -1844,7 +1849,7 @@ mod priority_tests {
                     "/gate",
                     "/repos/acme/demo/pulls/10",
                     "/work/0",
-                    "/repos/acme/demo/pulls/11",
+                    "/repos/acme/demo/branches/main",
                     "/work/1",
                     "/repos/acme/demo/pulls/12",
                     "/work/2",
