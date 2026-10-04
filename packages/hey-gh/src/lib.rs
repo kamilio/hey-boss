@@ -1,6 +1,7 @@
 //! Persistent, conditional GitHub REST reads and a durable observed-change feed.
 pub mod api;
 mod api_client;
+pub mod app_auth;
 mod client;
 mod collection_budget;
 pub mod comments;
@@ -17,6 +18,7 @@ mod store;
 pub mod watcher;
 
 pub use api_client::{ApiClient, PrStatusSelection};
+pub use app_auth::AppInstallation;
 pub use client::{Client, Config, Freshness};
 pub use dashboard::{
     AccountDiscoveryHealth, AccountRefreshCycle, PrStatusChange, PrStatusCoverage, PrStatusPage,
