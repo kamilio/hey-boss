@@ -27,7 +27,7 @@ pub(super) struct Completed {
     pub pr_started_at_ms: u64,
     pub result: Result<()>,
     pub cycle_interrupted: bool,
-    pub retained_job_pages: bool,
+    pub retained_progress: bool,
 }
 
 pub(super) type Read<'a> = Pin<Box<dyn Future<Output = Result<Completed>> + Send + 'a>>;
@@ -174,7 +174,7 @@ impl Cycle<'_> {
         let refresh = Box::pin(
             crate::client::REQUEST_DEADLINE.scope(background.then_some(deadline), refresh),
         );
-        let mut retained_job_pages = false;
+        let mut retained_progress = false;
         let result = if background {
             let budget = crate::collection_budget::Budget::new();
             let result = crate::collection_budget::CURRENT
@@ -185,7 +185,16 @@ impl Cycle<'_> {
                     }
                 })
                 .await;
-            retained_job_pages = ci_only && budget.has_retained_pages();
+            // A finished detail collection can reuse still-fresh sources on
+            // the next turn and complete its final metadata check. Partial
+            // collections and earlier stalls keep the ordinary rotation.
+            // Explicit refreshes cannot reuse these mutable source caches.
+            retained_progress = (ci_only && budget.has_retained_pages())
+                || (details_only
+                    && matches!(freshness, Freshness::MaxAge(age) if !age.is_zero())
+                    && matches!(result, Err(Error::Deadline))
+                    && tokio::time::Instant::now() >= deadline
+                    && budget.has_collected_details());
             result
         } else {
             refresh.await
@@ -201,7 +210,7 @@ impl Cycle<'_> {
             pr_started_at_ms,
             result,
             cycle_interrupted,
-            retained_job_pages,
+            retained_progress,
         })
     }
 }

@@ -13,12 +13,17 @@ pub(crate) struct Budget {
     state: Mutex<State>,
     changed: Notify,
     retained_pages: AtomicBool,
+    details_collected: AtomicBool,
 }
 
 // Only newly validated terminal job pages can advance an interrupted
 // collection on its next turn. Cache hits and mutable sources cannot renew it.
 pub(crate) fn retained_completed_page() {
     let _ = CURRENT.try_with(|budget| budget.retained_pages.store(true, Ordering::Relaxed));
+}
+
+pub(crate) fn completed_details() {
+    let _ = CURRENT.try_with(|budget| budget.details_collected.store(true, Ordering::Relaxed));
 }
 
 struct State {
@@ -49,11 +54,16 @@ impl Budget {
             }),
             changed: Notify::new(),
             retained_pages: AtomicBool::new(false),
+            details_collected: AtomicBool::new(false),
         })
     }
 
     pub(crate) fn has_retained_pages(&self) -> bool {
         self.retained_pages.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn has_collected_details(&self) -> bool {
+        self.details_collected.load(Ordering::Relaxed)
     }
 
     pub(crate) async fn exhausted(&self) {

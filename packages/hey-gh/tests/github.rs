@@ -23,6 +23,9 @@ const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
 
+#[path = "github/detail_continuation.rs"]
+mod detail_continuation;
+
 #[derive(Clone, Debug)]
 struct Call {
     at: std::time::Instant,
@@ -220,6 +223,15 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "account-multi-source-budget" && total_calls > 6 {
         mock.release.notified().await;
         return reply(503, json!({"message":"synthetic interrupted read"}), &[]);
+    }
+    if mode.starts_with("account-large-detail-")
+        && phase == 2
+        && (path.starts_with("/repos/acme/watch")
+            || (mode == "account-large-detail-finish" && path == "/repos/acme/demo/pulls/7")
+            || (mode == "account-large-detail-partial"
+                && path == "/repos/acme/demo/issues/7/timeline"))
+    {
+        mock.release.notified().await;
     }
     if mode == "account-slow-sources" {
         tokio::time::sleep(Duration::from_millis(900)).await;

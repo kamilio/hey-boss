@@ -144,10 +144,9 @@ impl Schedule {
         self.resume.retain(|queued| queued != key);
     }
 
-    // A newly retained completed job page lets the next cycle continue actual
-    // progress. This spends the existing priority turn, never the ordinary
-    // turn. The continuation is consumed before I/O and needs another newly
-    // retained page to earn another turn.
+    // Retained CI pages or a finished detail collection awaiting validation
+    // can continue on the next priority turn, never the ordinary turn. The
+    // continuation is consumed before I/O and must earn another turn again.
     pub fn progressed(&mut self, key: &Key) {
         if !self.resume.contains(key) {
             self.resume.push_back(key.clone());
