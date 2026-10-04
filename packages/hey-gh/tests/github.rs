@@ -6505,6 +6505,107 @@ async fn paced_cycle_defers_cold_rows_without_failing_the_roster_or_blocking_cac
 }
 
 #[tokio::test]
+async fn hard_quota_cooldowns_defer_the_roster_and_keep_cached_neighbors_readable() {
+    for secondary in [true, false] {
+        let h = Harness::new().await;
+        h.mode("account-large");
+        h.phase(2);
+        let mut config = h.config();
+        config.report_timeout = Duration::from_secs(1);
+        config.queue_timeout = Duration::from_secs(5);
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+        let warm = c
+            .ci_for_pr("acme/watch00", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(warm.complete);
+        // The fresh report does a final selector validation. Compare against
+        // that final cache state, rather than its earlier initial selector.
+        let warm = c
+            .ci_for_pr("acme/watch00", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        let before = c
+            .pr_status_page(None, None, 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        if secondary {
+            assert!(matches!(
+                c.get("secondary-no-header", Freshness::Revalidate).await,
+                Err(Error::RateLimited { .. })
+            ));
+        } else {
+            h.phase(1);
+            c.get("conditional-paced", Freshness::Revalidate)
+                .await
+                .unwrap();
+            assert_eq!(c.status().rate_limits["core"].remaining, 0);
+        }
+        let calls = h.calls().len();
+        // Ordinary callers still get actionable throttle feedback promptly.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(200),
+            c.pull_request("acme/cold", 7, Freshness::Revalidate),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(blocked, Err(Error::RateLimited { .. })));
+        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+        api.watch_account(60).await.unwrap();
+        let cycle = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let Some(cycle) = c.account_refresh_cycle(true).await.unwrap() {
+                    break cycle;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        api.stop().await;
+        eprintln!("secondary={secondary}: {cycle:?}");
+        assert_eq!(cycle.total, 25);
+        assert_eq!(
+            cycle.failed, 0,
+            "shared cooldown failed untouched PRs: {cycle:?}; secondary={secondary}"
+        );
+        assert_eq!(cycle.succeeded, 1, "cached neighbor was blocked: {cycle:?}");
+        assert!(cycle.attempted <= 3, "cooldown swept the roster: {cycle:?}");
+        assert!(cycle.deferred >= 22);
+        assert!(cycle.cycle_budget_exhausted);
+        assert_eq!(
+            h.calls().len(),
+            calls,
+            "background reads bypassed the hard cooldown"
+        );
+        let after = c
+            .pr_status_page(None, None, 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        let untouched = |page: &hey_gh::PrStatusPage| {
+            page.pull_requests
+                .iter()
+                .find(|r| r["repository"]["nameWithOwner"] == "acme/watch23")
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(
+            untouched(&before),
+            untouched(&after),
+            "deferred rows acquired false failures or lost evidence"
+        );
+        let cached = c
+            .ci_for_pr("acme/watch00", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        assert!(cached.complete);
+        assert_eq!(cached.oldest_validation_at_ms, warm.oldest_validation_at_ms);
+        assert_eq!(h.calls().len(), calls);
+    }
+}
+
+#[tokio::test]
 async fn account_background_ci_moves_past_one_stalled_pr_in_the_same_cycle() {
     let h = Harness::new().await;
     h.mode("account");
