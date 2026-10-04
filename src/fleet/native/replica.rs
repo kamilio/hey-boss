@@ -858,9 +858,8 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
         )?;
     } else if table == "agents" {
         if !after.is_null() {
-            let merged =
-                crate::issues::model_recovery::merge_recovered(&old, &before, &after, node)
-                    .map_err(|error| invalid(&error.message))?;
+            let merged = crate::issues::model_recovery::merge_recovered(&old, &before, &after)
+                .map_err(|error| invalid(&error.message))?;
             writer.put(table, &merged)?;
         }
     } else if table == "issues" {
@@ -4012,7 +4011,9 @@ mod tests {
         main.capture();
         let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
         let actor = format!("codex:{session}");
-        let metadata = json!({"id":actor,"kind":"codex","machine":"peer","session_id":session,"model":null,"host":"peer-host","cwd":"/saved","source":"CODEX_THREAD_ID"});
+        // The last CLI command ran elsewhere; the exact session transcript is
+        // on this peer. Command-host attribution is not transcript ownership.
+        let metadata = json!({"id":actor,"kind":"codex","machine":"other-machine","session_id":session,"model":null,"host":"peer-host","cwd":"/saved","source":"CODEX_THREAD_ID"});
         main.db
             .execute(
                 "INSERT INTO agents VALUES(?1,?2,123)",
@@ -4037,7 +4038,7 @@ mod tests {
         )
         .unwrap();
         let mut recovery = crate::issues::model_recovery::Recovery::default();
-        while !recovery.step(&peer.db, "peer", &root).unwrap() {}
+        while !recovery.step(&peer.db, &root).unwrap() {}
         let changes = rows(
             &peer.db,
             "SELECT * FROM fleet_outbox WHERE table_name='agents'",
