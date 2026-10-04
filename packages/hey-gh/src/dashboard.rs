@@ -710,7 +710,7 @@ impl Client {
                     )
                     .await?;
                     if continuing {
-                        tracing::info!(repository=%item.key.0,number=item.key.1,mode,"CI retained-page continuation started");
+                        tracing::info!(repository=%item.key.0,number=item.key.1,mode,"PR collection continuation started");
                     }
                 }
                 let disappeared = !current.contains_key(&item.key);
@@ -727,7 +727,7 @@ impl Client {
                 pr_started_at_ms,
                 result,
                 cycle_interrupted,
-                retained_job_pages,
+                retained_progress,
             } = hydration::next(&mut active).await?;
             let ((repo, number), node) = (item.key, item.node);
             if !seed_only && result.is_ok() && !matches!(freshness, Freshness::CachedOnly) {
@@ -749,12 +749,12 @@ impl Client {
                     .await?;
                 }
             }
-            if !seed_only && (result.is_ok() || retained_job_pages) {
+            if !seed_only && (result.is_ok() || retained_progress) {
                 if result.is_ok() {
                     schedule.succeeded(&(repo.clone(), number));
                 } else {
                     schedule.progressed(&(repo.clone(), number));
-                    tracing::info!(repository=%repo,number,mode,"CI retained-page continuation queued");
+                    tracing::info!(repository=%repo,number,mode,"PR collection continuation queued");
                 }
                 self.save_derived(
                     &schedule_key,

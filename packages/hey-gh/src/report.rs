@@ -359,6 +359,9 @@ impl Client {
             }
         }
         errors.sort_by_key(|(index, _)| *index);
+        if errors.is_empty() {
+            crate::collection_budget::completed_details();
+        }
         let errors = errors.into_iter().map(|(_, error)| error).collect();
         let final_pr = self
             .final_pull_request(
@@ -440,7 +443,7 @@ impl Client {
         result
     }
 
-    /// CI-only path never spends GraphQL quota or waits for review pagination.
+    /// Read CI without waiting for conversation or review pagination.
     pub async fn ci_for_pr(
         &self,
         repository: &str,
