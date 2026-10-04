@@ -44,7 +44,7 @@ be upgraded. The web Ready action sends the displayed snapshot and retains retry
 IDs after uncertain errors.
 
 After handing off your claimed task, run `hey-boss issue assign NUMBER github`
-to transfer its automatic Boss assignment to the GitHub watcher. This atomic,
+to transfer its automatic Boss assignment to the GitHub PR watcher. This atomic,
 version-guarded transfer preserves Ready, dependent usability, and your running
 attempt. It requires an open attached GitHub PR and the same actor that handed
 off the claim, with no intervening ownership change, foreign reservation, or

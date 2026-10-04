@@ -16,7 +16,7 @@
   }
   function describeAssignment(issue, {actorName, bossName}) {
     const a = current(issue), machine = a.machine_name || a.machine;
-    if (a.kind === "github") return {label:"GitHub watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for new GitHub findings." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
+    if (a.kind === "github") return {label:"GitHub PR watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for new GitHub findings." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
     if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
     if (a.kind === "agent") return {label:actorName(a.actor), detail:machine ? `Working on ${machine}.` : "Agent is working.", icon:"user"};
     if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};
@@ -32,7 +32,7 @@
     const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft && !issue.attempt_hold;
     const hasPr = issue.pull_requests?.some(watchablePr);
     const selected = a.kind === "github" ? "github" : a.kind === "boss" ? "boss" : a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : "unassigned";
-    const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub watcher", disabled:!hasPr}];
+    const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub PR watcher", disabled:!hasPr}];
     for (const machine of value.assignment_machines || []) targets.push({id:`machine:${machine.id}`, name:machine.name || machine.host || machine.id});
     if (a.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
     if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
@@ -40,7 +40,7 @@
     const trace = a.actor && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
     const help = [issue.draft ? "Mark ready before assigning." : description.detail,
       a.kind === "github" ? "Fetch now runs on the next watcher cycle, subject to GitHub rate limits." : "",
-      editable && !hasPr ? "Attach a PR to enable the GitHub watcher." : ""].filter(Boolean).join(" ");
+      editable && !hasPr ? "Attach a PR to enable the GitHub PR watcher." : ""].filter(Boolean).join(" ");
     const detail = issue.attempt_hold ? "Pickup paused" : issue.draft ? "Draft" : a.actor ? description.detail : a.kind === "machine" ? "Waiting for an agent" : a.kind === "github" && !a.waiting && issue.state !== "closed" && !issue.deleted_at ? "Agent queued" : "";
     return `<div class="side-section issue-assignment"><div class="side-heading"><label for="issue-assignment">Assignment</label>${HeyBossUI.infoTip("assignment-help", "About assignment", help)}</div><select id="issue-assignment" data-assignment-select aria-describedby="assignment-help"${editable ? "" : " disabled"}>${options}</select>${detail ? `<p class="assignment-detail">${esc(detail)}</p>` : ""}${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Agent conversation →</a></p>` : ""}${fetchOverview(issue)}</div>`;
   }
@@ -104,7 +104,7 @@
     const dialog = document.createElement("dialog");
     dialog.className = "github-watcher-dialog";
     dialog.setAttribute("aria-labelledby", "github-watcher-title");
-    dialog.innerHTML = `<header class="dialog-heading"><h2 id="github-watcher-title">GitHub watcher</h2><button type="button" class="button" data-close aria-label="Close watcher">Close</button></header><div class="dialog-content"><a data-issue-link></a><div data-watcher-content></div><p class="github-status-error" data-error role="status" hidden></p></div>`;
+    dialog.innerHTML = `<header class="dialog-heading"><h2 id="github-watcher-title">GitHub PR watcher</h2><button type="button" class="button" data-close aria-label="Close watcher">Close</button></header><div class="dialog-content"><a data-issue-link></a><div data-watcher-content></div><p class="github-status-error" data-error role="status" hidden></p></div>`;
     document.body.append(dialog);
     const content = dialog.querySelector("[data-watcher-content]"), error = dialog.querySelector("[data-error]");
     let active = null;
@@ -146,7 +146,7 @@
           }
         } catch (failure) {
           if (valid(ctx)) {
-            error.textContent = failure.message || "Unable to load GitHub watcher status.";
+            error.textContent = failure.message || "Unable to load GitHub PR watcher status.";
             error.hidden = false;
             if (force) content.querySelector(".github-fetch-now")?.removeAttribute("disabled");
           }

@@ -7,11 +7,11 @@ async page => {
   await page.goto(origin + '/#project=named%3AAssignment%20QA&view=issues&state=open&owner=all');
   await page.reload();
   await page.waitForFunction(() => model.signature);
-  const opener = number => page.getByRole('button', {name:`Open GitHub watcher for issue #${number}`,exact:true});
+  const opener = number => page.getByRole('button', {name:`Open GitHub PR watcher for issue #${number}`,exact:true});
   check(await opener(1).count() === 1, 'Waiting watcher has a list opener');
   const url = page.url();
   await opener(7).click();
-  const dialog = page.getByRole('dialog', {name:'GitHub watcher',exact:true});
+  const dialog = page.getByRole('dialog', {name:'GitHub PR watcher',exact:true});
   await dialog.getByText('GitHub rate limit reached', {exact:true}).waitFor();
   check(page.url() === url, 'Opening status preserves list filters and URL');
   check(await dialog.getByText(/Last fetch/).count() === 1, 'Last fetch is visible');

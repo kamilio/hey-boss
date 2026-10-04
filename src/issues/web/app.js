@@ -88,7 +88,7 @@ const own = (id) => id && id === model.actor?.id;
 function actorName(id, actorModel) {
   if (!id) return "Unassigned";
   if (id === "human:boss") return model.boss.name;
-  if (id === "watcher:github") return "GitHub watcher";
+  if (id === "watcher:github") return "GitHub PR watcher";
   if (id.startsWith("machine:")) return model.assignmentMachines.find(m => m.id === id.slice(8))?.name || id.slice(8);
   if (own(id) && id.startsWith("human:")) return "You";
   return HeyBossUI.actorLabel(id, actorModel, model.boss.name);
@@ -412,7 +412,7 @@ function listAssignment(issue) {
   const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
   const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.label + " · " + description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
   const actor=a.actor||issue.assignee;
-  if(a.kind==='github') return `<span class="list-assignee">${filter}<button type="button" class="list-agent-trace list-watcher-open" data-open-watcher="${issue.number}" title="Open GitHub watcher" aria-label="Open GitHub watcher for issue #${issue.number}">${icon('arrow-right')}</button></span>`;
+  if(a.kind==='github') return `<span class="list-assignee">${filter}<button type="button" class="list-agent-trace list-watcher-open" data-open-watcher="${issue.number}" title="Open GitHub PR watcher" aria-label="Open GitHub PR watcher for issue #${issue.number}">${icon('arrow-right')}</button></span>`;
   if(!actor || actor.startsWith('human:') || actor==='watcher:github') return filter;
   const trace='/agents/session#'+new URLSearchParams({project:model.project.id,issue:issue.number,agent:actor});
   return `<span class="list-assignee">${filter}<a class="list-agent-trace" href="${esc(trace)}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
@@ -1258,7 +1258,7 @@ async function changeAssignment(select) {
   select.disabled=true;
   try {
     await mutate({action:'assign',number:issue.number,target,if_version:issue.version},project,host);
-    toast(target==='github'?'Assigned to GitHub watcher':target==='unassigned'?'Assignment cleared':'Assignment updated');
+    toast(target==='github'?'Assigned to GitHub PR watcher':target==='unassigned'?'Assignment cleared':'Assignment updated');
     if(model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) await renderRoute();
   } catch(error) {
     toast(error.message,true);
