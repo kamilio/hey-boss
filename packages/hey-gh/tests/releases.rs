@@ -114,12 +114,27 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         let mut result = json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}});
         if matches!(
             mode,
-            "branch_roster" | "truncated_branch_roster" | "side_branch"
+            "branch_roster" | "truncated_branch_roster" | "side_branch" | "branch_parents"
         ) {
             let commits: Vec<_> = [A, B, C, D]
                 .into_iter()
                 .filter(|sha| *sha > base && *sha <= head)
-                .map(|sha| json!({"sha":sha}))
+                .map(|sha| {
+                    if mode == "branch_parents" || mode == "side_branch" {
+                        let parents = match (mode, sha) {
+                            ("side_branch", B) => vec![D],
+                            ("side_branch", C) => vec![A, B],
+                            (_, B) => vec![A],
+                            (_, C) => vec![B],
+                            _ => vec![C],
+                        };
+                        let parents: Vec<_> =
+                            parents.into_iter().map(|sha| json!({"sha":sha})).collect();
+                        json!({"sha":sha,"parents":parents})
+                    } else {
+                        json!({"sha":sha})
+                    }
+                })
                 .collect();
             result["total_commits"] = json!(commits.len());
             result["commits"] = json!(commits);
@@ -395,6 +410,23 @@ async fn a_complete_branch_roster_limits_comparisons_to_possible_successors() {
             .filter(|path| path.contains("/compare/"))
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn complete_parent_links_prove_containing_runs_without_more_comparisons() {
+    let h = Harness::new("branch_parents").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "verified");
+    assert_eq!(
+        h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.contains("/compare/"))
+            .count(),
+        1
     );
 }
 

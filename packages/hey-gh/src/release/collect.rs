@@ -33,6 +33,7 @@ impl Client {
             pages: HashMap::new(),
             jobs: HashMap::new(),
             branch_tip: None,
+            ancestry: HashSet::new(),
         };
         let deadline = tokio::time::Instant::now() + self.report_timeout();
         let collection_budget =
@@ -126,10 +127,11 @@ struct Collector<'a> {
     pages: HashMap<String, (Vec<Value>, bool)>,
     jobs: HashMap<(u64, u64), Vec<Value>>,
     branch_tip: Option<String>,
+    ancestry: HashSet<(String, String)>,
 }
 impl Collector<'_> {
     async fn branch_commits(
-        &self,
+        &mut self,
         base: &str,
         head: &str,
     ) -> Result<(bool, Option<HashSet<String>>)> {
@@ -174,10 +176,34 @@ impl Collector<'_> {
                 return Ok((true, None));
             }
         }
+        if complete {
+            // A merged side branch belongs to the tip without containing the
+            // target. Parent links prove only positive target-to-run paths.
+            let mut proven = HashSet::from([base.to_owned()]);
+            loop {
+                let before = proven.len();
+                for commit in commits {
+                    if commit["parents"].as_array().is_some_and(|parents| {
+                        parents.iter().any(|parent| {
+                            parent["sha"]
+                                .as_str()
+                                .is_some_and(|sha| proven.contains(sha))
+                        })
+                    }) {
+                        proven.insert(commit["sha"].as_str().unwrap().to_owned());
+                    }
+                }
+                if proven.len() == before {
+                    break;
+                }
+            }
+            self.ancestry
+                .extend(proven.into_iter().map(|head| (base.to_owned(), head)));
+        }
         Ok((true, complete.then_some(roster)))
     }
     async fn ancestor(&self, base: &str, head: &str) -> Result<bool> {
-        if base == head {
+        if base == head || self.ancestry.contains(&(base.to_owned(), head.to_owned())) {
             return Ok(true);
         }
         let response = self
