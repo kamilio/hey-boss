@@ -737,17 +737,18 @@ impl Client {
             let timeline = collect(timeline_res, "timeline", &mut errors);
             let review_events = collect(review_events_res, "review_events", &mut errors);
             let review_threads = collect(review_threads_res, "review_threads", &mut errors);
+            // Nested CI or another reader may have validated metadata during
+            // collection. Apply the final bound to the newest cached response,
+            // rather than forcing another request because the initial one aged.
             let final_pr = self
                 .final_pull_request(
                     repository,
                     number,
-                    if matches!(freshness, Freshness::CachedOnly)
-                        || (matches!(freshness, Freshness::MaxAge(_))
-                            && now_ms().saturating_sub(pr.validated_at_ms) < 15_000)
-                    {
-                        freshness
-                    } else {
-                        Freshness::Revalidate
+                    match freshness {
+                        Freshness::MaxAge(age) => {
+                            Freshness::MaxAge(age.min(std::time::Duration::from_secs(15)))
+                        }
+                        other => other,
                     },
                 )
                 .await?;

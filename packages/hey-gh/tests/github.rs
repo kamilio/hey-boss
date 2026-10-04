@@ -4186,6 +4186,117 @@ async fn ci_reuses_fresh_discovery_selectors_without_refreshing_full_rest_metada
 }
 
 #[tokio::test]
+async fn full_report_reuses_ci_metadata_validation_without_weakening_refresh() {
+    for (freshness, expected_reads) in [
+        (Freshness::MaxAge(Duration::from_secs(30)), 1),
+        (Freshness::CachedOnly, 0),
+        (Freshness::Revalidate, 4),
+        (Freshness::MaxAge(Duration::ZERO), 4),
+    ] {
+        let h = Harness::new().await;
+        h.phase(2);
+        let c = h.client();
+        assert!(
+            c.pr_report("acme/demo", 7, Freshness::Revalidate)
+                .await
+                .unwrap()
+                .complete
+        );
+        let metadata = c
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        let old = metadata.validated_at_ms - 20_000;
+        // The caller permits this initial evidence, but CI must refresh its
+        // final selectors. The enclosing report can consume that same result.
+        rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'",
+            [old],
+        ).unwrap();
+        let before = h.calls().len();
+        let report = c.pr_report("acme/demo", 7, freshness).await.unwrap();
+        assert!(report.complete, "{freshness:?}");
+        assert_eq!(report.data.pull_request["head"]["sha"], HEAD);
+        assert_eq!(report.data.ci.head_sha, HEAD);
+        let reads = h.calls()[before..]
+            .iter()
+            .filter(|call| call.path == "/repos/acme/demo/pulls/7")
+            .count();
+        assert_eq!(
+            reads, expected_reads,
+            "{freshness:?}: redundant final metadata read"
+        );
+        let after = c
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        if matches!(freshness, Freshness::CachedOnly) {
+            assert_eq!(after.validated_at_ms, old);
+        } else {
+            assert!(after.validated_at_ms > old);
+        }
+        assert!(
+            report.validations.iter().any(|v| {
+                v.resource.ends_with("/pulls/7") && v.validated_at_ms == after.validated_at_ms
+            }),
+            "final evidence must retain its actual validation clock"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_report_final_bound_does_not_promote_discovery_selectors_to_rest_metadata() {
+    let h = Harness::new().await;
+    h.mode("account-ci-selectors");
+    h.phase(2);
+    let c = h.client();
+    assert!(
+        c.pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    c.all_my_open_pull_requests(Freshness::Revalidate)
+        .await
+        .unwrap();
+    let metadata = c
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    let old = metadata.validated_at_ms - 20_000;
+    rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1,'$.data.title','Stale REST title','$.etag',NULL) WHERE key LIKE '%/pulls/7'",
+        [old],
+    ).unwrap();
+    let before = h.calls().len();
+    let report = c
+        .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(report.complete);
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("#ci-selectors"))
+    );
+    assert_eq!(
+        h.calls()[before..]
+            .iter()
+            .filter(|call| call.path == "/repos/acme/demo/pulls/7")
+            .count(),
+        1
+    );
+    assert_eq!(report.data.pull_request["title"], "A PR");
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms > old)
+    );
+}
+
+#[tokio::test]
 async fn ci_final_validation_reuses_recent_selectors_but_rejects_older_evidence() {
     for case in ["fresh", "stale", "revalidate"] {
         let h = Harness::new().await;
