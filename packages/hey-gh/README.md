@@ -7,6 +7,34 @@ unchanged. Run the commands below from this package directory.
 
 A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared request queue, and a durable incremental feed. Authentication uses your existing `gh` login.
 
+## Optional GitHub App installation
+
+Repository REST reads can use a selected-repository installation's separate
+primary quota. Register/install a GitHub App with read access to Actions, Checks,
+Contents, Issues, Pull requests, and Commit statuses (Metadata is automatic).
+Keep the existing `gh` login: discovery, GraphQL, uncovered repositories, and
+comment posting still use the user identity. Installation errors remain explicit;
+they do not silently retry with user credentials. Secondary backoff and socket
+limits remain shared. All machines using one installation share its allowance.
+
+Configure each machine through secure secret entry, with its RSA private key in
+`HEY_GH_APP_PRIVATE_KEY`, then restart the daemon:
+
+```sh
+hey-boss notif secret --field HEY_GH_APP_PRIVATE_KEY -- hey-gh app --client-id APP_CLIENT_ID --installation-id INSTALLATION_ID --repository OWNER/REPO
+hey-gh service restart
+```
+
+Repeat `--repository` for selected repositories in that installation. The key
+is stored in a mode-0600 file under the platform's local data directory,
+`hey-gh/apps/github.com.json`; it is never printed or put in the response cache.
+The scheduler renews tokens before expiry. Cached-only reads never mint tokens.
+App identity and repository selection partition the cache; enabling/changing an
+installation requires a fresh bootstrap and watch registration. Hourly renewal
+and private-key rotation preserve that scope. `status.rate_limits` distinguishes
+`installation/core` from the user's `core` allowance. GitHub registration may
+require interactive passkey confirmation and organization permission.
+
 ## Start
 
 Requires Rust, Cargo, and an authenticated GitHub CLI (`gh auth login`).
