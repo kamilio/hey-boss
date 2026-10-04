@@ -858,7 +858,10 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
         )?;
     } else if table == "agents" {
         if !after.is_null() {
-            writer.put(table, &after)?;
+            let merged =
+                crate::issues::model_recovery::merge_recovered(&old, &before, &after, node)
+                    .map_err(|error| invalid(&error.message))?;
+            writer.put(table, &merged)?;
         }
     } else if table == "issues" {
         let owner = if after.is_null() {
@@ -4001,6 +4004,106 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
         }
+    }
+
+    #[test]
+    fn model_recovery_journals_sync_fill_only_metadata_to_ordinary_lists() {
+        let main = Fixture::new();
+        main.capture();
+        let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let actor = format!("codex:{session}");
+        let metadata = json!({"id":actor,"kind":"codex","machine":"peer","session_id":session,"model":null,"host":"peer-host","cwd":"/saved","source":"CODEX_THREAD_ID"});
+        main.db
+            .execute(
+                "INSERT INTO agents VALUES(?1,?2,123)",
+                rusqlite::params![actor, metadata.to_string()],
+            )
+            .unwrap();
+        main.db
+            .execute("UPDATE issues SET assignee=?1", [&actor])
+            .unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "peer").unwrap();
+        apply_pull(&peer.db, "peer", &snapshot(&main.db, "peer").unwrap(), &[]).unwrap();
+        let root = peer.path.with_extension("sessions");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::write(
+            root.join(format!("sessions/rollout-{session}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                json!({"type":"session_meta","payload":{"id":session}}),
+                json!({"type":"turn_context","payload":{"model":"gpt-recovered"}})
+            ),
+        )
+        .unwrap();
+        let mut recovery = crate::issues::model_recovery::Recovery::default();
+        while !recovery.step(&peer.db, "peer", &root).unwrap() {}
+        let changes = rows(
+            &peer.db,
+            "SELECT * FROM fleet_outbox WHERE table_name='agents'",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            accept_changes(&main.db, "peer", &changes).unwrap()[0]["state"],
+            "applied"
+        );
+        let canonical = current_row(&main.db, "agents", &json!({"id":actor})).unwrap();
+        assert_eq!(canonical["last_seen"], 123);
+        let saved: Value = serde_json::from_str(canonical["metadata"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["model"], "gpt-recovered");
+        serde_json::from_value::<Actor>(saved)
+            .expect("Recovered metadata retains the Actor schema");
+        // A newer live capture must win against a delayed repair.
+        main.db.execute("UPDATE agents SET metadata=json_set(metadata,'$.model','newer-model','$.cwd','/newer'),last_seen=456 WHERE id=?1",[&actor]).unwrap();
+        let mut delayed = changes[0].clone();
+        delayed["seq"] = json!(99999);
+        accept_changes(&main.db, "peer", &[delayed]).unwrap();
+        let canonical = current_row(&main.db, "agents", &json!({"id":actor})).unwrap();
+        assert_eq!(canonical["last_seen"], 456);
+        let saved: Value = serde_json::from_str(canonical["metadata"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["model"], "newer-model");
+        assert_eq!(saved["cwd"], "/newer");
+        let replica = Fixture::new();
+        install_capture(&replica.db, "agent", "viewer").unwrap();
+        apply_pull(
+            &replica.db,
+            "viewer",
+            &snapshot(&main.db, "viewer").unwrap(),
+            &[],
+        )
+        .unwrap();
+        let mut store = Store::open(&replica.path).unwrap();
+        let response = store
+            .execute(&Request {
+                version: 1,
+                project: Project {
+                    id: "named:Native fleet".into(),
+                    name: "Native fleet".into(),
+                },
+                project_override: None,
+                actor: None,
+                operation: serde_json::from_value(json!({"action":"list","state":"open","mine":false,"unassigned":false,"labels":[],"limit":100,"offset":0})).unwrap(),
+                request_id: None,
+            })
+            .unwrap();
+        assert_eq!(response["actor_models"][&actor], "newer-model");
+        let detail = store
+            .execute(&Request {
+                version: 1,
+                project: Project {
+                    id: "named:Native fleet".into(),
+                    name: "Native fleet".into(),
+                },
+                project_override: None,
+                actor: None,
+                operation: Operation::View { number: 1 },
+                request_id: None,
+            })
+            .unwrap();
+        assert_eq!(detail["actor_models"][&actor], "newer-model");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

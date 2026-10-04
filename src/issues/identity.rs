@@ -236,13 +236,26 @@ fn resolve_with_discovery(
             .map(|p| p.pid);
     }
     actor.process_start = actor.pid.and_then(crate::agents::process_identity);
-    // Stable explicit Codex identities also carry their actual session. Human
-    // callers never inherit the agent environment that launched their terminal.
+    // The stable actor can be an alias; only a real thread ID is a session.
+    // Human callers never inherit the agent environment of their terminal.
     if actor.session_id.is_none() && actor.id.starts_with("codex:") {
-        actor.session_id = actor.id.strip_prefix("codex:").map(str::to_owned);
+        actor.session_id = configured_codex_session(&actor.id, env("CODEX_THREAD_ID").as_deref());
         actor.kind = "codex".into();
     }
     Ok(actor)
+}
+
+fn configured_codex_session(id: &str, thread: Option<&str>) -> Option<String> {
+    let session = id.strip_prefix("codex:")?;
+    // A canonical actor explicitly names its own session, even when invoked
+    // from another thread. Custom actors use the caller's explicit thread ID.
+    if crate::agent_conversations::valid_session(session) {
+        Some(session.to_owned())
+    } else {
+        thread
+            .filter(|s| crate::agent_conversations::valid_session(s))
+            .map(str::to_owned)
+    }
 }
 
 /// Capture only for creations, on the caller's machine before remote transport.
@@ -333,6 +346,23 @@ pub fn presence(actor: &Actor, local_machine: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_actor_ids_do_not_masquerade_as_session_ids() {
+        let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let other = "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let alias = format!("codex:{session}:ci_review_watch");
+        assert_eq!(
+            configured_codex_session(&alias, Some(other)),
+            Some(other.into())
+        );
+        assert_eq!(configured_codex_session(&alias, None), None);
+        assert_eq!(configured_codex_session(&alias, Some("invalid")), None);
+        assert_eq!(
+            configured_codex_session(&format!("codex:{session}"), Some(other)),
+            Some(session.into())
+        );
+        assert_eq!(configured_codex_session("human:boss", Some(session)), None);
+    }
     #[test]
     fn git_metadata_is_an_exact_local_path_component() {
         for path in [

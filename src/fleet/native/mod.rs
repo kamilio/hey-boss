@@ -9,6 +9,7 @@ mod control;
 mod conversation;
 mod handshake;
 mod mobile;
+mod model_recovery;
 mod pr_monitor;
 mod projects;
 mod pull;

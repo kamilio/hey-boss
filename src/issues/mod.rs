@@ -11,6 +11,7 @@ mod fleet;
 pub(crate) use fleet::INDEXES as FLEET_INDEXES;
 mod global_settings;
 pub mod identity;
+pub(crate) mod model_recovery;
 pub mod planning;
 pub(crate) mod provenance;
 pub mod remote;

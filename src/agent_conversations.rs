@@ -270,7 +270,7 @@ pub fn local_window(run: &str, window: &Window) -> Result<Value> {
         window,
     )
 }
-fn valid_session(session: &str) -> bool {
+pub(crate) fn valid_session(session: &str) -> bool {
     session.len() == 36
         && session.bytes().enumerate().all(|(i, b)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -304,10 +304,31 @@ fn capture_creation_context(
     Some((invocation, model))
 }
 
-fn model_name(value: &str) -> Option<String> {
+pub(crate) fn model_name(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
         .then(|| value.to_owned())
+}
+
+/// A filename alone is not session evidence. Recovery also checks the bounded
+/// session header before reading the same bounded tail used by live capture.
+pub(crate) fn recovered_model(path: &Path, session: &str) -> Option<String> {
+    if !valid_session(session) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut header = Vec::new();
+    BufReader::new(file.take(64 * 1024))
+        .read_until(b'\n', &mut header)
+        .ok()?;
+    if header.last() != Some(&b'\n') {
+        return None;
+    }
+    let record: Value = serde_json::from_slice(&header).ok()?;
+    if record["type"] != "session_meta" || record["payload"]["id"] != session {
+        return None;
+    }
+    creation_context_at(path)?.1
 }
 
 fn creation_context_at(path: &Path) -> Option<(Option<crate::issues::Invocation>, Option<String>)> {
@@ -1055,6 +1076,35 @@ mod tests {
         let p=item(&json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"Public summary"}],"encrypted_content":"private ciphertext"}}),0).unwrap();
         assert_eq!(p["text"], "Public summary");
         assert!(!p.to_string().contains("ciphertext"));
+    }
+    #[test]
+    fn recovered_models_require_exact_complete_session_headers() {
+        let f = Fixture::new();
+        let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let context =
+            json!({"type":"turn_context","payload":{"model":"gpt-6-astra"}}).to_string() + "\n";
+        for header in [
+            json!({"type":"session_meta","payload":{"id":"ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"}})
+                .to_string()
+                + "\n",
+            "{broken}\n".into(),
+            "x".repeat(64 * 1024) + "\n",
+            String::new(),
+        ] {
+            std::fs::write(&f.path, header + &context).unwrap();
+            assert_eq!(recovered_model(&f.path, session), None);
+        }
+        let header = json!({"type":"session_meta","payload":{"id":session}}).to_string() + "\n";
+        std::fs::write(
+            &f.path,
+            header + &"x".repeat(ENTRY_BYTES as usize + 1) + "\n" + &context,
+        )
+        .unwrap();
+        assert_eq!(
+            recovered_model(&f.path, session).as_deref(),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(recovered_model(&f.path, "../private"), None);
     }
     #[test]
     fn creation_model_uses_complete_turn_metadata_and_bounds_large_records() {

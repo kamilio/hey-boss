@@ -461,6 +461,7 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
     let Some(_lock) = ctx.lock("fleet-agent.lock", false)? else {
         return Err("Fleet companion is already running".into());
     };
+    super::model_recovery::start(ctx.clone());
     while !ctx.stopped() {
         let interrupted = {
             let _lock = ctx.lock("fleet-worker-control.lock", false)?;
