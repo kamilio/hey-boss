@@ -462,20 +462,29 @@ impl Scheduler {
                 }
             }
             let now = Instant::now();
+            let quota_blocked = |job: &Job| {
+                secondary_until > now
+                    || budgets.for_resource(&job.quota()).any(|budget| {
+                        budget.next > now
+                            && (budget.remaining == 0
+                                || (job.resource == "core" && budget.remaining <= QUOTA_RESERVE))
+                    })
+            };
             // Expiry is independent of quota availability, including exhausted
             // buckets whose next reset might be an hour away.
+            // Ordinary pacing is not a throttle. Keep that work queued until
+            // its actual deadline: a coalescing reader may extend it, and early
+            // rejection can otherwise fail an entire account's remaining rows
+            // in the last pacing interval of a background cycle.
             if let Some(index) = pending.iter().position(|j| {
                 self.abandoned_request(j)
                     || j.deadline() <= now
-                    || ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline()
+                    || (quota_blocked(j)
+                        && ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline())
             }) {
                 let job = pending.remove(index).expect("existing queue entry");
                 let ready = ready(&job, &budgets, global_next.max(secondary_until));
-                let quota_blocked = secondary_until > now
-                    || budgets
-                        .for_resource(&job.quota())
-                        .any(|b| b.next > now && !conditional_budget_exempt(&job, b));
-                let error = if quota_blocked && !self.abandoned_request(&job) {
+                let error = if quota_blocked(&job) && !self.abandoned_request(&job) {
                     Error::RateLimited {
                         retry_after_seconds: ceil_seconds(ready.saturating_duration_since(now)),
                     }
