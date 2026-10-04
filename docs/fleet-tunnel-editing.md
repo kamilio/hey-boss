@@ -40,7 +40,7 @@ task. `--force` is unsupported. The closing comment and actor attribution commit
 with the lifecycle change. No claim, reverse SSH or replica write is needed.
 
 `issue ready NUMBER` routes through the tunnel on companions; `--supervisor`
-also works explicitly. The snapshot includes the current GitHub watcher event,
+also works explicitly. The snapshot includes the current GitHub PR watcher event,
 so idle triage can hand off reviewed work without claiming it. New findings
 between the read and write cause a guard conflict. An unguarded handoff with
 unacknowledged findings is refused, never reported as a successful Open result.

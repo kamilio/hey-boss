@@ -13,7 +13,7 @@ for (const model of [null, '', {}, 'x'.repeat(257), '\u001bmodel']) {
 assert.equal(name('codex:internal-session',' custom/<model> '), 'Codex · custom/<model>');
 assert.equal(name('human:boss','gpt-6-astra','Kamil'), 'Kamil');
 assert.equal(name('human:alice'), 'alice');
-assert.equal(name('watcher:github'), 'GitHub watcher');
+assert.equal(name('watcher:github'), 'GitHub PR watcher');
 assert.equal(name(null), 'Unassigned');
 assert.equal(ctx.ui.rememberActors({actor_models:{'codex:internal-session':'gpt-6-sol'}}),true);
 assert.equal(name('codex:internal-session'),'Codex · gpt-6-sol');

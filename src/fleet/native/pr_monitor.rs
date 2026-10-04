@@ -82,7 +82,7 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
         )
     });
     if let Err(error) = watched {
-        eprintln!("GitHub watcher: {error}");
+        eprintln!("GitHub PR watcher: {error}");
     }
     match metadata {
         Ok(Ok(())) => {}

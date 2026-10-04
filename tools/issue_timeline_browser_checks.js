@@ -12,7 +12,7 @@ async page => {
   check(await page.locator('#history-toggle').count()===0,mode+': activity visible by default');
   check(await page.locator('#comments .comment-card').count()===2,mode+': comments appear once');
   const text=await page.locator('#comments').innerText();
-  check(text.includes('Codex · gpt-6-astra')&&text.includes('GitHub watcher')&&text.includes('Boss'),mode+': human, model and watcher attribution');
+  check(text.includes('Codex · gpt-6-astra')&&text.includes('GitHub PR watcher')&&text.includes('Boss'),mode+': human, model and watcher attribution');
   check(text.includes('added bug needs-review; removed enhancement'),mode+': readable label differences');
   check(await page.locator('#comments img').count()===0,mode+': event metadata escaped');
   check(await page.locator('#comments .comment-body strong').first().textContent()==='Tests pass.',mode+': Markdown comments remain rich');

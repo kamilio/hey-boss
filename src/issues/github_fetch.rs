@@ -26,7 +26,7 @@ pub(in crate::issues::store) fn request(
         .collect::<BTreeSet<_>>();
     if !active || urls.is_empty() {
         return Err(Error::conflict(
-            "Fetch requires an active GitHub watcher with an open pull request",
+            "Fetch requires an active GitHub PR watcher with an open pull request",
         ));
     }
     for url in urls {
