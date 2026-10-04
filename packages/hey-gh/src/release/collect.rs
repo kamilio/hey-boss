@@ -35,7 +35,12 @@ impl Client {
             branch_tip: None,
         };
         let deadline = tokio::time::Instant::now() + self.report_timeout();
-        let collection_deadline = deadline - Duration::from_secs(20).min(self.report_timeout() / 4);
+        let collection_budget =
+            self.report_timeout() - Duration::from_secs(20).min(self.report_timeout() / 4);
+        let collection_deadline = deadline - (self.report_timeout() - collection_budget);
+        // Small batches can use their existing budget; large queues still yield
+        // after at most one fifth of it so checked-time ordering rotates fairly.
+        let target_budget = collection_budget / request.targets.len().min(5) as u32;
         let mut reports = Vec::new();
         for target in &request.targets {
             if tokio::time::Instant::now() >= collection_deadline {
@@ -43,7 +48,7 @@ impl Client {
             }
             let mut report = Report::new(target);
             let target_deadline =
-                collection_deadline.min(tokio::time::Instant::now() + Duration::from_secs(20));
+                collection_deadline.min(tokio::time::Instant::now() + target_budget);
             match crate::client::REQUEST_DEADLINE
                 .scope(
                     Some(target_deadline),
@@ -119,6 +124,54 @@ struct Collector<'a> {
     branch_tip: Option<String>,
 }
 impl Collector<'_> {
+    async fn branch_commits(
+        &self,
+        base: &str,
+        head: &str,
+    ) -> Result<(bool, Option<HashSet<String>>)> {
+        if base == head {
+            return Ok((true, Some(HashSet::from([base.to_owned()]))));
+        }
+        let response = self
+            .client
+            .get(
+                &format!(
+                    "repos/{}/compare/{base}...{head}?per_page=100",
+                    self.project.repository
+                ),
+                if matches!(self.freshness, Freshness::CachedOnly) {
+                    self.freshness
+                } else {
+                    Freshness::MaxAge(Duration::from_secs(86400))
+                },
+            )
+            .await?;
+        if !contains(base, head, &response.data) {
+            return Ok((false, None));
+        }
+        let Some(commits) = response.data["commits"].as_array() else {
+            return Ok((true, None));
+        };
+        // Only a complete immutable comparison can exclude other run SHAs.
+        // Long histories, omitted rows, or malformed identities fall back to
+        // individual comparisons instead of trusting a truncated roster.
+        let complete = response.data["total_commits"].as_u64() == Some(commits.len() as u64)
+            && commits.len() <= 100
+            && commits.last().is_some_and(|c| c["sha"] == head);
+        let mut roster = HashSet::from([base.to_owned()]);
+        for commit in commits {
+            let Some(sha) = commit["sha"]
+                .as_str()
+                .filter(|s| crate::repository::valid_sha(s))
+            else {
+                return Ok((true, None));
+            };
+            if !roster.insert(sha.to_owned()) {
+                return Ok((true, None));
+            }
+        }
+        Ok((true, complete.then_some(roster)))
+    }
     async fn ancestor(&self, base: &str, head: &str) -> Result<bool> {
         if base == head {
             return Ok(true);
@@ -217,7 +270,8 @@ impl Collector<'_> {
             tip
         };
         report.branch_sha = Some(tip.clone());
-        if !self.ancestor(&sha, &tip).await? {
+        let (on_branch, branch_commits) = self.branch_commits(&sha, &tip).await?;
+        if !on_branch {
             report.state = "not_on_branch".into();
             return Ok(());
         }
@@ -262,7 +316,17 @@ impl Collector<'_> {
                     break;
                 }
                 let head = string(&run, "head_sha")?;
-                if !self.ancestor(&sha, &head).await? || !self.ancestor(&head, &tip).await? {
+                let covered = if let Some(commits) = &branch_commits {
+                    // Comparison members belong to the tip, but a merged side
+                    // branch can still omit the target. Prove that direction.
+                    commits.contains(&head)
+                        && (head == sha || head == tip || self.ancestor(&sha, &head).await?)
+                } else if head == sha || head == tip {
+                    true
+                } else {
+                    self.ancestor(&sha, &head).await? && self.ancestor(&head, &tip).await?
+                };
+                if !covered {
                     continue;
                 }
                 let id = number(&run, "id")?;

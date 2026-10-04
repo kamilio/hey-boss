@@ -91,6 +91,9 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
     let path = uri.path();
     mock.calls.lock().unwrap().push(uri.to_string());
     let mode = mock.mode.as_str();
+    if mode == "paced_metadata" && path.starts_with("/repos/o/r/commits/") {
+        tokio::time::sleep(Duration::from_secs(21)).await;
+    }
     let result = if path.starts_with("/repos/o/r/commits/") {
         json!({"sha":path.rsplit('/').next().unwrap(),"commit":{"committer":{"date":"2026-10-04T00:00:00Z"}}})
     } else if path == "/repos/o/r/branches/main" {
@@ -106,8 +109,25 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         let (base, head) = path.rsplit('/').next().unwrap().split_once("...").unwrap();
         let ahead = base <= head
             && !(mode == "unrelated" && head == C)
+            && !(mode == "side_branch" && base == A && head == B)
             && !(mode == "force_push" && head == D);
-        json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}})
+        let mut result = json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}});
+        if matches!(
+            mode,
+            "branch_roster" | "truncated_branch_roster" | "side_branch"
+        ) {
+            let commits: Vec<_> = [A, B, C, D]
+                .into_iter()
+                .filter(|sha| *sha > base && *sha <= head)
+                .map(|sha| json!({"sha":sha}))
+                .collect();
+            result["total_commits"] = json!(commits.len());
+            result["commits"] = json!(commits);
+            if mode == "truncated_branch_roster" {
+                result["commits"] = json!([]);
+            }
+        }
+        result
     } else if path == "/repos/o/r/actions/workflows/ci.yml/runs" {
         if mode == "forbidden" {
             return (
@@ -175,6 +195,8 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
     } else if path.ends_with("/jobs") {
         let id = path.split('/').nth(6).unwrap().parse::<u64>().unwrap();
         let mut jobs = match id {
+            2 if mode == "side_branch" => vec![job(2, B, "success")],
+            3 if mode == "side_branch" => vec![job(3, C, "skipped")],
             1 if mode == "old_failure" => vec![job(1, A, "failure")],
             1 => vec![],
             2 => vec![job(2, if mode == "old_failure" { A } else { B }, "skipped")],
@@ -320,6 +342,61 @@ async fn a_successful_rerun_retains_the_failed_earlier_attempt() {
         hey_gh::release::RunState::Failed
     );
     assert_eq!(gate.confirmation.as_ref().unwrap().attempt, 2);
+}
+
+#[tokio::test]
+async fn a_small_release_batch_uses_its_existing_budget_for_paced_metadata() {
+    let h = Harness::new("paced_metadata").await;
+    let started = tokio::time::Instant::now();
+    let batch = h.report(&[C]).await;
+    assert_eq!(
+        batch.reports[0].state, "verified",
+        "{:?}",
+        batch.reports[0].errors
+    );
+    assert!(started.elapsed() < Duration::from_secs(120));
+}
+
+#[tokio::test]
+async fn a_complete_branch_roster_limits_comparisons_to_possible_successors() {
+    let h = Harness::new("branch_roster").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "verified");
+    assert_eq!(
+        h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.contains("/compare/"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_truncated_branch_roster_falls_back_to_individual_ancestry_proofs() {
+    let h = Harness::new("truncated_branch_roster").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "verified");
+    assert!(
+        h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.contains("/compare/"))
+            .count()
+            > 1
+    );
+}
+
+#[tokio::test]
+async fn a_merged_side_branch_run_does_not_prove_it_contains_the_release_target() {
+    let h = Harness::new("side_branch").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "watching");
+    assert!(!batch.reports[0].gates[0].satisfied);
 }
 
 #[tokio::test]
