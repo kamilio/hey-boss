@@ -170,6 +170,7 @@ fn endpoint(line: &str) -> String {
     allowed(
         field(line, "endpoint"),
         &[
+            "app_token",
             "viewer",
             "graphql",
             "search",
