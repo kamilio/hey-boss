@@ -596,6 +596,9 @@ waiter also promotes the background PR, CI or policy report holding its lock,
 so it can finish without leaving that waiter behind the queue. After at
 most three interactive dispatches in a quota lane, an eligible background
 request in that lane gets a turn.
+Final REST head checks for ready foreground reports take priority over other
+foreground reads, then yield to an ordinary foreground read in the same quota.
+Coalesced checks inherit that priority; background fairness still applies.
 Priority never bypasses quota exhaustion, cooldowns, lane limits or deadlines,
 and cannot preempt an already active socket.
 An explicit GitHub `404: Branch not protected` establishes absence of legacy
@@ -655,7 +658,7 @@ a count of this daemon's charges. Check retention coverage and unmatched respons
 before comparing bounded windows. Older logs lack these records and cannot prove
 zero traffic. Cache hits remain visible in `status`; they do not dispatch requests.
 
-The daemon owns one bounded queue: active, waiting, and retrying distinct requests share its 256-request capacity. Identical in-flight requests share one operation, even when callers cancel. Eligible ready requests retain FIFO order within each bucket; an exhausted resource bucket does not block a ready request from another bucket. REST core, search, and GraphQL use separate budgets, refined from GitHub's `x-ratelimit-resource` header.
+The daemon owns one bounded queue: active, waiting, and retrying distinct requests share its 256-request capacity. Identical in-flight requests share one operation, even when callers cancel. Eligible ready requests retain FIFO order within each bucket and priority class; an exhausted resource bucket does not block a ready request from another bucket. REST core, search, and GraphQL use separate budgets, refined from GitHub's `x-ratelimit-resource` header.
 
 Three of those slots are reserved for interactive PR/CI/policy reads, so polling
 cannot fill every admission slot. Embedded queues reserve `min(3, capacity / 4)`
@@ -683,7 +686,7 @@ For `api.github.com`, at most eight network attempts are active, with separate
 limits for core CI/lifecycle, GraphQL, and REST comment/review work. Other hosts
 use at most three attempts. The detail lane shares core quota and minimum spacing
 with lifecycle and CI reads, but a stalled review request or body cannot hold
-their socket. FIFO ordering applies within each lane. Throttle headers update
+their socket. FIFO ordering applies within each lane and priority class. Throttle headers update
 budgets and shared cooldowns before reading the body. `status` distinguishes
 `active_requests` from all `outstanding_requests` and reports the
 `max_active_requests` bound (one for a single-slot queue).
@@ -697,6 +700,7 @@ Scheduler diagnostics use a random `request_id` shared by one queued job's
 retries and final `GitHub request finished` record. Completion includes attempt
 count, current-attempt HTTP status when received, elapsed queue/work time and
 transport/cache outcome; it does not establish PR completeness or readiness.
+Dispatch records mark final head checks with `completion_validation`.
 Completion also includes a fixed endpoint class (for example `check_runs`,
 `timeline`, `repository`, or `branch_protection`) to distinguish source failures without exposing selectors.
 Unknown REST paths use `rest_other`; no URL or query values become labels.

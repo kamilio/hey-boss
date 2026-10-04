@@ -22,6 +22,8 @@ use url::Url;
 tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Instant>; }
 tokio::task_local! { pub(crate) static INTERACTIVE_READ: Arc<AtomicBool>; }
 tokio::task_local! { pub(crate) static BACKGROUND_READ: (); }
+// One final selector read can complete an otherwise collected PR report.
+tokio::task_local! { pub(crate) static COMPLETION_VALIDATION: (); }
 
 pub(crate) fn interactive_read() -> bool {
     INTERACTIVE_READ
@@ -549,11 +551,17 @@ impl Client {
                     deadline.min(now + self.0.config.queue_timeout)
                 })
         };
+        let completion_validation = COMPLETION_VALIDATION.try_with(|_| ()).is_ok()
+            && body.is_none()
+            && endpoint_class(&url, false, &self.0.config.rest_url) == "pull_request";
         let mut receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((receiver, interactive, shared_deadline)) = inflight.get(&key) {
+            if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
                 if interactive_read() {
                     interactive.store(true, Ordering::Relaxed);
+                }
+                if completion_validation {
+                    completion.store(true, Ordering::Relaxed);
                 }
                 let mut deadline_guard = shared_deadline.lock().unwrap_or_else(|e| e.into_inner());
                 if caller_deadline > *deadline_guard {
@@ -590,7 +598,9 @@ impl Client {
                     .try_with(Arc::clone)
                     .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
+                let completion = Arc::new(AtomicBool::new(completion_validation));
                 let job = Job {
+                    completion_validation: completion.clone(),
                     installation: body.is_none()
                         // Classic protection needs Administration permission.
                         // Keep it, and unclassified SDK reads, on the user's
@@ -631,7 +641,7 @@ impl Client {
                     mpsc::error::TrySendError::Closed(_) => Error::Stopped,
                     mpsc::error::TrySendError::Full(_) => self.queue_full(),
                 })?;
-                inflight.insert(key, (receiver.clone(), interactive, deadline));
+                inflight.insert(key, (receiver.clone(), interactive, deadline, completion));
                 receiver
             }
         };
@@ -1376,6 +1386,173 @@ mod priority_tests {
     use std::sync::atomic::AtomicU64;
 
     #[tokio::test]
+    async fn completion_checks_promote_coalesced_work_but_yield_to_other_reads_and_backoff() {
+        async fn outstanding(client: &Client, count: usize) {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while client.status().outstanding_requests != count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            let gate = gate.clone();
+            move |uri: axum::http::Uri| {
+                let calls = calls.clone();
+                let gate = gate.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.lock().unwrap().push(uri.path().to_owned());
+                    if uri.path() == "/gate" {
+                        gate.notified().await;
+                    }
+                    if uri.path() == "/throttle" {
+                        return (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "30")],
+                            axum::Json(serde_json::json!({"message":"rate limit"})),
+                        )
+                            .into_response();
+                    }
+                    axum::Json(serde_json::json!({"ok":true})).into_response()
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(10),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn({
+            let c = client.clone();
+            async move {
+                INTERACTIVE_READ
+                    .scope(foreground_priority(), c.get("gate", Freshness::Revalidate))
+                    .await
+            }
+        }));
+        outstanding(&client, 1).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while calls.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for i in 0..6 {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                INTERACTIVE_READ
+                    .scope(
+                        foreground_priority(),
+                        c.get(&format!("work/{i}"), Freshness::Revalidate),
+                    )
+                    .await
+            }));
+            outstanding(&client, i + 2).await;
+        }
+        // A background request already waiting behind the batch is promoted
+        // when an interactive report needs the same final selector.
+        tasks.push(tokio::spawn({
+            let c = client.clone();
+            async move {
+                c.get("repos/acme/demo/pulls/10", Freshness::Revalidate)
+                    .await
+            }
+        }));
+        outstanding(&client, 8).await;
+        tasks.push(tokio::spawn({
+            let c = client.clone();
+            async move { c.get("background", Freshness::Revalidate).await }
+        }));
+        outstanding(&client, 9).await;
+        for number in 10..=12 {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                COMPLETION_VALIDATION
+                    .scope(
+                        (),
+                        INTERACTIVE_READ.scope(
+                            foreground_priority(),
+                            c.get(
+                                &format!("repos/acme/demo/pulls/{number}"),
+                                Freshness::Revalidate,
+                            ),
+                        ),
+                    )
+                    .await
+            }));
+            if number == 10 {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while client.status().coalesced_requests == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                outstanding(&client, number as usize - 1).await;
+            }
+        }
+        gate.notify_one();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let observed = calls.lock().unwrap().clone();
+        assert_eq!(
+            &observed[..7],
+            &[
+                "/gate",
+                "/repos/acme/demo/pulls/10",
+                "/work/0",
+                "/background",
+                "/repos/acme/demo/pulls/11",
+                "/work/1",
+                "/repos/acme/demo/pulls/12"
+            ]
+        );
+        assert!(matches!(
+            client.get("throttle", Freshness::Revalidate).await,
+            Err(Error::RateLimited { .. })
+        ));
+        let before = calls.lock().unwrap().len();
+        assert!(matches!(
+            COMPLETION_VALIDATION
+                .scope(
+                    (),
+                    INTERACTIVE_READ.scope(
+                        foreground_priority(),
+                        client.get("repos/acme/demo/pulls/99", Freshness::Revalidate)
+                    )
+                )
+                .await,
+            Err(Error::RateLimited { .. })
+        ));
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            before,
+            "completion priority bypassed shared backoff"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn sequential_slow_responses_use_their_reserved_pacing_intervals() {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicU64::new(0));
@@ -1433,6 +1610,15 @@ mod priority_tests {
 
     #[tokio::test]
     async fn changed_conditional_probes_cannot_postpone_background_forever() {
+        changed_probe_turn(false).await;
+    }
+
+    #[tokio::test]
+    async fn background_probes_cannot_postpone_the_foreground_turn_after_a_completion_check() {
+        changed_probe_turn(true).await;
+    }
+
+    async fn changed_probe_turn(after_completion: bool) {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let live = Arc::new(AtomicBool::new(false));
@@ -1494,10 +1680,23 @@ mod priority_tests {
         }
         calls.lock().unwrap().clear();
         live.store(true, Ordering::Relaxed);
-        client.get("seed", Freshness::Revalidate).await.unwrap();
+        if after_completion {
+            COMPLETION_VALIDATION
+                .scope(
+                    (),
+                    INTERACTIVE_READ.scope(
+                        foreground_priority(),
+                        client.get("repos/acme/demo/pulls/7", Freshness::Revalidate),
+                    ),
+                )
+                .await
+                .unwrap();
+        } else {
+            client.get("seed", Freshness::Revalidate).await.unwrap();
+        }
         let mut tasks = Vec::new();
-        for (path, interactive) in std::iter::once(("background".to_owned(), false))
-            .chain((0..12).map(|n| (format!("probe/{n}"), true)))
+        for (path, interactive) in std::iter::once(("owed".to_owned(), after_completion))
+            .chain((0..12).map(|n| (format!("probe/{n}"), !after_completion)))
         {
             let c = client.clone();
             tasks.push(tokio::spawn(async move {
@@ -1514,10 +1713,10 @@ mod priority_tests {
         }
         server.abort();
         let calls = calls.lock().unwrap();
-        let position = calls.iter().position(|path| path == "/background").unwrap();
+        let position = calls.iter().position(|path| path == "/owed").unwrap();
         assert!(
-            position <= 4,
-            "conditional probes starved background: {calls:?}"
+            position <= if after_completion { 2 } else { 4 },
+            "conditional probes postponed an owed turn (after completion={after_completion}): {calls:?}"
         );
     }
 
@@ -1700,7 +1899,7 @@ mod priority_tests {
                 .lock()
                 .unwrap()
                 .values()
-                .any(|(_, priority, _)| priority.load(Ordering::Relaxed))
+                .any(|(_, priority, _, _)| priority.load(Ordering::Relaxed))
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while client.status().outstanding_requests != 0 {
