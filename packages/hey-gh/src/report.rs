@@ -346,7 +346,7 @@ impl Client {
             }
         }
         let final_pr = self
-            .pull_request(
+            .final_pull_request(
                 repository,
                 number,
                 if matches!(freshness, Freshness::CachedOnly) {
@@ -488,7 +488,7 @@ impl Client {
                         Freshness::MaxAge(age) => Freshness::MaxAge(age.min(std::time::Duration::from_secs(15))),
                         other => other,
                     };
-                    let final_pr = self.ci_metadata(repository, number, final_policy).await?;
+                    let final_pr = crate::client::COMPLETION_VALIDATION.scope((), self.ci_metadata(repository, number, final_policy)).await?;
                     if pr.data()["node_id"] != final_pr.data()["node_id"]
                         || pr.data()["head"]["sha"] != final_pr.data()["head"]["sha"]
                         || pr.data()["base"]["sha"] != final_pr.data()["base"]["sha"]
@@ -522,6 +522,17 @@ impl Client {
             }).await
         }))).await
     }
+    async fn final_pull_request(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<crate::Response> {
+        crate::client::COMPLETION_VALIDATION
+            .scope((), self.pull_request(repository, number, freshness))
+            .await
+    }
+
     pub async fn pull_request(
         &self,
         repository: &str,
@@ -713,7 +724,7 @@ impl Client {
             let review_events = collect(review_events_res, "review_events", &mut errors);
             let review_threads = collect(review_threads_res, "review_threads", &mut errors);
             let final_pr = self
-                .pull_request(
+                .final_pull_request(
                     repository,
                     number,
                     if matches!(freshness, Freshness::CachedOnly)

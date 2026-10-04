@@ -42,6 +42,7 @@ pub(crate) type Inflight = Arc<
                 watch::Receiver<SharedResult>,
                 Arc<AtomicBool>,
                 Arc<Mutex<Instant>>,
+                Arc<AtomicBool>,
             ),
         >,
     >,
@@ -92,6 +93,7 @@ pub(crate) struct Metrics {
 }
 
 pub(crate) struct Job {
+    pub completion_validation: Arc<AtomicBool>,
     pub installation: bool,
     pub minting: bool,
     pub auth_attempts: u32,
@@ -425,6 +427,7 @@ impl Scheduler {
         let instance = format!("{:032x}", fastrand::u128(..));
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
+        let mut completion_yields = std::collections::HashSet::<String>::new();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
@@ -498,8 +501,30 @@ impl Scheduler {
                 })
                 .map(|job| job.quota())
                 .collect();
+            // Alternate prioritized completion checks with ordinary foreground
+            // work in the same quota. Like background fairness, hold even free
+            // probes while an owed request waits for its pacing slot; changed
+            // 200 responses must not keep postponing that request's timer.
+            let ordinary_turns: std::collections::HashSet<_> = pending
+                .iter()
+                .filter(|job| {
+                    job.interactive.load(Ordering::Relaxed)
+                        && !job.completion_validation.load(Ordering::Relaxed)
+                        && completion_yields.contains(&job.quota())
+                        && job.ready_at <= now
+                        && !lane_busy(&active, job, prod)
+                })
+                .map(|job| job.quota())
+                .collect();
             let waiting_for_turn = |job: &Job| {
-                job.interactive.load(Ordering::Relaxed) && background_turns.contains(&job.quota())
+                let interactive = job.interactive.load(Ordering::Relaxed);
+                let quota = job.quota();
+                if background_turns.contains(&quota) {
+                    interactive
+                } else {
+                    ordinary_turns.contains(&quota)
+                        && (!interactive || job.completion_validation.load(Ordering::Relaxed))
+                }
             };
             let next = {
                 let eligible = |job: &Job| {
@@ -514,12 +539,25 @@ impl Scheduler {
                 // separate socket lanes. GraphQL keeps its own counter.
                 // Quotas, lane limits,
                 // retries, cooldowns and expiry remain unchanged.
-                let preferred = pending.iter().position(|job| {
+                let preferred = |job: &Job| {
                     eligible(job)
                         && job.interactive.load(Ordering::Relaxed)
                             == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
-                });
-                preferred.or_else(|| pending.iter().position(eligible))
+                };
+                let completing = |job: &Job| {
+                    job.interactive.load(Ordering::Relaxed)
+                        && job.completion_validation.load(Ordering::Relaxed)
+                };
+                pending
+                    .iter()
+                    .position(|job| preferred(job) && completing(job))
+                    .or_else(|| pending.iter().position(preferred))
+                    .or_else(|| {
+                        pending
+                            .iter()
+                            .position(|job| eligible(job) && completing(job))
+                    })
+                    .or_else(|| pending.iter().position(eligible))
             };
             if active.len() < max_active
                 && let Some(index) = next
@@ -557,6 +595,13 @@ impl Scheduler {
                 } else {
                     0
                 };
+                if job.interactive.load(Ordering::Relaxed) && !job.minting {
+                    if job.completion_validation.load(Ordering::Relaxed) {
+                        completion_yields.insert(job.quota());
+                    } else {
+                        completion_yields.remove(&job.quota());
+                    }
+                }
                 if job.minting {
                     job.auth_attempts += 1;
                     minting = true;
@@ -568,6 +613,7 @@ impl Scheduler {
                 tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
                     foreground=job.interactive.load(Ordering::Relaxed),
+                    completion_validation=job.completion_validation.load(Ordering::Relaxed),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
                     auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope }, %instance, request_key=%crate::digest(&job.key),
                     "GitHub request dispatched");
@@ -1186,6 +1232,7 @@ mod tests {
 
     fn core_job() -> Job {
         Job {
+            completion_validation: Arc::new(AtomicBool::new(false)),
             installation: false,
             minting: false,
             auth_attempts: 0,

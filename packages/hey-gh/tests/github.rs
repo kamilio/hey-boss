@@ -206,6 +206,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             data.calls.len(),
         )
     };
+    if mode == "final-selector-priority" && path.starts_with("/repos/acme/bulk/pulls/") {
+        mock.release.notified().await;
+    }
     if mode == "account-multi-source-budget" && total_calls > 6 {
         mock.release.notified().await;
         return reply(503, json!({"message":"synthetic interrupted read"}), &[]);
@@ -4150,6 +4153,84 @@ async fn ci_final_validation_reuses_recent_selectors_but_rejects_older_evidence(
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_ready_foreground_report_checks_its_final_head_before_unrelated_batches() {
+    let h = Harness::new().await;
+    h.phase(2);
+    let c = h.client();
+    assert!(
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    let metadata = c
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    let old = metadata.validated_at_ms - 20_000;
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [old]).unwrap();
+    drop(db);
+    h.mode("final-selector-priority");
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = hey_gh::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let gate = tokio::spawn({
+        let c = c.clone();
+        async move { c.get("slow", Freshness::Revalidate).await }
+    });
+    until(|| h.calls().iter().any(|call| call.path == "/slow")).await;
+    let mut bulk = Vec::new();
+    for number in 1..=6 {
+        let sdk = sdk.clone();
+        bulk.push(tokio::spawn(async move {
+            sdk.ci_for_pr("acme/bulk", number, Freshness::Revalidate)
+                .await
+        }));
+        until(|| c.status().outstanding_requests == number as usize + 1).await;
+    }
+    // The initial selector is within the caller's 30s bound, but the final
+    // 15s validation must go to GitHub. All CI sources are already available.
+    let mut report = tokio::spawn(async move {
+        sdk.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+    });
+    until(|| c.status().outstanding_requests == 8).await;
+    h.mock.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_millis(750), &mut report).await;
+    // Cleanup also on the expected pre-fix timeout; no stalled tasks escape.
+    h.mode("");
+    h.mock.release.notify_waiters();
+    gate.await.unwrap().unwrap();
+    for task in bulk {
+        let _ = task.await.unwrap();
+    }
+    if result.is_err() {
+        let _ = report.await;
+    }
+    server.abort();
+    let report = result
+        .expect("ready report's final head check waited behind unrelated foreground requests")
+        .unwrap()
+        .unwrap();
+    assert!(report.complete);
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/pulls/7")
+                && v.validated_at_ms > metadata.validated_at_ms)
+    );
+    assert_eq!(report.data.head_sha, HEAD);
 }
 
 #[tokio::test]
