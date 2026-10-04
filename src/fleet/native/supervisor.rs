@@ -1931,6 +1931,7 @@ pub(super) fn run(ctx: Context) -> Result<()> {
         return Err("Fleet supervisor is already running".into());
     };
     let app = Supervisor::new(ctx.clone())?;
+    super::model_recovery::start(ctx.clone());
     let socket = ctx.state.join("fleet.sock");
     if socket.exists() {
         std::fs::remove_file(&socket)?;
