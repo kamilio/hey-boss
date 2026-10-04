@@ -31,6 +31,27 @@ impl CiMetadata {
 }
 
 impl Client {
+    pub(super) async fn initial_ci_metadata(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<CiMetadata> {
+        let pr = self.ci_metadata(repository, number, freshness).await?;
+        crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
+        // Lifecycle evidence must remain independent of slow CI sources.
+        if super::can_publish() && pr.rest_observation().is_some() {
+            self.observe(
+                &format!("metadata://{}/{repository}/{number}", self.hostname()),
+                &serde_json::json!({"conflicts":super::conflicts(pr.data()),"pull_request":pr.data()}),
+            )
+            .await?;
+            self.publish_individual_pr_status(repository, number, &[])
+                .await?;
+        }
+        Ok(pr)
+    }
+
     pub(super) async fn ci_metadata(
         &self,
         repository: &str,

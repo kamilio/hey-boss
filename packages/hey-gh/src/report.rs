@@ -483,19 +483,34 @@ impl Client {
                         Freshness::Revalidate
                     };
                     crate::entity::clear();
-                    let pr = self.ci_metadata(repository, number, policy).await?;
+                    let seed = self.cached_pr_seed(repository, number, policy).await?;
+                    let (pr, data) = if let Some(seed) = seed {
+                        crate::entity::set(self.pr_owner(repository, number, &seed.data).await?);
+                        let head = sha(&seed.data, "head")?;
+                        let merge = seed.data["merge_commit_sha"].as_str();
+                        // Immutable commit sources can load while current PR
+                        // metadata validates. Give metadata its own ownership
+                        // scope so lifecycle publication never uses the seed.
+                        let (pr, data) = tokio::join!(
+                            crate::entity::scope(self.initial_ci_metadata(repository, number, policy)),
+                            self.ci_report(repository, &head, merge, policy),
+                        );
+                        let pr = pr?;
+                        if seed.data["node_id"] != pr.data()["node_id"]
+                            || seed.data["head"]["sha"] != pr.data()["head"]["sha"]
+                            || seed.data["base"]["sha"] != pr.data()["base"]["sha"]
+                            || seed.data["merge_commit_sha"] != pr.data()["merge_commit_sha"] {
+                            continue;
+                        }
+                        (pr, data?)
+                    } else {
+                        let pr = self.initial_ci_metadata(repository, number, policy).await?;
+                        let head = sha(pr.data(), "head")?;
+                        let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
+                        let data = self.ci_report(repository, &head, merge, policy).await?;
+                        (pr, data)
+                    };
                     crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
-                    // Lifecycle evidence does not depend on finishing CI jobs.
-                    if can_publish() && pr.rest_observation().is_some() {
-                        self.observe(
-                            &format!("metadata://{}/{repository}/{number}", self.hostname()),
-                            &json!({"conflicts":conflicts(pr.data()),"pull_request":pr.data()}),
-                        ).await?;
-                        self.publish_individual_pr_status(repository, number, &[]).await?;
-                    }
-                    let head = sha(pr.data(), "head")?;
-                    let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
-                    let data = self.ci_report(repository, &head, merge, policy).await?;
                     // Another collection may have validated selectors while
                     // these CI sources were loading. Apply the final freshness
                     // bound to that evidence, not the initial observation.
@@ -679,6 +694,18 @@ impl Client {
         number: u64,
         freshness: Freshness,
     ) -> Result<crate::Response> {
+        if let Some(cached) = self.cached_pr_seed(repository, number, freshness).await? {
+            return Ok(cached);
+        }
+        self.pull_request(repository, number, freshness).await
+    }
+
+    async fn cached_pr_seed(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<Option<crate::Response>> {
         if number > 0
             && let Freshness::MaxAge(age) = freshness
             && !age.is_zero()
@@ -705,13 +732,13 @@ impl Client {
                     // CI validates independently while details start loading;
                     // the final PR read still enforces the caller's freshness
                     // and rejects changed identities and commit selectors.
-                    return Ok(cached);
+                    return Ok(Some(cached));
                 }
                 Ok(_) | Err(Error::CacheMiss) => {}
                 Err(error) => return Err(error),
             }
         }
-        self.pull_request(repository, number, freshness).await
+        Ok(None)
     }
 
     async fn build_report(
