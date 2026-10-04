@@ -20,6 +20,9 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/ci_selectors.rs"]
+mod ci_selectors;
+
 #[derive(Clone, Debug)]
 struct Call {
     at: std::time::Instant,
@@ -680,6 +683,49 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         );
     }
     if path == "/graphql" {
+        if mode.starts_with("ci-point-")
+            && body["query"]
+                .as_str()
+                .unwrap_or("")
+                .contains("query CiSelectors")
+        {
+            if mode == "ci-point-denied" {
+                return reply(
+                    200,
+                    json!({"errors":[{"type":"FORBIDDEN","message":"access denied"}]}),
+                    &[],
+                );
+            }
+            if mode == "ci-point-stalled" {
+                mock.release.notified().await;
+            }
+            let mut node = json!({"id":"PR_acme/demo_7","number":7,"state":"OPEN","merged":false,
+                "mergeable":"MERGEABLE","headRefOid":HEAD,"baseRefOid":BASE,
+                "repository":{"nameWithOwner":"acme/demo"},
+                "potentialMergeCommit":{"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":OTHER_BASE},{"oid":HEAD}]}}});
+            match mode.as_str() {
+                "ci-point-head" => node["headRefOid"] = json!(NEW_HEAD),
+                "ci-point-base" => node["baseRefOid"] = json!(NEW_HEAD),
+                "ci-point-id" => node["id"] = json!("PR_replaced"),
+                "ci-point-number" => node["number"] = json!(8),
+                "ci-point-repository" => node["repository"]["nameWithOwner"] = json!("acme/other"),
+                "ci-point-merge" => node["potentialMergeCommit"]["oid"] = json!(NEW_HEAD),
+                "ci-point-null-merge" => node["potentialMergeCommit"] = Value::Null,
+                "ci-point-parents" => {
+                    node["potentialMergeCommit"]["parents"]["nodes"][1]["oid"] = json!(NEW_HEAD)
+                }
+                "ci-point-closed" => node["state"] = json!("CLOSED"),
+                "ci-point-merged" => node["merged"] = json!(true),
+                "ci-point-unknown" => node["mergeable"] = json!("UNKNOWN"),
+                "ci-point-case" => node["repository"]["nameWithOwner"] = json!("ACME/Demo"),
+                _ => {}
+            }
+            return reply(
+                200,
+                json!({"data":{"repository":{"pullRequest":node}}}),
+                &[],
+            );
+        }
         if mode == "graphql-primary" {
             let reset = (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1111,7 +1157,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             });
         }
     }
-    if mode == "account-ci-selectors" {
+    if mode == "account-ci-selectors" || mode.starts_with("ci-point-") {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
         } else if normalized.contains(MERGE) && normalized.ends_with("/check-runs") {
@@ -4199,8 +4245,19 @@ async fn ci_discovery_page_scenario(repository: &str, case: &str) {
     assert!(
         h.calls()[before..]
             .iter()
-            .all(|call| call.path != "/graphql"),
+            .all(|call| call.path != "/graphql"
+                || call.body["query"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("query CiSelectors")),
         "{case}: selector lookup must never dispatch discovery"
+    );
+    assert_eq!(
+        h.calls()[before..]
+            .iter()
+            .any(|call| call.path == "/graphql"),
+        case != "valid",
+        "{case}: only rejected cached selectors need a point confirmation"
     );
     assert_eq!(
         h.calls()[before..]
@@ -4471,7 +4528,10 @@ async fn ci_final_validation_reuses_recent_selectors_but_rejects_older_evidence(
         let calls = h.calls();
         let reads = &calls[before..];
         assert!(reads.iter().any(|call| call.path.contains("check-runs")));
-        assert!(!reads.iter().any(|call| call.path == "/graphql"));
+        assert_eq!(
+            reads.iter().any(|call| call.path == "/graphql"),
+            case == "stale"
+        );
         assert_eq!(
             reads
                 .iter()
@@ -10553,9 +10613,13 @@ async fn ci_seed_starts_checks_while_metadata_is_waiting() {
     });
     let checks_started = tokio::time::timeout(Duration::from_millis(500), async {
         loop {
-            // The mock permits only one core socket. Queued CI proves the
-            // collection has started even while metadata holds that socket.
-            if c.status().outstanding_requests > 1 {
+            // The mock permits only one core socket. CI can either queue
+            // behind metadata or reach the network before metadata queues.
+            if c.status().outstanding_requests > 1
+                || h.calls()[before..]
+                    .iter()
+                    .any(|call| call.path.ends_with("/check-runs"))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -10564,7 +10628,8 @@ async fn ci_seed_starts_checks_while_metadata_is_waiting() {
     .await;
     assert!(
         checks_started.is_ok(),
-        "CI collection waited for initial metadata"
+        "CI collection waited for initial metadata: {:?}",
+        &h.calls()[before..]
     );
     assert!(!read.is_finished(), "expired metadata must not certify CI");
     h.mock.release.notify_one();
