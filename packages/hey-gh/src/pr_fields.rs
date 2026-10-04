@@ -43,6 +43,39 @@ pub const PR_STATUS_FIELDS: &[&str] = &[
     "assignees",
 ];
 
+// These payloads stay in the authoritative snapshot. Small bootstrap selections
+// can use a SQLite expression index without loading them from the table.
+const COMPACT_OMISSIONS: &[&str] = &[
+    "body",
+    "ci",
+    "comments",
+    "reviewComments",
+    "reviews",
+    "reviewThreads",
+    "reviewStatus",
+    "requiredChecks",
+    "statusCheckRollup",
+];
+
+pub(crate) fn can_read_compact(fields: Option<&[String]>) -> bool {
+    fields.is_some_and(|fields| {
+        fields
+            .iter()
+            .all(|field| !COMPACT_OMISSIONS.contains(&field.as_str()))
+    })
+}
+
+pub(crate) fn compact_sql() -> String {
+    let paths = COMPACT_OMISSIONS
+        .iter()
+        .map(|field| format!("'$.pullRequest.{field}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    // Corruption remains readable as an error, including corruption in omitted
+    // fields. SQLite maintains this expression atomically with every data edit.
+    format!("CASE WHEN json_valid(data) THEN json_remove(data,{paths}) ELSE data END")
+}
+
 pub(crate) fn validate(fields: &[&str]) -> Result<()> {
     if fields.is_empty() {
         return Err(Error::Invalid(

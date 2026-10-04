@@ -330,6 +330,13 @@ impl Store {
              WHERE {OPEN_PR_SELECTION}"
         ))
         .map_err(storage)?;
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS snapshot_open_prs_compact ON snapshots(
+                scope,resource COLLATE NOCASE,length(CAST(data AS BLOB)),observed_at_ms,{})
+             WHERE {OPEN_PR_SELECTION}",
+            crate::pr_fields::compact_sql()
+        ))
+        .map_err(storage)?;
         conn.execute(
             "INSERT OR IGNORE INTO metadata(key,value) VALUES('database_id',?1)",
             [digest(&format!("{}-{}", now_ms(), fastrand::u128(..)))],
@@ -951,6 +958,7 @@ impl Store {
             .map_or_else(|| prefix.to_owned(), |repo| format!("{prefix}{repo}/"));
         let upper = format!("{prefix}\u{10ffff}");
         let max_bytes = self.max_snapshot_bytes;
+        let compact = crate::pr_fields::can_read_compact(fields.as_deref());
         self.run(move |conn| {
             let tx = conn.transaction().map_err(storage)?;
             let head: u64 = tx.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
@@ -960,17 +968,31 @@ impl Store {
             // closed/removed bodies are not scanned to select the open roster.
             // Require that index: without statistics SQLite can prefer the
             // general resource index and read every terminal JSON body again.
-            let mut stmt = tx.prepare(&format!("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots INDEXED BY snapshot_open_prs
+            let compact_sql = crate::pr_fields::compact_sql();
+            let (index, payload) = if compact {
+                ("snapshot_open_prs_compact", compact_sql.as_str())
+            } else {
+                ("snapshot_open_prs", "data")
+            };
+            let mut stmt = tx.prepare(&format!("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots INDEXED BY {index}
                 WHERE scope=?1 AND resource>=?2 COLLATE NOCASE AND resource<?3 COLLATE NOCASE
                 AND ({OPEN_PR_SELECTION})
-                AND (?4 IS NULL OR json_extract(data,'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
+                AND (?4 IS NULL OR json_extract(({payload}),'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
                 ORDER BY resource")).map_err(storage)?;
             let rows = stmt.query_map(params![scope, prefix, upper, repository], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?, r.get::<_, u64>(2)?))
             }).map_err(storage)?;
             // Sort only small metadata, and reject oversized selections before
             // allocating their bodies. Full JSON must not enter SQLite's sorter.
-            let mut body = tx.prepare("SELECT data FROM snapshots WHERE scope=?1 AND resource=?2").map_err(storage)?;
+            let body_sql = if compact {
+                // Match both the index collation and exact stored spelling.
+                // Metadata and payload share one read transaction; the original
+                // byte budget is checked before fetching even compact bodies.
+                format!("SELECT {payload} FROM snapshots INDEXED BY {index} WHERE scope=?1 AND resource=?2 COLLATE NOCASE AND resource=?2 AND ({OPEN_PR_SELECTION})")
+            } else {
+                "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2".to_owned()
+            };
+            let mut body = tx.prepare(&body_sql).map_err(storage)?;
             let mut snapshots = Vec::new();
             let mut bytes = 0usize;
             for row in rows {
@@ -2382,6 +2404,187 @@ mod tests {
         };
         assert_eq!(result, rusqlite::ffi::SQLITE_OK);
         misses
+    }
+
+    #[tokio::test]
+    async fn compact_open_pr_reads_skip_omitted_payload_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(
+            &path,
+            std::time::Duration::from_secs(3600),
+            1000,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        let mut rows = Vec::new();
+        // Keep each payload within a SQLite page: larger overflow payloads can
+        // use direct reads that bypass SQLite's page-cache miss counter.
+        for number in 1..=512 {
+            rows.push((format!("pr-status://github.com/acme/demo/{number}"), serde_json::json!({
+                "pullRequest": {"number": number, "state": "OPEN", "repository": {"nameWithOwner": "acme/demo"},
+                    "complete": false, "sourceErrors": {"details": "pending"}, "body": "x".repeat(1024),
+                    "ci": {"jobs": [{"output": "y".repeat(1024)}]}},
+                "kind": "updated", "activity": [{"kind": "comment_added", "body": "preserve"}], "changedFields": ["ci"]
+            })));
+        }
+        let cursor = store.observe_many("account", &rows).await.unwrap();
+        drop(store);
+        let store = Store::open(
+            &path,
+            std::time::Duration::from_secs(3600),
+            1000,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        let fields = vec!["number".to_owned(), "title".to_owned()];
+        for repository in [None, Some("ACME/DEMO")] {
+            store
+                .run(|conn| {
+                    conn.execute_batch(
+                        "PRAGMA mmap_size=0; PRAGMA cache_size=32; PRAGMA shrink_memory",
+                    )
+                    .map_err(storage)?;
+                    Ok(cache_misses(conn, true))
+                })
+                .await
+                .unwrap();
+            let page = store
+                .bootstrap_open_prs(
+                    "account",
+                    "pr-status://github.com/",
+                    repository,
+                    Some(fields.clone()),
+                )
+                .await
+                .unwrap();
+            let pages = store
+                .run(|conn| Ok(cache_misses(conn, false)))
+                .await
+                .unwrap();
+            assert_eq!(page.cursor, cursor);
+            assert_eq!(page.snapshots.len(), rows.len());
+            for snapshot in &page.snapshots {
+                let original = &rows
+                    .iter()
+                    .find(|(resource, _)| resource == &snapshot.resource)
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    snapshot.data,
+                    crate::pr_fields::decode_stored(&original.to_string(), Some(&fields)).unwrap()
+                );
+                assert!(
+                    snapshot.data["pullRequest"].get("title").is_none(),
+                    "missing fields stay missing internally"
+                );
+            }
+            eprintln!("compact {repository:?}: {pages} page misses");
+            assert!(
+                pages < 128,
+                "compact {repository:?} read loaded {pages} SQLite pages for tiny selected fields"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_open_pr_index_tracks_updates_scopes_and_original_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 100, 8192).unwrap();
+        let resource = "pr-status://github.com/acme/demo/1";
+        let fields = Some(vec!["number".to_owned()]);
+        let mut value = serde_json::json!({"pullRequest": {"id": "old", "number": 1, "state": "OPEN",
+            "repository": {"nameWithOwner": "acme/demo"}, "complete": false, "sourceErrors": {"ci": "pending"},
+            "ci": {"checks": [1]}, "body": "x".repeat(1024)}});
+        store
+            .observe("other-account", resource, &value)
+            .await
+            .unwrap();
+        store.observe("account", resource, &value).await.unwrap();
+        // Simulate upgrading a database that only has the original roster index.
+        store
+            .run(|conn| {
+                conn.execute_batch("DROP INDEX snapshot_open_prs_compact")
+                    .map_err(storage)
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 100, 8192).unwrap();
+        for state in ["OPEN", "CLOSED", "OPEN"] {
+            value["pullRequest"]["id"] = serde_json::json!("new");
+            value["pullRequest"]["state"] = serde_json::json!(state);
+            value["pullRequest"]["complete"] = serde_json::json!(true);
+            value["pullRequest"]["sourceErrors"] = serde_json::json!({});
+            let cursor = store.observe("account", resource, &value).await.unwrap();
+            let compact = store
+                .bootstrap_open_prs(
+                    "account",
+                    "pr-status://github.com/",
+                    Some("ACME/DEMO"),
+                    fields.clone(),
+                )
+                .await
+                .unwrap();
+            let full = store
+                .bootstrap_open_prs(
+                    "account",
+                    "pr-status://github.com/",
+                    Some("ACME/DEMO"),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(compact.cursor, cursor);
+            assert_eq!(compact.cursor, full.cursor);
+            assert_eq!(compact.snapshots.len(), usize::from(state == "OPEN"));
+            if state == "OPEN" {
+                assert_eq!(
+                    compact.snapshots[0].observed_at_ms,
+                    full.snapshots[0].observed_at_ms
+                );
+                assert_eq!(
+                    compact.snapshots[0].data,
+                    crate::pr_fields::decode_stored(&value.to_string(), fields.as_deref()).unwrap()
+                );
+            }
+        }
+        for field in crate::pr_fields::PR_STATUS_FIELDS {
+            let selection = vec![(*field).to_owned()];
+            let page = store
+                .bootstrap_open_prs("account", "pr-status://", None, Some(selection.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                page.snapshots[0].data,
+                crate::pr_fields::decode_stored(&value.to_string(), Some(&selection)).unwrap(),
+                "field {field}"
+            );
+        }
+        let other = store
+            .bootstrap_open_prs("other-account", "pr-status://", None, fields.clone())
+            .await
+            .unwrap();
+        assert_eq!(other.snapshots[0].data["pullRequest"]["complete"], false);
+        value["pullRequest"]["removed"] = serde_json::json!(true);
+        store.observe("account", resource, &value).await.unwrap();
+        assert!(
+            store
+                .bootstrap_open_prs("account", "pr-status://", None, fields.clone())
+                .await
+                .unwrap()
+                .snapshots
+                .is_empty()
+        );
+        // Tiny projected output must still reject oversized original evidence.
+        let bounded = Store::open(&path, std::time::Duration::from_secs(3600), 100, 512).unwrap();
+        assert!(matches!(
+            bounded
+                .bootstrap_open_prs("other-account", "pr-status://", None, fields)
+                .await,
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[tokio::test]
