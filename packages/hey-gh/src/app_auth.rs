@@ -76,7 +76,7 @@ impl AppInstallation {
             .map_err(|_| Error::Invalid("invalid GitHub App RSA private key".into()))?;
         let scope = digest(
             &json!([
-                "installation-read-v1",
+                "installation-read-v2",
                 client_id,
                 installation_id,
                 repositories

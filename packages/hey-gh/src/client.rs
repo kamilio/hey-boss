@@ -592,6 +592,10 @@ impl Client {
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let job = Job {
                     installation: body.is_none()
+                        // Classic protection needs Administration permission.
+                        // Keep it, and unclassified SDK reads, on the user's
+                        // existing grants; the App only covers known reads.
+                        && !matches!(endpoint, "branch_protection" | "rest_other")
                         && self.request_repository(&url).is_some_and(|repo| {
                             self.0
                                 .config
