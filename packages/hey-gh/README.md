@@ -459,12 +459,15 @@ that reflect selected fields. HTTP/SDK projections always retain `complete` and
 `sourceErrors`; CLI stdout keeps its exact requested fields. Cursor boundaries,
 activity, lifecycle kinds, changed fields, and envelope health remain unchanged.
 Use the same selection for bootstrap and deltas. Omitted fields are unknown;
-projected rows replace only selected local state. Projected stored reads validate raw JSON spans and skip decoding omitted row
-collections. The byte budget still counts original stored bodies, so projection
+projected rows replace only selected local state. Small-field open-list bootstraps
+read an atomically maintained compact SQLite index. Selections containing body,
+CI, comments, reviews, review status, required checks, or check rollups fall back
+to the original payload, as do incremental reads. Those projected reads validate
+raw JSON spans and skip decoding omitted row collections. The byte budget still counts original stored bodies, so projection
 preserves page/cursor boundaries and oversized-event failures. Scope/lifecycle
 fields needed for internal filtering remain available; the HTTP response removes
 those fields unless selected. Activity remains intact and may contain comment
-bodies. Raw stored JSON is still read, and this is not a new total wire-size bound. Unknown/empty fields fail before
+bodies. This is not a new total wire-size bound. Unknown/empty fields fail before
 GitHub reads or watch registration. Omit selections for a full mirror.
 
 ## Repository commits and branches
