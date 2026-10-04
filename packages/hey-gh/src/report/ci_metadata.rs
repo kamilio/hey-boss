@@ -1,31 +1,79 @@
-//! Reuse recent batched selectors without refreshing unrelated REST metadata.
+//! Confirm CI selectors without refreshing unrelated REST metadata.
 use crate::{Client, Error, Freshness, Response, Result, Source, now_ms};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::time::Duration;
+
+const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id number state merged mergeable headRefOid baseRefOid
+      repository { nameWithOwner }
+      potentialMergeCommit { oid parents(first: 2) { totalCount nodes { oid } } }
+    }
+  }
+}"#;
+
+fn recent(response: &Response, age: Duration) -> bool {
+    now_ms()
+        .checked_sub(response.validated_at_ms)
+        .is_some_and(|elapsed| (elapsed as u128) < age.as_millis())
+}
+
+fn matches_selectors(pr: &Value, node: &Value, repository: &str, number: u64) -> bool {
+    let merge = &node["potentialMergeCommit"];
+    let valid_sha = crate::repository::valid_sha;
+    node["number"] == number
+        && node["repository"]["nameWithOwner"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        && node["state"] == "OPEN"
+        && node["mergeable"] == "MERGEABLE"
+        && pr["state"] == "open"
+        && pr["merged"] != true
+        && node["id"].as_str().is_some_and(|id| !id.is_empty())
+        && node["id"] == pr["node_id"]
+        && node["headRefOid"].as_str().is_some_and(valid_sha)
+        && node["baseRefOid"].as_str().is_some_and(valid_sha)
+        && node["headRefOid"] == pr["head"]["sha"]
+        && node["baseRefOid"] == pr["base"]["sha"]
+        && merge["oid"].as_str().is_some_and(valid_sha)
+        && merge["oid"] == pr["merge_commit_sha"]
+        && merge["parents"]["totalCount"] == 2
+        && merge["parents"]["nodes"].as_array().is_some_and(|parents| {
+            parents.len() == 2
+                && parents
+                    .iter()
+                    .all(|parent| parent["oid"].as_str().is_some_and(valid_sha))
+                && parents
+                    .iter()
+                    .any(|parent| parent["oid"] == node["headRefOid"])
+        })
+}
 
 pub(super) enum CiMetadata {
     Rest(Response),
-    Discovery { cached: Response, validated_at: u64 },
+    Selectors { cached: Response, validated_at: u64 },
 }
 
 impl CiMetadata {
     pub(super) fn data(&self) -> &Value {
         match self {
             Self::Rest(response) => &response.data,
-            Self::Discovery { cached, .. } => &cached.data,
+            Self::Selectors { cached, .. } => &cached.data,
         }
     }
 
     pub(super) fn validated_at(&self) -> u64 {
         match self {
             Self::Rest(response) => response.validated_at_ms,
-            Self::Discovery { validated_at, .. } => *validated_at,
+            Self::Selectors { validated_at, .. } => *validated_at,
         }
     }
 
     pub(super) fn rest_observation(&self) -> Option<&Response> {
         match self {
             Self::Rest(response) => Some(response),
-            Self::Discovery { .. } => None,
+            Self::Selectors { .. } => None,
         }
     }
 }
@@ -60,19 +108,94 @@ impl Client {
     ) -> Result<CiMetadata> {
         if let Freshness::MaxAge(age) = freshness
             && !age.is_zero()
-            && let Some(metadata) = self.discovery_ci_metadata(repository, number, age).await?
+            && let Some(cached) = self.cached_pr_seed(repository, number, freshness).await?
+            && !recent(&cached, age)
         {
-            let _ = super::VALIDATIONS.try_with(|records| {
-                records.borrow_mut().push(super::ResourceValidation {
-                    resource: format!(
-                        "my-open-prs://{}/{repository}/{number}#ci-selectors",
-                        self.hostname()
-                    ),
-                    validated_at_ms: metadata.validated_at(),
-                    source: Source::Cache,
+            if let Some(metadata) = self
+                .discovery_ci_metadata(repository, number, age, &cached)
+                .await?
+            {
+                let _ = super::VALIDATIONS.try_with(|records| {
+                    records.borrow_mut().push(super::ResourceValidation {
+                        resource: format!(
+                            "my-open-prs://{}/{repository}/{number}#ci-selectors",
+                            self.hostname()
+                        ),
+                        validated_at_ms: metadata.validated_at(),
+                        source: Source::Cache,
+                    });
                 });
-            });
-            return Ok(metadata);
+                return Ok(metadata);
+            }
+            if cached.data["mergeable"] == true
+                && cached.data["merge_commit_sha"]
+                    .as_str()
+                    .is_some_and(crate::repository::valid_sha)
+            {
+                let (owner, repo) = repository.split_once('/').expect("validated repository");
+                // Confirm just the CI selectors in the main account's GraphQL
+                // quota. Preserve REST capacity for complete metadata/detail reads,
+                // and leave time for REST if this optional path stalls.
+                // Only consumed selector evidence belongs in the report's
+                // validation clocks; malformed or mismatched optional reads
+                // must not age a successful REST fallback.
+                let (result, validations) = super::VALIDATIONS
+                    .scope(std::cell::RefCell::new(Vec::new()), async {
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(2),
+                            self.graphql(
+                                CI_SELECTORS,
+                                json!({"owner":owner,"repo":repo,"number":number}),
+                                freshness,
+                            ),
+                        )
+                        .await;
+                        (
+                            result,
+                            super::VALIDATIONS.with(|records| records.borrow().clone()),
+                        )
+                    })
+                    .await;
+                match result {
+                    Ok(Ok(response))
+                        if response.validated_at_ms >= cached.validated_at_ms
+                            && recent(&response, age)
+                            && response.data["data"]["repository"]["pullRequest"]["merged"]
+                                == false
+                            && matches_selectors(
+                                &cached.data,
+                                &response.data["data"]["repository"]["pullRequest"],
+                                repository,
+                                number,
+                            ) =>
+                    {
+                        super::VALIDATIONS.with(|records| records.borrow_mut().extend(validations));
+                        return Ok(CiMetadata::Selectors {
+                            cached,
+                            validated_at: response.validated_at_ms,
+                        });
+                    }
+                    Ok(Err(
+                        error @ (Error::Auth(_)
+                        | Error::LocalAuth(_)
+                        | Error::Storage(_)
+                        | Error::Stopped
+                        | Error::GraphQL {
+                            access_denied: true,
+                            ..
+                        }
+                        | Error::GitHub {
+                            status: 401 | 403, ..
+                        }),
+                    )) => return Err(error),
+                    _ => {}
+                }
+                // Changed or ambiguous selectors must not certify the seed.
+                return Ok(CiMetadata::Rest(
+                    self.pull_request(repository, number, Freshness::Revalidate)
+                        .await?,
+                ));
+            }
         }
         Ok(CiMetadata::Rest(
             self.pull_request(repository, number, freshness).await?,
@@ -84,22 +207,8 @@ impl Client {
         repository: &str,
         number: u64,
         age: std::time::Duration,
+        cached: &Response,
     ) -> Result<Option<CiMetadata>> {
-        let cached = match self
-            .peek_get(&format!("repos/{repository}/pulls/{number}"))
-            .await
-        {
-            Ok(response) => response,
-            Err(Error::CacheMiss) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        // Already fresh REST evidence needs no account-wide cache lookup.
-        if now_ms()
-            .checked_sub(cached.validated_at_ms)
-            .is_some_and(|elapsed| (elapsed as u128) < age.as_millis())
-        {
-            return Ok(None);
-        }
         let scan = match self.peek_derived(crate::dashboard::DISCOVERY_CACHE).await {
             Ok(Some(scan)) => scan,
             Ok(None) => return Ok(None),
@@ -188,39 +297,14 @@ impl Client {
         {
             return Ok(None);
         }
-        let pr = &cached.data;
-        let merge = &node["potentialMergeCommit"];
-        let valid_sha = crate::repository::valid_sha;
-        if node["state"] != "OPEN"
-            || node["mergeable"] != "MERGEABLE"
-            || pr["state"] != "open"
-            || pr["merged"] == true
-            || !node["id"].as_str().is_some_and(|id| !id.is_empty())
-            || node["id"] != pr["node_id"]
-            || !node["headRefOid"].as_str().is_some_and(valid_sha)
-            || !node["baseRefOid"].as_str().is_some_and(valid_sha)
-            || node["headRefOid"] != pr["head"]["sha"]
-            || node["baseRefOid"] != pr["base"]["sha"]
-            || !merge["oid"].as_str().is_some_and(valid_sha)
-            || merge["oid"] != pr["merge_commit_sha"]
-            || merge["parents"]["totalCount"] != 2
-            || !merge["parents"]["nodes"].as_array().is_some_and(|parents| {
-                parents.len() == 2
-                    && parents
-                        .iter()
-                        .all(|parent| parent["oid"].as_str().is_some_and(valid_sha))
-                    && parents
-                        .iter()
-                        .any(|parent| parent["oid"] == node["headRefOid"])
-            })
-        {
+        if !matches_selectors(&cached.data, &node, repository, number) {
             return Ok(None);
         }
         // Native stacks merge against their trunk, which need not be the PR's
         // immediate diff base. Preserve the observed test-merge SHA and parents;
         // do not infer a policy branch from these selectors.
-        Ok(Some(CiMetadata::Discovery {
-            cached,
+        Ok(Some(CiMetadata::Selectors {
+            cached: cached.clone(),
             validated_at,
         }))
     }
