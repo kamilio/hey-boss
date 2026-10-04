@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+const DIRECT_HEAD_LIMIT: usize = 4;
+
 impl Client {
     /// A bounded, read-only batch through the existing cache and quota scheduler.
     /// Progress cached before a deadline is reused by the next poll.
@@ -306,12 +308,15 @@ impl Collector<'_> {
             return Ok(());
         }
         for gate in &self.project.gates {
-            let (runs, history_complete) =
-                if let Some(heads) = branch_commits.as_ref().filter(|s| s.len() <= 4) {
-                    self.runs_for_heads(&gate.workflow, heads).await?
-                } else {
-                    self.runs(&gate.workflow, &since).await?
-                };
+            let (runs, history_complete) = if let Some(heads) = branch_commits
+                .as_ref()
+                .filter(|s| s.len() <= DIRECT_HEAD_LIMIT)
+            {
+                self.runs_for_heads(&gate.workflow, heads).await?
+            } else {
+                self.runs(&gate.workflow, &since, branch_commits.as_ref())
+                    .await?
+            };
             let mut observed = GateReport {
                 name: gate.name.clone(),
                 purpose: gate.purpose,
@@ -624,8 +629,15 @@ impl Collector<'_> {
         }
         Ok((all, complete))
     }
-    async fn runs(&mut self, workflow: &str, since: &str) -> Result<(Vec<Value>, bool)> {
-        let key = format!("{workflow}:{since}");
+    async fn runs(
+        &mut self,
+        workflow: &str,
+        since: &str,
+        candidates: Option<&HashSet<String>>,
+    ) -> Result<(Vec<Value>, bool)> {
+        let mut roster: Vec<_> = candidates.into_iter().flatten().collect();
+        roster.sort();
+        let key = format!("{workflow}:{since}:{roster:?}");
         if let Some(value) = self.pages.get(&key) {
             return Ok(value.clone());
         }
@@ -652,7 +664,13 @@ impl Collector<'_> {
         let mut complete = true;
         let mut bytes = 0;
         let mut requests = 0;
+        let mut archived_heads = HashSet::new();
         'windows: while let Some((start, end)) = windows.pop() {
+            // GitHub assigns run creation times. Closed windows can discover
+            // candidate heads without repeatedly validating unrelated history.
+            // They never supply verdicts: relevant heads get current complete
+            // histories below, including reruns and newly dispatched runs.
+            let discovery_only = candidates.is_some() && end < today;
             let at = |s| {
                 chrono::DateTime::from_timestamp(s, 0)
                     .unwrap()
@@ -681,7 +699,22 @@ impl Collector<'_> {
                 if !seen.insert(path.clone()) {
                     return Err(Error::Invalid("release history pagination cycle".into()));
                 }
-                let response = self.client.get(&path, self.freshness).await?;
+                let freshness = match self.freshness {
+                    Freshness::MaxAge(age) if discovery_only => {
+                        Freshness::MaxAge(age.max(Duration::from_secs(86400)))
+                    }
+                    other => other,
+                };
+                let mut response = self.client.get(&path, freshness).await?;
+                if discovery_only && response.validated_at_ms < (end as u64 + 1) * 1000 {
+                    // A page cached while the day was open can omit later runs.
+                    // Crossing midnight does not make that snapshot complete.
+                    if matches!(self.freshness, Freshness::CachedOnly) {
+                        complete = false;
+                    } else {
+                        response = self.client.get(&path, Freshness::Revalidate).await?;
+                    }
+                }
                 bytes += response.data.to_string().len();
                 if bytes > self.client.collection_limit() {
                     return Err(Error::Invalid(
@@ -722,7 +755,17 @@ impl Collector<'_> {
                         run["event"].as_str(),
                         Some("push" | "workflow_dispatch" | "schedule")
                     ) {
-                        runs.push(run.clone());
+                        if discovery_only {
+                            let head = string(run, "head_sha")?;
+                            if !crate::repository::valid_sha(&head) {
+                                return Err(Error::Invalid("invalid workflow commit".into()));
+                            }
+                            if candidates.is_some_and(|heads| heads.contains(&head)) {
+                                archived_heads.insert(head);
+                            }
+                        } else {
+                            runs.push(run.clone());
+                        }
                     }
                 }
                 match response.link.as_deref().and_then(crate::client::next_link) {
@@ -735,6 +778,24 @@ impl Collector<'_> {
                     }
                 }
             }
+        }
+        if archived_heads.len() > DIRECT_HEAD_LIMIT {
+            // A large relevant archive is cheaper to validate by pages than by
+            // commit. Reuse this poll's cached pages with the original policy.
+            return Box::pin(self.runs(workflow, since, None)).await;
+        }
+        if !archived_heads.is_empty() {
+            // Replace every copy of these heads, including today's listing, so
+            // an old page cannot win deduplication over the current attempt.
+            runs.retain(|run| {
+                run["head_sha"]
+                    .as_str()
+                    .is_none_or(|head| !archived_heads.contains(head))
+            });
+            let (current, current_complete) =
+                self.runs_for_heads(workflow, &archived_heads).await?;
+            runs.extend(current);
+            complete &= current_complete;
         }
         // Duplicated rows during shifting pagination cannot fabricate evidence.
         let mut ids = HashSet::new();

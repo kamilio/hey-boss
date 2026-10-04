@@ -65,7 +65,11 @@ History is paginated and dense date windows are split below GitHub's 1,000
 result search cap. Missing pages, changing counts, limits, permission errors,
 and deadlines never establish success. A complete small branch comparison uses
 per-commit workflow history directly, avoiding unrelated days. Date-based
-history older than a year or requiring
+discovery can reuse closed-day pages after a complete branch comparison; each
+relevant commit's history still uses the requested freshness before evaluation.
+A page observed before that day closed must be revalidated, or remains incomplete
+for cached-only reads. Current-day discovery keeps its normal freshness.
+Date-based history older than a year or requiring
 over 100 listing requests per workflow is reported incomplete. Cached progress
 is reused on subsequent polls.
 

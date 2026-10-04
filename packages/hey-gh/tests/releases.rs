@@ -17,6 +17,14 @@ const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
+const E: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+fn now() -> chrono::DateTime<chrono::Utc> {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    chrono::DateTime::from_timestamp(seconds as i64, 0).unwrap()
+}
 #[derive(Clone, Default)]
 struct Mock {
     mode: String,
@@ -95,7 +103,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         tokio::time::sleep(Duration::from_secs(21)).await;
     }
     let result = if path.starts_with("/repos/o/r/commits/") {
-        json!({"sha":path.rsplit('/').next().unwrap(),"commit":{"committer":{"date":"2026-10-04T00:00:00Z"}}})
+        json!({"sha":path.rsplit('/').next().unwrap(),"commit":{"committer":{"date":if mode.starts_with("archive_") {now().format("%Y-%m-%dT00:00:00Z").to_string()} else {"2026-10-04T00:00:00Z".to_owned()}}}})
     } else if path == "/repos/o/r/branches/main" {
         let count = mock
             .calls
@@ -104,7 +112,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             .iter()
             .filter(|p| p.starts_with(path))
             .count();
-        json!({"name":"main","commit":{"sha":if matches!(mode,"force_push"|"fast_forward") && count>1 {D}else{C}}})
+        json!({"name":"main","commit":{"sha":if mode.starts_with("archive_") {E} else if matches!(mode,"force_push"|"fast_forward") && count>1 {D}else{C}}})
     } else if path.contains("/compare/") {
         let (base, head) = path.rsplit('/').next().unwrap().split_once("...").unwrap();
         let ahead = base <= head
@@ -115,8 +123,9 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         if matches!(
             mode,
             "branch_roster" | "truncated_branch_roster" | "side_branch" | "branch_parents"
-        ) {
-            let commits: Vec<_> = [A, B, C, D]
+        ) || mode.starts_with("archive_")
+        {
+            let commits: Vec<_> = [A, B, C, D, E]
                 .into_iter()
                 .filter(|sha| *sha > base && *sha <= head)
                 .map(|sha| {
@@ -168,6 +177,22 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
                 },
             ),
         ];
+        if mode == "archive_many" {
+            rows.extend([run(4, D, "cancelled"), run(5, E, "cancelled")]);
+        }
+        if mode.starts_with("archive_") {
+            for row in &mut rows {
+                let yesterday = (now() - chrono::Duration::days(1))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                row["created_at"] = json!(
+                    row["created_at"]
+                        .as_str()
+                        .unwrap()
+                        .replace("2026-10-04", &yesterday)
+                );
+            }
+        }
         if mode == "past_attempt" {
             rows[0]["run_attempt"] = json!(2);
         }
@@ -175,6 +200,11 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             .find(|(key, _)| key == "head_sha")
             .map(|(_, value)| value.into_owned());
         if let Some(head) = head_query {
+            if mode == "archive_rerun" && head == C {
+                rows[0]["run_attempt"] = json!(2);
+                rows[0]["status"] = json!("in_progress");
+                rows[0]["conclusion"] = Value::Null;
+            }
             let rechecking = {
                 let calls = mock.calls.lock().unwrap();
                 calls
@@ -219,6 +249,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
     } else if path.ends_with("/jobs") {
         let id = path.split('/').nth(6).unwrap().parse::<u64>().unwrap();
         let mut jobs = match id {
+            4 | 5 if mode == "archive_many" => vec![],
             2 if mode == "side_branch" => vec![job(2, B, "success")],
             3 if mode == "side_branch" => vec![job(3, C, "skipped")],
             1 if mode == "old_failure" => vec![job(1, A, "failure")],
@@ -231,9 +262,20 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             jobs = vec![job(3, C, if attempt == 1 { "failure" } else { "success" })];
             jobs[0]["run_attempt"] = json!(attempt);
         }
+        if mode == "archive_rerun" && id == 3 && path.contains("/attempts/2/") {
+            jobs.clear();
+        }
         json!({"total_count":if mode=="missing_job_page" {jobs.len()+1}else{jobs.len()},"jobs":jobs})
     } else if path == "/repos/o/r/actions/runs/3/attempts/1" {
-        run(3, C, "failure")
+        run(
+            3,
+            C,
+            if mode == "archive_rerun" {
+                "success"
+            } else {
+                "failure"
+            },
+        )
     } else if path == "/repos/o/r/actions/runs/3" {
         let mut r = run(3, C, "success");
         if mode == "rerun" {
@@ -411,6 +453,120 @@ async fn a_complete_branch_roster_limits_comparisons_to_possible_successors() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn large_relevant_archives_keep_using_paged_history() {
+    let h = Harness::new("archive_many").await;
+    let report = h.report(&[A]).await;
+    assert_eq!(
+        report.reports[0].state, "verified",
+        "{:?}",
+        report.reports[0].errors
+    );
+    let calls = h.mock.calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().filter(|p| p.contains("head_sha=")).count(),
+        1,
+        "only the successful run's final validation needs a per-head request: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn archived_discovery_is_reused_but_relevant_commit_history_stays_fresh() {
+    let h = Harness::new("archive_history").await;
+    assert_eq!(h.report(&[A]).await.reports[0].state, "verified");
+    h.mock.calls.lock().unwrap().clear();
+    // Force ordinary sources to validate again without a wall-clock wait.
+    let report = h
+        .client
+        .release_report(
+            &Request {
+                project: project(),
+                targets: vec![A.into()],
+            },
+            Freshness::MaxAge(Duration::ZERO),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.reports[0].state, "verified");
+    let calls = h.mock.calls.lock().unwrap();
+    let today = now().format("created=%Y-%m-%d").to_string();
+    let yesterday = (now() - chrono::Duration::days(1))
+        .format("created=%Y-%m-%d")
+        .to_string();
+    assert!(
+        !calls.iter().any(|p| p.contains(&yesterday)),
+        "closed-day discovery should remain cached: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|p| p.contains(&today)),
+        "today's discovery still needs its normal freshness"
+    );
+    assert!(
+        calls.iter().any(|p| p.contains(&format!("head_sha={C}"))),
+        "success must still be validated"
+    );
+}
+
+#[tokio::test]
+async fn archived_discovery_cached_before_the_day_closed_is_revalidated() {
+    let h = Harness::new("archive_history").await;
+    assert_eq!(h.report(&[A]).await.reports[0].state, "verified");
+    let db = rusqlite::Connection::open(h._dir.path().join("cache")).unwrap();
+    let before_midnight = now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis()
+        - 1;
+    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%created=%'", [before_midnight]).unwrap();
+    h.mock.calls.lock().unwrap().clear();
+    let cached = h
+        .client
+        .release_report(
+            &Request {
+                project: project(),
+                targets: vec![A.into()],
+            },
+            Freshness::CachedOnly,
+        )
+        .await
+        .unwrap();
+    assert!(!cached.reports[0].gates[0].history_complete);
+    assert!(!cached.reports[0].gates[0].satisfied);
+    assert!(h.mock.calls.lock().unwrap().is_empty());
+    let report = h.report(&[A]).await;
+    assert_eq!(report.reports[0].state, "verified");
+    let yesterday = (now() - chrono::Duration::days(1))
+        .format("created=%Y-%m-%d")
+        .to_string();
+    assert!(
+        h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.contains(&yesterday)),
+        "a partial-day snapshot cannot become complete merely because midnight passed"
+    );
+}
+
+#[tokio::test]
+async fn archived_success_does_not_hide_a_current_rerun() {
+    let h = Harness::new("archive_rerun").await;
+    let report = h.report(&[A]).await;
+    assert_eq!(
+        report.reports[0].state, "watching",
+        "{:?}",
+        report.reports[0].errors
+    );
+    let gate = &report.reports[0].gates[0];
+    assert!(!gate.satisfied);
+    assert!(gate.runs.iter().any(|r| r.id == 3
+        && r.attempt == 2
+        && r.verdict.state == hey_gh::release::RunState::Pending));
 }
 
 #[tokio::test]
