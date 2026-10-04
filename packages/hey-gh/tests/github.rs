@@ -26,6 +26,9 @@ mod ci_selectors;
 #[path = "github/detail_continuation.rs"]
 mod detail_continuation;
 
+#[path = "github/detail_seed.rs"]
+mod detail_seed;
+
 #[derive(Clone, Debug)]
 struct Call {
     at: std::time::Instant,
@@ -464,8 +467,19 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             &[],
         );
     }
-    if mode == "issue72-stall-metadata" && path == "/repos/acme/demo/pulls/7" {
+    if matches!(
+        mode.as_str(),
+        "issue72-stall-metadata" | "account-detail-seed-stall"
+    ) && path == "/repos/acme/demo/pulls/7"
+    {
         mock.release.notified().await;
+    }
+    if mode == "account-detail-seed-denied" && path == "/repos/acme/demo/pulls/7" {
+        return reply(
+            403,
+            json!({"message":"synthetic metadata access denial"}),
+            &[],
+        );
     }
     if mode == "issue73-backoff" && path == "/repos/acme/demo/pulls/7" {
         return reply(
