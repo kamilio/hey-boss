@@ -661,8 +661,12 @@ fn observation_updates(
         // was already acknowledged. Never guess equivalence from bounded UI
         // evidence: missing rules or checks cannot authorize a handoff.
         let legacy_policy = observation.evidence["legacy_policy_fingerprint"].as_str();
-        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal IN (s.value, CASE WHEN s.value LIKE 'policy:v2:%' THEN ?6 END)) AND (s.value NOT LIKE 'policy:%' OR EXISTS(SELECT 1 FROM issue_github_signals baseline WHERE baseline.project_id=?1 AND baseline.issue_number=?2 AND baseline.url IN (?3,?3||'/') AND baseline.signal LIKE 'policy:%'))")?
-            .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals,legacy_policy], |r| r.get(0))?
+        let previous_legacy = observation
+            .policy_comparison
+            .as_ref()
+            .and_then(|policy| policy.equivalent_legacy(&previous["evidence"]));
+        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal IN (s.value, CASE WHEN s.value LIKE 'policy:v2:%' THEN ?6 END, CASE WHEN s.value LIKE 'policy:v2:%' THEN ?7 END)) AND (s.value NOT LIKE 'policy:%' OR EXISTS(SELECT 1 FROM issue_github_signals baseline WHERE baseline.project_id=?1 AND baseline.issue_number=?2 AND baseline.url IN (?3,?3||'/') AND baseline.signal LIKE 'policy:%'))")?
+            .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals,legacy_policy,previous_legacy], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let wake = !new_signals.is_empty();
         let mut errors = source_errors(previous);
@@ -1173,6 +1177,7 @@ mod tests {
                 .record_github_observation(
                     "https://github.com/o/r/pull/1",
                     &hey_gh::watcher::Observation {
+                        policy_comparison: None,
                         head: "head".into(),
                         blocking: key.into_iter().map(str::to_owned).collect(),
                         completed: None,
@@ -1229,6 +1234,7 @@ mod tests {
         let mut f = Fixture::new();
         f.assign("github").unwrap();
         let observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "head".into(),
             blocking: vec!["failed".into()],
             completed: None,
@@ -1276,6 +1282,7 @@ mod tests {
         f.assign("github").unwrap();
         f.observation(Some("failed"));
         let mut observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "head".into(),
             blocking: vec!["failed".into()],
             completed: Some("finished".into()),
@@ -1382,6 +1389,7 @@ mod tests {
                     .unwrap();
                 f.assign("github").unwrap();
                 let observation = hey_gh::watcher::Observation {
+                    policy_comparison: None,
                     head: "head".into(),
                     blocking: vec!["failure".into()],
                     completed: None,
@@ -1851,6 +1859,7 @@ mod tests {
         let mut f = Fixture::new();
         f.assign("github").unwrap();
         let mut observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "head".into(),
             blocking: vec![],
             completed: Some("done".into()),
@@ -1918,6 +1927,7 @@ mod tests {
         f.assign("github").unwrap();
         let url = "https://github.com/o/r/pull/1";
         let mut observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "head".into(),
             blocking: vec![],
             completed: None,
