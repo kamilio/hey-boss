@@ -132,7 +132,10 @@ async fn installation_reads_have_separate_primary_quota_and_keep_user_discovery(
     let client = Client::with_token(config.clone(), "synthetic-user-token".into()).unwrap();
     assert!(client.get("user", Freshness::Revalidate).await.is_err());
     client
-        .get("repos/Acme/Demo/pulls/7", Freshness::Revalidate)
+        .get(
+            "repos/Acme/Demo/commits/head7/check-runs",
+            Freshness::Revalidate,
+        )
         .await
         .unwrap();
     client
@@ -190,7 +193,10 @@ async fn installation_reads_have_separate_primary_quota_and_keep_user_discovery(
     )
     .unwrap();
     restarted
-        .get("repos/acme/demo/pulls/7", Freshness::CachedOnly)
+        .get(
+            "repos/acme/demo/commits/head7/check-runs",
+            Freshness::CachedOnly,
+        )
         .await
         .unwrap();
     assert_eq!(mock.0.lock().unwrap().len(), calls.len());
@@ -235,7 +241,10 @@ async fn installation_exhaustion_leaves_user_core_available() {
     let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
     assert!(
         client
-            .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+            .get(
+                "repos/acme/demo/commits/head7/check-runs",
+                Freshness::Revalidate
+            )
             .await
             .is_err()
     );
@@ -248,13 +257,24 @@ async fn installation_exhaustion_leaves_user_core_available() {
 }
 
 #[tokio::test]
-async fn classic_policy_and_unclassified_rest_reads_keep_the_user_permissions() {
+async fn only_ci_status_reads_use_the_app_and_all_other_activity_keeps_user_auth() {
     let (mock, _dir, config, server) = fixture("ok").await;
     let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
     for path in [
         "repos/acme/demo/branches/main/protection/required_status_checks",
         "repos/acme/demo/branches/main/protection",
         "repos/acme/demo/hooks",
+        "repos/acme/demo",
+        "repos/acme/demo/pulls/7",
+        "repos/acme/demo/pulls",
+        "repos/acme/demo/pulls/7/reviews",
+        "repos/acme/demo/pulls/7/comments",
+        "repos/acme/demo/issues/7/comments",
+        "repos/acme/demo/issues/7/timeline",
+        "repos/acme/demo/branches/main",
+        "repos/acme/demo/rules/branches/main",
+        "repos/acme/demo/commits/head7",
+        "repos/acme/demo/compare/base...head",
     ] {
         client.get(path, Freshness::Revalidate).await.unwrap();
         assert_eq!(
@@ -265,16 +285,32 @@ async fn classic_policy_and_unclassified_rest_reads_keep_the_user_permissions() 
     }
     assert_eq!(
         mock.0.lock().unwrap().len(),
-        3,
-        "administrative reads must not mint an installation token"
+        14,
+        "non-CI reads must not mint an installation token"
     );
+    for path in [
+        "repos/acme/demo/commits/head/check-runs",
+        "repos/acme/demo/commits/head/status",
+        "repos/acme/demo/actions/runs",
+        "repos/acme/demo/actions/runs/1/attempts/1/jobs",
+    ] {
+        client.get(path, Freshness::Revalidate).await.unwrap();
+        assert_eq!(
+            mock.0.lock().unwrap().last().unwrap().1,
+            "Bearer synthetic-installation-token-1",
+            "{path} must use the installation quota"
+        );
+    }
     client
-        .get("repos/acme/demo/rules/branches/main", Freshness::Revalidate)
+        .get(
+            "repos/acme/other/commits/head/check-runs",
+            Freshness::Revalidate,
+        )
         .await
         .unwrap();
     assert_eq!(
         mock.0.lock().unwrap().last().unwrap().1,
-        "Bearer synthetic-installation-token-1"
+        "Bearer synthetic-user-token"
     );
     server.abort();
 }
@@ -286,7 +322,10 @@ async fn secondary_throttles_pause_both_credentials_including_token_exchange() {
         let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
         assert!(matches!(
             client
-                .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+                .get(
+                    "repos/acme/demo/commits/head7/check-runs",
+                    Freshness::Revalidate
+                )
                 .await,
             Err(hey_gh::Error::RateLimited { .. })
         ));
@@ -306,7 +345,10 @@ async fn installation_denials_never_fall_back_to_user_and_auth_failures_are_boun
         let (mock, _dir, config, server) = fixture(mode).await;
         let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
         let error = client
-            .get("repos/acme/demo/pulls/7", Freshness::Revalidate)
+            .get(
+                "repos/acme/demo/commits/head7/check-runs",
+                Freshness::Revalidate,
+            )
             .await
             .err()
             .unwrap();
@@ -314,7 +356,10 @@ async fn installation_denials_never_fall_back_to_user_and_auth_failures_are_boun
         if mode == "mint-denied" {
             assert!(
                 client
-                    .get("repos/acme/demo/pulls/8", Freshness::Revalidate)
+                    .get(
+                        "repos/acme/demo/commits/head8/check-runs",
+                        Freshness::Revalidate
+                    )
                     .await
                     .is_err()
             );
@@ -337,8 +382,14 @@ async fn concurrent_reads_share_one_exchange_and_renewal_keeps_cached_evidence()
     let (mock, _dir, config, server) = fixture("ok").await;
     let client = Client::with_token(config.clone(), "synthetic-user-token".into()).unwrap();
     let (one, two) = tokio::join!(
-        client.get("repos/acme/demo/pulls/7", Freshness::Revalidate),
-        client.get("repos/acme/demo/pulls/8", Freshness::Revalidate)
+        client.get(
+            "repos/acme/demo/commits/head7/check-runs",
+            Freshness::Revalidate
+        ),
+        client.get(
+            "repos/acme/demo/commits/head8/check-runs",
+            Freshness::Revalidate
+        )
     );
     one.unwrap();
     two.unwrap();
@@ -361,11 +412,17 @@ async fn concurrent_reads_share_one_exchange_and_renewal_keeps_cached_evidence()
     )
     .unwrap();
     renewed
-        .get("repos/acme/demo/pulls/7", Freshness::CachedOnly)
+        .get(
+            "repos/acme/demo/commits/head7/check-runs",
+            Freshness::CachedOnly,
+        )
         .await
         .unwrap();
     renewed
-        .get("repos/acme/demo/pulls/9", Freshness::Revalidate)
+        .get(
+            "repos/acme/demo/commits/head9/check-runs",
+            Freshness::Revalidate,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -373,7 +430,10 @@ async fn concurrent_reads_share_one_exchange_and_renewal_keeps_cached_evidence()
         "Bearer synthetic-installation-token-2"
     );
     client
-        .get("repos/acme/demo/pulls/9", Freshness::CachedOnly)
+        .get(
+            "repos/acme/demo/commits/head9/check-runs",
+            Freshness::CachedOnly,
+        )
         .await
         .unwrap();
     for path in [

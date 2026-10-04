@@ -32,7 +32,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Configure a read-only GitHub App installation for repository REST reads.
+    /// Configure a read-only GitHub App installation for CI status reads.
     App {
         #[arg(long, default_value = "github.com")]
         hostname: String,
