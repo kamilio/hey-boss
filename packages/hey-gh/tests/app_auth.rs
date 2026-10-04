@@ -248,6 +248,38 @@ async fn installation_exhaustion_leaves_user_core_available() {
 }
 
 #[tokio::test]
+async fn classic_policy_and_unclassified_rest_reads_keep_the_user_permissions() {
+    let (mock, _dir, config, server) = fixture("ok").await;
+    let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
+    for path in [
+        "repos/acme/demo/branches/main/protection/required_status_checks",
+        "repos/acme/demo/branches/main/protection",
+        "repos/acme/demo/hooks",
+    ] {
+        client.get(path, Freshness::Revalidate).await.unwrap();
+        assert_eq!(
+            mock.0.lock().unwrap().last().unwrap().1,
+            "Bearer synthetic-user-token",
+            "{path} needs the user's existing permission set"
+        );
+    }
+    assert_eq!(
+        mock.0.lock().unwrap().len(),
+        3,
+        "administrative reads must not mint an installation token"
+    );
+    client
+        .get("repos/acme/demo/rules/branches/main", Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(
+        mock.0.lock().unwrap().last().unwrap().1,
+        "Bearer synthetic-installation-token-1"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn secondary_throttles_pause_both_credentials_including_token_exchange() {
     for mode in ["secondary", "mint-limited"] {
         let (mock, _dir, config, server) = fixture(mode).await;

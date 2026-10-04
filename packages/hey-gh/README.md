@@ -9,11 +9,13 @@ A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared req
 
 ## Optional GitHub App installation
 
-Repository REST reads can use a selected-repository installation's separate
+Supported repository REST reads can use a selected-repository installation's separate
 primary quota. Register/install a GitHub App with read access to Actions, Checks,
 Contents, Issues, Pull requests, and Commit statuses (Metadata is automatic).
 Keep the existing `gh` login: discovery, GraphQL, uncovered repositories, and
-comment posting still use the user identity. Installation errors remain explicit;
+comment posting still use the user identity. Classic branch protection and
+unclassified SDK REST endpoints also retain user credentials; the App does not
+need Administration permission. Installation errors remain explicit;
 they do not silently retry with user credentials. Secondary backoff and socket
 limits remain shared. All machines using one installation share its allowance.
 
