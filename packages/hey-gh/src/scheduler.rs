@@ -108,6 +108,8 @@ pub(crate) struct Job {
     pub endpoint: &'static str,
     pub queued_at: Instant,
     pub http_status: Option<u16>,
+    // Headers and body belong to one throttle observation, even for slow bodies.
+    pub secondary_retry_at: Option<Instant>,
     pub url: String,
     pub key: String,
     pub body: Option<serde_json::Value>,
@@ -217,6 +219,51 @@ struct Budget {
     spacing: Duration,
     reset_at_seconds: u64,
     usage: SharedUsage,
+}
+
+// A scan can abandon a throttled job and later create a different one. Keep
+// escalation with the shared cooldown, rather than that job's retry counter.
+struct SecondaryBackoff {
+    until: Instant,
+    episodes: u32,
+}
+
+impl SecondaryBackoff {
+    fn new() -> Self {
+        Self {
+            until: Instant::now(),
+            episodes: 0,
+        }
+    }
+
+    fn extend(&mut self, wait: Duration) {
+        self.until = self.until.max(quota_deadline(wait));
+    }
+
+    fn observe(&mut self, retry: Option<Duration>) -> Instant {
+        let now = Instant::now();
+        if now < self.until {
+            // In-flight siblings can report the same episode. Honor a longer
+            // server hint without multiplying backoff for each response.
+            if let Some(wait) = retry {
+                self.extend(wait);
+            }
+            return self.until;
+        }
+        if now.duration_since(self.until) >= Duration::from_secs(15 * 60) {
+            self.episodes = 0;
+        }
+        let fallback =
+            Duration::from_secs((60 * 2u64.pow(self.episodes.min(4))).min(15 * 60)) + jitter();
+        let wait = if self.episodes == 0 {
+            retry.unwrap_or(fallback)
+        } else {
+            retry.unwrap_or_default().max(fallback)
+        };
+        self.episodes = self.episodes.saturating_add(1);
+        self.extend(wait);
+        self.until
+    }
 }
 
 #[derive(Clone)]
@@ -436,7 +483,7 @@ impl Scheduler {
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
-        let mut secondary_until = Instant::now();
+        let mut secondary = SecondaryBackoff::new();
         let mut minting = false;
         let mut active = Vec::<Active>::new();
         let prod = self.config.rest_url.host_str() == Some("api.github.com");
@@ -468,7 +515,7 @@ impl Scheduler {
             }
             let now = Instant::now();
             let quota_blocked = |job: &Job| {
-                secondary_until > now
+                secondary.until > now
                     || budgets.for_resource(&job.quota()).any(|budget| {
                         budget.next > now
                             && (budget.remaining == 0
@@ -489,10 +536,10 @@ impl Scheduler {
                     || j.deadline() <= now
                     || (!j.background_collection()
                         && quota_blocked(j)
-                        && ready(j, &budgets, global_next.max(secondary_until)) >= j.deadline())
+                        && ready(j, &budgets, global_next.max(secondary.until)) >= j.deadline())
             }) {
                 let job = pending.remove(index).expect("existing queue entry");
-                let ready = ready(&job, &budgets, global_next.max(secondary_until));
+                let ready = ready(&job, &budgets, global_next.max(secondary.until));
                 let error = if quota_blocked(&job)
                     && !job.background_collection()
                     && !self.abandoned_request(&job)
@@ -506,7 +553,7 @@ impl Scheduler {
                 self.finish(job, Err(error));
                 continue;
             }
-            let global = global_next.max(secondary_until);
+            let global = global_next.max(secondary.until);
             // Conditional probes can return charged 200s and move the quota
             // timer again. Once background work is owed a turn, let that timer
             // elapse instead of letting more exempt foreground probes postpone
@@ -630,6 +677,7 @@ impl Scheduler {
                     job.attempts += 1;
                 }
                 job.http_status = None;
+                job.secondary_retry_at = None;
                 job.notify.send_replace(SharedResult::Active);
                 tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
@@ -857,31 +905,27 @@ impl Scheduler {
                     // Pause traffic as soon as authoritative throttle headers are
                     // available, even if the error body is slow or oversized.
                     if header_limited {
-                        let wait = if exhausted {
-                            Duration::from_secs(
+                        if exhausted {
+                            let wait = Duration::from_secs(
                                 number(&headers, "x-ratelimit-reset").map_or(60, |reset| {
                                     reset.saturating_sub(now_ms() / 1000).saturating_add(1)
                                 }),
                             )
-                            .max(retry.unwrap_or_default())
-                        } else {
-                            retry.unwrap_or_else(|| {
-                                Duration::from_secs(
-                                    60 * 2u64.pow(job.attempts.saturating_sub(1).min(6)),
-                                ) + jitter()
-                            })
-                        };
-                        if exhausted && !job.minting {
-                            budgets.exhausted(
-                                &job.quota(),
-                                number(&headers, "x-ratelimit-reset").unwrap_or(0),
-                                wait,
-                            );
+                            .max(retry.unwrap_or_default());
+                            if job.minting {
+                                secondary.extend(wait);
+                            } else {
+                                budgets.exhausted(
+                                    &job.quota(),
+                                    number(&headers, "x-ratelimit-reset").unwrap_or(0),
+                                    wait,
+                                );
+                            }
                             if let Some(retry) = retry {
-                                secondary_until = secondary_until.max(quota_deadline(retry));
+                                secondary.extend(retry);
                             }
                         } else {
-                            secondary_until = secondary_until.max(quota_deadline(wait));
+                            job.secondary_retry_at = Some(secondary.observe(retry));
                         }
                     }
                     let max_body_bytes = if job.minting {
@@ -945,17 +989,24 @@ impl Scheduler {
                 let limited = header_limited
                     || (status == StatusCode::FORBIDDEN && lower.contains("rate limit"));
                 let result = if limited {
-                    let wait = retry.unwrap_or(Duration::from_secs(60)).max(if exhausted {
-                        Duration::from_secs(
-                            number(&headers, "x-ratelimit-reset")
-                                .unwrap_or(0)
-                                .saturating_sub(now_ms() / 1000)
-                                .saturating_add(1),
-                        )
+                    let wait = if exhausted {
+                        let wait =
+                            retry
+                                .unwrap_or(Duration::from_secs(60))
+                                .max(Duration::from_secs(
+                                    number(&headers, "x-ratelimit-reset")
+                                        .unwrap_or(0)
+                                        .saturating_sub(now_ms() / 1000)
+                                        .saturating_add(1),
+                                ));
+                        secondary.extend(wait);
+                        wait
                     } else {
-                        Duration::ZERO
-                    });
-                    secondary_until = secondary_until.max(quota_deadline(wait));
+                        job.secondary_retry_at
+                            .unwrap_or_else(|| secondary.observe(retry))
+                            .max(secondary.until)
+                            .saturating_duration_since(Instant::now())
+                    };
                     Err(Error::RateLimited {
                         retry_after_seconds: ceil_seconds(wait),
                     })
@@ -1019,10 +1070,10 @@ impl Scheduler {
                         .unwrap_or(Duration::from_secs(60))
                         .max(retry.unwrap_or_default())
                 } else {
-                    retry.unwrap_or_else(|| {
-                        Duration::from_secs(60 * 2u64.pow(job.attempts.saturating_sub(1).min(6)))
-                            + jitter()
-                    })
+                    job.secondary_retry_at
+                        .unwrap_or_else(|| secondary.observe(retry))
+                        .max(secondary.until)
+                        .saturating_duration_since(Instant::now())
                 };
                 tracing::info!(request_id=%job.request_id,resource=%job.resource,retry_after_seconds=ceil_seconds(wait),"GitHub request cooldown scheduled");
                 if exhausted {
@@ -1034,10 +1085,8 @@ impl Scheduler {
                     // Retry-After always pauses shared traffic, even when
                     // GitHub also reports an exhausted primary bucket.
                     if let Some(retry) = retry {
-                        secondary_until = secondary_until.max(quota_deadline(retry));
+                        secondary.extend(retry);
                     }
-                } else {
-                    secondary_until = secondary_until.max(quota_deadline(wait));
                 }
                 if job.attempts >= self.config.max_attempts
                     || (!job.background_collection() && quota_deadline(wait) >= job.deadline())
@@ -1250,6 +1299,50 @@ async fn read_body(mut response: reqwest::Response, max: usize) -> Result<Vec<u8
 mod tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn secondary_episodes_share_backoff_and_recover_after_quiet() {
+        let mut backoff = SecondaryBackoff::new();
+        let first = backoff.observe(None);
+        assert!((60..=61).contains(&ceil_seconds(first - Instant::now())));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            backoff.observe(None),
+            first,
+            "an in-flight sibling is the same episode"
+        );
+        let extended = backoff.observe(Some(Duration::from_secs(180)));
+        assert_eq!(extended - Instant::now(), Duration::from_secs(180));
+        tokio::time::advance(extended - Instant::now()).await;
+        let second = backoff.observe(Some(Duration::from_secs(1)));
+        assert!((120..=121).contains(&ceil_seconds(second - Instant::now())));
+        tokio::time::advance(second - Instant::now() + Duration::from_secs(15 * 60)).await;
+        let recovered = backoff.observe(None);
+        assert!((60..=61).contains(&ceil_seconds(recovered - Instant::now())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn primary_retry_hints_do_not_escalate_secondary_backoff() {
+        let mut backoff = SecondaryBackoff::new();
+        backoff.extend(Duration::from_secs(180));
+        tokio::time::advance(Duration::from_secs(180)).await;
+        let first_secondary = backoff.observe(None);
+        assert!((60..=61).contains(&ceil_seconds(first_secondary - Instant::now())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn secondary_backoff_stays_bounded_and_honors_longer_server_hints() {
+        let mut backoff = SecondaryBackoff::new();
+        for episode in 0..10 {
+            let until = backoff.observe(None);
+            let seconds = ceil_seconds(until - Instant::now());
+            let expected = (60 * 2u64.pow(episode.min(4))).min(15 * 60);
+            assert!((expected..=expected + 1).contains(&seconds));
+            tokio::time::advance(until - Instant::now()).await;
+        }
+        let until = backoff.observe(Some(Duration::from_secs(7200)));
+        assert_eq!(until - Instant::now(), Duration::from_secs(7200));
+    }
+
     fn core_job() -> Job {
         Job {
             completion_validation: Arc::new(AtomicBool::new(false)),
@@ -1264,6 +1357,7 @@ mod tests {
             endpoint: "pull_request",
             queued_at: Instant::now(),
             http_status: None,
+            secondary_retry_at: None,
             url: "https://api.github.com/test".into(),
             key: "test".into(),
             body: None,

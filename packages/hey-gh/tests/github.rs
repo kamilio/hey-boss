@@ -1498,6 +1498,33 @@ async fn primary_bucket_does_not_block_core_and_secondary_retries_are_bounded() 
 }
 
 #[tokio::test]
+async fn secondary_backoff_survives_successful_requests_and_new_jobs() {
+    let h = Harness::new().await;
+    let client = h.client();
+    // This first throttle explicitly permits an immediate retry, which succeeds.
+    assert!(client.get("secondary", Freshness::Revalidate).await.is_ok());
+    assert!(client.get("plain", Freshness::Revalidate).await.is_ok());
+    // Another request is still part of the same ongoing secondary-limit problem.
+    let result = client
+        .get("secondary-no-header", Freshness::Revalidate)
+        .await;
+    assert!(
+        matches!(result, Err(Error::RateLimited { retry_after_seconds }) if (120..=121).contains(&retry_after_seconds)),
+        "a new request reset shared backoff, or headers/body counted twice: {result:?}"
+    );
+    let calls = h.calls().len();
+    assert!(matches!(
+        client.get("another", Freshness::Revalidate).await,
+        Err(Error::RateLimited { retry_after_seconds }) if retry_after_seconds >= 119
+    ));
+    assert_eq!(
+        h.calls().len(),
+        calls,
+        "the shared cooldown must stop other work"
+    );
+}
+
+#[tokio::test]
 async fn permission_failures_are_not_retried_and_bad_responses_are_not_cached() {
     let h = Harness::new().await;
     let client = h.client();
