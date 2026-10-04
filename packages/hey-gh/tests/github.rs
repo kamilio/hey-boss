@@ -831,9 +831,12 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     .unwrap()
                     .parse()
                     .unwrap();
-                if size > 25 {
+                if size > 40 {
                     return reply(504, json!({"message":"gateway timeout"}), &[]);
                 }
+                // Every page pays substantial fixed upstream work. Oversized
+                // pages fail, but overly small pages exhaust the scan budget.
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 let start = body["variables"]["after"]
                     .as_str()
                     .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
@@ -4537,7 +4540,9 @@ async fn discovery_rejects_inconsistent_cohorts_and_keeps_the_last_complete_scan
 async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     let h = Harness::new().await;
     h.mode("account-page-timeout");
-    let c = h.client();
+    let mut config = h.config();
+    config.report_timeout = Duration::from_millis(2700);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
     let freshness = Freshness::MaxAge(Duration::from_secs(60));
     let (first, second) = tokio::join!(
         c.all_my_open_pull_requests(freshness),
@@ -4550,11 +4555,10 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     assert_eq!(first[59]["repository"]["nameWithOwner"], "acme/page59");
     assert_eq!(
         h.calls().len(),
-        4,
+        3,
         "the boundary and each page are fetched once without retries"
     );
-    assert_eq!(h.calls()[2].body["variables"]["after"], "25");
-    assert_eq!(h.calls()[3].body["variables"]["after"], "50");
+    assert_eq!(h.calls()[2].body["variables"]["after"], "40");
     assert_eq!(
         h.client()
             .all_my_open_pull_requests(Freshness::CachedOnly)
@@ -4563,7 +4567,7 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
         first,
         "the full roster remains durable across client reconstruction"
     );
-    assert_eq!(h.calls().len(), 4);
+    assert_eq!(h.calls().len(), 3);
 }
 
 #[tokio::test]
@@ -4587,7 +4591,7 @@ async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failur
         h.calls()[1].body["query"]
             .as_str()
             .unwrap()
-            .contains("first: 25")
+            .contains("first: 40")
     );
 
     // A reconstructed client reuses the durable collection without requests.

@@ -293,7 +293,7 @@ the whole cycle. They are not GitHub
 transport or rate-limit failure. Fair retry position remains durable; genuine
 upstream errors keep their original diagnostics.
 
-Discovery uses pages of 25, reads the head CI state without enumerating check
+Discovery uses pages of 40, reads the head CI state without enumerating check
 contexts, and shares a durable, fully paginated collection
 between polling loops. Its reuse window starts when the scan completes; rows
 retain the oldest page's actual validation time. Failed or inconsistent scans
