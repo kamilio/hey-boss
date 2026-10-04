@@ -601,54 +601,44 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary.until);
-            // Conditional probes can return charged 200s and move the quota
-            // timer again. Once background work is owed a turn, let that timer
-            // elapse instead of letting more exempt foreground probes postpone
-            // it indefinitely. A busy lane or a retry backoff must not hold up
-            // unrelated foreground work.
-            let background_turns: std::collections::HashSet<_> = pending
-                .iter()
-                .filter(|job| {
-                    !job.interactive.load(Ordering::Relaxed)
-                        && interactive_streaks.get(&job.quota()).copied().unwrap_or(0) >= 3
-                        && job.ready_at <= now
-                        && !lane_busy(&active, job, prod)
-                })
-                .map(|job| job.quota())
-                .collect();
-            // Alternate completion checks with ordinary work of the same
-            // priority and quota. Like background fairness, hold even free
-            // probes while an owed request waits for its pacing slot; changed
-            // 200 responses must not keep postponing that request's timer.
-            let ordinary_turns: std::collections::HashSet<_> = pending
-                .iter()
-                .filter(|job| {
-                    !job.completion_validation.load(Ordering::Relaxed)
-                        && completion_yields
-                            .contains(&(job.quota(), job.interactive.load(Ordering::Relaxed)))
-                        && job.ready_at <= now
-                        && !lane_busy(&active, job, prod)
-                })
-                .map(|job| (job.quota(), job.interactive.load(Ordering::Relaxed)))
-                .collect();
-            let waiting_for_turn = |job: &Job| {
+            // Choose each quota's turn before considering pacing. Otherwise a
+            // newer conditional probe can overtake older paced work, return a
+            // charged 200, and move that work's slot again indefinitely.
+            // Keep foreground/background and completion/ordinary alternation;
+            // ties retain queue order. Busy lanes and retry backoffs do not
+            // reserve a turn, so unrelated work can still use its own capacity.
+            let mut turns = HashMap::new();
+            for (index, job) in pending.iter().enumerate() {
+                if job.ready_at > now
+                    || (job.installation && minting)
+                    || lane_busy(&active, job, prod)
+                {
+                    continue;
+                }
                 let interactive = job.interactive.load(Ordering::Relaxed);
                 let quota = job.quota();
                 let completing = job.completion_validation.load(Ordering::Relaxed);
-                if background_turns.contains(&quota) {
-                    interactive || (completing && ordinary_turns.contains(&(quota, false)))
-                } else if ordinary_turns.contains(&(quota.clone(), true)) {
-                    !interactive || completing
-                } else {
-                    !interactive && completing && ordinary_turns.contains(&(quota, false))
+                let priority = (
+                    interactive != (interactive_streaks.get(&quota).copied().unwrap_or(0) < 3),
+                    completing == completion_yields.contains(&(quota.clone(), interactive)),
+                );
+                let turn = turns.entry(quota).or_insert((priority, index));
+                if priority < turn.0 {
+                    *turn = (priority, index);
                 }
+            }
+            let waiting_for_turn = |index: usize, job: &Job| {
+                job.ready_at <= now
+                    && turns
+                        .get(&job.quota())
+                        .is_some_and(|(_, selected)| *selected != index)
             };
             let next = {
-                let eligible = |job: &Job| {
+                let eligible = |index: usize, job: &Job| {
                     ready(job, &budgets, global) <= now
                         && !(job.installation && minting)
                         && !lane_busy(&active, job, prod)
-                        && !waiting_for_turn(job)
+                        && !waiting_for_turn(index, job)
                 };
                 // Prefer interactive policy, but admit an eligible background job
                 // after at most three foreground dispatches in the same quota.
@@ -656,22 +646,35 @@ impl Scheduler {
                 // separate socket lanes. GraphQL keeps its own counter.
                 // Quotas, lane limits,
                 // retries, cooldowns and expiry remain unchanged.
-                let preferred = |job: &Job| {
-                    eligible(job)
+                let preferred = |index: usize, job: &Job| {
+                    eligible(index, job)
                         && job.interactive.load(Ordering::Relaxed)
                             == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 };
                 let completing = |job: &Job| job.completion_validation.load(Ordering::Relaxed);
                 pending
                     .iter()
-                    .position(|job| preferred(job) && completing(job))
-                    .or_else(|| pending.iter().position(preferred))
+                    .enumerate()
+                    .find(|(index, job)| preferred(*index, job) && completing(job))
                     .or_else(|| {
                         pending
                             .iter()
-                            .position(|job| eligible(job) && completing(job))
+                            .enumerate()
+                            .find(|(index, job)| preferred(*index, job))
                     })
-                    .or_else(|| pending.iter().position(eligible))
+                    .or_else(|| {
+                        pending
+                            .iter()
+                            .enumerate()
+                            .find(|(index, job)| eligible(*index, job) && completing(job))
+                    })
+                    .or_else(|| {
+                        pending
+                            .iter()
+                            .enumerate()
+                            .find(|(index, job)| eligible(*index, job))
+                    })
+                    .map(|(index, _)| index)
             };
             if active.len() < max_active
                 && let Some(index) = next
@@ -817,11 +820,12 @@ impl Scheduler {
             }
             let wake = pending
                 .iter()
-                .map(|job| {
+                .enumerate()
+                .map(|(index, job)| {
                     if active.len() >= max_active
                         || (job.installation && minting)
                         || lane_busy(&active, job, prod)
-                        || waiting_for_turn(job)
+                        || waiting_for_turn(index, job)
                     {
                         // A completion or the background timer wakes held work;
                         // never spin on its old ready time. Deadlines still apply.
