@@ -29,7 +29,15 @@ pub(super) fn acknowledge(
                 "Reviewed evidence must contain each attached open GitHub PR exactly once",
             ));
         }
-        if observation.evidence["complete"] != true
+        // Explicit review requires fully fetched, matching sources, not settled
+        // CI. Keep the observation's actual signals: no synthetic completion.
+        if !report.complete
+            || !report.data.errors.is_empty()
+            || !report.data.ci.errors.is_empty()
+            || !policy.errors.is_empty()
+            || policy.state == "unknown"
+            || observation.evidence["sources_match"] != true
+            || report.data.pull_request["state"] != "open"
             || report.data.pull_request["head"]["sha"] != observation.head
             || report.data.pull_request["base"]["sha"].as_str().is_none()
             || report.data.pull_request["base"]["sha"].as_str() != policy.pr_base_sha.as_deref()
