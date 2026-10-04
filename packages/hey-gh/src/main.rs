@@ -7,6 +7,7 @@ mod comment_cli;
 mod log_summary;
 mod logging;
 mod read_deadline;
+mod release_cli;
 mod service;
 mod skill_install;
 
@@ -32,6 +33,11 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// GitHub Release Watcher: explicit durable commit/PR release queues.
+    Release {
+        #[command(subcommand)]
+        action: release_cli::Action,
+    },
     /// Configure a read-only GitHub App installation for CI status reads.
     App {
         #[arg(long, default_value = "github.com")]
@@ -466,6 +472,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut complete = true;
     let value: Value = match args.command.unwrap_or(Command::Pr(PrArgs::default())) {
+        Command::Release { action } => return release_cli::run(&api, action).await,
         Command::Pr(options) => {
             let (value, is_complete) = run_pr(&api, options, args.repo, args.cursor).await?;
             complete = is_complete;

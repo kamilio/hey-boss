@@ -1,0 +1,74 @@
+# GitHub Release Watcher
+
+An explicitly started, read-only release queue. It does not assign agents,
+change issues, send notifications, or add prompts. The existing issue watcher
+is named **GitHub PR watcher**.
+
+```sh
+hey-gh release profile poe2 > release.json
+hey-gh release add --config release.json --state release.sqlite 17884 17872
+hey-gh release poll --state release.sqlite
+hey-gh release watch --state release.sqlite
+hey-gh release status --state release.sqlite
+hey-gh release remove --state release.sqlite 17884
+```
+
+`poe2` defaults to merged PR numbers. `poe-code` defaults to commit SHAs and
+checks main validation without requiring publication. The JSON project profile
+selects `repository`, `branch`, `target` (`commit` or `pull_request`), and gates.
+Each gate names a workflow file, its purpose, and required job/step names.
+Job names are exact unless they end in `*`; `count` requires the exact number
+of matching matrix jobs. Every selected job and required step must succeed.
+`step_counts` requires exact counts for repeated composite-action step names
+(one by default).
+Changing the policy requires a separate queue, preserving the old evidence.
+
+The poe2 profile covers post-merge tests, paired Convex, Joiner/Poe workers,
+and app publication. Other services or mobile releases need their own gates.
+Profiles describe reviewed workflow layouts; a renamed/missing job or step
+does not silently become successful. Deployment no-change alternatives must
+be configured explicitly with `unchanged_steps` and a successful named proof.
+They produce `unchanged`, not `passed` or a claim of a new deployment.
+
+A PR resolves to its merged commit on the configured branch. A commit must
+be an ancestor of that branch. Cancelled, queued, skipped, and missing builds
+remain watched; later runs count only when Git ancestry proves they contain
+the target and still belong to the branch. The report identifies `exact` or
+`successor` coverage and links the run attempt that supplied the evidence.
+Successful evidence and the branch are rechecked before certification.
+Cancellation after all configured jobs succeeded preserves their proof;
+`workflow_conclusion` always exposes the raw workflow result separately.
+
+`verified` means the configured evidence passed; `recovered` also retains
+observed failures. Neither establishes that a particular commit caused a
+failure, or that the original commit passed when only its successor did.
+Each deployment gate reports the selected jobs' completion time, a confirmation
+from the deployment pipeline, not an independently measured production switch
+time. A no-change confirmation has no new deployment time.
+
+`checked_at_ms` is the local observation time. `oldest_source_validation_ms`
+and the poll response's `validations` expose source freshness. `status` is
+offline and does not refresh those times. Errors produce `unknown` while
+retaining older evidence and observed failures. Inspect the JSON even when
+`poll` exits nonzero.
+Historical `confirmations` retain when a deployment was confirmed even if a
+later rerun, force-push, or read error changes the current report.
+
+`watch` polls every minute through the shared daemon's background scheduler.
+Manual `poll` uses its interactive lane. GitHub App routing remains limited
+to CI reads in configured installations. A poll has bounded work per target
+and rotates the queue after partial batches. Restarts retain the queue;
+concurrent pollers are excluded while targets can still be added or removed.
+Completed entries remain available for rerun detection until explicitly removed.
+
+History is paginated and dense date windows are split below GitHub's 1,000
+result search cap. Missing pages, changing counts, limits, permission errors,
+and deadlines never establish success. History older than a year or requiring
+over 100 listing requests per workflow is reported incomplete. Cached progress
+is reused on subsequent polls.
+
+Tests replay sanitized job/step evidence from 48 real workflow runs across
+both repositories, including successful workflows whose validation was skipped.
+Synthetic HTTP tests exercise ancestry, cancellation chains, rerun and branch
+races, pagination, and shared-cache reuse; queue tests cover restarts and stale
+results. These fixtures are offline and do not run or cancel real builds.
