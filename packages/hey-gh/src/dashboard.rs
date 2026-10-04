@@ -702,13 +702,16 @@ impl Client {
                     break;
                 }
                 if !seed_only {
-                    schedule.started(&item);
+                    let continuing = schedule.started(&item);
                     self.save_derived(
                         &schedule_key,
                         serde_json::to_value(&schedule)
                             .map_err(|e| Error::Storage(e.to_string()))?,
                     )
                     .await?;
+                    if continuing {
+                        tracing::info!(repository=%item.key.0,number=item.key.1,mode,"CI retained-page continuation started");
+                    }
                 }
                 let disappeared = !current.contains_key(&item.key);
                 attempted += 1;
@@ -724,6 +727,7 @@ impl Client {
                 pr_started_at_ms,
                 result,
                 cycle_interrupted,
+                retained_job_pages,
             } = hydration::next(&mut active).await?;
             let ((repo, number), node) = (item.key, item.node);
             if !seed_only && result.is_ok() && !matches!(freshness, Freshness::CachedOnly) {
@@ -745,8 +749,13 @@ impl Client {
                     .await?;
                 }
             }
-            if !seed_only && result.is_ok() {
-                schedule.succeeded(&(repo.clone(), number));
+            if !seed_only && (result.is_ok() || retained_job_pages) {
+                if result.is_ok() {
+                    schedule.succeeded(&(repo.clone(), number));
+                } else {
+                    schedule.progressed(&(repo.clone(), number));
+                    tracing::info!(repository=%repo,number,mode,"CI retained-page continuation queued");
+                }
                 self.save_derived(
                     &schedule_key,
                     serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,

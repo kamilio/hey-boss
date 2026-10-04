@@ -25,6 +25,8 @@ pub(super) struct Schedule {
     // JSON object keys cannot represent repository/number tuples.
     seen: Vec<(Key, Head)>,
     urgent: VecDeque<Key>,
+    #[serde(default)]
+    resume: VecDeque<Key>,
     pub next: Option<Key>,
     prefer_urgent: bool,
 }
@@ -45,6 +47,7 @@ impl Schedule {
                 .map(|(key, node)| (key.clone(), Head::from_node(node)))
                 .collect(),
             urgent: VecDeque::new(),
+            resume: VecDeque::new(),
             next,
             prefer_urgent: true,
         }
@@ -53,6 +56,11 @@ impl Schedule {
     pub fn reconcile(&mut self, nodes: &BTreeMap<Key, Value>) {
         let seen: BTreeMap<_, _> = self.seen.iter().cloned().collect();
         self.urgent.retain(|key| nodes.contains_key(key));
+        self.resume.retain(|key| {
+            nodes
+                .get(key)
+                .is_some_and(|node| seen.get(key) == Some(&Head::from_node(node)))
+        });
         let queued: BTreeSet<_> = self.urgent.iter().cloned().collect();
         self.seen = nodes
             .iter()
@@ -82,7 +90,7 @@ impl Schedule {
             }
         }
         let mut normal: VecDeque<_> = normal.into();
-        let mut urgent = self.urgent.clone();
+        let mut urgent: VecDeque<_> = self.resume.iter().chain(&self.urgent).cloned().collect();
         let mut prefer_urgent = self.prefer_urgent;
         let mut work = Vec::with_capacity(nodes.len());
         while !nodes.is_empty() {
@@ -117,7 +125,9 @@ impl Schedule {
     // Save before starting I/O. An aborted cycle cannot repeatedly consume the
     // same lane. Priority cannot skip earlier ordinary work, but if both lanes
     // point at this PR it must advance both to avoid repeating a stalled read.
-    pub fn started(&mut self, work: &Work) {
+    pub fn started(&mut self, work: &Work) -> bool {
+        let continuing = self.resume.contains(&work.key);
+        self.resume.retain(|key| key != &work.key);
         self.prefer_urgent = !work.urgent || work.at_normal_front;
         if !work.urgent || work.at_normal_front {
             self.next = Some(work.successor.clone());
@@ -126,10 +136,22 @@ impl Schedule {
             let key = self.urgent.remove(index).unwrap();
             self.urgent.push_back(key);
         }
+        continuing
     }
 
     pub fn succeeded(&mut self, key: &Key) {
         self.urgent.retain(|queued| queued != key);
+        self.resume.retain(|queued| queued != key);
+    }
+
+    // A newly retained completed job page lets the next cycle continue actual
+    // progress. This spends the existing priority turn, never the ordinary
+    // turn. The continuation is consumed before I/O and needs another newly
+    // retained page to earn another turn.
+    pub fn progressed(&mut self, key: &Key) {
+        if !self.resume.contains(key) {
+            self.resume.push_back(key.clone());
+        }
     }
 }
 
@@ -240,5 +262,36 @@ mod tests {
             vec![3, 4, 1]
         );
         assert!(work.iter().all(|work| !work.urgent));
+    }
+
+    #[test]
+    fn retained_progress_resumes_once_and_cannot_take_the_ordinary_turn() {
+        let current = nodes(&[1, 2, 3, 4, 5, 6]);
+        let mut schedule = Schedule::baseline(&current, Some(key(2)));
+        for ordinary in 2..=5 {
+            schedule.progressed(&key(1));
+            schedule.progressed(&key(1)); // Coalesced progress earns one turn.
+            schedule = restart(schedule);
+            let work = schedule.order(current.clone());
+            assert_eq!(work[0].key, key(1));
+            assert_eq!(work[1].key, key(ordinary));
+            assert_eq!(work.len(), current.len());
+            for item in &work[..2] {
+                schedule.started(item);
+            }
+        }
+        // A stalled or denied continuation does not renew itself on restart.
+        let mut schedule = restart(schedule);
+        assert_eq!(schedule.order(current.clone())[0].key, key(6));
+        schedule.progressed(&key(1));
+        let mut changed = current.clone();
+        changed.get_mut(&key(1)).unwrap()["headRefOid"] = json!("new-head");
+        schedule.reconcile(&changed);
+        assert!(schedule.resume.is_empty());
+        assert_eq!(schedule.urgent.front(), Some(&key(1)));
+        schedule.progressed(&key(1));
+        schedule.succeeded(&key(1));
+        assert!(schedule.resume.is_empty());
+        assert!(schedule.urgent.is_empty());
     }
 }

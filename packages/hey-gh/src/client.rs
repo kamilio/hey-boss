@@ -750,6 +750,11 @@ impl Client {
         let response = self
             .request_versioned(url.clone(), None, Freshness::Revalidate, Some(version))
             .await?;
+        if response.data["jobs"].as_array().is_some_and(|jobs| {
+            !jobs.is_empty() && jobs.iter().all(|job| job["status"] == "completed")
+        }) {
+            crate::collection_budget::retained_completed_page();
+        }
         crate::report::record_validation(&url, &response);
         Ok(response)
     }
