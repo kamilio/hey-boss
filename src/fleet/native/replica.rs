@@ -4125,6 +4125,115 @@ mod tests {
     }
 
     #[test]
+    fn repeated_dependency_replay_from_distinct_actors_stabilizes() {
+        let main = Fixture::new();
+        main.capture();
+        main.db.execute_batch("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,subtask_scheduling) VALUES('named:Native fleet','',1,1,'explicit');
+            INSERT INTO issues(project_id,number,title,body,state,created_by,assignee,created_at,updated_at,version,labels)
+            VALUES('named:Native fleet',2,'Held upstream','','open','human:fixture','human:fixture',0,0,1,'[]');
+            UPDATE issues SET blockers='[2]',assignee='human:fixture' WHERE number=1;").unwrap();
+        let before = current_row(
+            &main.db,
+            "issues",
+            &json!({"project_id":"named:Native fleet","number":1}),
+        )
+        .unwrap();
+        let body = "Dependency rework: upstream tasks [2] need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.";
+        for n in 0..6 {
+            let origin = format!("notice-peer-{n}");
+            let actor = format!("codex:notice-{n}");
+            main.db.execute("INSERT INTO agents SELECT ?1,json_set(metadata,'$.id',?1,'$.kind','codex','$.model','test-model'),0 FROM agents WHERE id='human:fixture'", [&actor]).unwrap();
+            let history = [
+                (
+                    "comments",
+                    json!({"id":400,"project_id":"named:Native fleet","issue_number":1,"author":actor,"body":body,"created_at":123+n}),
+                ),
+                (
+                    "events",
+                    json!({"id":401,"project_id":"named:Native fleet","issue_number":1,"actor":actor,"action":"commented","created_at":123+n,"data":json!({"comment_id":400,"body":body,"actor_model":"test-model"}).to_string()}),
+                ),
+                (
+                    "events",
+                    json!({"id":402,"project_id":"named:Native fleet","issue_number":1,"actor":actor,"action":"dependency_rework","created_at":123+n,"data":json!({"dependencies":[[2,n+1]],"actor_model":"test-model"}).to_string()}),
+                ),
+            ];
+            let changes=history.iter().enumerate().map(|(seq,(table,row))|json!({"seq":seq+1,"table_name":table,"before_json":null,"after_json":row.to_string()})).collect::<Vec<_>>();
+            let receipts = accept_changes(&main.db, &origin, &changes).unwrap();
+            assert!(
+                receipts.iter().all(|r| r["state"] == "applied"),
+                "{receipts:?}"
+            );
+            assert_eq!(
+                accept_changes(&main.db, &origin, &changes).unwrap(),
+                receipts
+            );
+            assert_eq!(
+                rows(&main.db, "SELECT * FROM comments WHERE issue_number=1", &[])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                rows(
+                    &main.db,
+                    "SELECT * FROM events WHERE issue_number=1 AND action='dependency_rework'",
+                    &[]
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            assert_eq!(
+                rows(
+                    &main.db,
+                    "SELECT * FROM events WHERE issue_number=1 AND action='commented'",
+                    &[]
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            assert_eq!(current_row(&main.db, "issues", &before).unwrap(), before);
+            if n > 0 {
+                assert!(receipts.iter().all(|r| r.get("canonical_append").is_none()));
+                assert!(
+                    rows(
+                        &main.db,
+                        "SELECT * FROM fleet_row_ids WHERE origin=?",
+                        &[json!(origin)]
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+            }
+        }
+        // Canonical snapshot replay preserves history and does not generate a
+        // fresh notice while reconciling on the receiving companion.
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "notice-receiver").unwrap();
+        let pull = snapshot(&main.db, "notice-receiver").unwrap();
+        for _ in 0..3 {
+            apply_pull(&peer.db, "notice-receiver", &pull, &[]).unwrap();
+            assert_eq!(
+                rows(&peer.db, "SELECT * FROM comments WHERE issue_number=1", &[])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                rows(
+                    &peer.db,
+                    "SELECT * FROM events WHERE issue_number=1 AND action='dependency_rework'",
+                    &[]
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn obsolete_dependency_replay_is_acknowledged_without_a_false_comment_mapping() {
         let main = Fixture::new();
         main.capture();
