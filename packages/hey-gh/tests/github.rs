@@ -2089,12 +2089,15 @@ async fn graph_ql_partial_errors_are_explicit_not_cached_or_published() {
             .any(|e| e.source == "review_threads")
     );
     assert!(
-        incomplete
+        !incomplete
             .data
             .errors
             .iter()
             .any(|e| e.source == "review_events")
     );
+    // The independently successful REST timeline proves that this PR has no
+    // review-request events even while GraphQL review threads are unavailable.
+    assert!(incomplete.data.review_events.is_empty());
     assert!(incomplete.cursor.is_none());
     let updates = client
         .changes(initial.cursor.as_deref(), 100)

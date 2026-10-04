@@ -40,6 +40,11 @@ struct Data {
     pr_head: String,
     pr_merge: String,
     conflicting: bool,
+    timeline: Vec<Value>,
+    timeline_failure: bool,
+    timeline_paginated: bool,
+    review_event_calls: usize,
+    review_event_failure: bool,
 }
 #[derive(Clone)]
 struct Mock(Arc<Mutex<Data>>);
@@ -76,6 +81,14 @@ impl Harness {
             pr_head: H.into(),
             pr_merge: M.into(),
             conflicting: false,
+            timeline: vec![
+                json!({"node_id":"ER1","event":"review_requested","created_at":"2026-09-19T00:00:00Z","requested_reviewer":{"login":"reviewer","type":"User"}}),
+                json!({"node_id":"ER2","event":"review_request_removed","created_at":"2026-09-19T01:00:00Z","requested_reviewer":{"login":"reviewer","type":"User"}}),
+            ],
+            timeline_failure: false,
+            timeline_paginated: false,
+            review_event_calls: 0,
+            review_event_failure: false,
         })));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -242,6 +255,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 .unwrap_or("")
                 .contains("query ReviewEvents") =>
         {
+            data.review_event_calls += 1;
+            if data.review_event_failure {
+                return Json(json!({"errors":[{"type":"FORBIDDEN","message":"review events denied"}],"data":null})).into_response();
+            }
             if body["variables"]["after"] == "next" {
                 json!({"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"ER2","__typename":"ReviewRequestRemovedEvent","createdAt":"2026-09-19T01:00:00Z","requestedReviewer":{"login":"reviewer","__typename":"User"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}})
             } else {
@@ -252,7 +269,25 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"T1","isResolved":data.resolved,"isOutdated":false,"comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}})
         }
         p if p.starts_with("/repos/acme/demo/commits/") => commit(p.rsplit('/').next().unwrap()),
-        p if p.ends_with("/comments") || p.ends_with("/timeline") => json!([]),
+        p if p.ends_with("/timeline") => {
+            if data.timeline_failure {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"message":"timeline unavailable"})),
+                )
+                    .into_response();
+            }
+            if data.timeline_paginated && !query.contains("page=2") {
+                link = Some(format!(
+                    "<http://{}{path}?per_page=100&page=2>; rel=\"next\"",
+                    headers["host"].to_str().unwrap()
+                ));
+                json!([{"event":"commented"}])
+            } else {
+                json!(data.timeline)
+            }
+        }
+        p if p.ends_with("/comments") => json!([]),
         _ => {
             return (
                 StatusCode::NOT_FOUND,
@@ -567,6 +602,105 @@ async fn required_checks_apply_apps_merge_precedence_strict_ancestry_and_permiss
             .iter()
             .any(|e| e.resource.starts_with("required_checks://"))
     );
+}
+
+#[tokio::test]
+async fn complete_rest_timeline_avoids_duplicate_graphql_review_events() {
+    let h = Harness::new().await;
+    h.change(|d| {
+        d.timeline_paginated = true;
+        d.timeline.push(json!({"node_id":"ER3","event":"review_requested","created_at":"2026-09-19T02:00:00Z","requested_team":{"slug":"maintainers","name":"Maintainers"}}));
+    });
+    let c = h.client();
+    let report = c
+        .pr_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(
+        report.data.review_events,
+        vec![
+            json!({"id":"ER1","__typename":"ReviewRequestedEvent","createdAt":"2026-09-19T00:00:00Z","requestedReviewer":{"__typename":"User","login":"reviewer"}}),
+            json!({"id":"ER2","__typename":"ReviewRequestRemovedEvent","createdAt":"2026-09-19T01:00:00Z","requestedReviewer":{"__typename":"User","login":"reviewer"}}),
+            json!({"id":"ER3","__typename":"ReviewRequestedEvent","createdAt":"2026-09-19T02:00:00Z","requestedReviewer":{"__typename":"Team","slug":"maintainers","name":"Maintainers"}}),
+        ]
+    );
+    assert_eq!(h.mock.0.lock().unwrap().review_event_calls, 0);
+    let calls = h.mock.0.lock().unwrap().calls.len();
+    let cached = c
+        .pr_report("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(cached.data.review_events, report.data.review_events);
+    assert_eq!(h.mock.0.lock().unwrap().calls.len(), calls);
+    assert!(
+        cached
+            .validations
+            .iter()
+            .any(|v| v.resource.contains("/timeline?") && v.resource.contains("page=2"))
+    );
+    let timeline_times = |report: &hey_gh::Report| {
+        report
+            .validations
+            .iter()
+            .filter(|v| v.resource.contains("/timeline?"))
+            .map(|v| (v.resource.clone(), v.validated_at_ms))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(timeline_times(&cached), timeline_times(&report));
+    h.change(|d| d.timeline.clear());
+    let empty = c
+        .pr_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(empty.complete);
+    assert!(empty.data.review_events.is_empty());
+    assert_eq!(h.mock.0.lock().unwrap().review_event_calls, 0);
+}
+
+#[tokio::test]
+async fn incomplete_timeline_keeps_independent_graphql_review_events() {
+    for unavailable in [false, true] {
+        let h = Harness::new().await;
+        h.change(|d| {
+            d.timeline_failure = unavailable;
+            d.timeline[0].as_object_mut().unwrap().remove("node_id");
+        });
+        let c = h.client();
+        let report = c
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(report.data.review_events.len(), 2);
+        assert_eq!(report.data.review_events[1]["id"], "ER2");
+        assert_eq!(h.mock.0.lock().unwrap().review_event_calls, 2);
+        assert_eq!(
+            report.data.errors.iter().any(|e| e.source == "timeline"),
+            unavailable
+        );
+        assert!(
+            !report
+                .data
+                .errors
+                .iter()
+                .any(|e| e.source == "review_events")
+        );
+        h.change(|d| d.review_event_failure = true);
+        let denied = c
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(!denied.complete);
+        assert!(denied.data.review_events.is_empty());
+        assert!(
+            denied
+                .data
+                .errors
+                .iter()
+                .any(|e| e.source == "review_events" && e.message.contains("review events denied"))
+        );
+        assert_eq!(h.mock.0.lock().unwrap().review_event_calls, 3);
+    }
 }
 
 #[tokio::test]

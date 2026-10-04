@@ -11,6 +11,7 @@ use std::{
 
 mod ci_collection;
 mod ci_metadata;
+mod review_events;
 
 // Nested PR/CI reads share this flag: contention makes the entire cached
 // observation read-only, preventing stale writes over an active refresh.
@@ -712,16 +713,29 @@ impl Client {
                 comments_res,
                 review_comments_res,
                 reviews_res,
-                timeline_res,
-                review_events_res,
+                (timeline_res, review_events_res),
                 review_threads_res,
             ) = tokio::join!(
                 self.ci_for_pr(repository, number, freshness),
                 self.pages(&comments_path, None, freshness),
                 self.pages(&review_comments_path, None, freshness),
                 self.pages(&reviews_path, None, freshness),
-                self.pages(&timeline_path, None, freshness),
-                self.review_events(repository, number, freshness),
+                async {
+                    let timeline = self.pages(&timeline_path, None, freshness).await;
+                    // The full report already needs the complete REST timeline.
+                    // Reuse its event identities and validation clocks where it
+                    // carries all GraphQL fields. Otherwise keep the independent
+                    // source, without waiting for CI or other detail collections.
+                    let events = match timeline
+                        .as_ref()
+                        .ok()
+                        .and_then(|timeline| review_events::from_timeline(timeline))
+                    {
+                        Some(events) => Ok(events),
+                        None => self.review_events(repository, number, freshness).await,
+                    };
+                    (timeline, events)
+                },
                 self.review_threads(repository, number, freshness),
             );
             let ci_observation = ci_res?;
