@@ -496,13 +496,22 @@ impl Client {
                             self.ci_report(repository, &head, merge, policy),
                         );
                         let pr = pr?;
-                        if seed.data["node_id"] != pr.data()["node_id"]
+                        let data = if seed.data["node_id"] != pr.data()["node_id"]
                             || seed.data["head"]["sha"] != pr.data()["head"]["sha"]
                             || seed.data["base"]["sha"] != pr.data()["base"]["sha"]
                             || seed.data["merge_commit_sha"] != pr.data()["merge_commit_sha"] {
-                            continue;
-                        }
-                        (pr, data?)
+                            // A stale seed is not a change between validated
+                            // observations. Reconcile against the metadata we
+                            // just obtained; the final check below still bounds
+                            // freshness and catches pushes during collection.
+                            crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
+                            let head = sha(pr.data(), "head")?;
+                            let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
+                            self.ci_report(repository, &head, merge, policy).await?
+                        } else {
+                            data?
+                        };
+                        (pr, data)
                     } else {
                         let pr = self.initial_ci_metadata(repository, number, policy).await?;
                         let head = sha(pr.data(), "head")?;

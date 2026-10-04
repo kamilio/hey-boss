@@ -4830,59 +4830,70 @@ async fn ci_discovery_reuse_preserves_cached_only_and_incomplete_source_evidence
 
 #[tokio::test]
 async fn ci_discovery_reuse_rechecks_newer_metadata_after_collecting_checks() {
-    let h = Harness::new().await;
-    h.mode("account-ci-selectors");
-    h.phase(2);
-    let c = h.client();
-    c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
-        .await
-        .unwrap();
-    let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
-    db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
-    c.all_my_open_pull_requests(Freshness::Revalidate)
-        .await
-        .unwrap();
-    h.mode("ci-batch-blocked-checks");
-    let before = h.calls().len();
-    let read = tokio::spawn({
-        let c = c.clone();
-        async move {
-            c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+    for stale_seed in [false, true] {
+        let h = Harness::new().await;
+        h.mode("account-ci-selectors");
+        h.phase(2);
+        let c = h.client();
+        c.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.fetched_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+        if stale_seed {
+            // Reconciliation must still detect a second change while collecting
+            // the corrected sources, without spending its final-validation retry.
+            db.execute(
+            "UPDATE cache SET response=json_set(response,'$.data.head.sha',?1,'$.etag','old-seed','$.last_modified',null) WHERE key LIKE '%/pulls/7'",
+            [NEW_HEAD],
+        ).unwrap();
+        } else {
+            c.all_my_open_pull_requests(Freshness::Revalidate)
                 .await
+                .unwrap();
         }
-    });
-    until(|| {
-        h.calls()[before..]
-            .iter()
-            .any(|call| call.path == format!("/repos/acme/demo/commits/{HEAD}/check-runs"))
-    })
-    .await;
-    // Another cache client validates a push while the first one is collecting
-    // checks. The old graph observation must not hide that newer REST evidence.
-    h.mode("account-head-change");
-    h.phase(2);
-    let newer = h
-        .client()
-        .pull_request("acme/demo", 7, Freshness::Revalidate)
-        .await
-        .unwrap();
-    assert_eq!(newer.data["head"]["sha"], NEW_HEAD);
-    h.mock.release.notify_waiters();
-    let result = tokio::time::timeout(Duration::from_secs(3), read)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(result.complete, "{:?}", result.data.errors);
-    assert_eq!(result.data.head_sha, NEW_HEAD);
-    assert_eq!(result.data.merge_sha, None);
-    assert!(
-        result
-            .data
-            .check_runs
-            .iter()
-            .all(|check| check["head_sha"] == NEW_HEAD)
-    );
+        h.mode("ci-batch-blocked-checks");
+        let before = h.calls().len();
+        let read = tokio::spawn({
+            let c = c.clone();
+            async move {
+                c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                    .await
+            }
+        });
+        until(|| {
+            h.calls()[before..]
+                .iter()
+                .any(|call| call.path == format!("/repos/acme/demo/commits/{HEAD}/check-runs"))
+        })
+        .await;
+        // Another cache client validates a push while the first one is collecting
+        // checks. The old graph observation must not hide that newer REST evidence.
+        h.mode("account-head-change");
+        h.phase(2);
+        let newer = h
+            .client()
+            .pull_request("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(newer.data["head"]["sha"], NEW_HEAD);
+        h.mock.release.notify_waiters();
+        let result = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(result.complete, "{:?}", result.data.errors);
+        assert_eq!(result.data.head_sha, NEW_HEAD);
+        assert_eq!(result.data.merge_sha, None);
+        assert!(
+            result
+                .data
+                .check_runs
+                .iter()
+                .all(|check| check["head_sha"] == NEW_HEAD)
+        );
+    }
 }
 
 #[tokio::test]
@@ -10666,6 +10677,7 @@ async fn report_and_ci_seeds_reject_changed_selectors_and_never_certify_expired_
             db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
                 .unwrap();
         }
+        let before_ci = h.calls().len();
         let ci = c
             .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
             .await
@@ -10676,6 +10688,14 @@ async fn report_and_ci_seeds_reject_changed_selectors_and_never_certify_expired_
         assert!(
             ci.validations.iter().all(|v| v.validated_at_ms > 0),
             "CI {changed}"
+        );
+        assert_eq!(
+            h.calls()[before_ci..]
+                .iter()
+                .filter(|call| call.path == "/repos/acme/demo/pulls/7")
+                .count(),
+            1,
+            "CI {changed}: reconcile the seed against the metadata just validated instead of refetching it"
         );
         // Restore the same seed to exercise the full report independently.
         db.execute(
