@@ -753,6 +753,57 @@ impl Client {
         Ok(url)
     }
 
+    /// GitHub often emits numeric repository URLs in Link headers. Keep pages
+    /// under the original named repository's auth, invalidation and cache scope.
+    pub(crate) fn pagination_path(&self, first: &str, next: &str) -> Result<String> {
+        let first = self.rest_url(first)?;
+        let mut next = self.rest_url(next)?;
+        let prefix = self.0.config.rest_url.path();
+        if let Some(numeric) = next
+            .path()
+            .strip_prefix(prefix)
+            .and_then(|p| p.strip_prefix("repositories/"))
+        {
+            let (id, suffix) = numeric
+                .split_once('/')
+                .ok_or_else(|| Error::Invalid("invalid numeric repository pagination".into()))?;
+            let original: Vec<_> = first
+                .path()
+                .strip_prefix(prefix)
+                .unwrap_or("")
+                .splitn(4, '/')
+                .collect();
+            if original.len() != 4
+                || original[0] != "repos"
+                || id.is_empty()
+                || !id.bytes().all(|b| b.is_ascii_digit())
+                || original[3] != suffix
+            {
+                return Err(Error::Invalid(
+                    "repository pagination changed its endpoint".into(),
+                ));
+            }
+            let filters = |url: &Url| {
+                let mut pairs: Vec<_> = url
+                    .query_pairs()
+                    .filter(|(k, _)| !matches!(k.as_ref(), "page" | "before" | "after"))
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect();
+                pairs.sort();
+                pairs
+            };
+            if filters(&first) != filters(&next) {
+                return Err(Error::Invalid(
+                    "repository pagination changed its filters".into(),
+                ));
+            }
+            // Never send credentials to the numeric ID from the header; only
+            // advance pagination on the already authorized original endpoint.
+            next.set_path(first.path());
+        }
+        Ok(next.to_string())
+    }
+
     /// Follow all pages, retaining per-page cache validators. Refuse cycles and
     /// cross-origin links so pagination cannot forward credentials elsewhere.
     pub async fn pages(
@@ -833,6 +884,7 @@ impl Client {
         freshness: Freshness,
         completed_version: Option<(&str, bool)>,
     ) -> Result<Vec<Value>> {
+        let first = path.to_owned();
         let mut path = path.to_owned();
         let mut seen = std::collections::HashSet::new();
         let mut values = Vec::new();
@@ -863,7 +915,7 @@ impl Client {
             }
             let next = response.link.as_deref().and_then(next_link);
             match next {
-                Some(next) => path = next,
+                Some(next) => path = self.pagination_path(&first, &next)?,
                 None => return Ok(values),
             }
         }

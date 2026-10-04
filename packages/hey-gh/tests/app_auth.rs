@@ -31,6 +31,22 @@ async fn handler(
     let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
     mock.0.lock().unwrap().push((path.clone(), token, body));
     let mode = mock.1.lock().unwrap().clone();
+    if matches!(mode.as_str(), "numeric-pages" | "numeric-filter-change")
+        && path.ends_with("/actions/runs")
+    {
+        let second = uri.query().is_some_and(|q| q.contains("page=2"));
+        let data = axum::Json(json!({"workflow_runs":[{"id":if second {2}else{1}}]}));
+        if !second {
+            let host = headers.get("host").unwrap().to_str().unwrap();
+            let extra = if mode == "numeric-filter-change" {
+                "&branch=other"
+            } else {
+                ""
+            };
+            return ([("link",format!("<http://{host}/repositories/99/actions/runs?per_page=1&page=2{extra}>; rel=\"next\""))],data).into_response();
+        }
+        return data.into_response();
+    }
     if path == "/app/installations/42/access_tokens" {
         if mode == "mint-denied" {
             return (
@@ -105,6 +121,56 @@ fn app() -> AppInstallation {
         include_str!("fixtures/github-app-test-key.pem"),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn numeric_repository_pagination_preserves_the_parent_app_and_cache_scope() {
+    let (mock, _dir, config, server) = fixture("numeric-pages").await;
+    let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
+    let rows = client
+        .pages(
+            "repos/acme/demo/actions/runs?per_page=1",
+            Some("workflow_runs"),
+            Freshness::Revalidate,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let calls = mock.0.lock().unwrap();
+    assert!(
+        calls
+            .iter()
+            .filter(|c| c.0.ends_with("/actions/runs"))
+            .all(|c| c.0 == "/repos/acme/demo/actions/runs"
+                && c.1 == "Bearer synthetic-installation-token-1")
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn numeric_pagination_cannot_change_the_collection_filters() {
+    let (mock, _dir, config, server) = fixture("numeric-filter-change").await;
+    let client = Client::with_token(config, "synthetic-user-token".into()).unwrap();
+    assert!(
+        client
+            .pages(
+                "repos/acme/demo/actions/runs?per_page=1",
+                Some("workflow_runs"),
+                Freshness::Revalidate
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        mock.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.0.ends_with("/actions/runs"))
+            .count(),
+        1
+    );
+    server.abort();
 }
 
 #[tokio::test]
