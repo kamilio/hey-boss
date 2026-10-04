@@ -989,34 +989,32 @@ impl Client {
     pub(crate) async fn observe_validated_status(
         &self,
         resource: &str,
-        data: &Value,
+        data: Option<&Value>,
         clock: u64,
         discovery_clock: u64,
-        expected_hash: Option<&str>,
+        expected_hash: &str,
         owner: &crate::store::PrOwner,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let clocks = [
             (resource.to_owned(), clock),
             (format!("{resource}#discovery"), discovery_clock),
         ];
-        if let Some(hash) = expected_hash {
-            self.0
+        let Some(data) = data else {
+            return self
+                .0
                 .store
-                .revalidate_owned(&self.0.scope, resource, hash, &clocks, owner)
-                .await?;
-            return Ok(());
-        }
-        self.0
+                .revalidate_owned(&self.0.scope, resource, expected_hash, &clocks, owner)
+                .await;
+        };
+        let applied = self
+            .0
             .store
-            .observe_validated_owned(
-                &self.0.scope,
-                &[(resource.to_owned(), data.clone())],
-                &clocks,
-                owner,
-            )
+            .replace_validated_status(&self.0.scope, resource, data, &clocks, expected_hash, owner)
             .await?;
-        self.0.changes_notify.notify_waiters();
-        Ok(())
+        if applied {
+            self.0.changes_notify.notify_waiters();
+        }
+        Ok(applied)
     }
     pub(crate) async fn status_validation_clock(&self, resource: &str) -> Result<u64> {
         self.0.store.validation_clock(&self.0.scope, resource).await
