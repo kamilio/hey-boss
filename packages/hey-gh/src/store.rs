@@ -190,10 +190,16 @@ fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, 
 #[derive(Clone)]
 pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
-    read_connection: Option<Arc<tokio::sync::Mutex<Connection>>>,
+    readers: Option<Readers>,
     retention: std::time::Duration,
     max_events: usize,
     max_snapshot_bytes: usize,
+}
+
+#[derive(Clone)]
+struct Readers {
+    lookups: Arc<tokio::sync::Mutex<Connection>>,
+    bulk: Arc<tokio::sync::Mutex<Connection>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -344,28 +350,35 @@ impl Store {
         )
         .map_err(storage)?;
         // WAL readers can use committed evidence while background publication
-        // is still writing. Keep one bounded reader; an async lock queues its
-        // callers without occupying the blocking pool with mutex waiters.
+        // is still writing. Full feeds can decode hundreds of MB: give them
+        // their own bounded reader so compact feeds and lookups can progress.
+        // Async locks queue callers without occupying the blocking pool.
         // Anonymous databases cannot open a second connection to the same data.
-        let read_connection = conn
+        let readers = conn
             .path()
             .filter(|path| !path.is_empty())
             .map(|path| {
-                let reader = Connection::open_with_flags(
-                    path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(storage)?;
-                reader
-                    .busy_timeout(std::time::Duration::from_secs(5))
+                let open = || -> Result<_> {
+                    let reader = Connection::open_with_flags(
+                        path,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
                     .map_err(storage)?;
-                Ok(Arc::new(tokio::sync::Mutex::new(reader)))
+                    reader
+                        .busy_timeout(std::time::Duration::from_secs(5))
+                        .map_err(storage)?;
+                    Ok(Arc::new(tokio::sync::Mutex::new(reader)))
+                };
+                Ok(Readers {
+                    lookups: open()?,
+                    bulk: open()?,
+                })
             })
             .transpose()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
-            read_connection,
+            readers,
             retention,
             max_events,
             max_snapshot_bytes,
@@ -389,6 +402,23 @@ impl Store {
         &self,
         f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        self.read_on(self.readers.as_ref().map(|r| &r.lookups), f)
+            .await
+    }
+
+    async fn read_bulk<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.read_on(self.readers.as_ref().map(|r| &r.bulk), f)
+            .await
+    }
+
+    async fn read_on<T: Send + 'static>(
+        &self,
+        connection: Option<&Arc<tokio::sync::Mutex<Connection>>>,
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         // All lookups in one operation share a snapshot, including identity
         // fences, aliases, validation clocks and cursor/payload pairs. Dropping
         // the transaction releases it before the next caller takes its turn.
@@ -396,7 +426,7 @@ impl Store {
             let tx = conn.transaction().map_err(storage)?;
             f(&tx)
         };
-        if let Some(conn) = &self.read_connection {
+        if let Some(conn) = connection {
             let conn = conn.clone();
             // Hydration pauses peer futures while processing a completed PR.
             // A paused FIFO waiter must not reserve the reader and prevent
@@ -896,7 +926,7 @@ impl Store {
         // forward progress without permitting arbitrarily large allocations.
         let max_bytes = (self.max_snapshot_bytes / 4).max(1);
         let max_event_bytes = self.max_snapshot_bytes;
-        self.read(move |conn| {
+        self.read_bulk(move |conn| {
             let (prefix, sequence, head) = cursor_position(conn, &scope, cursor.as_deref())?;
             let mut stmt = conn.prepare("SELECT c.cursor,c.resource,c.observed_at_ms,length(CAST(s.data AS BLOB)),length(CAST(c.fields AS BLOB)) FROM changes c LEFT JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor>?2 ORDER BY c.cursor LIMIT ?3").map_err(storage)?;
             let rows = stmt.query_map(params![scope, sequence, limit + 1], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?, r.get::<_, Option<usize>>(3)?, r.get::<_, usize>(4)?))).map_err(storage)?;
@@ -977,7 +1007,7 @@ impl Store {
         let (scope, prefix) = (scope.to_owned(), prefix.to_owned());
         let upper = format!("{prefix}\u{10ffff}");
         let max_bytes = self.max_snapshot_bytes;
-        self.read(move |conn| {
+        self.read_bulk(move |conn| {
             let head:u64=conn.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
             let cursor=format!("{}.{}",feed_prefix(conn,&scope)?,head);
             let mut stmt=conn.prepare("SELECT resource,data,observed_at_ms FROM snapshots WHERE scope=?1 AND resource>=?2 AND resource<?3 ORDER BY resource").map_err(storage)?;
@@ -1006,9 +1036,14 @@ impl Store {
         let upper = format!("{prefix}\u{10ffff}");
         let max_bytes = self.max_snapshot_bytes;
         let compact = crate::pr_fields::can_read_compact(fields.as_deref());
-        self.read(move |conn| {
-            let head: u64 = conn.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
-                .optional().map_err(storage)?.unwrap_or(0);
+        let read = move |conn: &Connection| {
+            let head: u64 = conn
+                .query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(storage)?
+                .unwrap_or(0);
             let cursor = format!("{}.{}", feed_prefix(conn, &scope)?, head);
             // Lifecycle and original byte counts come from the partial index;
             // closed/removed bodies are not scanned to select the open roster.
@@ -1025,16 +1060,24 @@ impl Store {
                 AND ({OPEN_PR_SELECTION})
                 AND (?4 IS NULL OR json_extract(({payload}),'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
                 ORDER BY resource")).map_err(storage)?;
-            let rows = stmt.query_map(params![scope, prefix, upper, repository], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?, r.get::<_, u64>(2)?))
-            }).map_err(storage)?;
+            let rows = stmt
+                .query_map(params![scope, prefix, upper, repository], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, usize>(1)?,
+                        r.get::<_, u64>(2)?,
+                    ))
+                })
+                .map_err(storage)?;
             // Sort only small metadata, and reject oversized selections before
             // allocating their bodies. Full JSON must not enter SQLite's sorter.
             let body_sql = if compact {
                 // Match both the index collation and exact stored spelling.
                 // Metadata and payload share one read transaction; the original
                 // byte budget is checked before fetching even compact bodies.
-                format!("SELECT {payload} FROM snapshots INDEXED BY {index} WHERE scope=?1 AND resource=?2 COLLATE NOCASE AND resource=?2 AND ({OPEN_PR_SELECTION})")
+                format!(
+                    "SELECT {payload} FROM snapshots INDEXED BY {index} WHERE scope=?1 AND resource=?2 COLLATE NOCASE AND resource=?2 AND ({OPEN_PR_SELECTION})"
+                )
             } else {
                 "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2".to_owned()
             };
@@ -1045,17 +1088,27 @@ impl Store {
                 let (resource, data_bytes, observed_at_ms) = row.map_err(storage)?;
                 bytes = bytes.saturating_add(data_bytes);
                 if bytes > max_bytes {
-                    return Err(Error::Invalid("bootstrap exceeds configured snapshot byte limit".into()));
+                    return Err(Error::Invalid(
+                        "bootstrap exceeds configured snapshot byte limit".into(),
+                    ));
                 }
-                let data: String = body.query_row(params![scope, resource], |r| r.get(0)).map_err(storage)?;
+                let data: String = body
+                    .query_row(params![scope, resource], |r| r.get(0))
+                    .map_err(storage)?;
                 snapshots.push(Snapshot {
                     resource,
-                    data: crate::pr_fields::decode_stored(&data, fields.as_deref()).map_err(storage)?,
+                    data: crate::pr_fields::decode_stored(&data, fields.as_deref())
+                        .map_err(storage)?,
                     observed_at_ms,
                 });
             }
             Ok(SnapshotPage { snapshots, cursor })
-        }).await
+        };
+        if compact {
+            self.read(read).await
+        } else {
+            self.read_bulk(read).await
+        }
     }
 
     pub async fn save_watch(&self, scope: &str, watch: &Watch) -> Result<()> {
@@ -1270,6 +1323,82 @@ fn feed_prefix(conn: &Connection, scope: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bulk_feed_reads_do_not_block_compact_feeds_or_background_lookups() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            4096,
+        )
+        .unwrap();
+        let resource = "pr-status://github.com/acme/repo/7";
+        let before = serde_json::json!({"pullRequest":{"number":7,"state":"OPEN","title":"before","complete":false,"sourceErrors":{},"repository":{"nameWithOwner":"acme/repo"}}});
+        let old_cursor = store.observe("scope", resource, &before).await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let bulk = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .read_bulk(move |conn| {
+                        let (_, _, head) = cursor_position(conn, "scope", None)?;
+                        entered.send(()).unwrap();
+                        held.recv_timeout(std::time::Duration::from_secs(5))
+                            .map_err(storage)?;
+                        let data: String = conn
+                            .query_row(
+                                "SELECT data FROM snapshots WHERE scope='scope' AND resource=?1",
+                                [resource],
+                                |r| r.get(0),
+                            )
+                            .map_err(storage)?;
+                        Ok((
+                            format!("{}.{}", feed_prefix(conn, "scope")?, head),
+                            serde_json::from_str::<Value>(&data).map_err(storage)?,
+                        ))
+                    })
+                    .await
+            }
+        });
+        ready.await.unwrap();
+        let mut after = before.clone();
+        after["pullRequest"]["title"] = serde_json::json!("after");
+        let current_cursor = store.observe("scope", resource, &after).await.unwrap();
+        let reads = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                store.bootstrap_open_prs(
+                    "scope",
+                    "pr-status://github.com/",
+                    None,
+                    Some(vec!["number".into(), "title".into()])
+                ),
+                store.snapshot("scope", resource),
+                store.get("scope", "missing"),
+                store.watches("scope"),
+                store.discovery_health("scope", "discovery")
+            )
+        })
+        .await;
+        release.send(()).unwrap();
+        let old = bulk.await.unwrap().unwrap();
+        let (page, snapshot, cache, watches, health) =
+            reads.expect("bulk feed held up compact reads and background lookups");
+        let page = page.unwrap();
+        assert_eq!(page.cursor, current_cursor);
+        assert_eq!(page.snapshots[0].data["pullRequest"]["title"], "after");
+        assert_eq!(snapshot.unwrap().unwrap(), after);
+        assert!(cache.unwrap().is_none());
+        assert!(watches.unwrap().is_empty());
+        assert!(health.unwrap().is_none());
+        assert_eq!(
+            old,
+            (old_cursor, before),
+            "bulk cursor and payload must retain their original read snapshot"
+        );
+    }
 
     #[tokio::test]
     async fn queued_read_progresses_while_its_caller_processes_another_result() {

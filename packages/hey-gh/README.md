@@ -476,6 +476,8 @@ File-backed cache reads use a separate read-only SQLite connection, so backgroun
 writes do not hold up reads of committed evidence. Each read operation keeps its
 cursor, payload, identity checks and validation clocks in one consistent snapshot;
 reading does not advance freshness. The next operation sees later commits.
+Bulk feed reads have their own bounded reader, so decoding large full snapshots
+does not block compact indexed PR lists or point lookups used by background work.
 
 ## Repository commits and branches
 
