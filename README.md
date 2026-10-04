@@ -544,12 +544,12 @@ Origin. The captured model stays unchanged after edits, retries, or later model
 switches. Older issues and unavailable metadata keep their existing attribution;
 configuration defaults are never treated as evidence of the model used.
 
-Fleet daemons recover missing historical assignment models on the session's
-owning machine in bounded background batches, then synchronize the display
-metadata. Recovery validates the exact transcript header and retries unavailable
-evidence hourly. Custom actor IDs need a separately recorded session ID; aliases
-are never guessed by stripping suffixes. Claims, conversation links, creation
-models, and recorded event models stay unchanged.
+Fleet daemons recover missing assignment models from exact local transcripts in
+bounded background batches, regardless of the last recorded command host, then
+synchronize the display metadata. Recovery validates session headers and retries
+unavailable evidence hourly. Legacy UUID:suffix identities are recognized only
+when the saved identity matches. Claims, conversation links, creation models,
+and recorded event models stay unchanged.
 
 Every web page includes a source comment and a `hidden` guide for agents, with a
 shell-quoted `hey-boss lookup 'URL' --json` command that follows URL navigation.

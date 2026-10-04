@@ -1,4 +1,4 @@
-//! Recovery belongs to the owning daemon, independently of HTTP and heartbeats.
+//! Recovery uses each daemon's local transcripts, independently of HTTP and heartbeats.
 use super::context::Context;
 use std::time::Duration;
 
@@ -9,9 +9,7 @@ pub(super) fn start(ctx: Context) {
             .unwrap_or_else(|| ctx.home.join(".codex"));
         let mut recovery = crate::issues::model_recovery::Recovery::default();
         while !ctx.stopped() {
-            let result = ctx
-                .db()
-                .and_then(|db| Ok(recovery.step(&db, &ctx.node, &home)?));
+            let result = ctx.db().and_then(|db| Ok(recovery.step(&db, &home)?));
             let delay = match result {
                 Ok(true) => {
                     recovery = Default::default();

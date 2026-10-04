@@ -44,12 +44,7 @@ impl Recovery {
     /// At most 128 agent rows, 256 directory entries and four 8 MiB tails per
     /// step. No Codex database, subprocess, request-path work or write-held I/O.
     /// Returns true after one pass; the daemon retries unavailable evidence later.
-    pub(crate) fn step(
-        &mut self,
-        db: &Connection,
-        machine: &str,
-        home: &Path,
-    ) -> super::Result<bool> {
+    pub(crate) fn step(&mut self, db: &Connection, home: &Path) -> super::Result<bool> {
         if !self.scanning {
             let rows = db.query_collect(
                 "SELECT id,substr(metadata,1,65536) FROM agents WHERE id>?1 ORDER BY id LIMIT 128",
@@ -62,8 +57,9 @@ impl Recovery {
                 let Ok(metadata) = serde_json::from_str::<Value>(&raw) else {
                     continue;
                 };
-                if metadata["machine"] != machine
-                    || metadata["kind"] != "codex"
+                // Agent.machine records the last CLI caller, which may be an
+                // SSH destination rather than the device storing this session.
+                if metadata["kind"] != "codex"
                     || metadata["model"].as_str().and_then(model_name).is_some()
                 {
                     continue;
@@ -145,12 +141,7 @@ impl Recovery {
 
 /// A delayed recovery journal entry is a fill-only patch, never a replacement
 /// for newer agent identity/activity metadata captured by the supervisor.
-pub(crate) fn merge_recovered(
-    old: &Value,
-    before: &Value,
-    after: &Value,
-    node: &str,
-) -> super::Result<Value> {
+pub(crate) fn merge_recovered(old: &Value, before: &Value, after: &Value) -> super::Result<Value> {
     // SQLite JSON subtypes can make trigger payloads embed metadata as an
     // object, while snapshots and ordinary row reads carry its encoded text.
     let parse = |row: &Value| -> super::Result<Value> {
@@ -192,17 +183,16 @@ pub(crate) fn merge_recovered(
     let session = after["id"]
         .as_str()
         .and_then(|id| recovery_session(id, &incoming));
-    if session.is_none()
-        || incoming["machine"] != node
-        || incoming["model"].as_str().and_then(model_name).is_none()
-    {
+    if session.is_none() || incoming["model"].as_str().and_then(model_name).is_none() {
         return Err(super::Error::invalid("Invalid recovered model identity"));
     }
     if old.is_null() {
         return Ok(after.clone());
     }
     let mut metadata = parse(old)?;
-    if metadata["machine"] != node || metadata["session_id"] != incoming["session_id"] {
+    // Any authenticated peer holding the exact transcript can fill this display
+    // field. Keep newer caller-host metadata and never cross session identities.
+    if metadata["session_id"] != incoming["session_id"] {
         return Err(super::Error::invalid(
             "Recovered model no longer matches the saved agent",
         ));
@@ -287,7 +277,7 @@ mod tests {
         ] {
             std::fs::write(&path, transcript(header)).unwrap();
             let mut recovery = Recovery::default();
-            while !recovery.step(&db, "local", &root).unwrap() {}
+            while !recovery.step(&db, &root).unwrap() {}
             let raw: String = db
                 .query_row("SELECT metadata FROM agents", [], |r| r.get(0))
                 .unwrap();
@@ -298,28 +288,20 @@ mod tests {
             if expected.is_some() {
                 let mut after = before.clone();
                 after["metadata"] = json!(recovered.to_string());
-                assert_eq!(
-                    merge_recovered(&before, &before, &after, "local").unwrap(),
-                    after
-                );
-                assert!(merge_recovered(&before, &before, &after, "remote").is_err());
+                assert_eq!(merge_recovered(&before, &before, &after).unwrap(), after);
             }
         }
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn recovery_merge_rejects_foreign_evidence_and_preserves_newer_capture() {
+    fn recovery_merge_rejects_changed_sessions_and_preserves_newer_capture() {
         let row = |model: Value| json!({"id":"codex:alias","last_seen":1,"metadata":json!({"machine":"local","session_id":SESSION,"model":model}).to_string()});
         let before = row(Value::Null);
         let recovered = row(json!("recovered"));
-        assert!(merge_recovered(&before, &before, &recovered, "remote").is_err());
         let known = row(json!("known"));
-        assert_eq!(
-            merge_recovered(&known, &before, &recovered, "local").unwrap(),
-            known
-        );
-        let incoming = merge_recovered(&known, &before, &before, "local").unwrap();
+        assert_eq!(merge_recovered(&known, &before, &recovered).unwrap(), known);
+        let incoming = merge_recovered(&known, &before, &before).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(incoming["metadata"].as_str().unwrap()).unwrap()["model"],
             "known"
@@ -329,7 +311,7 @@ mod tests {
             json!({"machine":"local","session_id":"ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"})
                 .to_string()
         );
-        assert!(merge_recovered(&other_session, &before, &recovered, "local").is_err());
+        assert!(merge_recovered(&other_session, &before, &recovered).is_err());
     }
 
     #[test]
@@ -349,11 +331,11 @@ mod tests {
         )
         .unwrap();
         let mut recovery = Recovery::default();
-        assert!(!recovery.step(&db, "local", &root).unwrap());
+        assert!(!recovery.step(&db, &root).unwrap());
         assert_eq!(recovery.cursor, "a128");
-        assert!(!recovery.step(&db, "local", &root).unwrap());
-        assert!(!recovery.step(&db, "local", &root).unwrap());
-        assert!(recovery.step(&db, "local", &root).unwrap());
+        assert!(!recovery.step(&db, &root).unwrap());
+        assert!(!recovery.step(&db, &root).unwrap());
+        assert!(recovery.step(&db, &root).unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -408,7 +390,7 @@ mod tests {
             .unwrap();
         let mut recovery = Recovery::default();
         for _ in 0..100 {
-            if recovery.step(&db, "local", &root).unwrap() {
+            if recovery.step(&db, &root).unwrap() {
                 break;
             }
         }
@@ -423,7 +405,7 @@ mod tests {
             let metadata: Value = serde_json::from_str(&metadata).unwrap();
             assert_eq!(
                 metadata["model"],
-                json!(if index < 2 {
+                json!(if index < 2 || index == 3 {
                     Some("gpt-6-astra")
                 } else {
                     *model
@@ -449,7 +431,7 @@ mod tests {
                 r.get::<_, String>(0)
             })
             .unwrap();
-        assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 2);
+        assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 3);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
