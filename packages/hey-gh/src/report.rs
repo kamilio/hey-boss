@@ -491,10 +491,10 @@ impl Client {
                         // Immutable commit sources can load while current PR
                         // metadata validates. Give metadata its own ownership
                         // scope so lifecycle publication never uses the seed.
-                        let (pr, data) = tokio::join!(
+                        let (pr, data) = self.collect_with_pending_validation(
                             crate::entity::scope(self.initial_ci_metadata(repository, number, policy)),
                             self.ci_report(repository, &head, merge, policy),
-                        );
+                        ).await;
                         let pr = pr?;
                         let data = if seed.data["node_id"] != pr.data()["node_id"]
                             || seed.data["head"]["sha"] != pr.data()["head"]["sha"]

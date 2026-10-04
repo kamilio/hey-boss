@@ -24,6 +24,26 @@ tokio::task_local! { pub(crate) static INTERACTIVE_READ: Arc<AtomicBool>; }
 tokio::task_local! { pub(crate) static BACKGROUND_READ: (); }
 // One final selector read can complete an otherwise collected PR report.
 tokio::task_local! { pub(crate) static COMPLETION_VALIDATION: (); }
+// The overlapping metadata future has at most one pending selector request.
+// Register its actual shared queue flag, including when it coalesces with a
+// different reader, so finishing collection can promote it without refetching.
+#[derive(Default)]
+struct PendingValidation {
+    collected: bool,
+    priority: Option<Arc<AtomicBool>>,
+}
+tokio::task_local! { static PENDING_VALIDATION: Arc<Mutex<PendingValidation>>; }
+
+fn track_pending_validation(priority: &Arc<AtomicBool>) {
+    let _ = PENDING_VALIDATION.try_with(|pending| {
+        let mut pending = pending.lock().unwrap_or_else(|error| error.into_inner());
+        if pending.collected {
+            priority.store(true, Ordering::Relaxed);
+        } else {
+            pending.priority = Some(priority.clone());
+        }
+    });
+}
 
 pub(crate) fn interactive_read() -> bool {
     INTERACTIVE_READ
@@ -306,6 +326,30 @@ impl Client {
         Ok(response)
     }
 
+    pub(crate) async fn collect_with_pending_validation<V, C>(
+        &self,
+        validation: impl std::future::Future<Output = V>,
+        collection: impl std::future::Future<Output = C>,
+    ) -> (V, C) {
+        let pending = Arc::new(Mutex::new(PendingValidation::default()));
+        tokio::join!(
+            PENDING_VALIDATION.scope(pending.clone(), validation),
+            async {
+                let result = collection.await;
+                let priority = {
+                    let mut pending = pending.lock().unwrap_or_else(|error| error.into_inner());
+                    pending.collected = true;
+                    pending.priority.take()
+                };
+                if let Some(priority) = priority {
+                    priority.store(true, Ordering::Relaxed);
+                    self.0.queue_changed.notify_one();
+                }
+                result
+            },
+        )
+    }
+
     // Inspect cached evidence before deciding whether to consume its validation.
     pub(crate) async fn peek_get(&self, path: &str) -> Result<Response> {
         self.request(
@@ -555,12 +599,13 @@ impl Client {
                     deadline.min(now + self.0.config.queue_timeout)
                 })
         };
-        let completion_validation = COMPLETION_VALIDATION.try_with(|_| ()).is_ok()
-            && body.is_none()
+        let selector_validation = body.is_none()
             && matches!(
                 endpoint_class(&url, false, &self.0.config.rest_url),
                 "pull_request" | "branch"
             );
+        let completion_validation =
+            selector_validation && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
         let mut receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
@@ -569,6 +614,9 @@ impl Client {
                 }
                 if completion_validation {
                     completion.store(true, Ordering::Relaxed);
+                }
+                if selector_validation {
+                    track_pending_validation(completion);
                 }
                 let mut deadline_guard = shared_deadline.lock().unwrap_or_else(|e| e.into_inner());
                 if caller_deadline > *deadline_guard {
@@ -609,6 +657,9 @@ impl Client {
                     .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let completion = Arc::new(AtomicBool::new(completion_validation));
+                if selector_validation {
+                    track_pending_validation(&completion);
+                }
                 let job = Job {
                     completion_validation: completion.clone(),
                     installation: body.is_none()
@@ -1413,6 +1464,177 @@ fn validate_query(query: &str) -> Result<()> {
 mod priority_tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
+
+    #[tokio::test]
+    async fn collected_ci_promotes_its_pending_metadata_without_an_extra_request() {
+        async fn until(mut ready: impl FnMut() -> bool) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !ready() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queued work did not reach the expected state");
+        }
+        for interactive in [false, true] {
+            for coalesced in [false, true] {
+                for cached_ci in [true, false] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+                    let gate = Arc::new(tokio::sync::Notify::new());
+                    let router = axum::Router::new().fallback({
+                    let calls = calls.clone();
+                    let gate = gate.clone();
+                    move |uri: axum::http::Uri| {
+                        let calls = calls.clone();
+                        let gate = gate.clone();
+                        async move {
+                            let path = uri.path();
+                            calls.lock().unwrap().push(path.to_owned());
+                            if path == "/gate" {
+                                gate.notified().await;
+                            }
+                            let data = if path.contains("/pulls/") {
+                                serde_json::json!({"number":7,"node_id":"PR_7","state":"open","merged":false,
+                                    "head":{"sha":"a".repeat(40)},"base":{"sha":"b".repeat(40)},"merge_commit_sha":null})
+                            } else if path.ends_with("/check-runs") {
+                                serde_json::json!({"check_runs":[]})
+                            } else if path.ends_with("/status") {
+                                serde_json::json!({"statuses":[]})
+                            } else {
+                                serde_json::json!({"workflow_runs":[]})
+                            };
+                            axum::Json(data)
+                        }
+                    }
+                });
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let url = format!("http://{}/", listener.local_addr().unwrap());
+                    let server =
+                        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                    let cache_path = dir.path().join("cache.sqlite");
+                    let client = Client::with_token(
+                        Config {
+                            rest_url: url.parse().unwrap(),
+                            graphql_url: format!("{url}graphql").parse().unwrap(),
+                            cache_path: cache_path.clone(),
+                            min_spacing: Duration::ZERO,
+                            queue_timeout: Duration::from_secs(10),
+                            ..Config::default()
+                        },
+                        "synthetic-token".into(),
+                    )
+                    .unwrap();
+                    assert!(
+                        client
+                            .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+                            .await
+                            .unwrap()
+                            .complete
+                    );
+                    rusqlite::Connection::open(cache_path).unwrap().execute(
+                    "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE ?1",
+                    [if cached_ci { "%/pulls/7" } else { "%repos/%" }],
+                ).unwrap();
+                    calls.lock().unwrap().clear();
+                    let blocked = tokio::spawn({
+                        let c = client.clone();
+                        async move { c.get("gate", Freshness::Revalidate).await }
+                    });
+                    until(|| !calls.lock().unwrap().is_empty()).await;
+                    let ordinary = tokio::spawn({
+                        let c = client.clone();
+                        async move {
+                            INTERACTIVE_READ
+                                .scope(
+                                    Arc::new(AtomicBool::new(interactive)),
+                                    c.get("ordinary", Freshness::Revalidate),
+                                )
+                                .await
+                        }
+                    });
+                    until(|| client.status().outstanding_requests == 2).await;
+                    let joined = if coalesced {
+                        let c = client.clone();
+                        let job = tokio::spawn(async move {
+                            INTERACTIVE_READ
+                                .scope(
+                                    Arc::new(AtomicBool::new(interactive)),
+                                    c.pull_request("acme/demo", 7, Freshness::Revalidate),
+                                )
+                                .await
+                        });
+                        until(|| client.status().outstanding_requests == 3).await;
+                        Some(job)
+                    } else {
+                        None
+                    };
+                    let read = tokio::spawn({
+                        let c = client.clone();
+                        async move {
+                            INTERACTIVE_READ
+                                .scope(
+                                    Arc::new(AtomicBool::new(interactive)),
+                                    c.ci_for_pr(
+                                        "acme/demo",
+                                        7,
+                                        Freshness::MaxAge(Duration::from_secs(30)),
+                                    ),
+                                )
+                                .await
+                        }
+                    });
+                    let key = format!("{url}repos/acme/demo/pulls/7");
+                    let promoted =
+                        || {
+                            client.0.inflight.lock().unwrap().get(&key).is_some_and(
+                                |(_, _, _, completing)| completing.load(Ordering::Relaxed),
+                            )
+                        };
+                    if cached_ci {
+                        // Only metadata remains. The gate makes dispatch order
+                        // deterministic while the collection promotes its read.
+                        until(promoted).await;
+                    } else {
+                        // Unfinished CI must not claim completion priority. All
+                        // three CI sources are queued behind the same held gate.
+                        until(|| client.status().outstanding_requests == 6).await;
+                        assert!(!promoted());
+                    }
+                    assert!(
+                        !read.is_finished(),
+                        "promotion cannot certify pending metadata"
+                    );
+                    gate.notify_one();
+                    blocked.await.unwrap().unwrap();
+                    assert!(read.await.unwrap().unwrap().complete);
+                    ordinary.await.unwrap().unwrap();
+                    if let Some(joined) = joined {
+                        joined.await.unwrap().unwrap();
+                    }
+                    let calls = calls.lock().unwrap();
+                    assert_eq!(
+                        calls[1],
+                        if cached_ci {
+                            "/repos/acme/demo/pulls/7"
+                        } else {
+                            "/ordinary"
+                        },
+                        "interactive={interactive}, coalesced={coalesced}, cached_ci={cached_ci}: {calls:?}"
+                    );
+                    assert_eq!(
+                        calls
+                            .iter()
+                            .filter(|p| *p == "/repos/acme/demo/pulls/7")
+                            .count(),
+                        1
+                    );
+                    assert!(calls.iter().any(|p| p == "/ordinary"));
+                    server.abort();
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn ordinary_pacing_waits_for_the_deadline_and_allows_late_coalescing() {
