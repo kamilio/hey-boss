@@ -632,6 +632,7 @@ impl Client {
                     endpoint,
                     queued_at: now,
                     http_status: None,
+                    secondary_retry_at: None,
                     url,
                     key: key.clone(),
                     body,
