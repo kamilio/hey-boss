@@ -673,6 +673,47 @@ impl Client {
             .await
     }
 
+    async fn initial_report_pr(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<crate::Response> {
+        if number > 0
+            && let Freshness::MaxAge(age) = freshness
+            && !age.is_zero()
+        {
+            match self
+                .peek_get(&format!("repos/{repository}/pulls/{number}"))
+                .await
+            {
+                Ok(cached)
+                    if cached.data["number"] == number
+                        && cached.data["state"] == "open"
+                        && cached.data["merged"] != true
+                        && cached.data["node_id"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                        && cached.data["head"]["sha"].as_str().is_some_and(valid_sha)
+                        && cached.data["base"]["sha"].as_str().is_some_and(valid_sha)
+                        && (cached.data["merge_commit_sha"].is_null()
+                            || cached.data["merge_commit_sha"]
+                                .as_str()
+                                .is_some_and(valid_sha)) =>
+                {
+                    // Only a collection seed, not a validation or observation.
+                    // CI validates independently while details start loading;
+                    // the final PR read still enforces the caller's freshness
+                    // and rejects changed identities and commit selectors.
+                    return Ok(cached);
+                }
+                Ok(_) | Err(Error::CacheMiss) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.pull_request(repository, number, freshness).await
+    }
+
     async fn build_report(
         &self,
         repository: &str,
@@ -686,7 +727,7 @@ impl Client {
         for attempt in 0..2 {
             crate::entity::clear();
             let pr = self
-                .pull_request(
+                .initial_report_pr(
                     repository,
                     number,
                     if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {

@@ -10521,6 +10521,180 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
 }
 
 #[tokio::test]
+async fn report_seed_starts_details_while_metadata_is_waiting() {
+    let h = Harness::new().await;
+    let c = h.client();
+    let warm = c
+        .pr_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(warm.complete);
+    rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7' OR key LIKE '%/issues/7/comments%'", [],
+    ).unwrap();
+    let before = h.calls().len();
+    h.mode("issue72-stall-metadata");
+    let worker = c.clone();
+    let read = tokio::spawn(async move {
+        worker
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+    });
+    let details_started = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if h.calls()[before..]
+                .iter()
+                .any(|call| call.path.ends_with("/issues/7/comments"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(
+        details_started.is_ok(),
+        "detail collection waited for initial metadata"
+    );
+    assert!(
+        !read.is_finished(),
+        "expired metadata must not complete a report"
+    );
+    h.mock.release.notify_one();
+    let report = read.await.unwrap().unwrap();
+    assert!(report.complete);
+    assert_eq!(report.data.pull_request, warm.data.pull_request);
+    assert!(report.validations.iter().all(|v| v.validated_at_ms > 0));
+}
+
+#[tokio::test]
+async fn report_seed_rejects_changed_selectors_and_never_certifies_expired_metadata() {
+    for changed in [
+        "none",
+        "node",
+        "head",
+        "base",
+        "merge",
+        "malformed",
+        "cold",
+        "closed",
+    ] {
+        let h = Harness::new().await;
+        let c = h.client();
+        let warm = c
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        let (scope, key, raw): (String, String, String) = db
+            .query_row(
+                "SELECT scope,key,response FROM cache WHERE key LIKE '%/pulls/7'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut seed: Value = serde_json::from_str(&raw).unwrap();
+        seed["validated_at_ms"] = json!(0);
+        if changed != "none" {
+            seed["etag"] = json!("\"old-representation\"");
+            seed["last_modified"] = Value::Null;
+        }
+        match changed {
+            "node" => seed["data"]["node_id"] = json!("PR_old_identity"),
+            "head" => seed["data"]["head"]["sha"] = json!(NEW_HEAD),
+            "base" => seed["data"]["base"]["sha"] = json!(NEW_HEAD),
+            "merge" => seed["data"]["merge_commit_sha"] = json!(MERGE),
+            "malformed" => seed["data"]["head"]["sha"] = json!("invalid"),
+            "closed" => seed["data"]["state"] = json!("closed"),
+            _ => {}
+        }
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE scope=?2 AND key=?3",
+            rusqlite::params![seed.to_string(), scope, key],
+        )
+        .unwrap();
+        if changed == "cold" {
+            db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
+                .unwrap();
+        }
+        let report = c
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap_or_else(|e| panic!("{changed}: {e:?}"));
+        assert!(report.complete, "{changed}: {:?}", report.data.errors);
+        assert_eq!(
+            report.data.pull_request, warm.data.pull_request,
+            "{changed}"
+        );
+        assert_eq!(report.data.ci.head_sha, HEAD, "{changed}");
+        assert_eq!(report.data.ci.merge_sha, None, "{changed}");
+        assert!(
+            report.validations.iter().all(|v| v.validated_at_ms > 0),
+            "{changed}"
+        );
+        assert!(
+            report
+                .validations
+                .iter()
+                .any(|v| v.resource.ends_with("/pulls/7"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn report_seed_preserves_explicit_offline_and_denied_reads() {
+    for freshness in [
+        Freshness::Revalidate,
+        Freshness::MaxAge(Duration::ZERO),
+        Freshness::CachedOnly,
+    ] {
+        let h = Harness::new().await;
+        let c = h.client();
+        c.pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7' OR key LIKE '%/issues/7/comments%'", [],
+        ).unwrap();
+        let before = h.calls().len();
+        h.mode("issue72-stall-metadata");
+        if matches!(freshness, Freshness::CachedOnly) {
+            let report = c.pr_report("acme/demo", 7, freshness).await.unwrap();
+            assert!(report.complete);
+            assert_eq!(h.calls().len(), before);
+            assert!(report.validations.iter().any(|v| v.validated_at_ms == 0));
+        } else {
+            let worker = c.clone();
+            let read =
+                tokio::spawn(async move { worker.pr_report("acme/demo", 7, freshness).await });
+            until(|| h.calls().len() > before).await;
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            assert!(
+                h.calls()[before..]
+                    .iter()
+                    .all(|call| call.path.ends_with("/pulls/7"))
+            );
+            read.abort();
+            let _ = read.await;
+        }
+    }
+    let h = Harness::new().await;
+    let c = h.client();
+    c.pr_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'", [],
+    ).unwrap();
+    h.mode("sdk-upstream-403");
+    assert!(matches!(
+        c.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await,
+        Err(Error::GitHub { status: 403, .. })
+    ));
+}
+
+#[tokio::test]
 async fn required_policy_seed_collects_before_confirmation_and_rejects_changed_selectors() {
     for changed in [
         "none",
