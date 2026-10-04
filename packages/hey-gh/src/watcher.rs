@@ -128,6 +128,7 @@ fn ci_signals(
     );
     let mut blocking = Vec::new();
     if current {
+        blocking.extend(required_gaps(policy));
         for required in policy.checks.iter().filter(|c| c.state == "failure") {
             let Some(sha) = required.sha.as_deref() else {
                 continue;
@@ -229,11 +230,68 @@ fn ci_signals(
     };
     if current {
         observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
+        observation.evidence["legacy_policy_fingerprint"] =
+            json!(legacy_policy_fingerprint(policy));
     }
     observation
 }
 
 fn policy_fingerprint(policy: &RequiredChecksReport) -> String {
+    // Validation tips establish freshness, not new work. Keep them in source
+    // matching and display evidence; compare the effective policy separately.
+    let mut identity = policy
+        .policy_identity
+        .clone()
+        .unwrap_or(crate::policy::PolicyIdentity {
+            branch: policy.base_branch.clone(),
+            stack: None,
+        });
+    if let Some(stack) = identity.stack.as_mut()
+        && let Some(base) = stack["base"].as_object_mut()
+    {
+        base.remove("sha");
+    }
+    let mut rules: Vec<Value> = policy.rules.iter().map(|rule| {
+        json!({"type":rule["type"],"parameters":canonical_rule_parameters(&rule["parameters"])})
+    }).collect();
+    rules.sort_by_cached_key(Value::to_string);
+    rules.dedup();
+    format!(
+        "policy:v2:{}",
+        fingerprint(&json!([
+            policy.head_sha,
+            policy.base_branch,
+            identity,
+            policy.strict,
+            rules,
+            policy
+                .checks
+                .iter()
+                .map(|check| (&check.context, check.app_id))
+                .collect::<std::collections::BTreeSet<_>>()
+        ]))
+    )
+}
+
+fn canonical_rule_parameters(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            let mut values: Vec<_> = values.iter().map(canonical_rule_parameters).collect();
+            values.sort_by_cached_key(Value::to_string);
+            values.dedup();
+            json!(values)
+        }
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_rule_parameters(value)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn legacy_policy_fingerprint(policy: &RequiredChecksReport) -> String {
     let mut rules = policy.rules.clone();
     rules.sort_by_cached_key(Value::to_string);
     format!(
@@ -256,11 +314,37 @@ fn policy_fingerprint(policy: &RequiredChecksReport) -> String {
     )
 }
 
+fn required_gaps(policy: &RequiredChecksReport) -> Vec<String> {
+    let mut gaps: Vec<_> = policy
+        .checks
+        .iter()
+        .filter(|check| check.state == "missing")
+        .map(|check| {
+            format!(
+                "required-missing:{}",
+                fingerprint(&json!([policy.head_sha, check.context, check.app_id]))
+            )
+        })
+        .collect();
+    if policy.strict && policy.up_to_date == Some(false) {
+        gaps.push(format!(
+            "required-outdated:{}",
+            fingerprint(&json!([
+                policy.head_sha,
+                policy.base_branch,
+                policy.policy_sha
+            ]))
+        ));
+    }
+    gaps
+}
+
 /// Policy collection reads check results and statuses, but never workflow jobs
 /// or reviews. Its failure identities therefore wake work before those sources.
 pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
     let mut blocking = Vec::new();
     if policy.pull_request_state.as_deref() == Some("open") && policy.errors.is_empty() {
+        blocking.extend(required_gaps(policy));
         blocking.extend(
             policy
                 .checks
@@ -288,6 +372,8 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
         && !policy.head_sha.is_empty()
     {
         observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
+        observation.evidence["legacy_policy_fingerprint"] =
+            json!(legacy_policy_fingerprint(policy));
     }
     observation
 }
@@ -312,6 +398,18 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
     let pr = &report.data;
     let ci = &pr.ci;
     let mut observation = ci_signals(&pr.repository, pr.number, &pr.pull_request, ci, policy);
+    if report.complete
+        && pr.errors.is_empty()
+        && policy.errors.is_empty()
+        && ci.errors.is_empty()
+        && observation.evidence["sources_match"] == true
+        && pr.pull_request["state"] == "open"
+        && pr.conflicts == "conflicting"
+    {
+        observation
+            .blocking
+            .push(format!("conflict:{}", fingerprint(&json!(ci.head_sha))));
+    }
     let complete =
         observation.evidence["ci_settled"] == true && report.complete && pr.errors.is_empty();
     if !complete {
@@ -434,6 +532,49 @@ mod tests {
         })).unwrap();
         let policy = serde_json::from_value(json!({"repository":"o/r","pull_number":1,"head_sha":"head","base_branch":"main","state":"failure","strict":false,"up_to_date":true,"checks":[{"context":"test","app_id":1,"state":"failure","sha":"head","url":"https://github.com/o/r/actions/runs/1"}],"rules":[],"errors":[],"cursor":"unused"})).unwrap();
         (report, policy)
+    }
+    #[test]
+    fn policy_refresh_identity_ignores_validation_tips_and_rule_order() {
+        let (_, mut policy) = fixture();
+        policy.rules = vec![json!({"type":"required_status_checks","ruleset_id":1,
+            "parameters":{"strict_required_status_checks_policy":false,
+            "required_status_checks":[{"context":"test","integration_id":1},{"context":"lint","integration_id":2}]}})];
+        policy.policy_identity = Some(crate::policy::PolicyIdentity {
+            branch: "main".into(),
+            stack: Some(
+                json!({"id":1,"number":2,"position":1,"size":2,"base":{"ref":"main","sha":"old"}}),
+            ),
+        });
+        let before = policy_fingerprint(&policy);
+        policy.base_sha = Some("new-base-tip".into());
+        policy.pr_base_sha = Some("new-pr-base".into());
+        policy.policy_sha = Some("new-policy-tip".into());
+        policy
+            .policy_identity
+            .as_mut()
+            .unwrap()
+            .stack
+            .as_mut()
+            .unwrap()["base"]["sha"] = json!("new");
+        policy.rules[0]["ruleset_id"] = json!(2);
+        policy.rules[0]["parameters"]["required_status_checks"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        policy.observed_at_ms = Some(200);
+        assert_eq!(policy_fingerprint(&policy), before);
+        for kind in ["head", "branch", "strict", "app", "rule"] {
+            let mut changed = policy.clone();
+            match kind {
+                "head" => changed.head_sha = "new-head".into(),
+                "branch" => changed.policy_identity.as_mut().unwrap().branch = "release".into(),
+                "strict" => changed.strict = true,
+                "app" => changed.checks[0].app_id = Some(2),
+                "rule" => changed.rules.push(json!({"type":"pull_request","parameters":{"required_approving_review_count":2}})),
+                _ => unreachable!(),
+            }
+            assert_ne!(policy_fingerprint(&changed), before, "{kind}");
+        }
     }
     #[test]
     fn ci_only_observation_wakes_before_review_sources_are_read() {

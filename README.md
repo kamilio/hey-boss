@@ -246,6 +246,11 @@ work to Boss; an active agent keeps its claim. Existing merged-fix auto-close
 behavior still applies. Stale or unavailable evidence stays an error, not a
 successful check result.
 
+Equivalent policy refreshes retain Ready and dependent eligibility while updating
+monitoring evidence. Validation SHAs and rule ordering do not schedule work;
+changed requirements, missing checks, strict branch-update requirements, and
+merge conflicts still do.
+
 For example, `hey-boss issue assign 12 github` enables watching.
 Other destinations are `boss`, `unassigned`, and `machine:ID`. `issue view` exposes
 the assignment, available machines, and last GitHub status. Allocation inspection

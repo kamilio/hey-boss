@@ -657,8 +657,12 @@ fn observation_updates(
         // The first policy identity establishes comparison state; it must not
         // invent a policy-change event during upgrade. Existing CI/review
         // signals still wake on a first scan, and reviewed handoffs seed policy.
-        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal=s.value) AND (s.value NOT LIKE 'policy:%' OR EXISTS(SELECT 1 FROM issue_github_signals baseline WHERE baseline.project_id=?1 AND baseline.issue_number=?2 AND baseline.url IN (?3,?3||'/') AND baseline.signal LIKE 'policy:%'))")?
-            .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals], |r| r.get(0))?
+        // Seed the semantic identity silently only when the exact old report
+        // was already acknowledged. Never guess equivalence from bounded UI
+        // evidence: missing rules or checks cannot authorize a handoff.
+        let legacy_policy = observation.evidence["legacy_policy_fingerprint"].as_str();
+        let new_signals: Vec<String> = db.prepare("SELECT DISTINCT s.value FROM json_each(?5) s WHERE NOT EXISTS(SELECT 1 FROM issue_github_signals seen WHERE seen.project_id=?1 AND seen.issue_number=?2 AND seen.url IN (?3,?3||'/') AND seen.head=?4 AND seen.signal IN (s.value, CASE WHEN s.value LIKE 'policy:v2:%' THEN ?6 END)) AND (s.value NOT LIKE 'policy:%' OR EXISTS(SELECT 1 FROM issue_github_signals baseline WHERE baseline.project_id=?1 AND baseline.issue_number=?2 AND baseline.url IN (?3,?3||'/') AND baseline.signal LIKE 'policy:%'))")?
+            .query_map(params![project,number,url.trim_end_matches('/'),observation.head,signals,legacy_policy], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let wake = !new_signals.is_empty();
         let mut errors = source_errors(previous);

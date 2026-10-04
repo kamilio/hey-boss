@@ -16,6 +16,8 @@ mod replica;
 mod service;
 mod supervisor;
 mod takeover;
+#[cfg(test)]
+mod watcher_tests;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(super) use authority::metadata;
