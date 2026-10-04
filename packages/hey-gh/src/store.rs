@@ -190,6 +190,7 @@ fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, 
 #[derive(Clone)]
 pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
+    read_connection: Option<Arc<tokio::sync::Mutex<Connection>>>,
     retention: std::time::Duration,
     max_events: usize,
     max_snapshot_bytes: usize,
@@ -342,8 +343,29 @@ impl Store {
             [digest(&format!("{}-{}", now_ms(), fastrand::u128(..)))],
         )
         .map_err(storage)?;
+        // WAL readers can use committed evidence while background publication
+        // is still writing. Keep one bounded reader; an async lock queues its
+        // callers without occupying the blocking pool with mutex waiters.
+        // Anonymous databases cannot open a second connection to the same data.
+        let read_connection = conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                let reader = Connection::open_with_flags(
+                    path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(storage)?;
+                reader
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .map_err(storage)?;
+                Ok(Arc::new(tokio::sync::Mutex::new(reader)))
+            })
+            .transpose()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
+            read_connection,
             retention,
             max_events,
             max_snapshot_bytes,
@@ -363,9 +385,39 @@ impl Store {
         .map_err(storage)?
     }
 
+    async fn read<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        // All lookups in one operation share a snapshot, including identity
+        // fences, aliases, validation clocks and cursor/payload pairs. Dropping
+        // the transaction releases it before the next caller takes its turn.
+        let read = move |conn: &mut Connection| {
+            let tx = conn.transaction().map_err(storage)?;
+            f(&tx)
+        };
+        if let Some(conn) = &self.read_connection {
+            let conn = conn.clone();
+            // Hydration pauses peer futures while processing a completed PR.
+            // A paused FIFO waiter must not reserve the reader and prevent
+            // that processing from reading. Drive admitted work independently,
+            // just as the writer's spawn_blocking work already does.
+            tokio::spawn(async move {
+                let mut conn = conn.lock_owned().await;
+                tokio::task::spawn_blocking(move || read(&mut conn))
+                    .await
+                    .map_err(storage)?
+            })
+            .await
+            .map_err(storage)?
+        } else {
+            self.run(read).await
+        }
+    }
+
     pub async fn get(&self, scope: &str, key: &str) -> Result<Option<Response>> {
         let (scope, key) = (scope.to_owned(), key.to_owned());
-        self.run(move |conn| {
+        self.read(move |conn| {
             let value: Option<String> = conn
                 .query_row(
                     "SELECT response FROM cache WHERE scope=?1 AND key=?2",
@@ -394,7 +446,7 @@ impl Store {
         resource: &str,
     ) -> Result<Option<(Value, String)>> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
-        self.run(move |conn| {
+        self.read(move |conn| {
             let resource = resolve_pr_resource(conn, &scope, &resource)?;
             let data: Option<(String, String)> = conn
                 .query_row(
@@ -416,7 +468,7 @@ impl Store {
 
     pub async fn pr_resource_key(&self, scope: &str, resource: &str) -> Result<String> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
-        self.run(move |conn| resolve_pr_resource(conn, &scope, &resource))
+        self.read(move |conn| resolve_pr_resource(conn, &scope, &resource))
             .await
     }
 
@@ -440,7 +492,7 @@ impl Store {
             .map_or_else(|| format!("{prefix}\u{10ffff}"), |base| format!("{base}0"));
         let prefix_length = prefix.chars().count();
         let (scope, prefix, suffix) = (scope.to_owned(), prefix.to_owned(), suffix.to_owned());
-        self.run(move |conn| {
+        self.read(move |conn| {
             // Only the host/repository prefix is case-insensitive. Branches,
             // refs, pagination/query values, and generation suffixes stay exact.
             let data: Option<String> = conn.query_row(
@@ -453,7 +505,7 @@ impl Store {
 
     pub async fn repository_generation(&self, scope: &str, repository: &str) -> Result<u64> {
         let (scope, repository) = (scope.to_owned(), repository.to_ascii_lowercase());
-        self.run(move |conn| repository_generation(conn, &scope, &repository))
+        self.read(move |conn| repository_generation(conn, &scope, &repository))
             .await
     }
 
@@ -464,7 +516,7 @@ impl Store {
         number: u64,
     ) -> Result<Option<String>> {
         let (scope, repository) = (scope.to_owned(), repository.to_ascii_lowercase());
-        self.run(move |conn|conn.query_row("SELECT node_id FROM pr_identity WHERE scope=?1 AND repository=?2 AND pull_number=?3",params![scope,repository,number],|r|r.get(0)).optional().map_err(storage)).await
+        self.read(move |conn|conn.query_row("SELECT node_id FROM pr_identity WHERE scope=?1 AND repository=?2 AND pull_number=?3",params![scope,repository,number],|r|r.get(0)).optional().map_err(storage)).await
     }
 
     pub async fn accept_rest_identity(
@@ -505,7 +557,7 @@ impl Store {
 
     pub async fn owner_is_current(&self, scope: &str, owner: &PrOwner) -> Result<bool> {
         let (scope, owner) = (scope.to_owned(), owner.clone());
-        self.run(move |conn| owner_is_current(conn, &scope, &owner))
+        self.read(move |conn| owner_is_current(conn, &scope, &owner))
             .await
     }
 
@@ -522,7 +574,7 @@ impl Store {
             repository.to_ascii_lowercase(),
             node_id.map(str::to_owned),
         );
-        self.run(move |conn| {
+        self.read(move |conn| {
             let resource = resolve_pr_resource(conn, &scope, &resource)?;
             let generation = repository_generation(conn, &scope, &repository)?;
             let owner: Option<(Option<String>, u64)> = conn
@@ -562,7 +614,7 @@ impl Store {
 
     pub async fn validation_clock(&self, scope: &str, resource: &str) -> Result<u64> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
-        self.run(move |conn| {
+        self.read(move |conn| {
             let resource = resolve_pr_resource(conn, &scope, &resource)?;
             conn.query_row(
             // Legacy rows have no validation clock. Their last semantic
@@ -587,7 +639,7 @@ impl Store {
         resource: &str,
     ) -> Result<Option<DiscoveryHealth>> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
-        self.run(move |conn| conn.query_row(
+        self.read(move |conn| conn.query_row(
             "SELECT last_poll_at_ms,last_success_at_ms,last_error FROM discovery_health WHERE scope=?1 AND resource=?2",
             params![scope,resource], |row| Ok(DiscoveryHealth {
                 last_poll_at_ms: row.get(0)?, last_success_at_ms: row.get(1)?, last_error: row.get(2)?,
@@ -796,11 +848,8 @@ impl Store {
     /// Validate feed identity and retention without scanning observation bodies.
     pub async fn validate_cursor(&self, scope: &str, cursor: &str) -> Result<()> {
         let (scope, cursor) = (scope.to_owned(), cursor.to_owned());
-        self.run(move |conn| {
-            let tx = conn.transaction().map_err(storage)?;
-            cursor_position(&tx, &scope, Some(&cursor)).map(|_| ())
-        })
-        .await
+        self.read(move |conn| cursor_position(conn, &scope, Some(&cursor)).map(|_| ()))
+            .await
     }
 
     pub async fn changes(
@@ -847,12 +896,11 @@ impl Store {
         // forward progress without permitting arbitrarily large allocations.
         let max_bytes = (self.max_snapshot_bytes / 4).max(1);
         let max_event_bytes = self.max_snapshot_bytes;
-        self.run(move |conn| {
-            let tx = conn.transaction().map_err(storage)?;
-            let (prefix, sequence, head) = cursor_position(&tx, &scope, cursor.as_deref())?;
-            let mut stmt = tx.prepare("SELECT c.cursor,c.resource,c.observed_at_ms,length(CAST(s.data AS BLOB)),length(CAST(c.fields AS BLOB)) FROM changes c LEFT JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor>?2 ORDER BY c.cursor LIMIT ?3").map_err(storage)?;
+        self.read(move |conn| {
+            let (prefix, sequence, head) = cursor_position(conn, &scope, cursor.as_deref())?;
+            let mut stmt = conn.prepare("SELECT c.cursor,c.resource,c.observed_at_ms,length(CAST(s.data AS BLOB)),length(CAST(c.fields AS BLOB)) FROM changes c LEFT JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor>?2 ORDER BY c.cursor LIMIT ?3").map_err(storage)?;
             let rows = stmt.query_map(params![scope, sequence, limit + 1], |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?, r.get::<_, Option<usize>>(3)?, r.get::<_, usize>(4)?))).map_err(storage)?;
-            let mut body = tx.prepare("SELECT s.data,c.fields FROM changes c JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor=?2").map_err(storage)?;
+            let mut body = conn.prepare("SELECT s.data,c.fields FROM changes c JOIN snapshots s ON s.scope=c.scope AND s.resource=c.resource AND s.cursor=c.cursor WHERE c.scope=?1 AND c.cursor=?2").map_err(storage)?;
             let mut changes = Vec::new();
             let mut position = sequence;
             let mut bytes = 0usize;
@@ -929,11 +977,10 @@ impl Store {
         let (scope, prefix) = (scope.to_owned(), prefix.to_owned());
         let upper = format!("{prefix}\u{10ffff}");
         let max_bytes = self.max_snapshot_bytes;
-        self.run(move |conn| {
-            let tx=conn.transaction().map_err(storage)?;
-            let head:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
-            let cursor=format!("{}.{}",feed_prefix(&tx,&scope)?,head);
-            let mut stmt=tx.prepare("SELECT resource,data,observed_at_ms FROM snapshots WHERE scope=?1 AND resource>=?2 AND resource<?3 ORDER BY resource").map_err(storage)?;
+        self.read(move |conn| {
+            let head:u64=conn.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
+            let cursor=format!("{}.{}",feed_prefix(conn,&scope)?,head);
+            let mut stmt=conn.prepare("SELECT resource,data,observed_at_ms FROM snapshots WHERE scope=?1 AND resource>=?2 AND resource<?3 ORDER BY resource").map_err(storage)?;
             let rows=stmt.query_map(params![scope,prefix,upper],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u64>(2)?))).map_err(storage)?;
             let mut snapshots=Vec::new();
             let mut bytes=0usize;
@@ -959,11 +1006,10 @@ impl Store {
         let upper = format!("{prefix}\u{10ffff}");
         let max_bytes = self.max_snapshot_bytes;
         let compact = crate::pr_fields::can_read_compact(fields.as_deref());
-        self.run(move |conn| {
-            let tx = conn.transaction().map_err(storage)?;
-            let head: u64 = tx.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
+        self.read(move |conn| {
+            let head: u64 = conn.query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| r.get(0))
                 .optional().map_err(storage)?.unwrap_or(0);
-            let cursor = format!("{}.{}", feed_prefix(&tx, &scope)?, head);
+            let cursor = format!("{}.{}", feed_prefix(conn, &scope)?, head);
             // Lifecycle and original byte counts come from the partial index;
             // closed/removed bodies are not scanned to select the open roster.
             // Require that index: without statistics SQLite can prefer the
@@ -974,7 +1020,7 @@ impl Store {
             } else {
                 ("snapshot_open_prs", "data")
             };
-            let mut stmt = tx.prepare(&format!("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots INDEXED BY {index}
+            let mut stmt = conn.prepare(&format!("SELECT resource,length(CAST(data AS BLOB)),observed_at_ms FROM snapshots INDEXED BY {index}
                 WHERE scope=?1 AND resource>=?2 COLLATE NOCASE AND resource<?3 COLLATE NOCASE
                 AND ({OPEN_PR_SELECTION})
                 AND (?4 IS NULL OR json_extract(({payload}),'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
@@ -992,7 +1038,7 @@ impl Store {
             } else {
                 "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2".to_owned()
             };
-            let mut body = tx.prepare(&body_sql).map_err(storage)?;
+            let mut body = conn.prepare(&body_sql).map_err(storage)?;
             let mut snapshots = Vec::new();
             let mut bytes = 0usize;
             for row in rows {
@@ -1032,7 +1078,7 @@ impl Store {
 
     pub async fn tracking(&self, scope: &str, id: &str, kind: &str) -> Result<Vec<u64>> {
         let (scope, id, kind) = (scope.to_owned(), id.to_owned(), kind.to_owned());
-        self.run(move |conn| {
+        self.read(move |conn| {
             let data: Option<String> = conn
                 .query_row(
                     "SELECT value FROM watch_tracking WHERE scope=?1 AND watch_id=?2 AND kind=?3",
@@ -1069,7 +1115,7 @@ impl Store {
 
     pub async fn watches(&self, scope: &str) -> Result<Vec<Watch>> {
         let scope = scope.to_owned();
-        self.run(move |conn| {
+        self.read(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT value FROM watches WHERE scope=?1 ORDER BY id")
                 .map_err(storage)?;
@@ -1224,6 +1270,207 @@ fn feed_prefix(conn: &Connection, scope: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_read_progresses_while_its_caller_processes_another_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            4096,
+        )
+        .unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let reader = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store
+                    .read(move |_| {
+                        entered.send(()).unwrap();
+                        held.recv_timeout(std::time::Duration::from_secs(5))
+                            .map_err(storage)
+                    })
+                    .await
+            }
+        });
+        ready.await.unwrap();
+        // Account hydration polls several borrowed futures, then processes one
+        // completed PR (including cache reads) before polling its peers again.
+        let mut queued = Box::pin(store.get("scope", "queued"));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+        reader.await.unwrap().unwrap();
+        let next = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.get("scope", "next"),
+        )
+        .await;
+        assert!(
+            next.is_ok(),
+            "queued reader depended on its caller being polled again"
+        );
+        assert!(next.unwrap().unwrap().is_none());
+        assert!(queued.await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cached_reads_remain_available_while_a_background_write_is_uncommitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            4096,
+        )
+        .unwrap();
+        let start = store.bootstrap("scope").await.unwrap().cursor;
+        let resource = "pr-status://github.com/acme/repo/7";
+        let row = serde_json::json!({"pullRequest":{"number":7,"state":"OPEN","repository":{"nameWithOwner":"acme/repo"},"complete":false,"sourceErrors":{}}});
+        store.observe("scope", resource, &row).await.unwrap();
+        let response = Response {
+            data: serde_json::json!({"value":"before"}),
+            fetched_at_ms: 10,
+            validated_at_ms: 10,
+            source: Source::Cache,
+            etag: None,
+            last_modified: None,
+            link: None,
+        };
+        store.put("scope", "cached", &response).await.unwrap();
+        let generation = store
+            .begin_discovery("scope", "discovery", None)
+            .await
+            .unwrap();
+        store
+            .finish_discovery(
+                "scope",
+                "discovery",
+                generation,
+                None,
+                Some("pending".into()),
+            )
+            .await
+            .unwrap();
+        let clock = store.validation_clock("scope", resource).await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let writer = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store.run(move |conn| {
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage)?;
+                tx.execute("UPDATE cache SET response=json_set(response,'$.data.value','after') WHERE scope='scope' AND key='cached'", []).map_err(storage)?;
+                entered.send(()).unwrap();
+                held.recv_timeout(std::time::Duration::from_secs(5)).map_err(storage)?;
+                tx.commit().map_err(storage)
+            }).await
+            }
+        });
+        ready.await.unwrap();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(
+                store.get("scope", "cached"),
+                store.snapshot("scope", resource),
+                store.bootstrap_open_prs(
+                    "scope",
+                    "pr-status://github.com/",
+                    None,
+                    Some(vec!["number".into()])
+                ),
+                store.changes("scope", Some(&start), 100),
+                store.discovery_health("scope", "discovery"),
+                store.validation_clock("scope", resource)
+            )
+        })
+        .await;
+        // Always unblock the writer before asserting, including the failing baseline.
+        release.send(()).unwrap();
+        writer.await.unwrap().unwrap();
+        let (cached, snapshot, page, changes, health, observed_clock) =
+            read.expect("cached reads waited behind the background writer");
+        let cached = cached.unwrap().unwrap();
+        assert_eq!(
+            cached.data["value"], "before",
+            "uncommitted evidence must not leak"
+        );
+        assert_eq!(
+            cached.validated_at_ms, 10,
+            "reading must not refresh evidence"
+        );
+        assert_eq!(snapshot.unwrap().unwrap(), row);
+        assert_eq!(page.unwrap().snapshots[0].data["pullRequest"]["number"], 7);
+        assert_eq!(changes.unwrap().changes.len(), 1);
+        assert_eq!(
+            health.unwrap().unwrap().last_error.as_deref(),
+            Some("pending")
+        );
+        assert_eq!(observed_clock.unwrap(), clock);
+        assert_eq!(
+            store.get("scope", "cached").await.unwrap().unwrap().data["value"],
+            "after"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_transaction_keeps_cursor_and_payload_consistent_during_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            4096,
+        )
+        .unwrap();
+        let before = store
+            .observe("scope", "source", &serde_json::json!({"value":"before"}))
+            .await
+            .unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let reader = tokio::spawn({
+            let store = store.clone();
+            async move {
+                store.read(move |conn| {
+                let head: u64 = conn.query_row("SELECT head FROM feeds WHERE scope='scope'", [], |row|row.get(0)).map_err(storage)?;
+                entered.send(()).unwrap();
+                held.recv_timeout(std::time::Duration::from_secs(5)).map_err(storage)?;
+                let data: String = conn.query_row("SELECT data FROM snapshots WHERE scope='scope' AND resource='source'", [], |row|row.get(0)).map_err(storage)?;
+                let prefix = feed_prefix(conn, "scope")?;
+                Ok((format!("{prefix}.{head}"), serde_json::from_str::<Value>(&data).map_err(storage)?))
+            }).await
+            }
+        });
+        ready.await.unwrap();
+        let published = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.observe("scope", "source", &serde_json::json!({"value":"after"})),
+        )
+        .await;
+        release.send(()).unwrap();
+        let (cursor, data) = reader.await.unwrap().unwrap();
+        let after = published
+            .expect("read transaction blocked publication")
+            .unwrap();
+        assert_eq!(cursor, before);
+        assert_eq!(
+            data["value"], "before",
+            "old cursor must not describe a newer payload"
+        );
+        let current = store.bootstrap("scope").await.unwrap();
+        assert_eq!(current.cursor, after);
+        assert_ne!(before, after);
+        assert_eq!(
+            current.snapshots[0].data["value"], "after",
+            "the next read must release the old SQLite snapshot"
+        );
+    }
 
     #[tokio::test]
     async fn repeated_large_updates_keep_only_current_payload_and_page_over_old_markers() {

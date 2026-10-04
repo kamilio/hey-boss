@@ -472,6 +472,11 @@ those fields unless selected. Activity remains intact and may contain comment
 bodies. This is not a new total wire-size bound. Unknown/empty fields fail before
 GitHub reads or watch registration. Omit selections for a full mirror.
 
+File-backed cache reads use a separate read-only SQLite connection, so background
+writes do not hold up reads of committed evidence. Each read operation keeps its
+cursor, payload, identity checks and validation clocks in one consistent snapshot;
+reading does not advance freshness. The next operation sees later commits.
+
 ## Repository commits and branches
 
 ```sh
