@@ -726,12 +726,22 @@ impl Scheduler {
                 job.http_status = None;
                 job.secondary_retry_at = None;
                 job.notify.send_replace(SharedResult::Active);
+                let quota = job.quota();
+                let pacing = budgets
+                    .for_resource(&quota)
+                    .filter(|_| !job.minting)
+                    .max_by_key(|budget| budget.spacing);
                 tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
                     foreground=job.interactive.load(Ordering::Relaxed),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
                     auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope }, %instance, request_key=%crate::digest(&job.key),
+                    // Total job age; on the first attempt this is queue time.
+                    elapsed_ms=job.queued_at.elapsed().as_millis() as u64,
+                    pacing_ms=pacing.map(|budget| budget.spacing.as_millis() as u64),
+                    pacing_reset=pacing.map(|budget| budget.reset_at_seconds),
+                    pacing_share=pacing.map(|budget| budget.usage.share),
                     "GitHub request dispatched");
                 self.metrics.network.fetch_add(1, Ordering::Relaxed);
                 let mut request = if job.minting {
@@ -1214,7 +1224,12 @@ impl Scheduler {
             Ok(Source::Cache) => "cache",
             Err(_) => "error",
         };
-        tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts+job.auth_attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,"GitHub request finished");
+        tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts+job.auth_attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,
+            request_key=%crate::digest(&job.key),
+            auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope },
+            foreground=job.interactive.load(Ordering::Relaxed),
+            completion_validation=job.completion_validation.load(Ordering::Relaxed),
+            "GitHub request finished");
         let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         drop(job._permit);
         job.notify
