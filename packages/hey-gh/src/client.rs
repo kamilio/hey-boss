@@ -1387,6 +1387,15 @@ mod priority_tests {
 
     #[tokio::test]
     async fn completion_checks_promote_coalesced_work_but_yield_to_other_reads_and_backoff() {
+        completion_checks_yield(true).await;
+    }
+
+    #[tokio::test]
+    async fn background_completion_checks_yield_to_other_background_reads_and_backoff() {
+        completion_checks_yield(false).await;
+    }
+
+    async fn completion_checks_yield(interactive: bool) {
         async fn outstanding(client: &Client, count: usize) {
             tokio::time::timeout(Duration::from_secs(3), async {
                 while client.status().outstanding_requests != count {
@@ -1443,7 +1452,10 @@ mod priority_tests {
             let c = client.clone();
             async move {
                 INTERACTIVE_READ
-                    .scope(foreground_priority(), c.get("gate", Freshness::Revalidate))
+                    .scope(
+                        Arc::new(AtomicBool::new(interactive)),
+                        c.get("gate", Freshness::Revalidate),
+                    )
                     .await
             }
         }));
@@ -1460,7 +1472,7 @@ mod priority_tests {
             tasks.push(tokio::spawn(async move {
                 INTERACTIVE_READ
                     .scope(
-                        foreground_priority(),
+                        Arc::new(AtomicBool::new(interactive)),
                         c.get(&format!("work/{i}"), Freshness::Revalidate),
                     )
                     .await
@@ -1489,7 +1501,7 @@ mod priority_tests {
                     .scope(
                         (),
                         INTERACTIVE_READ.scope(
-                            foreground_priority(),
+                            Arc::new(AtomicBool::new(interactive)),
                             c.get(
                                 &format!("repos/acme/demo/pulls/{number}"),
                                 Freshness::Revalidate,
@@ -1517,15 +1529,27 @@ mod priority_tests {
         let observed = calls.lock().unwrap().clone();
         assert_eq!(
             &observed[..7],
-            &[
-                "/gate",
-                "/repos/acme/demo/pulls/10",
-                "/work/0",
-                "/background",
-                "/repos/acme/demo/pulls/11",
-                "/work/1",
-                "/repos/acme/demo/pulls/12"
-            ]
+            &if interactive {
+                [
+                    "/gate",
+                    "/repos/acme/demo/pulls/10",
+                    "/work/0",
+                    "/background",
+                    "/repos/acme/demo/pulls/11",
+                    "/work/1",
+                    "/repos/acme/demo/pulls/12",
+                ]
+            } else {
+                [
+                    "/gate",
+                    "/repos/acme/demo/pulls/10",
+                    "/work/0",
+                    "/repos/acme/demo/pulls/11",
+                    "/work/1",
+                    "/repos/acme/demo/pulls/12",
+                    "/work/2",
+                ]
+            }
         );
         assert!(matches!(
             client.get("throttle", Freshness::Revalidate).await,
@@ -1537,7 +1561,7 @@ mod priority_tests {
                 .scope(
                     (),
                     INTERACTIVE_READ.scope(
-                        foreground_priority(),
+                        Arc::new(AtomicBool::new(interactive)),
                         client.get("repos/acme/demo/pulls/99", Freshness::Revalidate)
                     )
                 )
@@ -1732,6 +1756,10 @@ mod priority_tests {
                     use axum::response::IntoResponse;
                     calls.lock().unwrap().push(uri.path().to_owned());
                     let mut response = axum::Json(serde_json::json!({"ok":true})).into_response();
+                    if uri.path() == "/foreground-ci/0" {
+                        // A busy core lane must not hold the free detail lane.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                     if uri.path() == "/seed" {
                         // Hold all core jobs until they are queued, then release
                         // both socket lanes together at the quota reset.
@@ -1792,9 +1820,8 @@ mod priority_tests {
         server.abort();
         let calls = calls.lock().unwrap();
         assert!(
-            calls[1..4]
-                .iter()
-                .all(|path| path.starts_with("/foreground-ci/"))
+            calls[1].starts_with("/foreground-ci/"),
+            "unexpected initial order: {calls:?}"
         );
         let position = calls
             .iter()

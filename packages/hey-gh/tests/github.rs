@@ -6750,9 +6750,11 @@ async fn exhausted_budget_recovers_at_reset_without_restarting_client() {
         assert_eq!(h.calls().len(), 1);
         h.phase(1);
         tokio::time::sleep(Duration::from_millis(5100)).await;
+        // Pacing begins at dispatch; time spent receiving/storing the first
+        // response can already pay part of the interval on a busy runner.
+        let started = std::time::Instant::now();
         c.get(path, Freshness::Revalidate).await.unwrap();
         assert_eq!(c.status().rate_limits["core"].remaining, 5000);
-        let started = std::time::Instant::now();
         c.get(path, Freshness::Revalidate)
             .await
             .expect("only the new window's pacing may delay this request");
