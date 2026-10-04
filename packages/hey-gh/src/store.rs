@@ -517,17 +517,16 @@ impl Store {
         let Some(suffix) = key.strip_prefix(prefix) else {
             return Ok(None);
         };
-        let upper = prefix
-            .strip_suffix('/')
-            .map_or_else(|| format!("{prefix}\u{10ffff}"), |base| format!("{base}0"));
         let prefix_length = prefix.chars().count();
-        let (scope, prefix, suffix) = (scope.to_owned(), prefix.to_owned(), suffix.to_owned());
+        let (scope, key, suffix) = (scope.to_owned(), key.to_owned(), suffix.to_owned());
         self.read(move |conn| {
             // Only the host/repository prefix is case-insensitive. Branches,
             // refs, pagination/query values, and generation suffixes stay exact.
+            // Seek the complete key first; a cold miss must not scan every
+            // cached URL in the repository while holding the lookup reader.
             let data: Option<String> = conn.query_row(
-                "SELECT response FROM cache WHERE scope=?1 AND key>=?3 COLLATE NOCASE AND key<?6 COLLATE NOCASE AND substr(key,1,?2)=?3 COLLATE NOCASE AND substr(key,?4)=?5 LIMIT 1",
-                params![scope,prefix_length,prefix,prefix_length+1,suffix,upper], |r|r.get(0),
+                "SELECT response FROM cache WHERE scope=?1 AND key=?2 COLLATE NOCASE AND substr(key,?3)=?4 COLLATE BINARY LIMIT 1",
+                params![scope,key,prefix_length+1,suffix], |r|r.get(0),
             ).optional().map_err(storage)?;
             data.map(|data|serde_json::from_str(&data).map_err(storage)).transpose()
         }).await
@@ -1323,6 +1322,91 @@ fn feed_prefix(conn: &Connection, scope: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn repository_alias_misses_do_not_scan_other_cached_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 100, 4096).unwrap();
+        store.run(|conn| {
+            let tx = conn.transaction().map_err(storage)?;
+            let response = serde_json::to_string(&Response {
+                data: serde_json::json!({"value":"legacy"}), fetched_at_ms: 1, validated_at_ms: 2,
+                source: Source::Cache, etag: None, last_modified: None, link: None,
+            }).map_err(storage)?;
+            {
+                let mut insert = tx.prepare("INSERT INTO cache(scope,key,response) VALUES('scope',?1,?2)").map_err(storage)?;
+                for number in 0..4096 {
+                    insert.execute(params![format!("https://api.github.com/repos/Acme/Demo/actions/runs/{number}/{}", "x".repeat(128)), response]).map_err(storage)?;
+                }
+                insert.execute(params!["https://api.github.com/repos/Acme/Demo/branches/Feature", response]).map_err(storage)?;
+                insert.execute(params!["completed-jobs://github.com/Acme/Demo/123/1#Version", response]).map_err(storage)?;
+            }
+            tx.commit().map_err(storage)
+        }).await.unwrap();
+        drop(store);
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 100, 4096).unwrap();
+        for (prefix, suffix, present) in [
+            (
+                "https://api.github.com/repos/acme/demo/",
+                "branches/missing",
+                false,
+            ),
+            (
+                "https://api.github.com/repos/acme/demo/",
+                "branches/feature",
+                false,
+            ),
+            (
+                "https://api.github.com/repos/acme/demo/",
+                "branches/Feature",
+                true,
+            ),
+            (
+                "completed-jobs://github.com/acme/demo/",
+                "123/1#Version",
+                true,
+            ),
+            (
+                "completed-jobs://github.com/acme/demo/",
+                "123/1#version",
+                false,
+            ),
+        ] {
+            store
+                .read(|conn| {
+                    conn.execute_batch(
+                        "PRAGMA mmap_size=0; PRAGMA cache_size=16; PRAGMA shrink_memory",
+                    )
+                    .map_err(storage)?;
+                    Ok(cache_misses(conn, true))
+                })
+                .await
+                .unwrap();
+            let found = store
+                .get_repository_alias("scope", &format!("{prefix}{suffix}"), Some(prefix))
+                .await
+                .unwrap();
+            let pages = store
+                .read(|conn| Ok(cache_misses(conn, false)))
+                .await
+                .unwrap();
+            assert_eq!(
+                found.is_some(),
+                present,
+                "repository casing can change, suffix casing cannot: {suffix}"
+            );
+            if let Some(response) = found {
+                assert_eq!(response.data["value"], "legacy");
+                assert_eq!(response.validated_at_ms, 2);
+            }
+            assert!(pages > 0, "must measure the actual cold reader connection");
+            assert!(
+                pages < 32,
+                "alias lookup loaded {pages} SQLite pages; unrelated repository URLs must not be scanned"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn bulk_feed_reads_do_not_block_compact_feeds_or_background_lookups() {
@@ -2732,7 +2816,7 @@ mod tests {
         assert!(stored_bytes >= 1024 * 1024);
         for repository in [None, Some("ACME/DEMO")] {
             store
-                .run(|conn| {
+                .read(|conn| {
                     conn.execute_batch(
                         "PRAGMA mmap_size=0; PRAGMA cache_size=32; PRAGMA shrink_memory",
                     )
@@ -2754,12 +2838,12 @@ mod tests {
             assert_eq!(page.snapshots.len(), 1);
             assert_eq!(page.snapshots[0].data["pullRequest"]["number"], 1000);
             let pages = store
-                .run(|conn| Ok(cache_misses(conn, false)))
+                .read(|conn| Ok(cache_misses(conn, false)))
                 .await
                 .unwrap();
             eprintln!("bootstrap {repository:?}: {pages} page misses");
             assert!(
-                pages < 128,
+                pages > 0 && pages < 128,
                 "bootstrap read {pages} SQLite pages for one tiny open row; terminal bodies must not be scanned"
             );
         }
@@ -2767,7 +2851,7 @@ mod tests {
 
     fn cache_misses(conn: &Connection, reset: bool) -> i32 {
         let (mut misses, mut unused) = (0, 0);
-        // The test holds the store connection lock; SQLite only writes these
+        // The test holds the measured connection guard; SQLite only writes these
         // counters and does not retain either pointer.
         let result = unsafe {
             rusqlite::ffi::sqlite3_db_status(
@@ -2816,7 +2900,7 @@ mod tests {
         let fields = vec!["number".to_owned(), "title".to_owned()];
         for repository in [None, Some("ACME/DEMO")] {
             store
-                .run(|conn| {
+                .read(|conn| {
                     conn.execute_batch(
                         "PRAGMA mmap_size=0; PRAGMA cache_size=32; PRAGMA shrink_memory",
                     )
@@ -2835,7 +2919,7 @@ mod tests {
                 .await
                 .unwrap();
             let pages = store
-                .run(|conn| Ok(cache_misses(conn, false)))
+                .read(|conn| Ok(cache_misses(conn, false)))
                 .await
                 .unwrap();
             assert_eq!(page.cursor, cursor);
@@ -2857,7 +2941,7 @@ mod tests {
             }
             eprintln!("compact {repository:?}: {pages} page misses");
             assert!(
-                pages < 128,
+                pages > 0 && pages < 128,
                 "compact {repository:?} read loaded {pages} SQLite pages for tiny selected fields"
             );
         }
