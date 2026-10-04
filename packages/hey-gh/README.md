@@ -376,6 +376,9 @@ Feed metadata precedence survives restarts through private SQLite validation
 clocks committed atomically with replacements. Cached individual reads preserve
 newer observed metadata; clock-only updates never advance a cursor. Legacy rows
 use their last semantic observation as a conservative barrier until refreshed.
+Unchanged PR status updates write only validation and ownership metadata. An
+atomic content-hash and entity check prevents a delayed reader from validating a
+concurrent replacement; large status bodies are not cloned or serialized again.
 
 GraphQL-only review decisions and merge-state status have a separate private
 validation clock, committed with the same replacement. Newer REST metadata cannot

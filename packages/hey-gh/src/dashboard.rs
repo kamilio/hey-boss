@@ -915,10 +915,10 @@ impl Client {
         let resource = format!("{}{repo}/{number}", self.status_prefix());
         let lock = self.report_lock(&resource.to_ascii_lowercase());
         let _guard = lock.lock().await;
-        let old_event = self
-            .stored_snapshot(&resource)
+        let (old_event, old_hash) = self
+            .stored_snapshot_with_hash(&resource)
             .await?
-            .unwrap_or(Value::Null);
+            .unwrap_or((Value::Null, String::new()));
         let old = &old_event["pullRequest"];
         let mut removed = removed.unwrap_or(old["removed"] == true);
         let suffix = format!("{}/{repo}/{number}", self.hostname());
@@ -1359,8 +1359,15 @@ impl Client {
         row["removed"] = json!(removed || matches!(state.as_str(), "CLOSED" | "MERGED"));
         let clock = discovery_clock.max(if metadata_current { metadata_at } else { 0 });
         if row == *old {
-            self.observe_validated_status(&resource, &old_event, clock, graph_clock, false, &owner)
-                .await?;
+            self.observe_validated_status(
+                &resource,
+                &old_event,
+                clock,
+                graph_clock,
+                Some(&old_hash),
+                &owner,
+            )
+            .await?;
             return Ok(());
         }
         let kind = if identity_changed {
@@ -1395,7 +1402,7 @@ impl Client {
             .cloned()
             .collect();
         let changed_fields: Vec<_> = fields.into_iter().filter(|f| old[f] != row[f]).collect();
-        self.observe_validated_status(&resource, &json!({"pullRequest":row,"kind":kind,"activity":activity,"changedFields":changed_fields}), clock, graph_clock, true, &owner).await?;
+        self.observe_validated_status(&resource, &json!({"pullRequest":row,"kind":kind,"activity":activity,"changedFields":changed_fields}), clock, graph_clock, None, &owner).await?;
         Ok(())
     }
 
