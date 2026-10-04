@@ -2168,18 +2168,71 @@ mod priority_tests {
     }
 
     #[tokio::test]
-    async fn changed_probes_cannot_overtake_older_work_in_the_same_priority() {
+    async fn changed_probes_cannot_repeatedly_overtake_older_work_in_the_same_priority() {
         for interactive in [false, true] {
             for completion in [false, true] {
-                queued_probe_turn(interactive, completion, interactive, completion).await;
+                queued_probe_turn(
+                    interactive,
+                    completion,
+                    interactive,
+                    completion,
+                    ProbeReplies::Changed,
+                )
+                .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_probes_progress_while_their_class_waits_for_a_paced_turn() {
+        for interactive in [false, true] {
+            for completion in [false, true] {
+                queued_probe_turn(
+                    interactive,
+                    completion,
+                    interactive,
+                    completion,
+                    ProbeReplies::Unchanged,
+                )
+                .await;
             }
         }
     }
 
     #[tokio::test]
     async fn changed_probes_cannot_postpone_a_higher_priority_turn() {
-        queued_probe_turn(true, false, false, false).await;
-        queued_probe_turn(true, true, true, false).await;
+        queued_probe_turn(true, false, false, false, ProbeReplies::Changed).await;
+        queued_probe_turn(true, true, true, false, ProbeReplies::Changed).await;
+    }
+
+    #[tokio::test]
+    async fn only_one_pacing_probe_awaits_headers_across_core_and_detail_lanes() {
+        queued_probe_turn(false, false, false, false, ProbeReplies::Held).await;
+    }
+
+    #[tokio::test]
+    async fn completion_turns_cannot_renew_changed_probes_ahead_of_an_older_ordinary_read() {
+        queued_probe_turn(
+            true,
+            false,
+            true,
+            false,
+            ProbeReplies::ChangedWithCompletions,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pacing_probes_preserve_the_last_spendable_slot_for_the_owed_read() {
+        queued_probe_turn(false, false, false, false, ProbeReplies::LastSlot).await;
+    }
+
+    enum ProbeReplies {
+        Changed,
+        Unchanged,
+        Held,
+        ChangedWithCompletions,
+        LastSlot,
     }
 
     async fn queued_probe_turn(
@@ -2187,12 +2240,27 @@ mod priority_tests {
         completion: bool,
         probe_interactive: bool,
         probe_completion: bool,
+        replies: ProbeReplies,
     ) {
+        let changed = matches!(
+            replies,
+            ProbeReplies::Changed | ProbeReplies::ChangedWithCompletions
+        );
+        let held = matches!(replies, ProbeReplies::Held);
+        let mixed = matches!(replies, ProbeReplies::ChangedWithCompletions);
+        let last_slot = matches!(replies, ProbeReplies::LastSlot);
+        let probe_path = |n| {
+            if held && n == 1 {
+                "repos/acme/demo/issues/7/comments".to_owned()
+            } else {
+                format!("repos/acme/demo/pulls/{n}")
+            }
+        };
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let live = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(tokio::sync::Notify::new());
-        let reset = now_ms() / 1000 + 3600;
+        let reset = now_ms() / 1000 + if last_slot { 3 } else { 3600 };
         let router = axum::Router::new().fallback({
             let calls = calls.clone();
             let live = live.clone();
@@ -2204,20 +2272,36 @@ mod priority_tests {
                 async move {
                     use axum::response::IntoResponse;
                     calls.lock().unwrap().push(uri.path().to_owned());
-                    if uri.path() == "/gate" {
+                    if uri.path() == "/gate"
+                        || (held
+                            && live.load(Ordering::Relaxed)
+                            && uri.path().ends_with("/comments"))
+                    {
                         gate.notified().await;
                     }
                     let live = live.load(Ordering::Relaxed);
-                    let mut response = if !live && headers.contains_key("if-none-match") {
-                        axum::http::StatusCode::NOT_MODIFIED.into_response()
-                    } else {
-                        axum::Json(serde_json::json!({"live":live})).into_response()
-                    };
+                    let mut response =
+                        if (!live || !changed) && headers.contains_key("if-none-match") {
+                            axum::http::StatusCode::NOT_MODIFIED.into_response()
+                        } else {
+                            axum::Json(serde_json::json!({"live":live})).into_response()
+                        };
                     let headers = response.headers_mut();
                     headers.insert("etag", "\"synthetic\"".parse().unwrap());
                     if live {
                         headers.insert("x-ratelimit-resource", "core".parse().unwrap());
-                        headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-remaining",
+                            if held {
+                                "1000"
+                            } else if last_slot {
+                                "101"
+                            } else {
+                                "5000"
+                            }
+                            .parse()
+                            .unwrap(),
+                        );
                         headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
                     }
                     response
@@ -2239,12 +2323,12 @@ mod priority_tests {
             "synthetic-token".into(),
         )
         .unwrap();
-        // Warm each probe with a 304. All of them become charged 200s after
-        // the gate opens, so admitting one moves the older read's pacing slot.
+        // Warm each probe with a 304. In the changed case they become charged
+        // 200s after the gate opens; only one may borrow the older read's wait.
         for n in 1..=12 {
             for _ in 0..2 {
                 client
-                    .get(&format!("repos/acme/demo/pulls/{n}"), Freshness::Revalidate)
+                    .get(&probe_path(n), Freshness::Revalidate)
                     .await
                     .unwrap();
             }
@@ -2262,12 +2346,25 @@ mod priority_tests {
         })
         .await
         .unwrap();
+        if held {
+            // Establish pacing and release the core socket before queuing a
+            // detail-lane probe. Otherwise it could take an ordinary free lane
+            // while /gate itself still occupies core.
+            gate.notify_one();
+            tasks.remove(0).await.unwrap().unwrap();
+        }
         for (number, interactive, completion) in std::iter::once((99, interactive, completion))
-            .chain((1..=12).map(|n| (n, probe_interactive, probe_completion)))
+            .chain((1..=12).map(|n| {
+                (
+                    n,
+                    probe_interactive,
+                    probe_completion || (mixed && n % 2 == 0),
+                )
+            }))
         {
             let c = client.clone();
+            let path = probe_path(number);
             tasks.push(tokio::spawn(async move {
-                let path = format!("repos/acme/demo/pulls/{number}");
                 let read = INTERACTIVE_READ.scope(
                     Arc::new(AtomicBool::new(interactive)),
                     c.get(&path, Freshness::Revalidate),
@@ -2286,16 +2383,73 @@ mod priority_tests {
             .await
             .unwrap();
         }
-        gate.notify_one();
+        if !held {
+            gate.notify_one();
+        }
+        if held {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while calls.lock().unwrap().len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                calls.lock().unwrap()[1],
+                "/repos/acme/demo/issues/7/comments"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert_eq!(
+                calls.lock().unwrap().len(),
+                2,
+                "another lane borrowed the same paced turn before the first probe's headers"
+            );
+            gate.notify_one();
+        }
         for task in tasks {
             task.await.unwrap().unwrap();
         }
         server.abort();
         let calls = calls.lock().unwrap();
-        assert_eq!(
-            calls[1], "/repos/acme/demo/pulls/99",
-            "newer probes displaced the owed turn (interactive={interactive}, completion={completion}, probe_interactive={probe_interactive}, probe_completion={probe_completion}): {calls:?}"
-        );
+        let owed = calls
+            .iter()
+            .position(|path| path == "/repos/acme/demo/pulls/99")
+            .unwrap();
+        if last_slot {
+            assert_eq!(
+                owed, 1,
+                "a speculative validator borrowed the last spendable quota slot: {calls:?}"
+            );
+        } else if mixed {
+            let borrowed = calls[..owed]
+                .iter()
+                .filter(|path| {
+                    path.rsplit('/')
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .is_some_and(|n| n % 2 == 1)
+                })
+                .count();
+            assert!(
+                borrowed <= 1,
+                "completion reads repeatedly renewed borrowing ahead of an older ordinary read: {calls:?}"
+            );
+        } else if !changed {
+            assert!(
+                owed > 1,
+                "unchanged validations waited behind soft pacing: {calls:?}"
+            );
+        } else if interactive == probe_interactive && completion == probe_completion {
+            assert!(
+                owed <= 2,
+                "a stream of changed probes postponed the owed turn: {calls:?}"
+            );
+        } else {
+            assert_eq!(
+                owed, 1,
+                "lower-priority probes displaced a higher-priority turn: {calls:?}"
+            );
+        }
     }
 
     async fn changed_probe_turn(after_completion: bool) {
