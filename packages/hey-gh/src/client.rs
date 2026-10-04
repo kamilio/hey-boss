@@ -1947,6 +1947,137 @@ mod priority_tests {
         changed_probe_turn(true).await;
     }
 
+    #[tokio::test]
+    async fn changed_probes_cannot_overtake_older_work_in_the_same_priority() {
+        for interactive in [false, true] {
+            for completion in [false, true] {
+                queued_probe_turn(interactive, completion, interactive, completion).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_probes_cannot_postpone_a_higher_priority_turn() {
+        queued_probe_turn(true, false, false, false).await;
+        queued_probe_turn(true, true, true, false).await;
+    }
+
+    async fn queued_probe_turn(
+        interactive: bool,
+        completion: bool,
+        probe_interactive: bool,
+        probe_completion: bool,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let live = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let reset = now_ms() / 1000 + 3600;
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            let live = live.clone();
+            let gate = gate.clone();
+            move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                let calls = calls.clone();
+                let live = live.clone();
+                let gate = gate.clone();
+                async move {
+                    use axum::response::IntoResponse;
+                    calls.lock().unwrap().push(uri.path().to_owned());
+                    if uri.path() == "/gate" {
+                        gate.notified().await;
+                    }
+                    let live = live.load(Ordering::Relaxed);
+                    let mut response = if !live && headers.contains_key("if-none-match") {
+                        axum::http::StatusCode::NOT_MODIFIED.into_response()
+                    } else {
+                        axum::Json(serde_json::json!({"live":live})).into_response()
+                    };
+                    let headers = response.headers_mut();
+                    headers.insert("etag", "\"synthetic\"".parse().unwrap());
+                    if live {
+                        headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+                        headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+                    }
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::from_millis(20),
+                queue_timeout: Duration::from_secs(10),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        // Warm each probe with a 304. All of them become charged 200s after
+        // the gate opens, so admitting one moves the older read's pacing slot.
+        for n in 1..=12 {
+            for _ in 0..2 {
+                client
+                    .get(&format!("repos/acme/demo/pulls/{n}"), Freshness::Revalidate)
+                    .await
+                    .unwrap();
+            }
+        }
+        calls.lock().unwrap().clear();
+        live.store(true, Ordering::Relaxed);
+        let mut tasks = vec![tokio::spawn({
+            let c = client.clone();
+            async move { c.get("gate", Freshness::Revalidate).await }
+        })];
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while calls.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for (number, interactive, completion) in std::iter::once((99, interactive, completion))
+            .chain((1..=12).map(|n| (n, probe_interactive, probe_completion)))
+        {
+            let c = client.clone();
+            tasks.push(tokio::spawn(async move {
+                let path = format!("repos/acme/demo/pulls/{number}");
+                let read = INTERACTIVE_READ.scope(
+                    Arc::new(AtomicBool::new(interactive)),
+                    c.get(&path, Freshness::Revalidate),
+                );
+                if completion {
+                    COMPLETION_VALIDATION.scope((), read).await
+                } else {
+                    read.await
+                }
+            }));
+            tokio::time::timeout(Duration::from_secs(3), async {
+                while client.status().outstanding_requests != tasks.len() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        gate.notify_one();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        server.abort();
+        let calls = calls.lock().unwrap();
+        assert_eq!(
+            calls[1], "/repos/acme/demo/pulls/99",
+            "newer probes displaced the owed turn (interactive={interactive}, completion={completion}, probe_interactive={probe_interactive}, probe_completion={probe_completion}): {calls:?}"
+        );
+    }
+
     async fn changed_probe_turn(after_completion: bool) {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
