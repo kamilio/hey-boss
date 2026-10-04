@@ -208,7 +208,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             data.calls.len(),
         )
     };
-    if mode == "final-selector-priority" && path.starts_with("/repos/acme/bulk/pulls/") {
+    if mode == "final-selector-priority"
+        && path.starts_with("/repos/acme/bulk/pulls/")
+        && !path.ends_with("/pulls/1")
+    {
         mock.release.notified().await;
     }
     if mode == "account-multi-source-budget" && total_calls > 6 {
@@ -1048,7 +1051,12 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 &[],
             );
         }
-        "/repos/acme/demo/branches/main" if mode == "ruleset-only-policy" => {
+        "/repos/acme/demo/branches/main"
+            if matches!(
+                mode.as_str(),
+                "ruleset-only-policy" | "final-selector-priority"
+            ) =>
+        {
             json!({"commit":{"sha":if phase == 11 {NEW_HEAD} else {BASE}},"protected":true})
         }
         p if mode == "ruleset-only-policy" && p.ends_with("/protection/required_status_checks") => {
@@ -4462,6 +4470,86 @@ async fn a_ready_foreground_report_checks_its_final_head_before_unrelated_batche
                 && v.validated_at_ms > metadata.validated_at_ms)
     );
     assert_eq!(report.data.head_sha, HEAD);
+}
+
+#[tokio::test]
+async fn ready_required_policy_confirms_selectors_before_unrelated_foreground_batches() {
+    for (suffix, age) in [("/pulls/7", 20_000), ("/branches/main", 40_000)] {
+        let h = Harness::new().await;
+        h.mode("ruleset-only-policy");
+        h.phase(8);
+        let c = h.client();
+        let initial = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(initial.state, "failure");
+        let old = initial.observed_at_ms.unwrap() - age;
+        rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE ?2 AND key NOT LIKE '%/rules/%'",
+            rusqlite::params![old, format!("%{suffix}")],
+        ).unwrap();
+        h.mode("final-selector-priority");
+        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sdk = hey_gh::ApiClient::new(
+            format!("http://{}/", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+        let gate = tokio::spawn({
+            let c = c.clone();
+            async move { c.get("slow", Freshness::Revalidate).await }
+        });
+        until(|| h.calls().iter().any(|call| call.path == "/slow")).await;
+        let mut bulk = Vec::new();
+        for number in 1..=6 {
+            let sdk = sdk.clone();
+            bulk.push(tokio::spawn(async move {
+                sdk.ci_for_pr("acme/bulk", number, Freshness::Revalidate)
+                    .await
+            }));
+            until(|| c.status().outstanding_requests == number as usize + 1).await;
+        }
+        // All policy and CI evidence is ready. Only one final selector needs
+        // validation; it must use the same bounded priority as CI completion.
+        // The first bulk read is fast, allowing the ordinary turn owed after
+        // the seed report's final confirmation. The rest hold their sockets.
+        let mut report = tokio::spawn(async move {
+            sdk.required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(60)))
+                .await
+        });
+        until(|| c.status().outstanding_requests == 8).await;
+        h.mock.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_millis(750), &mut report).await;
+        h.mode("ruleset-only-policy");
+        h.mock.release.notify_waiters();
+        gate.await.unwrap().unwrap();
+        for task in bulk {
+            let _ = task.await.unwrap();
+        }
+        if result.is_err() {
+            let _ = report.await;
+        }
+        server.abort();
+        let report = result
+            .unwrap_or_else(|_| {
+                panic!("ready policy confirmation {suffix} waited behind unrelated foreground work")
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.state, "failure", "{suffix}: {:?}", report.errors);
+        assert_eq!(report.head_sha, HEAD);
+        assert!(
+            report
+                .validations
+                .iter()
+                .any(|v| v.resource.ends_with(suffix) && v.validated_at_ms > old)
+        );
+    }
 }
 
 #[tokio::test]

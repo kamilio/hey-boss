@@ -463,10 +463,17 @@ impl Client {
                     Freshness::MaxAge(age) => Freshness::MaxAge(age.min(Duration::from_secs(30))),
                     _ => Freshness::Revalidate,
                 };
-                let (pr_res, branch_res) = tokio::join!(
-                    self.pull_request(repository, number, pr_policy),
-                    self.get(&policy_path, branch_policy),
-                );
+                // Only the final selectors get completion priority. Collection
+                // still queues normally, and the scheduler alternates these
+                // confirmations with other work under the same quota limits.
+                let (pr_res, branch_res) = crate::client::COMPLETION_VALIDATION
+                    .scope((), async {
+                        tokio::join!(
+                            self.pull_request(repository, number, pr_policy),
+                            self.get(&policy_path, branch_policy),
+                        )
+                    })
+                    .await;
                 (pr_res?, Some(branch_res))
             };
             if pr.data["node_id"] != final_pr.data["node_id"]
@@ -489,7 +496,10 @@ impl Client {
                     errors.push(source("base_confirmation", e));
                 }
                 if identity.branch != base {
-                    match self.get(&branch_path, Freshness::Revalidate).await {
+                    match crate::client::COMPLETION_VALIDATION
+                        .scope((), self.get(&branch_path, Freshness::Revalidate))
+                        .await
+                    {
                         Ok(after)
                             if after.data["commit"]["sha"].as_str() != base_sha.as_deref() =>
                         {
