@@ -931,26 +931,31 @@ impl Client {
         data: &Value,
         clock: u64,
         discovery_clock: u64,
-        changed: bool,
+        expected_hash: Option<&str>,
         owner: &crate::store::PrOwner,
-    ) -> Result<String> {
-        let cursor = self
-            .0
+    ) -> Result<()> {
+        let clocks = [
+            (resource.to_owned(), clock),
+            (format!("{resource}#discovery"), discovery_clock),
+        ];
+        if let Some(hash) = expected_hash {
+            self.0
+                .store
+                .revalidate_owned(&self.0.scope, resource, hash, &clocks, owner)
+                .await?;
+            return Ok(());
+        }
+        self.0
             .store
             .observe_validated_owned(
                 &self.0.scope,
                 &[(resource.to_owned(), data.clone())],
-                &[
-                    (resource.to_owned(), clock),
-                    (format!("{resource}#discovery"), discovery_clock),
-                ],
+                &clocks,
                 owner,
             )
             .await?;
-        if changed {
-            self.0.changes_notify.notify_waiters();
-        }
-        Ok(cursor)
+        self.0.changes_notify.notify_waiters();
+        Ok(())
     }
     pub(crate) async fn status_validation_clock(&self, resource: &str) -> Result<u64> {
         self.0.store.validation_clock(&self.0.scope, resource).await
@@ -1249,6 +1254,15 @@ impl Client {
     }
     pub(crate) async fn stored_snapshot(&self, resource: &str) -> Result<Option<Value>> {
         self.0.store.snapshot(&self.0.scope, resource).await
+    }
+    pub(crate) async fn stored_snapshot_with_hash(
+        &self,
+        resource: &str,
+    ) -> Result<Option<(Value, String)>> {
+        self.0
+            .store
+            .snapshot_with_hash(&self.0.scope, resource)
+            .await
     }
     pub(crate) async fn persist_watch(&self, watch: &Watch) -> Result<()> {
         self.0.store.save_watch(&self.0.scope, watch).await

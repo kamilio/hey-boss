@@ -136,6 +136,38 @@ fn owner_is_current(conn: &Connection, scope: &str, owner: &PrOwner) -> Result<b
     }))
 }
 
+fn prune_changes(conn: &Connection, scope: &str, cutoff: u64, max_events: usize) -> Result<()> {
+    let age_floor: u64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(cursor),0) FROM changes WHERE scope=?1 AND observed_at_ms<?2",
+            params![scope, cutoff],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    let count_floor: Option<u64> = conn
+        .query_row(
+            "SELECT cursor FROM changes WHERE scope=?1 ORDER BY cursor DESC LIMIT 1 OFFSET ?2",
+            params![scope, max_events],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let floor = age_floor.max(count_floor.unwrap_or(0));
+    if floor > 0 {
+        conn.execute(
+            "DELETE FROM changes WHERE scope=?1 AND cursor<=?2",
+            params![scope, floor],
+        )
+        .map_err(storage)?;
+        conn.execute(
+            "UPDATE feeds SET floor=MAX(floor,?2) WHERE scope=?1",
+            params![scope, floor],
+        )
+        .map_err(storage)?;
+    }
+    Ok(())
+}
+
 fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, String, u64)> {
     let repository = node["repository"]["nameWithOwner"].as_str()?;
     let number = node["number"].as_u64()?;
@@ -343,19 +375,34 @@ impl Store {
     }
 
     pub async fn snapshot(&self, scope: &str, resource: &str) -> Result<Option<Value>> {
+        Ok(self
+            .snapshot_with_hash(scope, resource)
+            .await?
+            .map(|(data, _)| data))
+    }
+
+    pub async fn snapshot_with_hash(
+        &self,
+        scope: &str,
+        resource: &str,
+    ) -> Result<Option<(Value, String)>> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
         self.run(move |conn| {
             let resource = resolve_pr_resource(conn, &scope, &resource)?;
-            let data: Option<String> = conn
+            let data: Option<(String, String)> = conn
                 .query_row(
-                    "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2",
+                    "SELECT data,hash FROM snapshots WHERE scope=?1 AND resource=?2",
                     params![scope, resource],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(storage)?;
-            data.map(|data| serde_json::from_str(&data).map_err(storage))
-                .transpose()
+            data.map(|(data, hash)| {
+                serde_json::from_str(&data)
+                    .map(|data| (data, hash))
+                    .map_err(storage)
+            })
+            .transpose()
         })
         .await
     }
@@ -641,6 +688,52 @@ impl Store {
             .await
     }
 
+    /// Validate the exact previously read body without cloning or decoding it.
+    /// A concurrent replacement is left untouched, including its clocks.
+    pub async fn revalidate_owned(
+        &self,
+        scope: &str,
+        resource: &str,
+        expected_hash: &str,
+        clocks: &[(String, u64)],
+        owner: &PrOwner,
+    ) -> Result<bool> {
+        let (scope, resource, expected_hash, clocks, owner) = (
+            scope.to_owned(),
+            resource.to_owned(),
+            expected_hash.to_owned(),
+            clocks.to_vec(),
+            owner.clone(),
+        );
+        let cutoff = now_ms().saturating_sub(self.retention.as_millis() as u64);
+        let max_events = self.max_events;
+        self.run(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage)?;
+            if !owner_is_current(&tx, &scope, &owner)? {
+                return Err(Error::Invalid("PR entity changed while collecting evidence".into()));
+            }
+            let resource = resolve_pr_resource(&tx, &scope, &resource)?;
+            // A separate SDK process can publish after the caller reads its
+            // snapshot. Never validate its replacement using our older facts.
+            let unchanged: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM snapshots WHERE scope=?1 AND resource=?2 AND hash=?3)",
+                params![scope, resource, expected_hash], |r| r.get(0),
+            ).map_err(storage)?;
+            if !unchanged {
+                return Ok(false);
+            }
+            tx.execute("INSERT INTO source_owner(scope,resource,repository,pull_number,node_id,generation) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET repository=excluded.repository,pull_number=excluded.pull_number,node_id=excluded.node_id,generation=excluded.generation",params![scope,resource,owner.repository,owner.number,owner.node_id,owner.generation]).map_err(storage)?;
+            for (resource, clock) in clocks {
+                let resource = resolve_pr_resource(&tx, &scope, &resource)?;
+                tx.execute("INSERT INTO snapshot_validation(scope,resource,validated_at_ms) VALUES(?1,?2,?3) ON CONFLICT(scope,resource) DO UPDATE SET validated_at_ms=MAX(snapshot_validation.validated_at_ms,excluded.validated_at_ms)", params![scope,resource,clock]).map_err(storage)?;
+            }
+            prune_changes(&tx, &scope, cutoff, max_events)?;
+            tx.commit().map_err(storage)?;
+            let _ = conn.execute_batch("PRAGMA incremental_vacuum(64);");
+            Ok(true)
+        }).await
+    }
+
     async fn observe_many_with_owner(
         &self,
         scope: &str,
@@ -682,13 +775,7 @@ impl Store {
                 let resource=resolve_pr_resource(&tx,&scope,&resource)?;
                 tx.execute("INSERT INTO snapshot_validation(scope,resource,validated_at_ms) VALUES(?1,?2,?3) ON CONFLICT(scope,resource) DO UPDATE SET validated_at_ms=MAX(snapshot_validation.validated_at_ms,excluded.validated_at_ms)", params![scope,resource,clock]).map_err(storage)?;
             }
-            let age_floor:u64=tx.query_row("SELECT COALESCE(MAX(cursor),0) FROM changes WHERE scope=?1 AND observed_at_ms<?2",params![scope,cutoff],|r|r.get(0)).map_err(storage)?;
-            let count_floor:Option<u64>=tx.query_row("SELECT cursor FROM changes WHERE scope=?1 ORDER BY cursor DESC LIMIT 1 OFFSET ?2",params![scope,max_events],|r|r.get(0)).optional().map_err(storage)?;
-            let floor=age_floor.max(count_floor.unwrap_or(0));
-            if floor>0 {
-                tx.execute("DELETE FROM changes WHERE scope=?1 AND cursor<=?2",params![scope,floor]).map_err(storage)?;
-                tx.execute("UPDATE feeds SET floor=MAX(floor,?2) WHERE scope=?1",params![scope,floor]).map_err(storage)?;
-            }
+            prune_changes(&tx, &scope, cutoff, max_events)?;
             let sequence:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
             let cursor=format!("{}.{}",feed_prefix(&tx,&scope)?,sequence);
             tx.commit().map_err(storage)?;
@@ -1424,6 +1511,211 @@ mod tests {
             Err(Error::CursorExpired)
         ));
         store.validate_cursor("account", &head).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "manual benchmark for unchanged large PR publication"]
+    async fn unchanged_publication_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            8 * 1024 * 1024,
+        )
+        .unwrap();
+        let resource = "pr-status://github.com/acme/repo/7";
+        let owner = PrOwner {
+            repository: "acme/repo".into(),
+            number: 7,
+            node_id: Some("PR_7".into()),
+            generation: 0,
+        };
+        let data = serde_json::json!({"pullRequest":{"id":"PR_7","ci":{"jobs":(0..1024).map(|id|serde_json::json!({"id":id,"name":"x".repeat(1024),"state":"completed"})).collect::<Vec<_>>()}}});
+        let observations = [(resource.to_owned(), data.clone())];
+        let cursor = store
+            .observe_owned("scope", &observations, &owner)
+            .await
+            .unwrap();
+        let (_, hash) = store
+            .snapshot_with_hash("scope", resource)
+            .await
+            .unwrap()
+            .unwrap();
+        let start = std::time::Instant::now();
+        for clock in 1..=64 {
+            store
+                .observe_validated_owned(
+                    "scope",
+                    &observations,
+                    &[(resource.into(), clock)],
+                    &owner,
+                )
+                .await
+                .unwrap();
+        }
+        let full = start.elapsed();
+        let start = std::time::Instant::now();
+        for clock in 65..=128 {
+            assert!(
+                store
+                    .revalidate_owned(
+                        "scope",
+                        resource,
+                        &hash,
+                        &[(resource.into(), clock)],
+                        &owner
+                    )
+                    .await
+                    .unwrap()
+            );
+        }
+        let metadata = start.elapsed();
+        assert_eq!(store.bootstrap("scope").await.unwrap().cursor, cursor);
+        assert_eq!(
+            store.validation_clock("scope", resource).await.unwrap(),
+            128
+        );
+        eprintln!(
+            "64 unchanged publications, {} bytes: full={full:?}, metadata={metadata:?}",
+            serde_json::to_vec(&data).unwrap().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_validation_is_bound_to_the_observed_version_and_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let open = || {
+            Store::open(
+                &path,
+                std::time::Duration::from_secs(3600),
+                100,
+                8 * 1024 * 1024,
+            )
+            .unwrap()
+        };
+        let store = open();
+        let other = open();
+        let resource = "pr-status://github.com/ACME/Repo/7";
+        let alias = "pr-status://github.com/acme/repo/7";
+        let owner = PrOwner {
+            repository: "acme/repo".into(),
+            number: 7,
+            node_id: Some("PR_7".into()),
+            generation: 0,
+        };
+        store
+            .accept_rest_identity("scope", "acme/repo", 7, "PR_7", 100, &[])
+            .await
+            .unwrap();
+        let old =
+            serde_json::json!({"pullRequest":{"id":"PR_7","ci":{"jobs":"x".repeat(1024 * 1024)}}});
+        let cursor = store
+            .observe_validated_owned(
+                "scope",
+                &[(resource.into(), old.clone())],
+                &[(resource.into(), 100)],
+                &owner,
+            )
+            .await
+            .unwrap();
+        let (_, hash) = store
+            .snapshot_with_hash("scope", alias)
+            .await
+            .unwrap()
+            .unwrap();
+        let clocks = [(alias.into(), 200), (format!("{alias}#discovery"), 150)];
+        assert!(
+            store
+                .revalidate_owned("scope", alias, &hash, &clocks, &owner)
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.snapshot("scope", resource).await.unwrap(), Some(old));
+        assert_eq!(
+            store.validation_clock("scope", resource).await.unwrap(),
+            200
+        );
+        assert_eq!(
+            store
+                .validation_clock("scope", &format!("{resource}#discovery"))
+                .await
+                .unwrap(),
+            150
+        );
+        assert_eq!(store.bootstrap("scope").await.unwrap().cursor, cursor);
+        assert!(
+            store
+                .changes("scope", Some(&cursor), 100)
+                .await
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        assert!(
+            store
+                .revalidate_owned("scope", alias, &hash, &[(alias.into(), 150)], &owner)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.validation_clock("scope", resource).await.unwrap(),
+            200
+        );
+
+        // Independent clients do not share the daemon's report mutex. A late
+        // unchanged observation must not validate or replace their new value.
+        let newer = serde_json::json!({"pullRequest":{"id":"PR_7","ci":{"state":"failure"}}});
+        let next = other
+            .observe_validated_owned(
+                "scope",
+                &[(resource.into(), newer.clone())],
+                &[(resource.into(), 300)],
+                &owner,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .revalidate_owned("scope", alias, &hash, &[(alias.into(), 400)], &owner)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.snapshot("scope", resource).await.unwrap(),
+            Some(newer)
+        );
+        assert_eq!(
+            store.validation_clock("scope", resource).await.unwrap(),
+            300
+        );
+        assert_eq!(store.bootstrap("scope").await.unwrap().cursor, next);
+        assert!(
+            !store
+                .revalidate_owned("other-scope", alias, &hash, &clocks, &owner)
+                .await
+                .unwrap()
+        );
+        let (_, current_hash) = store
+            .snapshot_with_hash("scope", alias)
+            .await
+            .unwrap()
+            .unwrap();
+        let stale_owner = PrOwner {
+            generation: 1,
+            ..owner
+        };
+        assert!(
+            store
+                .revalidate_owned("scope", alias, &current_hash, &clocks, &stale_owner)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.validation_clock("scope", resource).await.unwrap(),
+            300
+        );
     }
 
     #[tokio::test]
