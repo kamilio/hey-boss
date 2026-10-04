@@ -37,9 +37,9 @@ pub(crate) const DISCOVERY_CACHE: &str = "account-discovery-complete:v1";
 // must not emit partial intermediate rows or overwrite discovery metadata.
 tokio::task_local! { static ACCOUNT_PUBLICATION: (); }
 
-// Bound expensive merge metadata, without paying per-page overhead for tiny pages.
+// Large discovery pages can time out and amplify retries; bound per-request work.
 const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
-  viewer { pullRequests(first: 40, after: $after, states: OPEN,
+  viewer { pullRequests(first: 25, after: $after, states: OPEN,
     orderBy: {field: CREATED_AT, direction: ASC}) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
       headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus reviewDecision
