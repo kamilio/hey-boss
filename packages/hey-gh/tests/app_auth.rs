@@ -292,6 +292,9 @@ async fn only_ci_status_reads_use_the_app_and_all_other_activity_keeps_user_auth
         "repos/acme/demo/commits/head/check-runs",
         "repos/acme/demo/commits/head/status",
         "repos/acme/demo/actions/runs",
+        "repos/acme/demo/actions/workflows/release.yml/runs",
+        "repos/acme/demo/actions/runs/1",
+        "repos/acme/demo/actions/runs/1/attempts/1",
         "repos/acme/demo/actions/runs/1/attempts/1/jobs",
     ] {
         client.get(path, Freshness::Revalidate).await.unwrap();

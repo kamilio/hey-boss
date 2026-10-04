@@ -1,0 +1,48 @@
+{
+  "repository": "poe-internal/poe2",
+  "branch": "main",
+  "target": "pull_request",
+  "gates": [
+    {
+      "name": "post-merge tests",
+      "workflow": "post-merge-tests.yml",
+      "purpose": "validation",
+      "jobs": [
+        {"name": "Warm pre-commit Turbo cache / Build, lint, format & tests"},
+        {"name": "Warm pre-commit Turbo cache / Slow and integration tests"},
+        {"name": "Warm pre-commit Turbo cache / Remix standalone end-to-end tests"},
+        {"name": "Warm pre-commit Turbo cache / Shared headless integration tests (TestServer)"},
+        {"name": "Warm pre-commit Turbo cache / Shared headless integration tests (Wrangler)"},
+        {"name": "Warm pre-commit Turbo cache / Check suite results"}
+      ]
+    },
+    {
+      "name": "paired Convex release",
+      "workflow": "post-merge-poe-convex.yml",
+      "purpose": "deployment",
+      "jobs": [{"name": "Deploy Poe and Joiner Convex", "steps": ["Run ./convex-release-artifact"], "step_counts": {"Run ./convex-release-artifact": 34}}]
+    },
+    {
+      "name": "Joiner workers",
+      "workflow": "post-merge-poe-convex.yml",
+      "purpose": "deployment",
+      "jobs": [
+        {"name": "deploy-poe-tiles / Deploy Joiner workers and maintenance", "steps": ["Deploy joiner instance"]}
+      ]
+    },
+    {
+      "name": "Poe worker",
+      "workflow": "post-merge-poe-convex.yml",
+      "purpose": "deployment",
+      "jobs": [
+        {"name": "deploy-poe-tiles / Deploy Poe worker and finalize release", "steps": ["Deploy poe product worker (login wall)", "poe product worker health check"], "unchanged_steps": {"Deploy poe product worker (login wall)": "Poe gate skipped the deploy"}}
+      ]
+    },
+    {
+      "name": "published apps",
+      "workflow": "post-merge-apps.yml",
+      "purpose": "deployment",
+      "jobs": [{"name": "publish", "steps": ["Publish changed tiles under their release identity"]}]
+    }
+  ]
+}

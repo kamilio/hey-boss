@@ -11,6 +11,7 @@ mod entity;
 pub mod local_auth;
 mod policy;
 mod pr_fields;
+pub mod release;
 mod report;
 mod repository;
 mod scheduler;

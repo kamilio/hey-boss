@@ -1,0 +1,232 @@
+{
+  "run": {
+    "id": 1000,
+    "run_attempt": 1,
+    "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+    "status": "completed",
+    "conclusion": "success"
+  },
+  "jobs": [
+    {
+      "id": 2000,
+      "run_id": 1000,
+      "run_attempt": 1,
+      "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "name": "Deploy Poe and Joiner Convex",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-04T17:19:31Z",
+      "steps": [
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run ./convex-release-artifact",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 2001,
+      "run_id": 1000,
+      "run_attempt": 1,
+      "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "name": "deploy-poe-tiles / Deploy Joiner workers and maintenance",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-04T17:24:05Z",
+      "steps": [
+        {
+          "name": "Deploy joiner instance",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "id": 2002,
+      "run_id": 1000,
+      "run_attempt": 1,
+      "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+      "name": "deploy-poe-tiles / Deploy Poe worker and finalize release",
+      "status": "completed",
+      "conclusion": "success",
+      "completed_at": "2026-10-04T17:25:54Z",
+      "steps": [
+        {
+          "name": "Deploy poe product worker (login wall)",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "poe product worker health check",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ]
+}

@@ -770,17 +770,18 @@ impl Client {
         version: &str,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
-        self.collect_pages(path, Some("jobs"), freshness, Some(version))
+        self.collect_pages(path, Some("jobs"), freshness, Some((version, false)))
             .await
     }
 
     // Each page is retained under the completed parent's version before the
     // caller resumes. Cancellation cannot lose already dispatched progress or
     // reuse a page fetched for an earlier, still-running parent.
-    async fn completed_job_page(
+    pub(crate) async fn completed_job_page(
         &self,
         path: &str,
         version: &str,
+        allow_empty: bool,
         freshness: Freshness,
     ) -> Result<Response> {
         let url = self.rest_url(path)?.to_string();
@@ -796,7 +797,8 @@ impl Client {
                     }
                     if now_ms().saturating_sub(response.validated_at_ms) < 86400 * 1000
                         && response.data["jobs"].as_array().is_some_and(|jobs| {
-                            !jobs.is_empty() && jobs.iter().all(|j| j["status"] == "completed")
+                            (allow_empty || !jobs.is_empty())
+                                && jobs.iter().all(|j| j["status"] == "completed")
                         })
                     {
                         // The freshly read parent certifies this immutable
@@ -829,7 +831,7 @@ impl Client {
         path: &str,
         field: Option<&str>,
         freshness: Freshness,
-        completed_version: Option<&str>,
+        completed_version: Option<(&str, bool)>,
     ) -> Result<Vec<Value>> {
         let mut path = path.to_owned();
         let mut seen = std::collections::HashSet::new();
@@ -839,8 +841,9 @@ impl Client {
             if !seen.insert(self.rest_url(&path)?.to_string()) {
                 return Err(Error::Invalid("pagination link cycle".into()));
             }
-            let response = if let Some(version) = completed_version {
-                self.completed_job_page(&path, version, freshness).await?
+            let response = if let Some((version, allow_empty)) = completed_version {
+                self.completed_job_page(&path, version, allow_empty, freshness)
+                    .await?
             } else {
                 self.get(&path, freshness).await?
             };
@@ -1406,7 +1409,10 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
         ["repos", _, _, "issues", _, "timeline"] => "timeline",
         ["repos", _, _, "commits", _, "check-runs"] => "check_runs",
         ["repos", _, _, "commits", _, "status"] => "commit_statuses",
-        ["repos", _, _, "actions", "runs"] => "workflow_runs",
+        ["repos", _, _, "actions", "runs"]
+        | ["repos", _, _, "actions", "runs", _]
+        | ["repos", _, _, "actions", "workflows", _, "runs"]
+        | ["repos", _, _, "actions", "runs", _, "attempts", _] => "workflow_runs",
         ["repos", _, _, "actions", "runs", _, "attempts", _, "jobs"] => "workflow_jobs",
         [
             "repos",
@@ -1429,7 +1435,7 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
 #[cfg(test)]
 mod transport_tests;
 
-fn next_link(link: &str) -> Option<String> {
+pub(crate) fn next_link(link: &str) -> Option<String> {
     for part in link.split(',') {
         let (target, params) = part.trim().split_once('>')?;
         if params.split(';').any(|p| p.trim() == "rel=\"next\"") {
