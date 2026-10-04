@@ -92,6 +92,10 @@ pub(crate) struct Metrics {
 }
 
 pub(crate) struct Job {
+    pub installation: bool,
+    pub minting: bool,
+    pub auth_attempts: u32,
+    pub auth_generation: u64,
     // Shared with coalesced readers so interactive use can promote queued work.
     pub interactive: Arc<AtomicBool>,
     pub detail_lane: bool,
@@ -119,6 +123,13 @@ pub(crate) struct Job {
 // retain their lane; headers reach the scheduler before any body wait so quota
 // exhaustion and shared cooldowns take effect immediately.
 impl Job {
+    fn quota(&self) -> String {
+        if self.installation {
+            format!("installation/{}", self.resource)
+        } else {
+            self.resource.clone()
+        }
+    }
     pub(crate) fn deadline(&self) -> Instant {
         *self.deadline.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -318,7 +329,7 @@ impl Budgets {
         let seconds = reset.saturating_sub(seconds_now);
         let spacing = if remaining == 0 {
             Duration::from_secs(seconds.saturating_add(1))
-        } else if resource == "core" {
+        } else if resource.rsplit('/').next() == Some("core") {
             usage.spacing(remaining, seconds)
         } else {
             Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
@@ -331,7 +342,11 @@ impl Budgets {
             // again or erasing later reservations. Unreserved probes/new windows
             // still start pacing at observation. Exhaustion always waits to reset.
             let anchor = reserved_at
-                .filter(|_| remaining > 0 && (resource != "core" || remaining > QUOTA_RESERVE))
+                .filter(|_| {
+                    remaining > 0
+                        && (resource.rsplit('/').next() != Some("core")
+                            || remaining > QUOTA_RESERVE)
+                })
                 .unwrap_or(now);
             let deadline = anchor
                 .checked_add(spacing)
@@ -352,11 +367,11 @@ impl Budgets {
 
     fn reserve(&mut self, job: &Job) -> Reservation {
         let mut reservation = Reservation {
-            resource: job.resource.clone(),
+            resource: job.quota(),
             resets: Vec::new(),
             dispatched_at: Instant::now(),
         };
-        if let Some(windows) = self.0.get_mut(&job.resource) {
+        if let Some(windows) = self.0.get_mut(&job.quota()) {
             for budget in windows.values_mut() {
                 if budget.remaining > 0
                     && budget.reset_at_seconds > now_ms() / 1000
@@ -414,6 +429,7 @@ impl Scheduler {
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
         let mut secondary_until = Instant::now();
+        let mut minting = false;
         let mut active = Vec::<Active>::new();
         let prod = self.config.rest_url.host_str() == Some("api.github.com");
         let max_active = self
@@ -454,7 +470,7 @@ impl Scheduler {
                 let ready = ready(&job, &budgets, global_next.max(secondary_until));
                 let quota_blocked = secondary_until > now
                     || budgets
-                        .for_resource(&job.resource)
+                        .for_resource(&job.quota())
                         .any(|b| b.next > now && !conditional_budget_exempt(&job, b));
                 let error = if quota_blocked && !self.abandoned_request(&job) {
                     Error::RateLimited {
@@ -476,19 +492,19 @@ impl Scheduler {
                 .iter()
                 .filter(|job| {
                     !job.interactive.load(Ordering::Relaxed)
-                        && interactive_streaks.get(&job.resource).copied().unwrap_or(0) >= 3
+                        && interactive_streaks.get(&job.quota()).copied().unwrap_or(0) >= 3
                         && job.ready_at <= now
                         && !lane_busy(&active, job, prod)
                 })
-                .map(|job| job.resource.as_str())
+                .map(|job| job.quota())
                 .collect();
             let waiting_for_turn = |job: &Job| {
-                job.interactive.load(Ordering::Relaxed)
-                    && background_turns.contains(job.resource.as_str())
+                job.interactive.load(Ordering::Relaxed) && background_turns.contains(&job.quota())
             };
             let next = {
                 let eligible = |job: &Job| {
                     ready(job, &budgets, global) <= now
+                        && !(job.installation && minting)
                         && !lane_busy(&active, job, prod)
                         && !waiting_for_turn(job)
                 };
@@ -501,7 +517,7 @@ impl Scheduler {
                 let preferred = pending.iter().position(|job| {
                     eligible(job)
                         && job.interactive.load(Ordering::Relaxed)
-                            == (interactive_streaks.get(&job.resource).copied().unwrap_or(0) < 3)
+                            == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 });
                 preferred.or_else(|| pending.iter().position(eligible))
             };
@@ -509,30 +525,78 @@ impl Scheduler {
                 && let Some(index) = next
             {
                 let mut job = pending.remove(index).expect("existing queue entry");
+                let token = if job.installation {
+                    match self
+                        .config
+                        .installation
+                        .as_ref()
+                        .expect("configured installation")
+                        .token()
+                    {
+                        Ok(Some((token, generation))) => {
+                            job.auth_generation = generation;
+                            token
+                        }
+                        Ok(None) => {
+                            job.minting = true;
+                            String::new()
+                        }
+                        Err(error) => {
+                            self.finish(job, Err(error));
+                            continue;
+                        }
+                    }
+                } else {
+                    self.token.clone()
+                };
                 // Reserve every live window before another socket can dispatch.
-                let reservation = budgets.reserve(&job);
-                let streak = interactive_streaks.entry(job.resource.clone()).or_default();
+                let reservation = (!job.minting).then(|| budgets.reserve(&job));
+                let streak = interactive_streaks.entry(job.quota()).or_default();
                 *streak = if job.interactive.load(Ordering::Relaxed) {
                     streak.saturating_add(1)
                 } else {
                     0
                 };
-                job.attempts += 1;
+                if job.minting {
+                    job.auth_attempts += 1;
+                    minting = true;
+                } else {
+                    job.attempts += 1;
+                }
                 job.http_status = None;
                 job.notify.send_replace(SharedResult::Active);
-                tracing::info!(request_id=%job.request_id, attempt=job.attempts,
-                    endpoint=job.endpoint, resource=%job.resource,
+                tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
+                    endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
                     foreground=job.interactive.load(Ordering::Relaxed),
-                    conditional=job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
-                    auth_scope=%self.scope, %instance, request_key=%crate::digest(&job.key),
+                    conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
+                    auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope }, %instance, request_key=%crate::digest(&job.key),
                     "GitHub request dispatched");
                 self.metrics.network.fetch_add(1, Ordering::Relaxed);
-                let mut request = if let Some(body) = &job.body {
-                    self.http.post(&job.url).json(body)
+                let mut request = if job.minting {
+                    match self
+                        .config
+                        .installation
+                        .as_ref()
+                        .unwrap()
+                        .request(&self.http, &self.config.rest_url)
+                    {
+                        Ok(request) => request,
+                        Err(error) => {
+                            minting = false;
+                            self.config
+                                .installation
+                                .as_ref()
+                                .unwrap()
+                                .failed(error.clone());
+                            self.finish(job, Err(error));
+                            continue;
+                        }
+                    }
+                } else if let Some(body) = &job.body {
+                    self.http.post(&job.url).json(body).bearer_auth(&token)
                 } else {
-                    self.http.get(&job.url)
+                    self.http.get(&job.url).bearer_auth(&token)
                 }
-                .bearer_auth(&self.token)
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", &self.config.api_version)
                 .timeout(
@@ -549,6 +613,7 @@ impl Scheduler {
                 );
                 if let Some(cache) = &job.cached
                     && job.body.is_none()
+                    && !job.minting
                 {
                     if let Some(etag) = &cache.etag {
                         request = request.header("If-None-Match", etag);
@@ -561,7 +626,7 @@ impl Scheduler {
                 let mut attempt = Active {
                     resource: job.resource.clone(),
                     detail_lane: job.detail_lane,
-                    reservation: Some(reservation),
+                    reservation,
                     future: Box::pin(async move { (job, Attempt::Headers(request.send().await)) }),
                 };
                 // Start the socket now, rather than treating an unpolled
@@ -584,6 +649,7 @@ impl Scheduler {
                 .iter()
                 .map(|job| {
                     if active.len() >= max_active
+                        || (job.installation && minting)
                         || lane_busy(&active, job, prod)
                         || waiting_for_turn(job)
                     {
@@ -616,6 +682,21 @@ impl Scheduler {
                     let response = match response {
                         Ok(r) => r,
                         Err(e) => {
+                            if job.minting {
+                                minting = false;
+                                let error = if e.is_timeout() {
+                                    Error::Deadline
+                                } else {
+                                    Error::Transport("GitHub App token exchange failed".into())
+                                };
+                                self.config
+                                    .installation
+                                    .as_ref()
+                                    .unwrap()
+                                    .failed(error.clone());
+                                self.finish(job, Err(error));
+                                continue;
+                            }
                             tracing::warn!(request_id=%job.request_id,resource=%job.resource,attempt=job.attempts,timed_out=e.is_timeout(),"GitHub transport attempt failed");
                             if Instant::now() >= job.deadline()
                                 || self.abandoned_request(&job)
@@ -647,14 +728,16 @@ impl Scheduler {
                         self.metrics.not_modified.fetch_add(1, Ordering::Relaxed);
                     }
                     let headers = response.headers().clone();
-                    tracing::info!(request_id=%job.request_id, attempt=job.attempts,
+                    tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                         http_status=status.as_u16(),
                         remaining=number(&headers,"x-ratelimit-remaining"),
                         used=number(&headers,"x-ratelimit-used"),
                         limit=number(&headers,"x-ratelimit-limit"),
                         reset=number(&headers,"x-ratelimit-reset"),
                         "GitHub response headers");
-                    if let Some(resource) = header(&headers, "x-ratelimit-resource") {
+                    if let Some(resource) = header(&headers, "x-ratelimit-resource")
+                        && !job.minting
+                    {
                         job.resource = resource;
                         if routes.len() >= 4096 {
                             routes.clear();
@@ -664,7 +747,8 @@ impl Scheduler {
                     if let (Some(remaining), Some(reset)) = (
                         number(&headers, "x-ratelimit-remaining"),
                         number(&headers, "x-ratelimit-reset"),
-                    ) {
+                    ) && !job.minting
+                    {
                         let limit = RateLimit {
                             remaining,
                             reset_at_seconds: reset,
@@ -673,18 +757,18 @@ impl Scheduler {
                             .limits
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .insert(job.resource.clone(), limit);
+                            .insert(job.quota(), limit);
                         budgets.observe(
-                            &job.resource,
+                            &job.quota(),
                             remaining,
                             reset,
                             status == StatusCode::NOT_MODIFIED,
                             reservation
                                 .as_ref()
-                                .and_then(|r| r.for_window(&job.resource, reset)),
+                                .and_then(|r| r.for_window(&job.quota(), reset)),
                         );
                     }
-                    if status == StatusCode::NOT_MODIFIED {
+                    if status == StatusCode::NOT_MODIFIED && !job.minting {
                         let result = if let Some(mut cached) = job.cached.clone() {
                             // Validators and pagination metadata may be updated on 304.
                             cached.etag = header(&headers, "etag").or(cached.etag);
@@ -721,9 +805,9 @@ impl Scheduler {
                                 ) + jitter()
                             })
                         };
-                        if exhausted {
+                        if exhausted && !job.minting {
                             budgets.exhausted(
-                                &job.resource,
+                                &job.quota(),
                                 number(&headers, "x-ratelimit-reset").unwrap_or(0),
                                 wait,
                             );
@@ -734,7 +818,11 @@ impl Scheduler {
                             secondary_until = secondary_until.max(quota_deadline(wait));
                         }
                     }
-                    let max_body_bytes = self.config.max_body_bytes;
+                    let max_body_bytes = if job.minting {
+                        64 * 1024
+                    } else {
+                        self.config.max_body_bytes
+                    };
                     active.push(Active {
                         resource: job.resource.clone(),
                         detail_lane: job.detail_lane,
@@ -767,6 +855,10 @@ impl Scheduler {
                 Ok(bytes) => bytes,
                 Err(_) if header_limited => Vec::new(),
                 Err(e) => {
+                    if job.minting {
+                        minting = false;
+                        self.config.installation.as_ref().unwrap().failed(e.clone());
+                    }
                     self.finish(job, Err(e));
                     continue;
                 }
@@ -781,6 +873,61 @@ impl Scheduler {
                         .to_owned()
                 });
             let lower = message.to_ascii_lowercase();
+            if job.minting {
+                minting = false;
+                let app = self.config.installation.as_ref().unwrap();
+                let limited = header_limited
+                    || (status == StatusCode::FORBIDDEN && lower.contains("rate limit"));
+                let result = if limited {
+                    let wait = retry.unwrap_or(Duration::from_secs(60)).max(if exhausted {
+                        Duration::from_secs(
+                            number(&headers, "x-ratelimit-reset")
+                                .unwrap_or(0)
+                                .saturating_sub(now_ms() / 1000)
+                                .saturating_add(1),
+                        )
+                    } else {
+                        Duration::ZERO
+                    });
+                    secondary_until = secondary_until.max(quota_deadline(wait));
+                    Err(Error::RateLimited {
+                        retry_after_seconds: ceil_seconds(wait),
+                    })
+                } else if status == StatusCode::CREATED {
+                    app.accept(&bytes)
+                } else {
+                    Err(Error::Invalid(format!(
+                        "GitHub App token exchange failed (HTTP {})",
+                        status.as_u16()
+                    )))
+                };
+                match result {
+                    Ok(()) => {
+                        job.minting = false;
+                        job.notify.send_replace(SharedResult::Queued);
+                        pending.push_front(job);
+                    }
+                    Err(error) => {
+                        app.failed(error.clone());
+                        self.finish(job, Err(error));
+                    }
+                }
+                continue;
+            }
+            if status == StatusCode::UNAUTHORIZED
+                && job.installation
+                && job.auth_attempts < 2
+                && job.attempts < self.config.max_attempts
+            {
+                self.config
+                    .installation
+                    .as_ref()
+                    .unwrap()
+                    .invalidate(job.auth_generation);
+                job.notify.send_replace(SharedResult::Queued);
+                pending.push_back(job);
+                continue;
+            }
             let graphql_errors = if job.body.is_some() {
                 serde_json::from_slice::<serde_json::Value>(&bytes)
                     .ok()
@@ -814,7 +961,7 @@ impl Scheduler {
                 tracing::info!(request_id=%job.request_id,resource=%job.resource,retry_after_seconds=ceil_seconds(wait),"GitHub request cooldown scheduled");
                 if exhausted {
                     budgets.exhausted(
-                        &job.resource,
+                        &job.quota(),
                         number(&headers, "x-ratelimit-reset").unwrap_or(0),
                         wait,
                     );
@@ -922,7 +1069,7 @@ impl Scheduler {
             Ok(Source::Cache) => "cache",
             Err(_) => "error",
         };
-        tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,"GitHub request finished");
+        tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts+job.auth_attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,"GitHub request finished");
         let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         drop(job._permit);
         job.notify
@@ -936,7 +1083,7 @@ fn ready(job: &Job, budgets: &Budgets, global: Instant) -> Instant {
     let stamp = now_ms();
     job.ready_at.max(global).max(
         budgets
-            .for_resource(&job.resource)
+            .for_resource(&job.quota())
             .map(|budget| {
                 if conditional_budget_exempt(job, budget) {
                     job.ready_at
@@ -1039,6 +1186,10 @@ mod tests {
 
     fn core_job() -> Job {
         Job {
+            installation: false,
+            minting: false,
+            auth_attempts: 0,
+            auth_generation: 0,
             interactive: Arc::new(AtomicBool::new(true)),
             detail_lane: false,
             collection_slice: false,
