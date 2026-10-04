@@ -4158,7 +4158,24 @@ mod tests {
                 ),
             ];
             let changes=history.iter().enumerate().map(|(seq,(table,row))|json!({"seq":seq+1,"table_name":table,"before_json":null,"after_json":row.to_string()})).collect::<Vec<_>>();
-            let receipts = accept_changes(&main.db, &origin, &changes).unwrap();
+            let receipts = if n == 0 {
+                changes
+                    .chunks(1)
+                    .flat_map(|part| {
+                        let receipts = accept_changes(&main.db, &origin, part).unwrap();
+                        crate::issues::blockers::reconcile(
+                            &main.db,
+                            "named:Native fleet",
+                            Some("human:fixture"),
+                            200,
+                        )
+                        .unwrap();
+                        receipts
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                accept_changes(&main.db, &origin, &changes).unwrap()
+            };
             assert!(
                 receipts.iter().all(|r| r["state"] == "applied"),
                 "{receipts:?}"

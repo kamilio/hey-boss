@@ -11,7 +11,12 @@ pub(super) const REWORK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dependency_no
     project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,event_id INTEGER NOT NULL,
     PRIMARY KEY(project_id,issue_number));
     CREATE INDEX IF NOT EXISTS issue_dependency_rework ON events(project_id,issue_number,id DESC)
-    WHERE action='dependency_rework';";
+    WHERE action='dependency_rework';
+    CREATE INDEX IF NOT EXISTS issue_dependency_comments ON comments(project_id,issue_number,id DESC)
+    WHERE body GLOB 'Dependency rework: upstream tasks *';
+    CREATE TABLE IF NOT EXISTS dependency_comment_resets(
+    project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,comment_id INTEGER NOT NULL,
+    PRIMARY KEY(project_id,issue_number));";
 
 const PREFIX: &str = "Dependency rework: upstream tasks ";
 const SUFFIX: &str = " need work. Read their latest changes and update/rebase the stacked PR before marking this task Ready. Running worker claims are preserved; new pickups wait for the dependencies.";
@@ -19,7 +24,7 @@ pub(super) const REJECTION: &str = "This dependency notice used obsolete sibling
 
 // Only recognize the exact generated format. Authored prose and malformed
 // lookalikes remain ordinary comments, never SQL/JSON errors.
-fn numbers(text: &str) -> String {
+pub(super) fn numbers(text: &str) -> String {
     let list = format!(
         "substr({text},{},length({text})-{})",
         PREFIX.len() + 1,
@@ -58,6 +63,21 @@ fn canonical(list: &str, entry: &str) -> String {
     )
 }
 
+pub(super) fn latest_comment(project: &str, number: &str) -> String {
+    let list = numbers("body");
+    format!("SELECT id FROM comments WHERE project_id={project} AND issue_number={number}
+        AND body GLOB 'Dependency rework: upstream tasks *' AND json_array_length({list})>0 ORDER BY id DESC LIMIT 1")
+}
+
+fn duplicate_comment() -> String {
+    let latest = latest_comment("NEW.project_id", "NEW.issue_number");
+    let incoming = canonical(&numbers("NEW.body"), "dependency.value");
+    let saved = canonical(&numbers("c.body"), "dependency.value");
+    format!("EXISTS(SELECT 1 FROM comments c WHERE c.id=({latest})
+        AND c.id>coalesce((SELECT comment_id FROM dependency_comment_resets WHERE project_id=NEW.project_id AND issue_number=NEW.issue_number),0)
+        AND {incoming}<>'[]' AND {incoming}={saved})")
+}
+
 fn duplicate(list: &str, entry: &str) -> String {
     let incoming = canonical(list, entry);
     let saved = canonical(
@@ -71,12 +91,12 @@ fn duplicate(list: &str, entry: &str) -> String {
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode' OR (name='dependency_notice_comment' AND instr(sql,'dependency_notice_resets')=0)) FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
+    if db.query_row("SELECT count(*)=5 AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_mode' OR (name='dependency_notice_comment' AND instr(sql,'comment_id FROM dependency_comment_resets')=0)) FROM sqlite_master WHERE type='trigger' AND name IN ('dependency_notice_comment','dependency_notice_event','dependency_notice_steering','dependency_notice_delivery','dependency_notice_state')", [], |r|r.get::<_,bool>(0))? {
         return Ok(());
     }
     let tx =
         crate::database::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
-    let duplicate_comment = duplicate(&numbers("NEW.body"), "dependency.value");
+    let duplicate_comment = duplicate_comment();
     let duplicate_commented = duplicate(
         &numbers("json_extract(NEW.data,'$.body')"),
         "dependency.value",
@@ -85,6 +105,13 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         "coalesce(json_extract(NEW.data,'$.dependencies'),'[]')",
         "json_extract(dependency.value,'$[0]')",
     );
+    let commented_list = numbers("json_extract(NEW.data,'$.body')");
+    let invalid_comment = format!("json_array_length({commented_list})>0 AND (
+        NOT EXISTS(SELECT 1 FROM comments c WHERE c.id=json_extract(NEW.data,'$.comment_id')
+            AND c.project_id=NEW.project_id AND c.issue_number=NEW.issue_number
+            AND c.author=NEW.actor AND c.created_at=NEW.created_at AND c.body=json_extract(NEW.data,'$.body'))
+        OR EXISTS(SELECT 1 FROM events e WHERE e.project_id=NEW.project_id AND e.issue_number=NEW.issue_number
+            AND e.action='commented' AND json_extract(e.data,'$.comment_id')=json_extract(NEW.data,'$.comment_id')))");
     let comment = obsolete(
         "NEW.project_id",
         "NEW.issue_number",
@@ -135,7 +162,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND ({comment} OR {duplicate_comment}) BEGIN SELECT RAISE(IGNORE); END;
         DROP TRIGGER IF EXISTS dependency_notice_event;
         CREATE TRIGGER dependency_notice_event BEFORE INSERT ON events
-        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN ({commented} OR {duplicate_commented}) WHEN 'dependency_rework' THEN ({event} OR {duplicate_event}) WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
+        WHEN (SELECT syncing FROM fleet_meta WHERE id=1)<>2 AND CASE WHEN json_valid(NEW.data) THEN CASE NEW.action WHEN 'commented' THEN ({commented} OR {duplicate_commented} OR ({invalid_comment})) WHEN 'dependency_rework' THEN ({event} OR {duplicate_event}) WHEN 'blocked' THEN {blocked} ELSE 0 END ELSE 0 END
         BEGIN SELECT RAISE(IGNORE); END;
         -- Old reconcilers continue after ignored notices. Reject an automatic
         -- transition with no unfinished declared prerequisite or descendant.
