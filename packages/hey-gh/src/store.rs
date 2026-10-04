@@ -751,8 +751,9 @@ impl Store {
         observations: &[(String, Value)],
         clocks: &[(String, u64)],
     ) -> Result<String> {
-        self.observe_many_with_owner(scope, observations, clocks, None)
+        self.observe_many_with_owner(scope, observations, clocks, None, None)
             .await
+            .map(|(cursor, _)| cursor)
     }
 
     pub async fn observe_owned(
@@ -761,7 +762,7 @@ impl Store {
         observations: &[(String, Value)],
         owner: &PrOwner,
     ) -> Result<String> {
-        self.observe_many_with_owner(scope, observations, &[], Some(owner.clone()))
+        self.observe_validated_owned(scope, observations, &[], owner)
             .await
     }
 
@@ -772,8 +773,29 @@ impl Store {
         clocks: &[(String, u64)],
         owner: &PrOwner,
     ) -> Result<String> {
-        self.observe_many_with_owner(scope, observations, clocks, Some(owner.clone()))
+        self.observe_many_with_owner(scope, observations, clocks, Some(owner.clone()), None)
             .await
+            .map(|(cursor, _)| cursor)
+    }
+
+    pub async fn replace_validated_status(
+        &self,
+        scope: &str,
+        resource: &str,
+        data: &Value,
+        clocks: &[(String, u64)],
+        expected_hash: &str,
+        owner: &PrOwner,
+    ) -> Result<bool> {
+        self.observe_many_with_owner(
+            scope,
+            &[(resource.to_owned(), data.clone())],
+            clocks,
+            Some(owner.clone()),
+            Some((resource.to_owned(), expected_hash.to_owned())),
+        )
+        .await
+        .map(|(_, applied)| applied)
     }
 
     /// Validate the exact previously read body without cloning or decoding it.
@@ -828,7 +850,8 @@ impl Store {
         observations: &[(String, Value)],
         clocks: &[(String, u64)],
         owner: Option<PrOwner>,
-    ) -> Result<String> {
+        expected: Option<(String, String)>,
+    ) -> Result<(String, bool)> {
         let clocks = clocks.to_vec();
         let (scope, observations) = (scope.to_owned(), observations.to_vec());
         let cutoff = now_ms().saturating_sub(self.retention.as_millis() as u64);
@@ -837,6 +860,16 @@ impl Store {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage)?;
             if let Some(owner)=&owner && !owner_is_current(&tx,&scope,owner)? {
                 return Err(Error::Invalid("PR entity changed while collecting evidence".into()));
+            }
+            if let Some((resource, expected_hash)) = expected {
+                let resource = resolve_pr_resource(&tx, &scope, &resource)?;
+                let hash:Option<String> = tx.query_row("SELECT hash FROM snapshots WHERE scope=?1 AND resource=?2", params![scope,resource], |r|r.get(0)).optional().map_err(storage)?;
+                if hash.as_deref().unwrap_or_default() != expected_hash {
+                    // A separate client replaced the row used for projection.
+                    // Leave its payload, clocks and cursor untouched.
+                    let sequence:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
+                    return Ok((format!("{}.{}", feed_prefix(&tx, &scope)?, sequence), false));
+                }
             }
             for (resource,value) in observations {
             let resource=resolve_pr_resource(&tx,&scope,&resource)?;
@@ -870,7 +903,7 @@ impl Store {
             // Bound maintenance work per observation; the WAL checkpoint will
             // return these pages to the filesystem without a full vacuum.
             let _ = conn.execute_batch("PRAGMA incremental_vacuum(64);");
-            Ok(cursor)
+            Ok((cursor, true))
         }).await
     }
 
@@ -2318,6 +2351,115 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(store.bootstrap("scope").await.unwrap().snapshots.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn status_replacement_requires_the_exact_snapshot_even_with_current_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let store = Store::open(&path, std::time::Duration::from_secs(3600), 100, 4096).unwrap();
+        let peer = Store::open(&path, std::time::Duration::from_secs(3600), 100, 4096).unwrap();
+        let resource = "pr-status://github.com/Acme/Repo/7";
+        let alias = "pr-status://github.com/acme/repo/7";
+        let old = serde_json::json!({"pullRequest":{"id":"old","state":"OPEN"}});
+        store.observe("scope", resource, &old).await.unwrap();
+        store
+            .accept_rest_identity("scope", "acme/repo", 7, "new", 200, &[])
+            .await
+            .unwrap();
+        let owner = PrOwner {
+            repository: "acme/repo".into(),
+            number: 7,
+            node_id: Some("new".into()),
+            generation: 1,
+        };
+        // Before discovery publishes the replacement, an unresolved old row
+        // may still be retired by a collector holding the new selector owner.
+        let retired =
+            serde_json::json!({"pullRequest":{"id":"old","state":"UNKNOWN","removed":true}});
+        store
+            .observe_owned("scope", &[(resource.into(), retired.clone())], &owner)
+            .await
+            .unwrap();
+        let (_, retired_hash) = store
+            .snapshot_with_hash("scope", resource)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = serde_json::json!({"pullRequest":{"id":"new","state":"OPEN"}});
+        let clocks = [(alias.into(), 200)];
+        let before = peer
+            .observe_validated_owned("scope", &[(alias.into(), current.clone())], &clocks, &owner)
+            .await
+            .unwrap();
+        // A second client can finish its old projection after the replacement.
+        // Valid ownership does not make that retired payload current.
+        assert!(
+            !store
+                .replace_validated_status(
+                    "scope",
+                    resource,
+                    &retired,
+                    &[(resource.into(), 300)],
+                    &retired_hash,
+                    &owner
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.snapshot("scope", alias).await.unwrap(),
+            Some(current.clone())
+        );
+        assert_eq!(store.validation_clock("scope", alias).await.unwrap(), 200);
+        assert!(
+            store
+                .changes("scope", Some(&before), 100)
+                .await
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        // The same identity can also race: an early lifecycle projection must
+        // not erase CI already attached by another client.
+        let (_, hash) = store
+            .snapshot_with_hash("scope", resource)
+            .await
+            .unwrap()
+            .unwrap();
+        let completed = serde_json::json!({"pullRequest":{"id":"new","state":"OPEN","ci":{"summary":"success"}}});
+        assert!(
+            peer.replace_validated_status(
+                "scope",
+                alias,
+                &completed,
+                &[(alias.into(), 300)],
+                &hash,
+                &owner
+            )
+            .await
+            .unwrap()
+        );
+        let before = peer.bootstrap("scope").await.unwrap().cursor;
+        assert!(
+            !store
+                .replace_validated_status(
+                    "scope",
+                    resource,
+                    &current,
+                    &[(resource.into(), 400)],
+                    &hash,
+                    &owner
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.snapshot("scope", alias).await.unwrap(),
+            Some(completed)
+        );
+        assert_eq!(store.validation_clock("scope", alias).await.unwrap(), 300);
+        assert_eq!(store.bootstrap("scope").await.unwrap().cursor, before);
     }
 
     #[tokio::test]

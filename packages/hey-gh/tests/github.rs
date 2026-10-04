@@ -8920,7 +8920,8 @@ async fn delayed_old_entity_reads_cannot_overwrite_a_new_nodes_evidence_or_healt
         .unwrap();
     assert!(
         after.changes.is_empty(),
-        "retired work must not publish failure health or replacements"
+        "retired work must not publish failure health or replacements: {:?}",
+        after.changes
     );
     let calls = h.calls().len();
     let report = h

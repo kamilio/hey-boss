@@ -911,10 +911,33 @@ impl Client {
         health: &[(&str, Option<String>)],
     ) -> Result<()> {
         let (repo, number) = identity;
-        let (discovered, discovery_at) = discovery;
         let resource = format!("{}{repo}/{number}", self.status_prefix());
         let lock = self.report_lock(&resource.to_ascii_lowercase());
         let _guard = lock.lock().await;
+        for _ in 0..2 {
+            if self
+                .publish_pr_status_once(identity, discovery, removed, established, health)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+        // Independent SDK clients do not share this lock. If a second writer
+        // wins twice, retain its row; the next monitor cycle will reconcile.
+        Ok(())
+    }
+
+    async fn publish_pr_status_once(
+        &self,
+        identity: (&str, u64),
+        discovery: (&Value, u64),
+        removed: Option<bool>,
+        established: bool,
+        health: &[(&str, Option<String>)],
+    ) -> Result<bool> {
+        let (repo, number) = identity;
+        let (discovered, discovery_at) = discovery;
+        let resource = format!("{}{repo}/{number}", self.status_prefix());
         let (old_event, old_hash) = self
             .stored_snapshot_with_hash(&resource)
             .await?
@@ -931,14 +954,14 @@ impl Client {
                 .or_else(|| discovered["id"].as_str().map(str::to_owned)),
             generation: self.repository_generation(repo).await?,
         });
-        if discovery_at > 0
+        if (discovery_at > 0 || old["id"].as_str() == expected_node.as_deref())
             && expected_node
                 .as_deref()
                 .zip(discovered["id"].as_str())
                 .is_some_and(|(expected, incoming)| expected != incoming)
         {
             // A delayed scan must not undo a newer accepted entity identity.
-            return Ok(());
+            return Ok(true);
         }
         let metadata = self
             .stored_pr_snapshot(
@@ -1359,16 +1382,9 @@ impl Client {
         row["removed"] = json!(removed || matches!(state.as_str(), "CLOSED" | "MERGED"));
         let clock = discovery_clock.max(if metadata_current { metadata_at } else { 0 });
         if row == *old {
-            self.observe_validated_status(
-                &resource,
-                &old_event,
-                clock,
-                graph_clock,
-                Some(&old_hash),
-                &owner,
-            )
-            .await?;
-            return Ok(());
+            return self
+                .observe_validated_status(&resource, None, clock, graph_clock, &old_hash, &owner)
+                .await;
         }
         let kind = if identity_changed {
             "opened"
@@ -1402,8 +1418,7 @@ impl Client {
             .cloned()
             .collect();
         let changed_fields: Vec<_> = fields.into_iter().filter(|f| old[f] != row[f]).collect();
-        self.observe_validated_status(&resource, &json!({"pullRequest":row,"kind":kind,"activity":activity,"changedFields":changed_fields}), clock, graph_clock, None, &owner).await?;
-        Ok(())
+        self.observe_validated_status(&resource, Some(&json!({"pullRequest":row,"kind":kind,"activity":activity,"changedFields":changed_fields})), clock, graph_clock, &old_hash, &owner).await
     }
 
     /// HTTP preflight must not decode a page that will be decoded again later.
