@@ -323,6 +323,50 @@ async fn native_stack_registration_and_trunk_changes_retry_with_unchanged_head()
 }
 
 #[tokio::test]
+async fn expired_policy_seed_rechecks_native_membership_before_returning() {
+    for (before, after) in [
+        (Value::Null, stack("main")),
+        (stack("main"), stack("release")),
+        (stack("main"), Value::Null),
+    ] {
+        let (c, s, dir, task) = fixture(before).await;
+        c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(dir.path().join("cache.sqlite")).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'", [],
+        ).unwrap();
+        s.lock().unwrap().membership = after.clone();
+        let calls = s.lock().unwrap().calls.len();
+        let report = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["policy_identity"]["stack"],
+            after
+        );
+        assert_eq!(
+            report.state,
+            if after.is_null() {
+                "not_required"
+            } else {
+                "failure"
+            }
+        );
+        assert!(report.validations.iter().all(|v| v.validated_at_ms > 0));
+        assert_eq!(
+            s.lock().unwrap().calls[calls..]
+                .iter()
+                .filter(|p| p.ends_with("/pulls/7"))
+                .count(),
+            3
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
 async fn native_stack_missing_metadata_and_denied_policy_never_imply_readiness() {
     for membership in [
         json!({}),

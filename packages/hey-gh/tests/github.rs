@@ -4474,7 +4474,11 @@ async fn a_ready_foreground_report_checks_its_final_head_before_unrelated_batche
 
 #[tokio::test]
 async fn ready_required_policy_confirms_selectors_before_unrelated_foreground_batches() {
-    for (suffix, age) in [("/pulls/7", 20_000), ("/branches/main", 40_000)] {
+    for (suffix, age) in [
+        ("/pulls/7", 20_000),
+        ("/branches/main", 40_000),
+        ("/pulls/7", 120_000),
+    ] {
         let h = Harness::new().await;
         h.mode("ruleset-only-policy");
         h.phase(8);
@@ -4514,8 +4518,8 @@ async fn ready_required_policy_confirms_selectors_before_unrelated_foreground_ba
             }));
             until(|| c.status().outstanding_requests == number as usize + 1).await;
         }
-        // All policy and CI evidence is ready. Only one final selector needs
-        // validation; it must use the same bounded priority as CI completion.
+        // All policy and CI evidence is ready. Even expired initial metadata
+        // can seed collection; one final selector still needs fresh validation.
         // The first bulk read is fast, allowing the ordinary turn owed after
         // the seed report's final confirmation. The rest hold their sockets.
         let mut report = tokio::spawn(async move {
@@ -4537,7 +4541,7 @@ async fn ready_required_policy_confirms_selectors_before_unrelated_foreground_ba
         server.abort();
         let report = result
             .unwrap_or_else(|_| {
-                panic!("ready policy confirmation {suffix} waited behind unrelated foreground work")
+                panic!("ready policy confirmation {suffix}, age {age}ms waited behind unrelated foreground work")
             })
             .unwrap()
             .unwrap();
@@ -10402,6 +10406,165 @@ async fn large_account_watch_publishes_replacements_while_foreground_read_progre
     .unwrap();
     api.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn required_policy_seed_collects_before_confirmation_and_rejects_changed_selectors() {
+    for changed in [
+        "none",
+        "node",
+        "head",
+        "base",
+        "base_sha",
+        "base_repository",
+        "base_stats",
+        "merge",
+        "malformed",
+        "cold",
+    ] {
+        let h = Harness::new().await;
+        h.mode("ruleset-only-policy");
+        h.phase(8);
+        let c = h.client();
+        let initial = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        let (scope, key, raw): (String, String, String) = db
+            .query_row(
+                "SELECT scope,key,response FROM cache WHERE key LIKE '%/pulls/7'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut seed: Value = serde_json::from_str(&raw).unwrap();
+        seed["validated_at_ms"] = json!(0);
+        // Altered representations need their own validator, so the fixture
+        // cannot return a 304 for data that it never served.
+        if changed != "none" {
+            seed["etag"] = json!("\"old-representation\"");
+            seed["last_modified"] = Value::Null;
+        }
+        match changed {
+            "node" => seed["data"]["node_id"] = json!("PR_old_identity"),
+            "head" => seed["data"]["head"]["sha"] = json!(NEW_HEAD),
+            "base" => seed["data"]["base"]["ref"] = json!("old-base"),
+            "base_sha" => seed["data"]["base"]["sha"] = json!(NEW_HEAD),
+            "base_repository" => seed["data"]["base"]["repo"] = json!({"id":42,"node_id":"R_old"}),
+            "base_stats" => {
+                seed["data"]["base"]["repo"] =
+                    json!({"open_issues_count":123,"pushed_at":"2026-09-01T00:00:00Z"})
+            }
+            "merge" => seed["data"]["merge_commit_sha"] = json!(MERGE),
+            "malformed" => seed["data"]["head"]["sha"] = json!("invalid"),
+            _ => {}
+        }
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE scope=?2 AND key=?3",
+            rusqlite::params![seed.to_string(), scope, key],
+        )
+        .unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%repos/%'", []).unwrap();
+        if changed == "cold" {
+            db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/7'", [])
+                .unwrap();
+        }
+        let before = h.calls().len();
+        let report = c
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap_or_else(|error| panic!("{changed}: {error:?}"));
+        assert_eq!(report.head_sha, HEAD, "{changed}");
+        assert_eq!(report.base_branch, "main", "{changed}");
+        assert_eq!(report.pr_base_sha, initial.pr_base_sha, "{changed}");
+        assert_eq!(report.merge_sha, initial.merge_sha, "{changed}");
+        assert_eq!(report.state, "failure", "{changed}: {:?}", report.errors);
+        assert!(
+            report.validations.iter().all(|v| v.validated_at_ms > 0),
+            "collection seeds must not appear as validated evidence: {changed}"
+        );
+        let calls = h.calls();
+        let calls = &calls[before..];
+        let pr_position = calls
+            .iter()
+            .position(|call| call.path.ends_with("/pulls/7"))
+            .unwrap();
+        let ci_position = calls
+            .iter()
+            .position(|call| call.path.contains("/check-runs"))
+            .unwrap();
+        assert_eq!(
+            ci_position < pr_position,
+            !matches!(changed, "node" | "malformed" | "cold"),
+            "{changed}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.path.ends_with("/pulls/7"))
+                .count(),
+            if matches!(
+                changed,
+                "none" | "node" | "base_stats" | "malformed" | "cold"
+            ) {
+                1
+            } else {
+                3
+            },
+            "{changed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn required_policy_seed_cannot_return_before_confirmation_or_hide_access_failure() {
+    for denied in [false, true] {
+        let h = Harness::new().await;
+        h.mode("ruleset-only-policy");
+        h.phase(8);
+        let c = h.client();
+        c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'", [],
+        ).unwrap();
+        h.mode(if denied {
+            "sdk-upstream-403"
+        } else {
+            "issue72-stall-metadata"
+        });
+        let worker = c.clone();
+        let mut read = tokio::spawn(async move {
+            worker
+                .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+        });
+        if denied {
+            assert!(matches!(
+                read.await.unwrap(),
+                Err(Error::GitHub { status: 403, .. })
+            ));
+        } else {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut read)
+                    .await
+                    .is_err(),
+                "cached seed was returned as confirmed policy"
+            );
+            h.mock.release.notify_one();
+            let report = read.await.unwrap().unwrap();
+            assert_eq!(report.state, "failure");
+            assert!(
+                report
+                    .validations
+                    .iter()
+                    .filter(|v| v.resource.ends_with("/pulls/7"))
+                    .all(|v| v.validated_at_ms > 0)
+            );
+        }
+    }
 }
 
 #[tokio::test]

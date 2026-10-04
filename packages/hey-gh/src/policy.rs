@@ -117,6 +117,41 @@ pub struct RequiredChecksReport {
 }
 
 impl Client {
+    async fn initial_policy_pr(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<crate::Response> {
+        if number > 0
+            && let Freshness::MaxAge(age) = freshness
+            && !age.is_zero()
+        {
+            match self
+                .peek_get(&format!("repos/{repository}/pulls/{number}"))
+                .await
+            {
+                Ok(cached)
+                    if cached.data["node_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty())
+                        && cached.data["head"]["sha"]
+                            .as_str()
+                            .is_some_and(crate::repository::valid_sha)
+                        && policy_identity(&cached.data).is_ok() =>
+                {
+                    // This is only a collection seed, never fresh evidence.
+                    // Final PR validation still enforces the caller's age and
+                    // retries if node, head, base, merge or stack changed.
+                    return Ok(cached);
+                }
+                Ok(_) | Err(Error::CacheMiss) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        self.pull_request(repository, number, freshness).await
+    }
+
     pub async fn required_checks_for_pr(
         &self,
         repository: &str,
@@ -213,7 +248,9 @@ impl Client {
                 Freshness::Revalidate
             };
             crate::entity::clear();
-            let pr = self.pull_request(repository, number, freshness).await?;
+            let pr = self
+                .initial_policy_pr(repository, number, freshness)
+                .await?;
             crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
             let base = pr.data["base"]["ref"]
                 .as_str()
@@ -478,7 +515,10 @@ impl Client {
             };
             if pr.data["node_id"] != final_pr.data["node_id"]
                 || pr.data["head"]["sha"] != final_pr.data["head"]["sha"]
-                || pr.data["base"] != final_pr.data["base"]
+                // Repository counters and pushed_at can change for unrelated
+                // PRs. Confirm the base's identity, branch and commit instead.
+                || ["ref", "sha"].iter().any(|field| pr.data["base"][field] != final_pr.data["base"][field])
+                || ["id", "node_id", "full_name"].iter().any(|field| pr.data["base"]["repo"][field] != final_pr.data["base"]["repo"][field])
                 || pr.data["merge_commit_sha"] != final_pr.data["merge_commit_sha"]
                 || identity != policy_identity(&final_pr.data)?
             {
