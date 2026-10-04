@@ -293,7 +293,7 @@ the whole cycle. They are not GitHub
 transport or rate-limit failure. Fair retry position remains durable; genuine
 upstream errors keep their original diagnostics.
 
-Discovery uses pages of 40, reads the head CI state without enumerating check
+Discovery uses pages of 25, reads the head CI state without enumerating check
 contexts, and shares a durable, fully paginated collection
 between polling loops. Its reuse window starts when the scan completes; rows
 retain the oldest page's actual validation time. Failed or inconsistent scans
@@ -307,7 +307,9 @@ error. Closed PRs and unrelated repositories do not consume the open list's byte
 still count their original stored bytes before projection. The selected state and
 global observation cursor remain transactional; closure and reopening events
 remain available through cursor reads.
-Background discovery has its own full scan budget. CI and detail loops consume
+Background discovery has its own full scan budget and waits its polling interval
+after each completed or failed scan. Slow failures cannot trigger immediate
+catch-up scans. CI and detail loops consume
 the last successful collection without starting or waiting for discovery;
 `watches` exposes separate `discovery_last_*` health fields. Successful source
 hydration does not clear an independent discovery failure.

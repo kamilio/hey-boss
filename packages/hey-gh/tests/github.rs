@@ -22,6 +22,7 @@ const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 #[derive(Clone, Debug)]
 struct Call {
+    at: std::time::Instant,
     path: String,
     query: String,
     conditional: bool,
@@ -188,6 +189,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     let (phase, mode, call_number, total_calls) = {
         let mut data = mock.data.lock().unwrap();
         data.calls.push(Call {
+            at: std::time::Instant::now(),
             path: path.clone(),
             query: query.clone(),
             conditional: headers.contains_key("if-none-match")
@@ -701,6 +703,14 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             .unwrap_or("")
             .contains("query MyOpenPullRequests")
         {
+            if mode == "account-discovery-slow-error" {
+                mock.release.notified().await;
+                return reply(
+                    200,
+                    json!({"errors":[{"message":"discovery unavailable"}]}),
+                    &[],
+                );
+            }
             if mode == "account-unrelated-org-denied" {
                 return reply(
                     200,
@@ -831,12 +841,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     .unwrap()
                     .parse()
                     .unwrap();
-                if size > 40 {
+                if size > 25 {
                     return reply(504, json!({"message":"gateway timeout"}), &[]);
                 }
-                // Every page pays substantial fixed upstream work. Oversized
-                // pages fail, but overly small pages exhaust the scan budget.
-                tokio::time::sleep(Duration::from_secs(1)).await;
                 let start = body["variables"]["after"]
                     .as_str()
                     .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
@@ -3760,6 +3767,71 @@ async fn independent_detail_watch_reuses_ci_without_clearing_ci_failure_health()
 }
 
 #[tokio::test]
+async fn slow_failed_discovery_waits_a_full_interval_before_retrying() {
+    let h = Harness::new().await;
+    h.mode("account-discovery-slow-error");
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_secs(30);
+    config.request_timeout = Duration::from_secs(30);
+    config.report_timeout = Duration::from_secs(30);
+    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(10).await.unwrap();
+    until(|| !h.calls().is_empty()).await;
+    // Outlive the polling interval without timing out the upstream request.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let released_at = std::time::Instant::now();
+    h.mock.release.notify_one();
+    let failed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let page = c
+                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .await
+                .unwrap();
+            if !page.account_discovery.errors.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let calls_after_failure = h.calls().len();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let retried_immediately = h.calls().len() > 1 || calls_after_failure > 1;
+    if failed.is_err() || retried_immediately {
+        api.stop().await;
+        assert!(failed.is_ok(), "failed discovery was not published");
+        assert!(
+            !retried_immediately,
+            "missed interval immediately retried the failed scan"
+        );
+    }
+    h.mode("account");
+    let resumed = tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let page = c
+                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .await
+                .unwrap();
+            if page.account_discovery.complete == Some(true) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    api.stop().await;
+    assert!(
+        resumed.is_ok(),
+        "discovery must resume after its polling interval"
+    );
+    assert!(
+        h.calls()[1].at.duration_since(released_at) >= Duration::from_secs(10),
+        "the next upstream scan must wait the entire interval after failure"
+    );
+}
+
+#[tokio::test]
 async fn background_discovery_failure_does_not_taint_successful_account_hydration() {
     let h = Harness::new().await;
     h.mode("account");
@@ -4540,9 +4612,7 @@ async fn discovery_rejects_inconsistent_cohorts_and_keeps_the_last_complete_scan
 async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     let h = Harness::new().await;
     h.mode("account-page-timeout");
-    let mut config = h.config();
-    config.report_timeout = Duration::from_millis(2700);
-    let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+    let c = h.client();
     let freshness = Freshness::MaxAge(Duration::from_secs(60));
     let (first, second) = tokio::join!(
         c.all_my_open_pull_requests(freshness),
@@ -4555,10 +4625,11 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
     assert_eq!(first[59]["repository"]["nameWithOwner"], "acme/page59");
     assert_eq!(
         h.calls().len(),
-        3,
+        4,
         "the boundary and each page are fetched once without retries"
     );
-    assert_eq!(h.calls()[2].body["variables"]["after"], "40");
+    assert_eq!(h.calls()[2].body["variables"]["after"], "25");
+    assert_eq!(h.calls()[3].body["variables"]["after"], "50");
     assert_eq!(
         h.client()
             .all_my_open_pull_requests(Freshness::CachedOnly)
@@ -4567,7 +4638,7 @@ async fn discovery_bounds_page_work_without_truncating_the_shared_collection() {
         first,
         "the full roster remains durable across client reconstruction"
     );
-    assert_eq!(h.calls().len(), 3);
+    assert_eq!(h.calls().len(), 4);
 }
 
 #[tokio::test]
@@ -4591,7 +4662,7 @@ async fn account_discovery_shares_complete_scans_and_retains_last_good_on_failur
         h.calls()[1].body["query"]
             .as_str()
             .unwrap()
-            .contains("first: 40")
+            .contains("first: 25")
     );
 
     // A reconstructed client reuses the durable collection without requests.

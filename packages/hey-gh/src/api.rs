@@ -296,6 +296,10 @@ async fn account_discovery_loop(client: Client, watch: Watch, state: Arc<Mutex<W
                 ),
             }
         }
+        // A scan can outlast its interval. Delay's missed tick still fires
+        // immediately once; failed scans have no fresh collection to absorb
+        // that catch-up read, so sustained failures otherwise run back-to-back.
+        interval.reset();
     }
 }
 
