@@ -169,6 +169,10 @@ impl Client {
     /// Explicit credentials are useful for GitHub Apps and synthetic tests.
     /// The regular CLI and daemon always use from_gh.
     pub fn with_token(config: Config, token: String) -> Result<Self> {
+        Self::with_http(config, token, reqwest::Client::builder())
+    }
+
+    fn with_http(config: Config, token: String, http: reqwest::ClientBuilder) -> Result<Self> {
         if token.is_empty() {
             return Err(Error::Auth(config.hostname.clone()));
         }
@@ -248,7 +252,7 @@ impl Client {
         let permits = Arc::new(Semaphore::new(config.queue_capacity));
         let (queue, rx) = mpsc::channel(config.queue_capacity);
         let queue_changed = Arc::new(tokio::sync::Notify::new());
-        let http = reqwest::Client::builder()
+        let http = http
             .user_agent(concat!("hey-gh/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -1421,6 +1425,9 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
         _ => "rest_other",
     }
 }
+
+#[cfg(test)]
+mod transport_tests;
 
 fn next_link(link: &str) -> Option<String> {
     for part in link.split(',') {

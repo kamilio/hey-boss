@@ -958,6 +958,7 @@ impl Scheduler {
                     let headers = response.headers().clone();
                     tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                         http_status=status.as_u16(),
+                        http_version=?response.version(),
                         remaining=number(&headers,"x-ratelimit-remaining"),
                         used=number(&headers,"x-ratelimit-used"),
                         limit=number(&headers,"x-ratelimit-limit"),
