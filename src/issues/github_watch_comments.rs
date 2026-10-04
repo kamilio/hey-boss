@@ -30,7 +30,23 @@ fn body(url: &str, observation: &hey_gh::watcher::Observation, new: &[String]) -
         "GitHub update on {pr} · commit {}\n\n",
         text(&observation.head, 12)
     );
-    if observation.blocking.iter().any(|key| new.contains(key)) {
+    if new.iter().any(|key| key.starts_with("conflict:")) {
+        body.push_str("- **Merge conflicts.** The current PR needs conflict resolution.\n");
+    }
+    if new.iter().any(|key| key.starts_with("required-missing:")) {
+        body.push_str("- **Required checks missing.** A required context has no current result.\n");
+    }
+    if new.iter().any(|key| key.starts_with("required-outdated:")) {
+        body.push_str(
+            "- **Required branch update.** Strict check policy requires an up-to-date branch.\n",
+        );
+    }
+    if observation.blocking.iter().any(|key| {
+        new.contains(key)
+            && !key.starts_with("conflict:")
+            && !key.starts_with("required-missing:")
+            && !key.starts_with("required-outdated:")
+    }) {
         let names: BTreeSet<_> = observation.evidence["required"]
             .as_array()
             .into_iter()
