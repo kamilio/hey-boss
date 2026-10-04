@@ -416,8 +416,8 @@ enum Action {
     Assign {
         number: i64,
         target: String,
-        /// JSON array of full {report, policy} snapshots you reconciled. GitHub only.
-        #[arg(long)]
+        /// Path to a JSON file containing full {report, policy} snapshots as an array. GitHub only; CI may still be running or missing.
+        #[arg(long, value_name = "PATH")]
         reviewed_evidence: Option<PathBuf>,
         /// Current issue version from issue view.
         #[arg(long, hide = true, default_value_t = 0)]

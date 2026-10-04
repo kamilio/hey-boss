@@ -71,6 +71,119 @@ fn green_policy_evidence() -> Value {
     value
 }
 
+fn unsettled_evidence(state: &str) -> Value {
+    let mut value = green_policy_evidence();
+    value[0]["policy"]["state"] = json!(state);
+    value[0]["policy"]["checks"][0]["state"] = json!(state);
+    value[0]["report"]["data"]["ci"]["check_runs"] = json!([
+        {"id":2,"name":"OpenAI Review","status":"in_progress","conclusion":null,"head_sha":"head"}
+    ]);
+    value[0]["report"]["data"]["ci"]["summary"] =
+        json!({"state":"pending","successful":0,"failed":0,"pending":1,"skipped":0,"unknown":0});
+    if state != "missing" {
+        let mut check = green_policy_evidence()[0]["report"]["data"]["ci"]["check_runs"][0].clone();
+        if state == "pending" {
+            check["status"] = json!("in_progress");
+            check["conclusion"] = Value::Null;
+        }
+        value[0]["report"]["data"]["ci"]["check_runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(check);
+    }
+    value
+}
+
+#[test]
+fn reviewed_handoff_accepts_unsettled_ci_without_acknowledging_future_signals() {
+    for state in ["missing", "pending", "satisfied"] {
+        for change in ["completion", "review", "failure", "policy"] {
+            let mut f = ready_fixture();
+            let value = unsettled_evidence(state);
+            let observation = observe(&value);
+            assert!(observation.completed.is_none());
+            assert_eq!(observation.evidence["complete"], false);
+            if state == "missing" {
+                // Reproduce the already delivered missing-check event, as well
+                // as cold watcher handoffs in the other cases.
+                f.assign("github").unwrap();
+                f.store
+                    .record_github_observation("https://github.com/o/r/pull/1", &observation, 100)
+                    .unwrap();
+                f.call(json!({"action":"claim","number":1,"force":false}))
+                    .unwrap();
+                f.call(json!({"action":"ready","number":1,"force":false}))
+                    .unwrap();
+            }
+            reviewed_handoff(&mut f, value.clone()).unwrap();
+            let saved: Vec<String> = f
+                .store
+                .db
+                .prepare("SELECT signal FROM issue_github_signals ORDER BY signal")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect();
+            let mut expected: Vec<String> = signal_keys(&observation)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            expected.sort();
+            assert_eq!(saved, expected, "Only observed signals are acknowledged");
+            let before = f.call(json!({"action":"view","number":1})).unwrap();
+            let url = "https://github.com/o/r/pull/1";
+            for at in [200, 300] {
+                f.store = Store::open(&f.root.join("issues.db")).unwrap();
+                f.store
+                    .record_github_observation(url, &observation, at)
+                    .unwrap();
+                let after = f.call(json!({"action":"view","number":1})).unwrap();
+                assert_eq!(after["issue"]["state"], "ready");
+                assert_eq!(after["issue"]["assignment"]["waiting"], true);
+                assert_eq!(after["issue"]["version"], before["issue"]["version"]);
+                assert_eq!(after["comments"], before["comments"]);
+                assert_eq!(
+                    after["issue"]["github_status"]["prs"][url]["evidence"]["ci_settled"],
+                    false
+                );
+            }
+            let mut later = green_policy_evidence();
+            match change {
+                "review" => later[0]["report"]["data"]["reviews"][0]["body"] = json!("New finding"),
+                "failure" => {
+                    later[0]["policy"]["state"] = json!("failure");
+                    later[0]["policy"]["checks"][0]["state"] = json!("failure");
+                    later[0]["report"]["data"]["ci"]["check_runs"][0]["conclusion"] =
+                        json!("failure");
+                    later[0]["report"]["data"]["ci"]["summary"]["pending"] = json!(1);
+                }
+                "policy" => {
+                    later = value.clone();
+                    later[0]["policy"]["strict"] = json!(true);
+                }
+                _ => {}
+            }
+            f.store
+                .record_github_observation(url, &observe(&later), 400)
+                .unwrap();
+            let changed = f.call(json!({"action":"view","number":1})).unwrap();
+            assert_eq!(changed["issue"]["state"], "open", "{state}/{change}");
+            assert_eq!(changed["issue"]["assignment"]["waiting"], false);
+            f.store
+                .record_github_observation(url, &observe(&later), 500)
+                .unwrap();
+            let duplicate = f.call(json!({"action":"view","number":1})).unwrap();
+            assert_eq!(duplicate["comments"], changed["comments"]);
+            assert_eq!(duplicate["issue"]["version"], changed["issue"]["version"]);
+            assert!(
+                reviewed_handoff(&mut f, value).is_err(),
+                "Stale unsettled evidence must be rejected"
+            );
+        }
+    }
+}
+
 #[test]
 fn equivalent_policy_refresh_preserves_ready_and_dependency_until_real_failure() {
     let mut f = ready_fixture();
@@ -448,7 +561,13 @@ fn reviewed_handoff_rejects_incomplete_mismatched_and_missing_snapshots_atomical
     for kind in [
         "report",
         "quota",
-        "pending",
+        "ci_error",
+        "source_error",
+        "unknown_policy",
+        "closed",
+        "policy_pr",
+        "ci_head",
+        "merge",
         "head",
         "base",
         "missing",
@@ -463,7 +582,19 @@ fn reviewed_handoff_rejects_incomplete_mismatched_and_missing_snapshots_atomical
                 value[0]["policy"]["errors"] =
                     json!([{"source":"rulesets","message":"rate limited"}])
             }
-            "pending" => value[0]["report"]["data"]["ci"]["summary"]["pending"] = json!(1),
+            "ci_error" => {
+                value[0]["report"]["data"]["ci"]["errors"] =
+                    json!([{"source":"jobs","message":"unavailable"}])
+            }
+            "source_error" => {
+                value[0]["report"]["data"]["errors"] =
+                    json!([{"source":"reviews","message":"unavailable"}])
+            }
+            "unknown_policy" => value[0]["policy"]["state"] = json!("unknown"),
+            "closed" => value[0]["report"]["data"]["pull_request"]["state"] = json!("closed"),
+            "policy_pr" => value[0]["policy"]["pull_number"] = json!(2),
+            "ci_head" => value[0]["report"]["data"]["ci"]["head_sha"] = json!("other"),
+            "merge" => value[0]["policy"]["merge_sha"] = json!("other"),
             "head" => value[0]["policy"]["head_sha"] = json!("other"),
             "base" => value[0]["policy"]["pr_base_sha"] = json!("other"),
             "missing" => value = json!([]),
