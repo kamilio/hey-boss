@@ -358,6 +358,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "account-slow-reviews" && path == "/repos/acme/demo/pulls/7/reviews" {
         mock.release.notified().await;
     }
+    if mode == "account-slow-comments" && path == "/repos/acme/demo/issues/7/comments" {
+        mock.release.notified().await;
+    }
     if mode == "ci-batch-blocked-checks"
         && path == format!("/repos/acme/demo/commits/{HEAD}/check-runs")
     {
@@ -6351,7 +6354,61 @@ async fn account_background_details_collect_reviews_even_when_ci_is_incomplete()
 }
 
 #[tokio::test]
-async fn account_detail_timeout_preserves_new_comments_and_last_good_threads() {
+async fn account_review_threads_progress_while_rest_details_are_stalled() {
+    for mode in ["account-slow-comments", "account-slow-reviews"] {
+        let h = Harness::new().await;
+        h.mode("account");
+        let mut config = h.config();
+        config.report_timeout = Duration::from_secs(2);
+        config.request_timeout = Duration::from_secs(4);
+        config.max_attempts = 1;
+        let c = Client::with_token(config, "synthetic-token".into()).unwrap();
+        c.refresh_pr_status(Freshness::Revalidate, false)
+            .await
+            .unwrap();
+        let previous_cycle = c.account_refresh_cycle(false).await.unwrap().unwrap();
+        rusqlite::Connection::open(h.config().cache_path)
+            .unwrap()
+            .execute("DELETE FROM cache", [])
+            .unwrap();
+        h.mode(mode);
+        h.phase(4);
+        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+        api.watch_account(60).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while c
+                .account_refresh_cycle(false)
+                .await
+                .unwrap()
+                .is_none_or(|cycle| cycle.started_at_ms <= previous_cycle.started_at_ms)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let page = c
+            .pr_status_page(None, None, 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        let row = page
+            .pull_requests
+            .iter()
+            .find(|row| row["repository"]["nameWithOwner"] == "acme/demo")
+            .unwrap();
+        assert!(row["sourceErrors"]["details"].is_string());
+        assert_eq!(row["complete"], false);
+        assert_eq!(
+            row["reviewThreads"][0]["isResolved"], true,
+            "independent GraphQL evidence was blocked by {mode}"
+        );
+        api.stop().await;
+        h.mock.release.notify_waiters();
+    }
+}
+
+#[tokio::test]
+async fn account_detail_timeout_preserves_successful_sources_and_stalled_evidence() {
     for mode in ["account-slow-threads", "account-slow-reviews"] {
         let h = Harness::new().await;
         h.mode("account");
@@ -6400,7 +6457,11 @@ async fn account_detail_timeout_preserves_new_comments_and_last_good_threads() {
                     .is_some_and(|comments| comments.len() == 2)
                     && row["sourceErrors"]["details"].is_string()
                 {
-                    assert_eq!(row["reviewThreads"], old_threads);
+                    if mode == "account-slow-threads" {
+                        assert_eq!(row["reviewThreads"], old_threads);
+                    } else {
+                        assert_eq!(row["reviewThreads"][0]["isResolved"], true);
+                    }
                     assert!(!row["complete"].as_bool().unwrap());
                     assert!(row["sourceErrors"]["details"].is_string());
                     break;
@@ -6676,11 +6737,19 @@ async fn hard_quota_cooldowns_defer_the_roster_and_keep_cached_neighbors_readabl
         assert!(cycle.attempted <= 3, "cooldown swept the roster: {cycle:?}");
         assert!(cycle.deferred >= 22);
         assert!(cycle.cycle_budget_exhausted);
-        assert_eq!(
-            h.calls().len(),
-            calls,
-            "background reads bypassed the hard cooldown"
-        );
+        let after_calls = h.calls();
+        if secondary {
+            assert_eq!(after_calls.len(), calls, "secondary cooldown is global");
+        } else {
+            assert!(
+                after_calls.len() > calls
+                    && after_calls[calls..]
+                        .iter()
+                        .all(|call| call.path == "/graphql"),
+                "only independent GraphQL sources may progress during core exhaustion: {:?}",
+                &after_calls[calls..]
+            );
+        }
         let after = c
             .pr_status_page(None, None, 1000, Duration::ZERO)
             .await
@@ -6703,7 +6772,7 @@ async fn hard_quota_cooldowns_defer_the_roster_and_keep_cached_neighbors_readabl
             .unwrap();
         assert!(cached.complete);
         assert_eq!(cached.oldest_validation_at_ms, warm.oldest_validation_at_ms);
-        assert_eq!(h.calls().len(), calls);
+        assert_eq!(h.calls().len(), after_calls.len());
     }
 }
 
