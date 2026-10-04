@@ -596,9 +596,10 @@ waiter also promotes the background PR, CI or policy report holding its lock,
 so it can finish without leaving that waiter behind the queue. After at
 most three interactive dispatches in a quota lane, an eligible background
 request in that lane gets a turn.
-Final REST head checks for ready foreground reports take priority over other
-foreground reads, then yield to an ordinary foreground read in the same quota.
-Coalesced checks inherit that priority; background fairness still applies.
+Final REST head checks for ready reports take priority over other reads of the
+same foreground/background class, then yield to an ordinary read in that class
+and quota. Coalesced checks inherit that priority; foreground/background fairness
+still applies.
 Priority never bypasses quota exhaustion, cooldowns, lane limits or deadlines,
 and cannot preempt an already active socket.
 An explicit GitHub `404: Branch not protected` establishes absence of legacy

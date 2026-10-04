@@ -427,7 +427,7 @@ impl Scheduler {
         let instance = format!("{:032x}", fastrand::u128(..));
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
-        let mut completion_yields = std::collections::HashSet::<String>::new();
+        let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
@@ -501,29 +501,31 @@ impl Scheduler {
                 })
                 .map(|job| job.quota())
                 .collect();
-            // Alternate prioritized completion checks with ordinary foreground
-            // work in the same quota. Like background fairness, hold even free
+            // Alternate completion checks with ordinary work of the same
+            // priority and quota. Like background fairness, hold even free
             // probes while an owed request waits for its pacing slot; changed
             // 200 responses must not keep postponing that request's timer.
             let ordinary_turns: std::collections::HashSet<_> = pending
                 .iter()
                 .filter(|job| {
-                    job.interactive.load(Ordering::Relaxed)
-                        && !job.completion_validation.load(Ordering::Relaxed)
-                        && completion_yields.contains(&job.quota())
+                    !job.completion_validation.load(Ordering::Relaxed)
+                        && completion_yields
+                            .contains(&(job.quota(), job.interactive.load(Ordering::Relaxed)))
                         && job.ready_at <= now
                         && !lane_busy(&active, job, prod)
                 })
-                .map(|job| job.quota())
+                .map(|job| (job.quota(), job.interactive.load(Ordering::Relaxed)))
                 .collect();
             let waiting_for_turn = |job: &Job| {
                 let interactive = job.interactive.load(Ordering::Relaxed);
                 let quota = job.quota();
+                let completing = job.completion_validation.load(Ordering::Relaxed);
                 if background_turns.contains(&quota) {
-                    interactive
+                    interactive || (completing && ordinary_turns.contains(&(quota, false)))
+                } else if ordinary_turns.contains(&(quota.clone(), true)) {
+                    !interactive || completing
                 } else {
-                    ordinary_turns.contains(&quota)
-                        && (!interactive || job.completion_validation.load(Ordering::Relaxed))
+                    !interactive && completing && ordinary_turns.contains(&(quota, false))
                 }
             };
             let next = {
@@ -544,10 +546,7 @@ impl Scheduler {
                         && job.interactive.load(Ordering::Relaxed)
                             == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 };
-                let completing = |job: &Job| {
-                    job.interactive.load(Ordering::Relaxed)
-                        && job.completion_validation.load(Ordering::Relaxed)
-                };
+                let completing = |job: &Job| job.completion_validation.load(Ordering::Relaxed);
                 pending
                     .iter()
                     .position(|job| preferred(job) && completing(job))
@@ -595,11 +594,12 @@ impl Scheduler {
                 } else {
                     0
                 };
-                if job.interactive.load(Ordering::Relaxed) && !job.minting {
+                if !job.minting {
+                    let class = (job.quota(), job.interactive.load(Ordering::Relaxed));
                     if job.completion_validation.load(Ordering::Relaxed) {
-                        completion_yields.insert(job.quota());
+                        completion_yields.insert(class);
                     } else {
-                        completion_yields.remove(&job.quota());
+                        completion_yields.remove(&class);
                     }
                 }
                 if job.minting {
