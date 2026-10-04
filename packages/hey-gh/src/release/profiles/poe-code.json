@@ -1,0 +1,20 @@
+{
+  "repository": "poe-platform/poe-code",
+  "branch": "main",
+  "target": "commit",
+  "gates": [
+    {
+      "name": "main validation",
+      "workflow": "release.yml",
+      "purpose": "validation",
+      "jobs": [
+        {"name": "validate / build", "steps": ["Build workspace and CLI outputs"]},
+        {"name": "validate / checks", "steps": ["Smoke-test freshly built packed CLI"]},
+        {"name": "validate / audit", "steps": ["Run required lint stress tests"]},
+        {"name": "validate / unit", "steps": ["Run fresh unit and native checks"]},
+        {"name": "validate / unit-cached", "steps": ["Run cache-eligible unit checks"]},
+        {"name": "validate / bash (*", "count": 4, "steps": ["Run balanced Bash shard"]}
+      ]
+    }
+  ]
+}

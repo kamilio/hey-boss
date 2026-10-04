@@ -25,6 +25,21 @@ pub struct ApiClient {
     background: bool,
 }
 impl ApiClient {
+    /// Explicit release observations; does not register watches or notify agents.
+    pub async fn release_report(
+        &self,
+        request: &crate::release::Request,
+        freshness: Freshness,
+    ) -> Result<crate::release::Batch> {
+        request.project.validate()?;
+        self.read(
+            self.http
+                .post(self.url("v1/releases/observe"))
+                .query(&self.pr_query(freshness)?)
+                .json(request),
+        )
+        .await
+    }
     /// Authenticated GitHub identity, using the shared daemon cache.
     pub async fn viewer(&self, freshness: Freshness) -> Result<crate::Response> {
         self.read(
@@ -153,7 +168,7 @@ impl ApiClient {
         })
     }
     /// Use the daemon's background lane and bounded request lifetime for
-    /// targeted PR, CI, policy, and metadata reads. Other methods are unchanged.
+    /// targeted PR, CI, policy, metadata, and release reads. Other methods are unchanged.
     pub fn background(mut self) -> Self {
         self.background = true;
         self

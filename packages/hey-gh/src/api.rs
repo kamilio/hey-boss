@@ -8,7 +8,7 @@ use axum::{
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -87,6 +87,7 @@ impl Api {
     pub fn router_with_auth(&self, token: Option<String>) -> Router {
         Router::new()
             .route("/v1/status", get(status))
+            .route("/v1/releases/observe", post(releases))
             .route("/v1/viewer", get(viewer))
             .route("/v1/pr-status", get(pr_status))
             .route("/v1/prs/{owner}/{repo}", get(my_prs))
@@ -961,6 +962,23 @@ async fn pr_status(
         }
     }
     Ok(Json(page))
+}
+
+async fn releases(
+    State(api): State<Api>,
+    Query(query): Query<ReadQuery>,
+    Json(request): Json<crate::release::Request>,
+) -> ApiResult<Json<crate::release::Batch>> {
+    let read = api.0.client.release_report(&request, query.freshness()?);
+    // Release batches already enforce a per-target deadline and a total budget,
+    // returning completed targets so the durable queue can rotate fairly.
+    Ok(Json(if query.background {
+        crate::client::BACKGROUND_READ.scope((), read).await?
+    } else {
+        crate::client::INTERACTIVE_READ
+            .scope(crate::client::foreground_priority(), read)
+            .await?
+    }))
 }
 
 async fn status(State(api): State<Api>) -> Json<Status> {
