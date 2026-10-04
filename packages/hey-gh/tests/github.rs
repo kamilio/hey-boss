@@ -1802,6 +1802,31 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
         .filter(|line| line.contains("GitHub request finished"))
         .collect();
     assert_eq!(completed.len(), 2, "{text}");
+    let field = |line: &str, name: &str| {
+        line.split(&format!("{name}="))
+            .nth(1)
+            .unwrap_or_else(|| panic!("missing {name}: {line}"))
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    for finished in &completed {
+        let dispatched = text
+            .lines()
+            .find(|line| line.contains("GitHub request dispatched") && id(line) == id(finished))
+            .unwrap();
+        assert_eq!(
+            field(finished, "request_key"),
+            field(dispatched, "request_key")
+        );
+        assert_eq!(
+            field(finished, "auth_scope"),
+            field(dispatched, "auth_scope")
+        );
+        assert!(finished.contains("foreground=false"));
+        assert!(finished.contains("completion_validation=false"));
+    }
     let recovered = completed.iter().find(|line| id(line) == retry_id).unwrap();
     assert!(recovered.contains("attempts=2"));
     assert!(recovered.contains("succeeded=true"));
@@ -1876,6 +1901,90 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
     assert_ne!(id(failed), retry_id);
     assert!(!text.contains("timeout-synthetic-token"));
     h.mock.release.notify_waiters();
+
+    // An expired queued request has no dispatch line to supply attribution.
+    h.mode("");
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_millis(100);
+    let queued = Client::with_token(config, "private-queued-token".into()).unwrap();
+    queued
+        .get("paced-shared", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let api = hey_gh::api::Api::new(queued.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = hey_gh::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    assert!(matches!(
+        sdk.required_checks_for_pr(
+            "private-owner/private-repository",
+            123,
+            Freshness::Revalidate
+        )
+        .await,
+        Err(Error::Deadline)
+    ));
+    server.abort();
+    assert_eq!(queued.status().network_requests, 1);
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let expired = text
+        .lines()
+        .find(|line| line.contains("GitHub request finished") && line.contains("attempts=0"))
+        .unwrap();
+    assert!(expired.contains("foreground=true"));
+    assert!(expired.contains("completion_validation=false"));
+    assert!(expired.contains("error_code=\"deadline\""));
+    assert!(!expired.contains("http_status="));
+    let url = format!("{}repos/private-owner/private-repository/pulls/123", h.url);
+    use sha2::Digest;
+    let expected = format!("{:x}", sha2::Sha256::digest(url.as_bytes()));
+    assert_eq!(field(expired, "request_key"), expected);
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.contains("GitHub request dispatched") && id(line) == id(expired))
+    );
+
+    // Expose the actual pacing window used by a subsequently dispatched read.
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_secs(5);
+    let paced = Client::with_token(config, "private-paced-token".into()).unwrap();
+    paced
+        .get("paced-shared", Freshness::Revalidate)
+        .await
+        .unwrap();
+    paced
+        .get("private-paced-read", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let dispatch = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("GitHub request dispatched"))
+        .unwrap();
+    assert!(field(dispatch, "elapsed_ms").parse::<u64>().unwrap() >= 1500);
+    assert!(field(dispatch, "pacing_ms").parse::<u64>().unwrap() >= 2000);
+    assert!(field(dispatch, "pacing_reset").parse::<u64>().unwrap() > 0);
+    assert_eq!(field(dispatch, "pacing_share").parse::<f64>().unwrap(), 1.0);
+    for private in [
+        "private-queued-token",
+        "private-paced-token",
+        "private-owner",
+        "private-repository",
+        "private-paced-read",
+        h.url.as_str(),
+    ] {
+        assert!(
+            !text.contains(private),
+            "new diagnostic leaked a private value"
+        );
+    }
 }
 
 #[tokio::test]
