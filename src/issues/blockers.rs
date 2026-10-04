@@ -24,7 +24,7 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
     )?;
     let indexed: bool = db.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='index' AND name IN ('issue_dependency_sources','issue_active_graph')", [], |r|r.get(0))?;
     let notices: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_notice_resets')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_comment_resets')",
         [],
         |r| r.get(0),
     )?;
@@ -543,21 +543,23 @@ fn reconcile_graph(
     rework: bool,
 ) -> Result<()> {
     let graph = Graph::load_active(db, project)?;
-    // One indexed lookup per active issue, batched across the database service.
-    // Only issues with a notice need full blocker identities for comparison.
-    let notices = db.query_collect("SELECT e.issue_number,e.id,e.data FROM json_each(?2) n
-        CROSS JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=?1 AND issue_number=n.value AND action='dependency_rework' ORDER BY id DESC LIMIT 1)
-        WHERE e.id>coalesce((SELECT event_id FROM dependency_notice_resets WHERE project_id=?1 AND issue_number=e.issue_number),0)",
+    // A comment can arrive before its audit event in a split fleet batch.
+    // Use the visible notice as evidence; event metadata is not its identity.
+    let latest = super::dependency_notices::latest_comment("?1", "n.value");
+    let numbers = super::dependency_notices::numbers("c.body");
+    let notices = db.query_collect(&format!("SELECT c.issue_number,c.id,{numbers} FROM json_each(?2) n
+        CROSS JOIN comments c ON c.id=({latest})
+        WHERE c.id>coalesce((SELECT comment_id FROM dependency_comment_resets WHERE project_id=?1 AND issue_number=c.issue_number),0)"),
         params![project,serde_json::to_string(&graph.issues.keys().collect::<Vec<_>>())?],
         |r| -> rusqlite::Result<_> { Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)) })?;
     let mut notified = BTreeSet::new();
     for (number, id, data) in notices {
         let data: Value = serde_json::from_str(&data)?;
-        let previous = data["dependencies"]
+        let previous = data
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|entry| entry[0].as_i64())
+            .filter_map(Value::as_i64)
             .collect::<BTreeSet<_>>();
         let active = graph
             .active(number)
@@ -567,7 +569,8 @@ fn reconcile_graph(
         if !active.is_empty() && active == previous {
             notified.insert(number);
         } else {
-            db.execute("INSERT INTO dependency_notice_resets VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET event_id=excluded.event_id", params![project,number,id])?;
+            db.execute("INSERT INTO dependency_notice_resets(project_id,issue_number,event_id) VALUES(?1,?2,coalesce((SELECT id FROM events WHERE project_id=?1 AND issue_number=?2 AND action='dependency_rework' ORDER BY id DESC LIMIT 1),0)) ON CONFLICT(project_id,issue_number) DO UPDATE SET event_id=excluded.event_id", params![project,number])?;
+            db.execute("INSERT INTO dependency_comment_resets VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET comment_id=excluded.comment_id", params![project,number,id])?;
         }
     }
     for (&number, issue) in &graph.issues {
