@@ -1479,7 +1479,7 @@ impl Client {
                     .changes
                     .into_iter()
                     .filter(|c| c.resource.starts_with(&prefix) && matches(&c.data["pullRequest"]))
-                    .map(|c| PrStatusChange {
+                    .map(|mut c| PrStatusChange {
                         cursor: wrap(&c.cursor),
                         changed_fields: c.data["changedFields"]
                             .as_array()
@@ -1490,7 +1490,11 @@ impl Client {
                         observed_at_ms: c.observed_at_ms,
                         kind: c.data["kind"].as_str().unwrap_or("updated").to_owned(),
                         activity: c.data["activity"].as_array().cloned().unwrap_or_default(),
-                        pull_request: c.data["pullRequest"].clone(),
+                        pull_request: c
+                            .data
+                            .get_mut("pullRequest")
+                            .map(Value::take)
+                            .unwrap_or_default(),
                     })
                     .collect();
                 position = page.next_cursor;
@@ -1523,7 +1527,7 @@ impl Client {
                     && s.data["pullRequest"]["state"] == "OPEN"
                     && matches(&s.data["pullRequest"])
             })
-            .map(|s| s.data["pullRequest"].clone())
+            .filter_map(|mut s| s.data.get_mut("pullRequest").map(Value::take))
             .collect();
         let complete = pulls.iter().all(|p| p["complete"] == true);
         self.with_discovery_health(
