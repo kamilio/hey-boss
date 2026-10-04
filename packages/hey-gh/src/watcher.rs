@@ -11,6 +11,9 @@ pub struct Observation {
     pub completed: Option<String>,
     pub feedback: Vec<String>,
     pub evidence: Value,
+    /// Exact policy inputs for local legacy migration; never a display payload.
+    #[serde(skip)]
+    pub policy_comparison: Option<PolicyComparison>,
 }
 
 /// The watcher supports canonical GitHub pull-request links.
@@ -212,6 +215,7 @@ fn ci_signals(
         ]))
     });
     let mut observation = Observation {
+        policy_comparison: None,
         head: ci.head_sha.clone(),
         blocking,
         completed,
@@ -229,11 +233,17 @@ fn ci_signals(
         ),
     };
     if current {
-        observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
-        observation.evidence["legacy_policy_fingerprint"] =
-            json!(legacy_policy_fingerprint(policy));
+        attach_policy(&mut observation, policy);
     }
     observation
+}
+
+fn attach_policy(observation: &mut Observation, policy: &RequiredChecksReport) {
+    let legacy = legacy_policy_input(policy);
+    observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
+    observation.evidence["legacy_policy_fingerprint"] =
+        json!(format!("policy:{}", fingerprint(&legacy)));
+    observation.policy_comparison = Some(PolicyComparison { legacy });
 }
 
 fn policy_fingerprint(policy: &RequiredChecksReport) -> String {
@@ -291,27 +301,71 @@ fn canonical_rule_parameters(value: &Value) -> Value {
     }
 }
 
-fn legacy_policy_fingerprint(policy: &RequiredChecksReport) -> String {
+fn legacy_policy_input(policy: &RequiredChecksReport) -> Value {
     let mut rules = policy.rules.clone();
     rules.sort_by_cached_key(Value::to_string);
-    format!(
-        "policy:{}",
-        fingerprint(&json!([
-            policy.head_sha,
-            policy.base_branch,
-            policy.base_sha,
-            policy.pr_base_sha,
-            policy.policy_identity,
-            policy.policy_sha,
-            policy.strict,
-            rules,
-            policy
-                .checks
-                .iter()
-                .map(|check| (&check.context, check.app_id))
-                .collect::<std::collections::BTreeSet<_>>()
-        ]))
-    )
+    json!([
+        policy.head_sha,
+        policy.base_branch,
+        policy.base_sha,
+        policy.pr_base_sha,
+        policy.policy_identity,
+        policy.policy_sha,
+        policy.strict,
+        rules,
+        policy
+            .checks
+            .iter()
+            .map(|check| (&check.context, check.app_id))
+            .collect::<std::collections::BTreeSet<_>>()
+    ])
+}
+
+#[cfg(test)]
+fn legacy_policy_fingerprint(policy: &RequiredChecksReport) -> String {
+    format!("policy:{}", fingerprint(&legacy_policy_input(policy)))
+}
+
+/// Retains unbounded policy inputs only for the duration of a local observation.
+#[derive(Clone, Debug)]
+pub struct PolicyComparison {
+    legacy: Value,
+}
+
+impl PolicyComparison {
+    /// Prove that today's full policy reproduces the saved legacy identity when
+    /// only validation tips are restored. A bounded check list is never proof.
+    pub fn equivalent_legacy<'a>(&self, previous: &'a Value) -> Option<&'a str> {
+        let old = previous["policy_fingerprint"].as_str()?;
+        if !old.starts_with("policy:") || old.starts_with("policy:v2:") {
+            return None;
+        }
+        let branch = previous["source_bases"]["required"]["ref"].as_str()?;
+        let pr_base = previous["source_bases"]["required"]["sha"].as_str()?;
+        let policy_sha = previous["policy_sha"].as_str()?;
+        // Older evidence omitted the direct branch tip. It is recoverable only
+        // when the direct base and effective policy branch are the same branch.
+        let identity = previous.get("policy_identity")?;
+        if identity["branch"].as_str() != Some(branch)
+            || self.legacy[0] != previous["head"]
+            || self.legacy[1] != branch
+        {
+            return None;
+        }
+        let mut candidate = self.legacy.clone();
+        candidate[2] = json!(policy_sha);
+        candidate[3] = json!(pr_base);
+        candidate[5] = json!(policy_sha);
+        // Native stack base SHA is freshness; membership and ordering are not.
+        if let Some(base) = candidate[4]
+            .get_mut("stack")
+            .and_then(|stack| stack.get_mut("base"))
+            .and_then(Value::as_object_mut)
+        {
+            base.insert("sha".into(), identity["stack"]["base"]["sha"].clone());
+        }
+        (format!("policy:{}", fingerprint(&candidate)) == old).then_some(old)
+    }
 }
 
 fn required_gaps(policy: &RequiredChecksReport) -> Vec<String> {
@@ -356,6 +410,7 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
     blocking.sort();
     blocking.dedup();
     let mut observation = Observation {
+        policy_comparison: None,
         head: policy.head_sha.clone(),
         blocking,
         completed: None,
@@ -371,9 +426,7 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
         && policy.errors.is_empty()
         && !policy.head_sha.is_empty()
     {
-        observation.evidence["policy_fingerprint"] = json!(policy_fingerprint(policy));
-        observation.evidence["legacy_policy_fingerprint"] =
-            json!(legacy_policy_fingerprint(policy));
+        attach_policy(&mut observation, policy);
     }
     observation
 }
@@ -576,6 +629,88 @@ mod tests {
             assert_ne!(policy_fingerprint(&changed), before, "{kind}");
         }
     }
+    #[test]
+    fn legacy_policy_proof_uses_complete_rules_and_preserves_stack_identity() {
+        for stacked in [false, true] {
+            let (_, mut policy) = fixture();
+            policy.pull_request_state = Some("open".into());
+            policy.base_sha = Some("old-main".into());
+            policy.policy_sha = Some("old-main".into());
+            policy.pr_base_sha = Some("pr-base".into());
+            policy.policy_identity = Some(crate::policy::PolicyIdentity {
+                branch: "main".into(),
+                stack: stacked.then(|| json!({"id":1,"number":2,"position":1,"size":2,"base":{"ref":"main","sha":"pr-base"}})),
+            });
+            policy.rules = vec![
+                json!({"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test","integration_id":1}]}}),
+            ];
+            // Display evidence omits most checks; a changed omitted requirement
+            // must still fail the exact legacy proof.
+            policy.checks = (0..300)
+                .map(|n| {
+                    let mut check = policy.checks[0].clone();
+                    check.context = format!("check-{n}");
+                    check
+                })
+                .collect();
+            let mut previous = observe_required(&policy).evidence;
+            previous["policy_fingerprint"] = json!(legacy_policy_fingerprint(&policy));
+            assert!(previous["omitted"]["required"].as_u64().unwrap() > 0);
+            let old = previous["policy_fingerprint"].as_str().unwrap();
+            policy.base_sha = Some("advanced-main".into());
+            policy.policy_sha = Some("advanced-main".into());
+            if stacked {
+                policy
+                    .policy_identity
+                    .as_mut()
+                    .unwrap()
+                    .stack
+                    .as_mut()
+                    .unwrap()["base"]["sha"] = json!("advanced-stack-base");
+            }
+            let observation = observe_required(&policy);
+            assert_eq!(
+                observation
+                    .policy_comparison
+                    .as_ref()
+                    .unwrap()
+                    .equivalent_legacy(&previous),
+                Some(old)
+            );
+            assert!(
+                serde_json::to_value(&observation)
+                    .unwrap()
+                    .get("policy_comparison")
+                    .is_none()
+            );
+            for kind in ["rule", "omitted_check", "head", "branch", "strict", "stack"] {
+                let mut changed = policy.clone();
+                match kind {
+                    "rule" => changed.rules[0]["parameters"]["new_requirement"] = json!(true),
+                    "omitted_check" => changed.checks[299].app_id = Some(99),
+                    "head" => changed.head_sha = "new-head".into(),
+                    "branch" => changed.base_branch = "other".into(),
+                    "strict" => changed.strict = !changed.strict,
+                    "stack" => {
+                        changed.policy_identity.as_mut().unwrap().stack = Some(
+                            json!({"id":99,"number":2,"position":2,"size":3,"base":{"ref":"main","sha":"pr-base"}}),
+                        )
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    observe_required(&changed)
+                        .policy_comparison
+                        .as_ref()
+                        .unwrap()
+                        .equivalent_legacy(&previous),
+                    None,
+                    "{kind}/{stacked}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn ci_only_observation_wakes_before_review_sources_are_read() {
         let (mut report, policy) = fixture();

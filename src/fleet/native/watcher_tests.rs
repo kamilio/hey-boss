@@ -65,13 +65,21 @@ fn equivalent_policy_refresh_propagates_without_rescheduling_ready_dependencies(
     let mut policy: hey_gh::RequiredChecksReport = serde_json::from_value(json!({
         "repository":"o/r","pull_number":1,"head_sha":"head","base_branch":"main",
         "base_sha":"base","policy_sha":"base","pr_base_sha":"base","state":"satisfied",
+        "policy_identity":{"branch":"main","stack":null},
         "strict":false,"up_to_date":true,"checks":[{"context":"test","app_id":15368,
         "state":"satisfied","sha":"head","url":null}],"rules":[],"errors":[],
         "cursor":"unused","pull_request_state":"open"
     }))
     .unwrap();
-    main.record_github_observation(url, &hey_gh::watcher::observe_required(&policy), 100)
-        .unwrap();
+    let mut legacy = hey_gh::watcher::observe_required(&policy);
+    legacy.policy_comparison = None;
+    legacy.evidence["policy_fingerprint"] = legacy.evidence["legacy_policy_fingerprint"].clone();
+    legacy
+        .evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("legacy_policy_fingerprint");
+    main.record_github_observation(url, &legacy, 100).unwrap();
     replica::apply_pull(
         &peer_db,
         "peer",

@@ -1868,6 +1868,7 @@ mod tests {
             .record_github_observation(
                 "https://github.com/example/repo/pull/1",
                 &hey_gh::watcher::Observation {
+                    policy_comparison: None,
                     head: "head".into(),
                     blocking: vec![key.into()],
                     completed: None,

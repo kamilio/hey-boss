@@ -126,7 +126,9 @@ pub(super) fn record(
         WATCHER,
         "commented",
         now,
-        &json!({"comment_id":db.last_insert_rowid(),"body":body}),
+        &json!({"comment_id":db.last_insert_rowid(),"body":body,
+            "observer_build":env!("HEY_BOSS_BUILD_ID"),"head":observation.head,
+            "signals":new,"policy_fingerprint":observation.evidence["policy_fingerprint"]}),
     )?;
     Ok(())
 }
@@ -138,6 +140,7 @@ mod tests {
     #[test]
     fn new_reasons_are_separate_from_already_seen_failures() {
         let observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "0123456789abcdef".into(),
             blocking: vec!["failed".into()],
             completed: Some("done".into()),
@@ -158,6 +161,7 @@ mod tests {
     #[test]
     fn long_and_hostile_check_names_remain_bounded_plain_text() {
         let observation = hey_gh::watcher::Observation {
+            policy_comparison: None,
             head: "head".into(),
             blocking: vec!["failed".into()],
             completed: None,

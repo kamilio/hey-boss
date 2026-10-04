@@ -226,6 +226,141 @@ fn semantic_policy_upgrade_recognizes_only_exact_legacy_evidence() {
     }
 }
 
+fn legacy_ready_fixture() -> (Fixture, Value) {
+    let mut f = ready_fixture();
+    let mut value = green_policy_evidence();
+    value[0]["policy"]["policy_identity"] = json!({"branch":"main","stack":null});
+    reviewed_handoff(&mut f, value.clone()).unwrap();
+    let mut legacy = observe(&value);
+    legacy.policy_comparison = None;
+    legacy.evidence["policy_fingerprint"] = legacy.evidence["legacy_policy_fingerprint"].clone();
+    legacy
+        .evidence
+        .as_object_mut()
+        .unwrap()
+        .remove("legacy_policy_fingerprint");
+    f.store
+        .db
+        .execute(
+            "DELETE FROM issue_github_signals WHERE signal LIKE 'policy:%'",
+            [],
+        )
+        .unwrap();
+    f.store
+        .record_github_observation("https://github.com/o/r/pull/1", &legacy, 100)
+        .unwrap();
+    f.call(json!({"action":"create","title":"Dependent","body":"","labels":[]}))
+        .unwrap();
+    f.call(json!({"action":"set_blockers","number":2,"blockers":[1]}))
+        .unwrap();
+    (f, value)
+}
+
+#[test]
+fn legacy_policy_upgrade_with_advanced_main_preserves_ready_and_dependent() {
+    let (mut f, mut value) = legacy_ready_fixture();
+    let url = "https://github.com/o/r/pull/1";
+    let before = f.call(json!({"action":"view","number":1})).unwrap();
+    value[0]["policy"]["base_sha"] = json!("advanced-main");
+    value[0]["policy"]["policy_sha"] = json!("advanced-main");
+    let policy = serde_json::from_value(value[0]["policy"].clone()).unwrap();
+    for (at, observation) in [
+        (200, hey_gh::watcher::observe_required(&policy)),
+        (300, observe(&value)),
+        (400, observe(&value)),
+    ] {
+        f.store
+            .record_github_observation(url, &observation, at)
+            .unwrap();
+        f.store = Store::open(&f.root.join("issues.db")).unwrap();
+        let after = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(after["issue"]["state"], "ready");
+        assert_eq!(after["issue"]["version"], before["issue"]["version"]);
+        assert_eq!(after["comments"], before["comments"]);
+        assert_eq!(
+            after["issue"]["github_status"]["prs"][url]["evidence"]["policy_sha"],
+            "advanced-main"
+        );
+        assert_eq!(
+            get_issue(&f.store.db, "named:test", 2, false)
+                .unwrap()
+                .state,
+            "open"
+        );
+    }
+    // A queued pre-upgrade observation cannot replace the fresh baseline.
+    let mut old = observe(&green_policy_evidence());
+    old.evidence["policy_fingerprint"] = old.evidence["legacy_policy_fingerprint"].clone();
+    f.store.record_github_observation(url, &old, 150).unwrap();
+    assert_eq!(
+        get_issue(&f.store.db, "named:test", 1, false)
+            .unwrap()
+            .state,
+        "ready"
+    );
+}
+
+#[test]
+fn legacy_policy_upgrade_keeps_real_changes_and_requires_acknowledgement() {
+    for kind in [
+        "strict",
+        "rules",
+        "app",
+        "failure",
+        "missing",
+        "head",
+        "review",
+        "conflict",
+        "unacknowledged",
+        "missing_proof",
+    ] {
+        let (mut f, mut value) = legacy_ready_fixture();
+        value[0]["policy"]["base_sha"] = json!("advanced-main");
+        value[0]["policy"]["policy_sha"] = json!("advanced-main");
+        match kind {
+            "strict" => value[0]["policy"]["strict"] = json!(true),
+            "rules" => {
+                value[0]["policy"]["rules"] = json!([{"type":"pull_request","parameters":{"required_approving_review_count":2}}])
+            }
+            "app" => value[0]["policy"]["checks"][0]["app_id"] = json!(42),
+            "failure" | "missing" => {
+                value[0]["policy"]["state"] = json!(kind);
+                value[0]["policy"]["checks"][0]["state"] = json!(kind);
+                value[0]["report"]["data"]["ci"]["check_runs"][0]["conclusion"] = json!("failure");
+            }
+            "head" => {
+                value[0]["policy"]["head_sha"] = json!("new-head");
+                value[0]["report"]["data"]["ci"]["head_sha"] = json!("new-head");
+                value[0]["report"]["data"]["pull_request"]["head"]["sha"] = json!("new-head");
+            }
+            "review" => value[0]["report"]["data"]["reviews"][0]["body"] = json!("Fix a new race"),
+            "conflict" => value[0]["report"]["data"]["conflicts"] = json!("conflicting"),
+            "unacknowledged" => {
+                f.store.db.execute("UPDATE issue_github_signals SET signal='policy:different' WHERE signal LIKE 'policy:%'", []).unwrap();
+            }
+            "missing_proof" => {
+                f.store.db.execute("UPDATE issue_github_watches SET status=json_remove(status,'$.prs.\"https://github.com/o/r/pull/1\".evidence.policy_sha')", []).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        for at in [200, 300] {
+            f.store
+                .record_github_observation("https://github.com/o/r/pull/1", &observe(&value), at)
+                .unwrap();
+        }
+        let view = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(view["issue"]["state"], "open", "{kind}");
+        assert_eq!(view["comments"].as_array().unwrap().len(), 1, "{kind}");
+        assert_eq!(
+            get_issue(&f.store.db, "named:test", 2, false)
+                .unwrap()
+                .state,
+            "blocked",
+            "{kind}"
+        );
+    }
+}
+
 fn changed_evidence(kind: &str) -> Value {
     let mut value = evidence();
     match kind {
