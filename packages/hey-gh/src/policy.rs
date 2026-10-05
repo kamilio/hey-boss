@@ -118,6 +118,74 @@ pub struct RequiredChecksReport {
 }
 
 impl Client {
+    // Admission only: avoid an independent policy rotation competing to hydrate
+    // cold/stale CI. The actual policy read still validates every source and
+    // final selector normally. This probe never dispatches GitHub requests.
+    pub(crate) async fn policy_ci_cached(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<bool> {
+        let Freshness::MaxAge(age) = freshness else {
+            return Ok(true);
+        };
+        crate::report::VALIDATIONS
+            .scope(
+                std::cell::RefCell::new(Vec::new()),
+                crate::report::ci_discovery_scope(
+                    repository,
+                    number,
+                    crate::entity::scope(async {
+                        let Some(pr) = self.peek_ci_pull_request(repository, number).await? else {
+                            return Ok(false);
+                        };
+                        let Some(head) = pr.data["head"]["sha"]
+                            .as_str()
+                            .filter(|sha| crate::repository::valid_sha(sha))
+                        else {
+                            return Ok(false);
+                        };
+                        let merge = pr.data["merge_commit_sha"]
+                            .as_str()
+                            .filter(|sha| crate::repository::valid_sha(sha));
+                        let cached = self
+                            .stored_pr_snapshot(
+                                &format!("ci://{}/{repository}/{number}", self.hostname()),
+                                repository,
+                                pr.data["node_id"].as_str(),
+                            )
+                            .await?;
+                        if cached.is_none_or(|ci| {
+                            ci["head_sha"] != head
+                                || ci["merge_sha"].as_str() != merge
+                                || !ci["errors"].as_array().is_some_and(Vec::is_empty)
+                        }) {
+                            return Ok(false);
+                        }
+                        crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
+                        let ci = self
+                            .required_ci_report(repository, head, merge, Freshness::CachedOnly)
+                            .await?;
+                        Ok(ci.errors.is_empty()
+                            && crate::report::VALIDATIONS.with(|records| {
+                                let records = records.borrow();
+                                !records.is_empty()
+                                    && records.iter().all(|record| {
+                                        record.validated_at_ms > 0
+                                            && crate::now_ms()
+                                                .checked_sub(record.validated_at_ms)
+                                                .is_some_and(|age_ms| {
+                                                    (age_ms as u128) < age.as_millis()
+                                                })
+                                    })
+                            }))
+                    }),
+                ),
+            )
+            .await
+    }
+
     async fn initial_policy_pr(
         &self,
         repository: &str,

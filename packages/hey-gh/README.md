@@ -87,11 +87,23 @@ hey-gh status
 
 PR numbers above are examples. `watch` registrations and discovery state survive restarts. A repository watch discovers new PRs and refreshes a previously tracked PR once after it closes or merges; unsuccessful refreshes remain tracked for retry. CI polling runs independently of the full comment/review scan. Background account hydration allows five seconds without source progress, excluding deliberate scheduler queue waits; each cycle remains bounded and unfinished work stays queued. `/v1/watches` reports each loop's last successful refresh and errors. Covered individual watches report stale or pending evidence when their lane's conservative validation clock is unknown or older than two watch intervals (at least 60 seconds), even if cached data is complete.
 
-Each background account lane hydrates at most two PRs at once, so a cached PR
+The CI and detail account lanes hydrate at most two PRs at once, so a cached PR
 can finish while another waits for metadata or quota. Each PR keeps its own
 stall budget; admission advances the durable rotation before work starts.
 Small embedded queues remain sequential. Request concurrency, queue capacity,
 quota pacing, freshness, and foreground reservations still use the shared scheduler.
+
+Required-check policy has a separate durable rotation with one active PR. It
+starts only when a cache-only check finds recent, complete CI prerequisites;
+CI completion wakes the rotation without waiting for its next periodic tick.
+Policy keeps normal source freshness, final selector checks, queue pacing and
+collection deadlines. Slow policy reads do not hold the CI rotation open or
+turn its successful observations into failures. Deferred policy work stays
+queued, including PRs counted separately as `waiting_for_ci`. `watches` exposes independent
+`policy_last_poll_at_ms`, `policy_last_success_at_ms`, `policy_last_error` and
+`policy_last_cycle`; policy errors remain in the required-check report rather
+than overwriting CI/detail health. PR `complete` still describes CI/details,
+not required-check satisfaction.
 
 `pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without comment requests. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
 
@@ -201,7 +213,7 @@ counts, attempts, unique PRs, current health, or proof that an unlisted source
 succeeded. Repository names, PR numbers, comment bodies, and unknown labels are
 excluded from these aggregates.
 
-`account_refresh_cycles` separates CI/detail read failures from local refresh budget
+`account_refresh_cycles` separates CI/detail/policy read failures from local refresh budget
 interruptions and includes each lane's latest completed cycle with its clocks.
 `deferred_across_cycles` sums repeated deferrals, not unique PRs. Seed-only
 collection work is excluded; malformed/legacy cycle records are counted in
@@ -825,8 +837,8 @@ Unknown REST paths use `rest_other`; no URL or query values become labels.
 Separate jobs have separate IDs, including after restart. IDs do not encode
 credentials, URLs, queries or response bodies. Correlate a retry with its own
 completion, rather than inferring recovery from another job in the same bucket.
-Account entries in `watches` also expose durable `last_cycle` and `ci_last_cycle`
-summaries for the latest completed detail and CI hydration cycles. Each separates
+Account entries in `watches` also expose durable `last_cycle`, `ci_last_cycle`
+and `policy_last_cycle` summaries for the latest completed rotations. Each separates
 successful refreshes, genuine failures, local budget interruptions and unvisited
 deferred PRs. They survive restart and remain separate from aggregate success
 timestamps, which can stay empty while work is queued. Discovery-only preparation

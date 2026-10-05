@@ -58,6 +58,15 @@ pub struct WatchStatus {
     /// Latest completed account CI hydration cycle, independent of details.
     #[serde(default)]
     pub ci_last_cycle: Option<crate::AccountRefreshCycle>,
+    /// Required-check policy has its own bounded rotation and health.
+    #[serde(default)]
+    pub policy_last_poll_at_ms: Option<u64>,
+    #[serde(default)]
+    pub policy_last_success_at_ms: Option<u64>,
+    #[serde(default)]
+    pub policy_last_error: Option<String>,
+    #[serde(default)]
+    pub policy_last_cycle: Option<crate::AccountRefreshCycle>,
     /// Account discovery runs independently of source hydration.
     pub discovery_last_poll_at_ms: Option<u64>,
     pub discovery_last_success_at_ms: Option<u64>,
@@ -133,6 +142,10 @@ impl Api {
             ci_last_error: None,
             last_cycle: None,
             ci_last_cycle: None,
+            policy_last_poll_at_ms: None,
+            policy_last_success_at_ms: None,
+            policy_last_error: None,
+            policy_last_cycle: None,
             discovery_last_poll_at_ms: discovery.as_ref().and_then(|health| health.last_poll_at_ms),
             discovery_last_success_at_ms: discovery
                 .as_ref()
@@ -151,6 +164,7 @@ impl Api {
                 tokio::join!(biased;
                     account_discovery_loop(client.clone(), task_watch.clone(), task_state.clone()),
                     monitor_loop(client.clone(),task_watch.clone(),task_state.clone(),true),
+                    account_policy_loop(client.clone(),task_watch.clone(),task_state.clone()),
                     monitor_loop(client,task_watch,task_state,false)
                 );
                 return;
@@ -301,6 +315,31 @@ async fn account_discovery_loop(client: Client, watch: Watch, state: Arc<Mutex<W
         // immediately once; failed scans have no fresh collection to absorb
         // that catch-up read, so sustained failures otherwise run back-to-back.
         interval.reset();
+    }
+}
+
+async fn account_policy_loop(client: Client, watch: Watch, state: Arc<Mutex<WatchStatus>>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(watch.interval_seconds));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {},
+            _ = client.policy_ready() => {},
+        }
+        state.lock().await.policy_last_poll_at_ms = Some(now_ms());
+        let result = client
+            .hydrate_pr_status_policy(Freshness::MaxAge(Duration::from_secs(30)))
+            .await;
+        let error = match result {
+            Ok(errors) if errors.is_empty() => None,
+            Ok(errors) => Some(errors.join("; ")),
+            Err(error) => Some(error.to_string()),
+        };
+        let mut status = state.lock().await;
+        if error.is_none() {
+            status.policy_last_success_at_ms = Some(now_ms());
+        }
+        status.policy_last_error = error;
     }
 }
 
@@ -1081,12 +1120,14 @@ async fn watches(State(api): State<Api>) -> ApiResult<Json<Vec<WatchStatus>>> {
         let health = api.0.client.discovery_health().await?;
         let last_cycle = api.0.client.account_refresh_cycle(false).await?;
         let ci_last_cycle = api.0.client.account_refresh_cycle(true).await?;
+        let policy_last_cycle = api.0.client.account_policy_cycle().await?;
         for status in statuses
             .iter_mut()
             .filter(|status| status.watch.kind == WatchKind::Account)
         {
             status.last_cycle = last_cycle.clone();
             status.ci_last_cycle = ci_last_cycle.clone();
+            status.policy_last_cycle = policy_last_cycle.clone();
             let Some(health) = &health else { continue };
             status.discovery_last_success_at_ms = health.last_success_at_ms;
             if health.last_error.is_some()

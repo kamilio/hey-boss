@@ -174,7 +174,33 @@ pub struct AccountRefreshCycle {
     pub failed: usize,
     pub interrupted: usize,
     pub deferred: usize,
+    /// Policy prerequisites are not yet recent/complete; no upstream probe ran.
+    #[serde(default)]
+    pub waiting_for_ci: usize,
     pub cycle_budget_exhausted: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refresh {
+    Combined,
+    Discovery,
+    Ci,
+    Details,
+    Policy,
+}
+
+impl Refresh {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ci => "ci",
+            Self::Policy => "policy",
+            Self::Combined | Self::Discovery | Self::Details => "details",
+        }
+    }
+
+    fn follows_ci(self) -> bool {
+        matches!(self, Self::Ci | Self::Policy)
+    }
 }
 
 fn key(node: &Value) -> Result<(String, u64)> {
@@ -254,6 +280,13 @@ impl Client {
         .await?
         .map(|response| response.decode())
         .transpose()
+    }
+
+    pub(crate) async fn account_policy_cycle(&self) -> Result<Option<AccountRefreshCycle>> {
+        self.derived("account-status-cycle:policy")
+            .await?
+            .map(|response| response.decode())
+            .transpose()
     }
     pub(crate) fn roster_resource(&self) -> String {
         format!("my-open-prs://{}", self.hostname())
@@ -568,13 +601,21 @@ impl Client {
         freshness: Freshness,
         ci_only: bool,
     ) -> Result<Vec<String>> {
-        self.collect_pr_status(freshness, ci_only, false, false, false)
-            .await
+        self.collect_pr_status(
+            freshness,
+            if ci_only {
+                Refresh::Ci
+            } else {
+                Refresh::Combined
+            },
+            false,
+        )
+        .await
     }
 
     /// Batched metadata/head checks first; monitors hydrate detailed sources.
     pub async fn prepare_pr_status(&self, freshness: Freshness) -> Result<Vec<String>> {
-        self.collect_pr_status(freshness, false, true, false, false)
+        self.collect_pr_status(freshness, Refresh::Discovery, false)
             .await
     }
 
@@ -582,21 +623,26 @@ impl Client {
         &self,
         freshness: Freshness,
     ) -> Result<Vec<String>> {
-        self.collect_pr_status(freshness, false, false, true, true)
+        self.collect_pr_status(freshness, Refresh::Details, true)
             .await
     }
 
     pub(crate) async fn hydrate_pr_status_ci(&self, freshness: Freshness) -> Result<Vec<String>> {
-        self.collect_pr_status(freshness, true, false, false, true)
+        self.collect_pr_status(freshness, Refresh::Ci, true).await
+    }
+
+    pub(crate) async fn hydrate_pr_status_policy(
+        &self,
+        freshness: Freshness,
+    ) -> Result<Vec<String>> {
+        self.collect_pr_status(freshness, Refresh::Policy, true)
             .await
     }
 
     async fn collect_pr_status(
         &self,
         freshness: Freshness,
-        ci_only: bool,
-        seed_only: bool,
-        details_only: bool,
+        refresh: Refresh,
         background: bool,
     ) -> Result<Vec<String>> {
         crate::client::BACKGROUND_READ
@@ -604,13 +650,7 @@ impl Client {
                 (),
                 ACCOUNT_PUBLICATION.scope(
                     (),
-                    self.collect_pr_status_inner(
-                        freshness,
-                        ci_only,
-                        seed_only,
-                        details_only,
-                        background,
-                    ),
+                    self.collect_pr_status_inner(freshness, refresh, background),
                 ),
             )
             .await
@@ -619,12 +659,13 @@ impl Client {
     async fn collect_pr_status_inner(
         &self,
         freshness: Freshness,
-        ci_only: bool,
-        seed_only: bool,
-        details_only: bool,
+        refresh: Refresh,
         background: bool,
     ) -> Result<Vec<String>> {
-        let mode = if ci_only { "ci" } else { "details" };
+        let mode = refresh.label();
+        let seed_only = refresh == Refresh::Discovery;
+        let details_only = refresh == Refresh::Details;
+        let policy_only = refresh == Refresh::Policy;
         let started = tokio::time::Instant::now();
         let started_at_ms = crate::now_ms();
         let deadline = tokio::time::Instant::now() + self.report_timeout();
@@ -728,7 +769,7 @@ impl Client {
         // owned only by its hydration lane. Discovery cannot erase an unseen
         // head change by publishing newer nodes before that lane gets a turn.
         let mut schedule = if seed_only {
-            schedule::Schedule::baseline(&pending, None, ci_only)
+            schedule::Schedule::baseline(&pending, None, refresh.follows_ci())
         } else if let Some(stored) = self.derived(&schedule_key).await? {
             stored.decode::<schedule::Schedule>()?
         } else {
@@ -739,14 +780,14 @@ impl Client {
                 .transpose()?
                 .flatten()
                 .map(|(repo, number)| (repo.to_ascii_lowercase(), number));
-            schedule::Schedule::baseline(&pending, next, ci_only)
+            schedule::Schedule::baseline(&pending, next, refresh.follows_ci())
         };
         for node in previous.as_array().into_iter().flatten() {
             pending.insert(key(node)?, node.clone());
         }
         pending.extend(current.clone());
         if !seed_only {
-            schedule.reconcile(&pending, ci_only);
+            schedule.reconcile(&pending, refresh.follows_ci());
             self.save_derived(
                 &schedule_key,
                 serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
@@ -767,13 +808,12 @@ impl Client {
         let mut failed = 0usize;
         let mut interrupted = 0usize;
         let mut deferred = 0usize;
+        let mut waiting_for_ci = 0usize;
         let mut work = work.into_iter();
         let cycle = hydration::Cycle {
             client: self,
             freshness,
-            ci_only,
-            seed_only,
-            details_only,
+            refresh,
             background,
             authoritative_roster,
             deadline,
@@ -781,11 +821,12 @@ impl Client {
         // Let cached neighbors progress while one PR waits for quota or a
         // socket. The scheduler still owns every request and its concurrency.
         // Tiny embedded queues and explicit/discovery reads remain sequential.
-        let width = if background && !seed_only && self.status().queue_capacity >= 32 {
-            2
-        } else {
-            1
-        };
+        let width =
+            if background && !seed_only && !policy_only && self.status().queue_capacity >= 32 {
+                2
+            } else {
+                1
+            };
         let mut active: Vec<hydration::Read<'_>> = Vec::new();
         while work.len() > 0 || !active.is_empty() {
             while active.len() < width {
@@ -794,7 +835,7 @@ impl Client {
                 };
                 if !seed_only && tokio::time::Instant::now() >= deadline {
                     let remaining = 1 + work.len();
-                    deferred = remaining;
+                    deferred += remaining;
                     retry.insert(item.key, item.node);
                     retry.extend(work.by_ref().map(|item| (item.key, item.node)));
                     errors.push(format!(
@@ -813,6 +854,19 @@ impl Client {
                     if continuing {
                         tracing::info!(repository=%item.key.0,number=item.key.1,mode,"PR collection continuation started");
                     }
+                }
+                if policy_only
+                    && !tokio::time::timeout_at(
+                        deadline,
+                        Box::pin(self.policy_ci_cached(&item.key.0, item.key.1, freshness)),
+                    )
+                    .await
+                    .unwrap_or(Ok(false))?
+                {
+                    deferred += 1;
+                    waiting_for_ci += 1;
+                    retry.insert(item.key, item.node);
+                    continue;
                 }
                 let disappeared = !current.contains_key(&item.key);
                 attempted += 1;
@@ -839,7 +893,7 @@ impl Client {
                     _ => 0,
                 });
                 let mut modes = vec![mode];
-                if !ci_only && !details_only {
+                if refresh == Refresh::Combined {
                     modes.push("ci");
                 }
                 for mode in modes {
@@ -848,6 +902,9 @@ impl Client {
                         json!(validated_at),
                     )
                     .await?;
+                }
+                if refresh.follows_ci() && !policy_only {
+                    self.notify_policy_ready();
                 }
             }
             if !seed_only && (result.is_ok() || retained_progress) {
@@ -885,8 +942,15 @@ impl Client {
                 errors.push(format!("{repo}#{number}: {error}"));
                 retry.insert((repo.clone(), number), node.clone());
             }
-            let mut health = vec![(if seed_only { "discovery" } else { mode }, error)];
-            if !seed_only && !ci_only && !details_only && health[0].1.is_none() {
+            // Policy health is separate from the CI/detail completeness contract.
+            // Its report retains explicit errors; watch status exposes an
+            // interrupted policy rotation without overwriting CI/detail health.
+            let mut health = if policy_only {
+                vec![]
+            } else {
+                vec![(if seed_only { "discovery" } else { mode }, error)]
+            };
+            if refresh == Refresh::Combined && health[0].1.is_none() {
                 // A successful combined refresh validated CI too. It can
                 // recover a prior CI interruption; detail-only work cannot.
                 health.push(("ci", None));
@@ -925,6 +989,11 @@ impl Client {
         }
         self.save_derived(&tracking_key, json!(retry.values().collect::<Vec<_>>()))
             .await?;
+        if waiting_for_ci > 0 {
+            errors.push(format!(
+                "policy awaits recent CI evidence; {waiting_for_ci} PRs remain queued"
+            ));
+        }
         let finished_at_ms = crate::now_ms();
         if !seed_only {
             self.save_derived(&rotation_key, json!(schedule.next))
@@ -940,8 +1009,9 @@ impl Client {
                     failed,
                     interrupted,
                     deferred,
-                    cycle_budget_exhausted: deferred > 0
-                        || (interrupted > 0 && tokio::time::Instant::now() >= deadline),
+                    waiting_for_ci,
+                    cycle_budget_exhausted: (deferred > 0 || interrupted > 0)
+                        && tokio::time::Instant::now() >= deadline,
                 }),
             )
             .await?;
@@ -963,8 +1033,9 @@ impl Client {
             failed,
             interrupted,
             deferred,
+            waiting_for_ci,
             cycle_budget_exhausted =
-                deferred > 0 || (interrupted > 0 && tokio::time::Instant::now() >= deadline),
+                (deferred > 0 || interrupted > 0) && tokio::time::Instant::now() >= deadline,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "account refresh cycle finished"
         );

@@ -263,6 +263,10 @@ export interface WatchStatus extends Watch {
   ci_last_error: string | null
   last_cycle: AccountRefreshCycle | null
   ci_last_cycle: AccountRefreshCycle | null
+  policy_last_poll_at_ms: number | null
+  policy_last_success_at_ms: number | null
+  policy_last_error: string | null
+  policy_last_cycle: AccountRefreshCycle | null
   discovery_last_poll_at_ms: number | null
   discovery_last_success_at_ms: number | null
   discovery_last_error: string | null
@@ -277,6 +281,7 @@ export interface AccountRefreshCycle {
   failed: number
   interrupted: number
   deferred: number
+  waiting_for_ci: number
   cycle_budget_exhausted: boolean
 }
 export interface Snapshot { resource: string; data: JsonValue; observed_at_ms: number }

@@ -20,6 +20,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/account_policy.rs"]
+mod account_policy;
 #[path = "github/ci_discovery_checks.rs"]
 mod ci_discovery_checks;
 #[path = "github/ci_discovery_versions.rs"]
@@ -260,6 +262,36 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     }
     if mode == "account-slow-sources" {
         tokio::time::sleep(Duration::from_millis(900)).await;
+    }
+    if mode == "account-policy-rotation-gated"
+        && (path.ends_with("/check-runs") || path.ends_with("/status"))
+    {
+        mock.release.notified().await;
+    }
+    if mode.starts_with("account-policy-rotation") && path.contains("/rules/branches/") {
+        if mode.ends_with("denied") {
+            return reply(
+                403,
+                json!({"message":"Synthetic policy access denied"}),
+                &[],
+            );
+        }
+        if mode.ends_with("stalled") && path.contains("/acme/demo/") {
+            mock.release.notified().await;
+        } else if mode == "account-policy-rotation" {
+            tokio::time::sleep(Duration::from_millis(1400)).await;
+        }
+        return reply(200, json!([]), &[]);
+    }
+    if mode.starts_with("account-policy-rotation") && path.ends_with("/branches/main") {
+        return reply(
+            200,
+            json!({"commit":{"sha":BASE},"protected":false,
+            "protection":{"enabled":false,"required_status_checks":{
+                "enforcement_level":"off","contexts":[],"checks":[],"strict":false
+            }}}),
+            &[],
+        );
     }
     if mode.starts_with("account-multi-source") && path.ends_with("/jobs") {
         return reply(
@@ -4380,6 +4412,10 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
         1,
         "only the dedicated discovery loop scans GitHub"
     );
+    // Independent policy hydration may still be active after CI/details finish.
+    // Isolate the cached feed read before asserting that it spends no quota.
+    api.stop().await;
+    until(|| c.status().outstanding_requests == 0).await;
     let baseline = c
         .pr_status_page(None, None, 1000, Duration::ZERO)
         .await
@@ -6952,6 +6988,66 @@ async fn account_slow_policy_does_not_mark_successfully_observed_ci_as_failed() 
     assert!(first["sourceErrors"]["ci"].is_null());
     assert!(!first["complete"].as_bool().unwrap());
     h.mock.release.notify_waiters();
+}
+
+#[tokio::test]
+async fn account_policy_rotation_finishes_slow_rules_without_blocking_ci() {
+    let h = Harness::new().await;
+    h.mode("account-policy-rotation");
+    h.phase(2);
+    let c = Client::with_token(
+        Config {
+            report_timeout: Duration::from_secs(10),
+            ..h.config()
+        },
+        "synthetic-token".into(),
+    )
+    .unwrap();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    for repo in ["acme/demo", "acme/other"] {
+        assert!(
+            c.ci_for_pr(repo, 7, Freshness::Revalidate)
+                .await
+                .unwrap()
+                .complete
+        );
+    }
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    let progress = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+            let count: usize = db.query_row(
+                "SELECT count(*) FROM snapshots WHERE resource LIKE 'required_checks://%/acme/%/7' AND json_extract(data,'$.state')='not_required'",
+                [], |r| r.get(0),
+            ).unwrap();
+            if count == 2 { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await;
+    api.stop().await;
+    assert!(
+        progress.is_ok(),
+        "one-second policy probes never produced complete required-check evidence"
+    );
+    let ci = c.account_refresh_cycle(true).await.unwrap().unwrap();
+    assert_eq!(
+        ci.succeeded, 2,
+        "policy waits must not block or fail CI: {ci:?}"
+    );
+    assert!(
+        ci.finished_at_ms - ci.started_at_ms < 1000,
+        "CI still waited for the slow policy requests: {ci:?}"
+    );
+    for repo in ["demo", "other"] {
+        assert_eq!(
+            h.calls()
+                .iter()
+                .filter(|call| call.path == format!("/repos/acme/{repo}/rules/branches/main"))
+                .count(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
