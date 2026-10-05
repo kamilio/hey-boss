@@ -416,7 +416,8 @@ impl Client {
                 });
                 return Ok(metadata);
             }
-            if cached.data["mergeable"] == true
+            if cached.data["state"] == "open"
+                && cached.data["mergeable"] == true
                 && cached.data["merge_commit_sha"]
                     .as_str()
                     .is_some_and(crate::repository::valid_sha)

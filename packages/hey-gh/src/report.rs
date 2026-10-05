@@ -56,8 +56,10 @@ fn can_publish() -> bool {
 
 fn usable_pr_seed(data: &Value, number: u64) -> bool {
     data["number"] == number
-        && data["state"] == "open"
-        && data["merged"] != true
+        // A terminal seed can start work too. Final metadata still validates
+        // lifecycle and reconciles a reopened PR before the read completes.
+        && ((data["state"] == "open" && data["merged"] != true)
+            || (data["state"] == "closed" && data["merged"].is_boolean()))
         && data["node_id"].as_str().is_some_and(|id| !id.is_empty())
         && data["head"]["sha"].as_str().is_some_and(valid_sha)
         && data["base"]["sha"].as_str().is_some_and(valid_sha)

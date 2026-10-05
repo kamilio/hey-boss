@@ -54,6 +54,9 @@ mod detail_continuation;
 #[path = "github/detail_seed.rs"]
 mod detail_seed;
 
+#[path = "github/terminal_seed.rs"]
+mod terminal_seed;
+
 #[path = "github/cancelled_jobs.rs"]
 mod cancelled_jobs;
 
@@ -778,6 +781,14 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         );
     }
     if mode.starts_with("ci-rest-") && path.ends_with("/pulls/7") {
+        if mode.starts_with("ci-rest-terminal") {
+            if phase == 1 {
+                mock.release.notified().await;
+            }
+            if phase == 2 {
+                return reply(403, json!({"message":"terminal metadata denied"}), &[]);
+            }
+        }
         let app = headers["authorization"] == "Bearer synthetic-app-token";
         if (mode == "ci-rest-personal-quota" && !app) || (mode == "ci-rest-app-quota" && app) {
             return reply(
@@ -1482,6 +1493,16 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
+            if mode.starts_with("ci-rest-terminal") {
+                value["state"] = json!("closed");
+                value["merged"] = json!(mode.ends_with("merged"));
+                value["mergeable"] = Value::Null;
+                value["title"] = json!(if phase == 0 {
+                    "old terminal title"
+                } else {
+                    "fresh terminal title"
+                });
+            }
         } else if normalized.contains(MERGE) && normalized.ends_with("/check-runs") {
             value["check_runs"][0]["head_sha"] = json!(MERGE);
         } else if normalized.ends_with("/actions/runs") && query.contains(MERGE) {

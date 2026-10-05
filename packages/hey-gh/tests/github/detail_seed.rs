@@ -7,9 +7,14 @@ async fn detail_seed_starts_sources_without_publishing_expired_metadata() {
 
 #[tokio::test]
 async fn detail_seed_requires_usable_cached_identity() {
-    for case in ["cold", "closed", "malformed"] {
+    for case in ["cold", "malformed"] {
         detail_seed(case).await;
     }
+}
+
+#[tokio::test]
+async fn closed_detail_seed_starts_sources_without_publishing_stale_lifecycle() {
+    detail_seed("closed").await;
 }
 
 #[tokio::test]
@@ -97,7 +102,7 @@ async fn detail_seed(case: &str) {
     );
     assert_eq!(
         row["reviewThreads"][0]["isResolved"],
-        matches!(case, "valid" | "denied"),
+        matches!(case, "valid" | "closed" | "denied"),
         "independent sources should start only with a usable seed: {case}"
     );
     h.mode("account");
