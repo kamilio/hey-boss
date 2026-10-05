@@ -115,4 +115,83 @@ async fn blocked_policy_reads_log_the_wait_even_when_the_caller_cancels() {
             && !logs.contains("PRIVATE-ORG"),
         "{logs}"
     );
+    assert_status_publication_wait_is_logged(&captured).await;
+}
+
+async fn assert_status_publication_wait_is_logged(captured: &Logs) {
+    use serde_json::json;
+    let head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let router = axum::Router::new().fallback(move |uri: axum::http::Uri| async move {
+        axum::Json(if uri.path().ends_with("/pulls/7") {
+            json!({"node_id":"PR_7","number":7,"state":"open","merged":false,"mergeable":true,
+                "head":{"sha":head},"base":{"ref":"main","sha":base},"merge_commit_sha":null})
+        } else if uri.path().contains("/rules/") {
+            json!([])
+        } else {
+            json!({"commit":{"sha":base},"protected":false,"protection":{"enabled":false,
+                "required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}})
+        })
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let client = Client::with_token(
+        Config {
+            rest_url: url.parse().unwrap(),
+            graphql_url: format!("{url}graphql").parse().unwrap(),
+            cache_path: dir.path().join("cache.sqlite"),
+            min_spacing: Duration::ZERO,
+            ..Config::default()
+        },
+        "private-test-token".into(),
+    )
+    .unwrap();
+    let first = client
+        .required_checks_for_pr("private-org/private-repo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(first.state, "not_required");
+    let resource = "pr-status://github.com/private-org/private-repo/7";
+    client
+        .observe(resource, &json!({"pullRequest":{"id":"PR_7","number":7}}))
+        .await
+        .unwrap();
+    let lock = client.report_lock(resource);
+    let guard = lock.lock().await;
+    captured.0.lock().unwrap().clear();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            client.required_checks_for_pr("private-org/private-repo", 7, Freshness::default())
+        )
+        .await
+        .is_err()
+    );
+    drop(guard);
+    server.abort();
+    let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    let line = logs
+        .lines()
+        .find(|line| line.contains("Required-check read finished"))
+        .unwrap();
+    assert!(line.contains("outcome=\"interrupted\""), "{logs}");
+    assert!(line.contains("phase=\"status_publication\""), "{logs}");
+    let ms = |name: &str| -> u64 {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(name))
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert!(ms("status_publication_ms=") >= 100, "{logs}");
+    assert_eq!(
+        ms("publication_ms="),
+        ms("observation_ms=") + ms("status_publication_ms=")
+    );
+    assert!(
+        !logs.contains("private-test-token") && !logs.contains("private-org"),
+        "{logs}"
+    );
 }

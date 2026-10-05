@@ -798,6 +798,7 @@ impl Client {
             }
             report.cursor = self.observe_many(&observations).await?;
             if !matches!(freshness, Freshness::CachedOnly) {
+                timings.enter(Phase::StatusPublication);
                 self.publish_individual_pr_status(repository, number, &[])
                     .await?;
             }
