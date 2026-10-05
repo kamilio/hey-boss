@@ -177,6 +177,21 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    fn terminal(&self, merged: bool) {
+        let mut data = self.data.lock().unwrap();
+        data.rest["state"] = json!("closed");
+        data.rest["merged"] = json!(merged);
+        let node = &mut data.graph["data"]["repository"]["pullRequest"];
+        node["state"] = json!(if merged { "MERGED" } else { "CLOSED" });
+        node["merged"] = json!(merged);
+        if merged {
+            node["mergeable"] = json!("UNKNOWN");
+            node["potentialMergeCommit"] = Value::Null;
+            node["mergeCommit"] = json!({"oid":MERGE});
+            data.rest["mergeable"] = Value::Null;
+        }
+    }
+
     async fn new() -> Self {
         Self::with_installation(false).await
     }
@@ -258,6 +273,138 @@ impl Fixture {
             "INSERT OR REPLACE INTO cache(scope,key,response) SELECT scope,key||'#installation-ci-pr',json_set(response,'$.data',json(?1),'$.validated_at_ms',?2) FROM cache WHERE key LIKE '%/pulls/7'",
             rusqlite::params![data.to_string(), clock],
         ).unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn terminal_policy_confirms_exact_lifecycle_and_merge_without_waiting_for_rest() {
+    for merged in [false, true] {
+        let f = Fixture::new().await;
+        f.terminal(merged);
+        let old = f.seed().await;
+        f.data.lock().unwrap().stall_rest = true;
+        let report = tokio::time::timeout(
+            Duration::from_secs(1),
+            f.client
+                .required_checks_for_pr("acme/demo", 7, Freshness::default()),
+        )
+        .await
+        .expect("terminal policy confirmation waited for REST")
+        .unwrap();
+        assert_eq!(report.state, "satisfied");
+        assert_eq!(report.pull_request_state.as_deref(), Some("closed"));
+        assert_eq!(report.merge_sha.as_deref(), Some(MERGE));
+        assert!(
+            report
+                .validations
+                .iter()
+                .any(|v| v.resource.ends_with("/graphql") && v.validated_at_ms > old)
+        );
+        let cached = f
+            .client
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        assert_eq!(
+            cached.validated_at_ms, old,
+            "selector confirmation cannot freshen the REST body"
+        );
+        let data = f.data.lock().unwrap();
+        assert_eq!(data.calls.len(), 1, "{:?}", data.calls);
+        assert_eq!(data.calls[0].0, "/graphql");
+        assert!(data.tokens.iter().all(|t| t == "Bearer synthetic-token"));
+    }
+}
+
+#[tokio::test]
+async fn terminal_selector_changes_and_incomplete_merge_evidence_require_rest() {
+    for merged in [false, true] {
+        for field in [
+            "state",
+            "merged",
+            "headRefOid",
+            "baseRefOid",
+            "merge",
+            "missing_merge",
+            "stack",
+            "id",
+        ] {
+            let f = Fixture::new().await;
+            f.terminal(merged);
+            f.seed().await;
+            {
+                let mut data = f.data.lock().unwrap();
+                data.deny_rest = true;
+                let node = &mut data.graph["data"]["repository"]["pullRequest"];
+                let merge_field = if merged {
+                    "mergeCommit"
+                } else {
+                    "potentialMergeCommit"
+                };
+                match field {
+                    "state" => node["state"] = json!("OPEN"),
+                    "merged" => node["merged"] = json!(!merged),
+                    "headRefOid" | "baseRefOid" => node[field] = json!(MERGE),
+                    "merge" => node[merge_field]["oid"] = json!(HEAD),
+                    "missing_merge" => {
+                        node.as_object_mut().unwrap().remove(merge_field);
+                    }
+                    "stack" => node["stack"] = json!({"id":"native"}),
+                    "id" => node["id"] = json!("PR_replaced"),
+                    _ => unreachable!(),
+                }
+            }
+            assert!(
+                matches!(
+                    f.client
+                        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+                        .await,
+                    Err(hey_gh::Error::GitHub { status: 403, .. })
+                ),
+                "merged={merged}, field={field}"
+            );
+            let data = f.data.lock().unwrap();
+            assert_eq!(
+                data.calls.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(),
+                ["/graphql", "/repos/acme/demo/pulls/7"],
+                "merged={merged}, field={field}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_policy_retains_forced_rest_and_offline_freshness() {
+    for merged in [false, true] {
+        let f = Fixture::new().await;
+        f.terminal(merged);
+        let old = f.seed().await;
+        let offline = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        assert_eq!(offline.state, "satisfied");
+        assert_eq!(offline.oldest_validation_at_ms, Some(old));
+        assert!(f.data.lock().unwrap().calls.is_empty());
+        for freshness in [Freshness::Revalidate, Freshness::MaxAge(Duration::ZERO)] {
+            f.data.lock().unwrap().calls.clear();
+            let report = f
+                .client
+                .required_checks_for_pr("acme/demo", 7, freshness)
+                .await
+                .unwrap();
+            assert_eq!(report.state, "satisfied");
+            let data = f.data.lock().unwrap();
+            assert_eq!(
+                data.calls
+                    .iter()
+                    .filter(|c| c.0.ends_with("/pulls/7"))
+                    .count(),
+                2
+            );
+            assert!(data.calls.iter().all(|c| c.0 != "/graphql"));
+        }
     }
 }
 
