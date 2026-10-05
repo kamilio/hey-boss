@@ -126,6 +126,13 @@ Newer contradictory CI metadata invalidates a personal collection seed or cache
 read. A generic reader then revalidates through the personal account; cached-only
 reads report a cache miss rather than restoring an older lifecycle or selector.
 
+Fresh CI metadata can also prove an empty check-run list from a null commit
+rollup or an explicit zero check-run count. It reuses existing selector/discovery
+reads; no query is added solely for this shortcut. Missing or mismatched evidence
+retains REST, newer REST evidence wins, and contradictory presence at the same
+clock cannot certify an empty list. Explicit refresh still reads every source;
+offline evidence keeps its original validation time.
+
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 
 For lifecycle-only consumers, Rust `ApiClient::pull_request` and
