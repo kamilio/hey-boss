@@ -177,11 +177,32 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
     )
     .unwrap();
     let (api, sdk, server) = start(&c).await;
-    let resumed = wait_cycle(&sdk, cycle.finished_at_ms).await;
+    // Restarted CI can make the two rows ready in separate turns. A first
+    // successful policy turn is not necessarily the completed rotation.
+    let resumed = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut after = cycle.finished_at_ms;
+        loop {
+            let status = wait_cycle(&sdk, after).await;
+            let cycle = status.policy_last_cycle.as_ref().unwrap();
+            assert_eq!(cycle.failed, 0, "{status:?}");
+            assert_eq!(cycle.interrupted, 0, "{status:?}");
+            if cycle.succeeded == 2 {
+                break status;
+            }
+            assert!(cycle.waiting_for_ci > 0, "{status:?}");
+            after = cycle.finished_at_ms;
+        }
+    })
+    .await
+    .expect("restarted policy rotation did not finish both PRs");
     api.stop().await;
     server.abort();
     let _ = server.await;
-    assert_eq!(resumed.policy_last_cycle.unwrap().succeeded, 2);
+    assert_eq!(
+        resumed.policy_last_cycle.as_ref().unwrap().succeeded,
+        2,
+        "{resumed:?}"
+    );
     assert!(resumed.policy_last_error.is_none());
     assert!(resumed.policy_last_success_at_ms.is_some());
     let rules: Vec<_> = h.calls()[before..]
