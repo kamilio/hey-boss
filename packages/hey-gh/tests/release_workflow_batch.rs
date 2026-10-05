@@ -27,6 +27,28 @@ struct Mock {
     calls: Arc<Mutex<Vec<(String, Value)>>>,
 }
 impl Mock {
+    fn jobs(&self, id: u64, attempt: u64) -> Vec<Value> {
+        let passed = id == self.count && (self.mode != "rerun" || attempt == 1);
+        if !passed && !self.mode.starts_with("jobs_") {
+            return vec![];
+        }
+        let conclusion = if passed { "success" } else { "cancelled" };
+        let step = if self.mode == "jobs_evidence" && id == 1 {
+            "failure"
+        } else {
+            conclusion
+        };
+        vec![
+            json!({"id":id+1000,"run_id":id,"run_attempt":attempt,"head_sha":sha(id.min(self.count)),"name":"test","status":"completed","conclusion":conclusion,"completed_at":format!("{}T01:09:00Z",self.day),"steps":[{"number":1,"name":"Run tests","status":"completed","conclusion":step}]}),
+        ]
+    }
+    fn job_connection(&self, id: u64) -> Value {
+        let nodes: Vec<_> = self.jobs(id,1).iter().map(|job| {
+            let steps: Vec<_> = job["steps"].as_array().unwrap().iter().map(|step|json!({"number":step["number"],"name":step["name"],"status":step["status"].as_str().unwrap().to_ascii_uppercase(),"conclusion":step["conclusion"].as_str().map(str::to_ascii_uppercase)})).collect();
+            json!({"databaseId":job["id"],"name":job["name"],"status":job["status"].as_str().unwrap().to_ascii_uppercase(),"conclusion":job["conclusion"].as_str().map(str::to_ascii_uppercase),"completedAt":job["completed_at"],"steps":{"totalCount":steps.len(),"pageInfo":{"hasNextPage":false},"nodes":steps}})
+        }).collect();
+        json!({"totalCount":nodes.len(),"pageInfo":{"hasNextPage":false},"nodes":nodes})
+    }
     fn run(&self, id: u64) -> Value {
         json!({"id":id,"node_id":format!("WFR_{id}"),"run_attempt":1,
             "head_sha":sha(id.min(self.count)),"head_branch":"main",
@@ -38,6 +60,18 @@ impl Mock {
     }
     fn current(&self, id: u64) -> Value {
         let mut run = self.run(id);
+        if self.mode == "jobs_revision"
+            && self
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/branches/main"))
+                .count()
+                > 2
+        {
+            run["updated_at"] = json!(format!("{}T01:20:00Z", self.day));
+        }
         if self.mode == "rerun" && id == self.count {
             run["run_attempt"] = json!(2);
             run["status"] = json!("in_progress");
@@ -66,6 +100,7 @@ impl Mock {
 }
 struct Harness {
     client: Client,
+    config: Config,
     mock: Mock,
     _dir: tempfile::TempDir,
     task: tokio::task::JoinHandle<()>,
@@ -130,9 +165,21 @@ impl Harness {
             // Each response fits independently; their accumulated size does not.
             config.max_collection_bytes = discovery + metadata - 1;
         }
-        let client = Client::with_token(config, "synthetic".into()).unwrap();
+        if mode == "jobs_budget" {
+            let metadata = (1..=count).map(|id| mock.node(id)).collect::<Vec<_>>();
+            let versions = json!({"data":{"nodes":metadata}}).to_string().len();
+            let mut jobs = metadata;
+            for node in &mut jobs {
+                node["checkSuite"]["checkRuns"] =
+                    mock.job_connection(node["databaseId"].as_u64().unwrap());
+            }
+            config.max_collection_bytes =
+                json!({"data":{"nodes":jobs}}).to_string().len() + versions - 1;
+        }
+        let client = Client::with_token(config.clone(), "synthetic".into()).unwrap();
         Self {
             client,
+            config,
             mock,
             _dir: dir,
             task,
@@ -150,7 +197,26 @@ impl Harness {
     fn graphql_calls(&self) -> Vec<Value> {
         self.calls()
             .into_iter()
-            .filter(|(p, _)| p == "/graphql")
+            .filter(|(p, b)| {
+                p == "/graphql"
+                    && b["query"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("ReleaseWorkflowMetadata")
+            })
+            .map(|(_, b)| b)
+            .collect()
+    }
+    fn job_queries(&self) -> Vec<Value> {
+        self.calls()
+            .into_iter()
+            .filter(|(p, b)| {
+                p == "/graphql"
+                    && b["query"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("ReleaseWorkflowJobs")
+            })
             .map(|(_, b)| b)
             .collect()
     }
@@ -171,6 +237,55 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri, body: 
         .map(|s| s.parse::<usize>().unwrap())
         .unwrap_or(1);
     let value = if path == "/graphql" {
+        let versions = body["query"]
+            .as_str()
+            .unwrap()
+            .contains("ReleaseWorkflowJobVersions");
+        if versions && mock.mode == "jobs_versions_denied" {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"synthetic version denial"})),
+            )
+                .into_response();
+        }
+        let job_query = body["query"]
+            .as_str()
+            .unwrap()
+            .contains("ReleaseWorkflowJobs");
+        if job_query
+            && (mock.mode == "jobs_denied"
+                || (mock.mode == "jobs_partial"
+                    && mock
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, b)| {
+                            b["query"]
+                                .as_str()
+                                .unwrap_or("")
+                                .contains("ReleaseWorkflowJobs")
+                        })
+                        .count()
+                        > 1))
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"synthetic job denial"})),
+            )
+                .into_response();
+        }
+        if job_query && mock.mode == "jobs_rate_limit" {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "60")],
+                Json(json!({"message":"synthetic job limit"})),
+            )
+                .into_response();
+        }
+        if job_query && mock.mode == "jobs_deadline" {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
         if mock.mode == "denied" {
             return (
                 StatusCode::FORBIDDEN,
@@ -203,6 +318,31 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri, body: 
                 )
             })
             .collect();
+        if versions && mock.mode == "jobs_late_rerun" {
+            nodes[0]["runAttempt"] = json!(2);
+        }
+        if job_query {
+            for node in &mut nodes {
+                node["checkSuite"]["checkRuns"] =
+                    mock.job_connection(node["databaseId"].as_u64().unwrap());
+            }
+            let jobs = &mut nodes[0]["checkSuite"]["checkRuns"];
+            match mock.mode {
+                "jobs_missing" => { jobs["nodes"] = json!([]); },
+                "jobs_duplicate" => { let job=jobs["nodes"][0].clone(); jobs["nodes"].as_array_mut().unwrap().push(job); jobs["totalCount"]=json!(2); },
+                "jobs_steps_missing" => { jobs["nodes"][0]["steps"]["nodes"]=json!([]); },
+                "jobs_step_duplicate" => { let step=jobs["nodes"][0]["steps"]["nodes"][0].clone(); jobs["nodes"][0]["steps"]["nodes"].as_array_mut().unwrap().push(step); jobs["nodes"][0]["steps"]["totalCount"]=json!(2); },
+                "jobs_truncated" => { jobs["totalCount"]=json!(101); jobs["pageInfo"]["hasNextPage"]=json!(true); },
+                "jobs_steps_truncated" => { jobs["nodes"][0]["steps"]["totalCount"]=json!(101); jobs["nodes"][0]["steps"]["pageInfo"]["hasNextPage"]=json!(true); },
+                "jobs_rerun_race" => { nodes[0]["runAttempt"]=json!(2); },
+                "jobs_wrong_head" => { nodes[0]["checkSuite"]["commit"]["oid"]=json!(sha(999)); },
+                "jobs_wrong_repo" => { nodes[0]["checkSuite"]["repository"]["nameWithOwner"]=json!("other/repo"); },
+                "jobs_changed" => { nodes[0]["updatedAt"]=json!(format!("{}T01:20:00Z",mock.day)); },
+                "jobs_malformed" => { jobs["nodes"][0]["databaseId"] = Value::Null; },
+                "jobs_error" => return Json(json!({"data":{"nodes":nodes},"errors":[{"type":"FORBIDDEN","message":"synthetic job error"}]})).into_response(),
+                _ => {},
+            }
+        }
         match mock.mode {
             "missing" => { nodes.pop(); },
             "duplicate" => nodes[1] = nodes[0].clone(),
@@ -306,15 +446,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri, body: 
         if !path.ends_with("/jobs") {
             return Json(mock.run(id)).into_response();
         }
-        let run = mock.current(id);
-        let passed = id == mock.count && (mock.mode != "rerun" || attempt == 1);
-        let jobs = if passed {
-            vec![
-                json!({"id":id+1000,"run_id":id,"run_attempt":attempt,"head_sha":run["head_sha"],"name":"test","status":"completed","conclusion":"success","completed_at":format!("{}T01:09:00Z",mock.day),"steps":[{"name":"Run tests","status":"completed","conclusion":"success"}]}),
-            ]
-        } else {
-            vec![]
-        };
+        let jobs = mock.jobs(id, attempt);
         json!({"total_count":jobs.len(),"jobs":jobs})
     } else {
         return (
@@ -396,6 +528,12 @@ async fn rerun_metadata_retains_old_attempt_without_confirming_it() {
             .any(|r| r.id == 6 && r.attempt == 2 && r.verdict.state == RunState::Pending)
     );
     assert_eq!(h.graphql_calls().len(), 1);
+    assert!(h.job_queries().iter().all(|body| {
+        !body["variables"]["ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("WFR_6"))
+    }));
 }
 #[tokio::test]
 async fn new_current_day_run_on_archived_head_still_supersedes_success() {
@@ -498,6 +636,7 @@ async fn app_missing_nodes_explicit_refresh_and_incomplete_discovery_keep_rest()
             },
         );
         assert!(h.graphql_calls().is_empty(), "{mode}");
+        assert!(h.job_queries().is_empty(), "{mode}");
         h.mock.calls.lock().unwrap().clear();
         let cached = h.report(Freshness::CachedOnly).await;
         assert_state(
@@ -546,6 +685,171 @@ async fn graphql_bytes_share_the_discovery_collection_budget() {
     let batch = h.report(fresh()).await;
     assert_state(&batch, "unknown");
     assert_eq!(h.graphql_calls().len(), 1);
+    assert!(
+        batch.reports[0]
+            .errors
+            .iter()
+            .any(|s| s.contains("byte limit"))
+    );
+}
+
+#[tokio::test]
+async fn job_evidence_batches_preserve_failed_steps_and_reuse_completed_versions() {
+    let mut h = Harness::new("jobs_evidence", 6).await;
+    let batch = h.report(fresh()).await;
+    assert_state(&batch, "verified");
+    assert_eq!(
+        batch.reports[0].gates[0].runs[0].verdict.failed_jobs,
+        vec!["test"]
+    );
+    assert_eq!(
+        batch.reports[0].gates[0].confirmation.as_ref().unwrap().id,
+        6
+    );
+    assert_eq!(h.job_queries().len(), 1);
+    assert!(!h.calls().iter().any(|(p, _)| p.contains("/jobs")));
+    h.mock.calls.lock().unwrap().clear();
+    // Restart the client to prove persistent reuse after fresh parent validation.
+    h.client = Client::with_token(h.config.clone(), "synthetic".into()).unwrap();
+    assert_state(&h.report(fresh()).await, "verified");
+    assert!(h.job_queries().is_empty());
+    assert!(!h.calls().iter().any(|(p, _)| p.contains("/jobs")));
+}
+
+#[tokio::test]
+async fn job_evidence_pages_fall_back_without_hiding_other_batched_runs() {
+    for mode in ["jobs_truncated", "jobs_steps_truncated"] {
+        let h = Harness::new(mode, 6).await;
+        assert_state(&h.report(fresh()).await, "verified");
+        assert_eq!(h.job_queries().len(), 1, "{mode}");
+        let rest: Vec<_> = h
+            .calls()
+            .into_iter()
+            .filter(|(p, _)| p.contains("/jobs"))
+            .collect();
+        assert_eq!(rest.len(), 1, "{mode}");
+        assert!(rest[0].0.contains("/runs/1/attempts/1/jobs"));
+    }
+}
+
+#[tokio::test]
+async fn malformed_changed_or_denied_job_evidence_never_certifies_or_bypasses_errors() {
+    for mode in [
+        "jobs_missing",
+        "jobs_duplicate",
+        "jobs_steps_missing",
+        "jobs_step_duplicate",
+        "jobs_rerun_race",
+        "jobs_wrong_head",
+        "jobs_wrong_repo",
+        "jobs_changed",
+        "jobs_malformed",
+        "jobs_denied",
+        "jobs_rate_limit",
+        "jobs_deadline",
+        "jobs_error",
+        "jobs_late_rerun",
+        "jobs_versions_denied",
+    ] {
+        let h = Harness::new(mode, 6).await;
+        let batch = h.report(fresh()).await;
+        assert_state(&batch, "unknown");
+        assert!(
+            batch.reports[0]
+                .gates
+                .iter()
+                .all(|g| g.confirmation.is_none()),
+            "{mode}"
+        );
+        assert!(
+            !h.calls().iter().any(|(p, _)| p.contains("/jobs")),
+            "{mode}"
+        );
+        let db = rusqlite::Connection::open(h._dir.path().join("cache")).unwrap();
+        let memos: i64 = db
+            .query_row(
+                "SELECT count(*) FROM cache WHERE key LIKE 'completed-jobs://%#release-v1-%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            memos, 0,
+            "{mode}: unvalidated evidence must not become an immutable memo"
+        );
+    }
+}
+
+#[tokio::test]
+async fn job_batch_failure_keeps_prior_chunk_progress_and_never_confirms_partial_history() {
+    let mut h = Harness::new("jobs_partial", 25).await;
+    let batch = h.report(fresh()).await;
+    assert_state(&batch, "unknown");
+    let gate = &batch.reports[0].gates[0];
+    assert_eq!(gate.runs.len(), 20);
+    assert!(!gate.history_complete);
+    assert!(gate.confirmation.is_none());
+    assert_eq!(h.job_queries().len(), 2);
+    assert!(
+        h.job_queries()
+            .iter()
+            .all(|b| b["variables"]["ids"].as_array().unwrap().len() <= 20)
+    );
+    h.mock.calls.lock().unwrap().clear();
+    h.client = Client::with_token(h.config.clone(), "synthetic".into()).unwrap();
+    let recovered = h.report(fresh()).await;
+    assert_state(&recovered, "verified");
+    assert_eq!(recovered.reports[0].gates[0].runs.len(), 25);
+    assert_eq!(h.job_queries().len(), 1);
+    assert_eq!(
+        h.job_queries()[0]["variables"]["ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn job_memos_expire_and_explicit_refresh_retains_rest() {
+    let h = Harness::new("jobs_evidence", 6).await;
+    assert_state(&h.report(fresh()).await, "verified");
+    let db = rusqlite::Connection::open(h._dir.path().join("cache")).unwrap();
+    assert_eq!(db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE 'completed-jobs://%#release-v1-%'",[]).unwrap(),6);
+    h.mock.calls.lock().unwrap().clear();
+    assert_state(&h.report(fresh()).await, "verified");
+    assert_eq!(h.job_queries().len(), 1);
+    h.mock.calls.lock().unwrap().clear();
+    assert_state(&h.report(Freshness::Revalidate).await, "verified");
+    assert!(h.job_queries().is_empty());
+    assert_eq!(
+        h.calls()
+            .iter()
+            .filter(|(p, _)| p.contains("/jobs"))
+            .count(),
+        6
+    );
+}
+
+#[tokio::test]
+async fn changed_parent_version_invalidates_job_memo() {
+    let h = Harness::new("jobs_revision", 6).await;
+    assert_state(&h.report(fresh()).await, "verified");
+    h.mock
+        .calls
+        .lock()
+        .unwrap()
+        .retain(|(p, _)| p.ends_with("/branches/main"));
+    assert_state(&h.report(fresh()).await, "verified");
+    assert_eq!(h.job_queries().len(), 1);
+}
+
+#[tokio::test]
+async fn job_evidence_and_final_version_reads_share_the_byte_budget() {
+    let h = Harness::new("jobs_budget", 6).await;
+    let batch = h.report(fresh()).await;
+    assert_state(&batch, "unknown");
+    assert_eq!(h.job_queries().len(), 1);
     assert!(
         batch.reports[0]
             .errors

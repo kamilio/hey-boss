@@ -387,7 +387,7 @@ impl Collector<'_> {
                     r["id"].as_u64().unwrap_or(0),
                 )
             });
-            for run in runs {
+            for (index, run) in runs.iter().enumerate() {
                 if let Some(confirmation) = &confirmation
                     && run["created_at"]
                         .as_str()
@@ -396,7 +396,7 @@ impl Collector<'_> {
                 {
                     break;
                 }
-                let head = string(&run, "head_sha")?;
+                let head = string(run, "head_sha")?;
                 let covered = if let Some(commits) = &branch_commits {
                     // Comparison members belong to the tip, but a merged side
                     // branch can still omit the target. Prove that direction.
@@ -410,8 +410,8 @@ impl Collector<'_> {
                 if !covered {
                     continue;
                 }
-                let id = number(&run, "id")?;
-                let attempt = number(&run, "run_attempt")?;
+                let id = number(run, "id")?;
+                let attempt = number(run, "run_attempt")?;
                 // Retain failed/cancelled attempts when history starts after a rerun.
                 if attempt > 20 {
                     return Err(Error::Invalid(
@@ -435,6 +435,9 @@ impl Collector<'_> {
                         || attempt_run["run_attempt"] != n
                     {
                         return Err(Error::Invalid("workflow attempt identity changed".into()));
+                    }
+                    if n == attempt && history_complete {
+                        self.prefetch_jobs(&runs[index..], &sha, &tip).await?;
                     }
                     let jobs = self.jobs(&attempt_run).await?;
                     let mut verdict = assess(gate, &attempt_run, &jobs);
@@ -880,11 +883,74 @@ impl Collector<'_> {
         self.pages.insert(key, value.clone());
         Ok(value)
     }
+    async fn prefetch_jobs(&mut self, runs: &[Value], target: &str, tip: &str) -> Result<()> {
+        use super::workflow_jobs;
+        if !matches!(self.freshness, Freshness::MaxAge(_))
+            || self.client.ci_uses_installation(&self.project.repository)
+            || !workflow_jobs::eligible(&runs[0])
+            || self.jobs.contains_key(&(number(&runs[0], "id")?, 1))
+        {
+            return Ok(());
+        }
+        let mut missing = Vec::new();
+        let mut bytes = 0usize;
+        // Bound speculative work. The current run's ancestry was just proved;
+        // later runs must already have a proof from the complete comparison.
+        for (index, run) in runs.iter().take(workflow_jobs::BATCH_SIZE).enumerate() {
+            let head = string(run, "head_sha")?;
+            if !workflow_jobs::eligible(run)
+                || (index > 0
+                    && head != target
+                    && head != tip
+                    && !self.ancestry.contains(&(target.to_owned(), head)))
+            {
+                continue;
+            }
+            let id = number(run, "id")?;
+            if self.jobs.contains_key(&(id, 1)) {
+                continue;
+            }
+            if let Some(jobs) =
+                workflow_jobs::cached(self.client, &self.project.repository, run).await?
+            {
+                bytes = bytes.saturating_add(
+                    serde_json::to_vec(&jobs)
+                        .map_err(|e| Error::Invalid(e.to_string()))?
+                        .len(),
+                );
+                if bytes > self.client.collection_limit() {
+                    return Err(Error::Invalid(
+                        "release jobs exceed collection byte limit".into(),
+                    ));
+                }
+                self.jobs.insert((id, 1), jobs);
+            } else {
+                missing.push(run);
+            }
+        }
+        if missing.len() < 2 {
+            return Ok(());
+        }
+        let collected = workflow_jobs::fetch(self.client, &missing, self.freshness, bytes).await?;
+        for (run, jobs) in collected {
+            workflow_jobs::save(self.client, &self.project.repository, run, &jobs).await?;
+            self.jobs.insert((number(run, "id")?, 1), jobs);
+        }
+        Ok(())
+    }
     async fn jobs(&mut self, run: &Value) -> Result<Vec<Value>> {
         let id = number(run, "id")?;
         let attempt = number(run, "run_attempt")?;
         if let Some(jobs) = self.jobs.get(&(id, attempt)) {
             return Ok(jobs.clone());
+        }
+        if matches!(self.freshness, Freshness::MaxAge(_))
+            && !self.client.ci_uses_installation(&self.project.repository)
+            && let Some(jobs) =
+                super::workflow_jobs::cached(self.client, &self.project.repository, run).await?
+        {
+            self.jobs.insert((id, attempt), jobs.clone());
+            return Ok(jobs);
         }
         // Even cancelled workflows can have real failures before cancellation.
         let path = format!(
@@ -962,6 +1028,11 @@ impl Collector<'_> {
                     break;
                 }
             }
+        }
+        if !matches!(self.freshness, Freshness::CachedOnly)
+            && !self.client.ci_uses_installation(&self.project.repository)
+        {
+            super::workflow_jobs::save(self.client, &self.project.repository, run, &rows).await?;
         }
         self.jobs.insert((id, attempt), rows.clone());
         Ok(rows)
