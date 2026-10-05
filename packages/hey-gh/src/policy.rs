@@ -118,6 +118,39 @@ pub struct RequiredChecksReport {
 }
 
 impl Client {
+    // CI may already know this personal payload's collection selectors changed.
+    // Use that cached observation only to schedule a personal refresh, never as
+    // policy evidence or a substitute for personal metadata/confirmation.
+    async fn policy_seed_superseded(
+        &self,
+        repository: &str,
+        number: u64,
+        seed: &crate::Response,
+    ) -> Result<bool> {
+        if !self.ci_uses_installation(repository) {
+            return Ok(false);
+        }
+        let Some(latest) = self.peek_ci_pull_request(repository, number).await? else {
+            return Ok(false);
+        };
+        Ok(latest.validated_at_ms > seed.validated_at_ms
+            && latest.validated_at_ms <= crate::now_ms()
+            && ([
+                "/node_id",
+                "/number",
+                "/head/sha",
+                "/base/sha",
+                "/base/ref",
+                "/base/repo/id",
+                "/base/repo/node_id",
+                "/base/repo/full_name",
+                "/merge_commit_sha",
+            ]
+            .iter()
+            .any(|field| latest.data.pointer(field) != seed.data.pointer(field))
+                || policy_identity(&latest.data).ok() != policy_identity(&seed.data).ok()))
+    }
+
     // Admission only: avoid an independent policy rotation competing to hydrate
     // cold/stale CI. The actual policy read still validates every source and
     // final selector normally. This probe never dispatches GitHub requests.
@@ -233,6 +266,14 @@ impl Client {
                             .is_some_and(crate::repository::valid_sha)
                         && policy_identity(&cached.data).is_ok() =>
                 {
+                    if self
+                        .policy_seed_superseded(repository, number, &cached)
+                        .await?
+                    {
+                        return self
+                            .pull_request(repository, number, Freshness::Revalidate)
+                            .await;
+                    }
                     // This is only a collection seed, never fresh evidence.
                     // Final PR validation still enforces the caller's age and
                     // retries if node, head, base, merge or stack changed.

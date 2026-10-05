@@ -2,7 +2,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use hey_gh::{Client, Config, Freshness};
@@ -41,17 +41,36 @@ struct Data {
     change_rest_on_checks: Option<Value>,
     deny_rest_on_checks: bool,
     calls: Vec<(String, Value)>,
+    tokens: Vec<String>,
 }
 
-async fn handler(State(state): State<Arc<Mutex<Data>>>, uri: Uri, body: Bytes) -> Response {
+async fn handler(
+    State(state): State<Arc<Mutex<Data>>>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let (value, denied, stalled) = {
         let mut s = state.lock().unwrap();
         let path = uri.path();
+        s.tokens.push(
+            headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_owned(),
+        );
         s.calls.push((
             path.into(),
             serde_json::from_slice(&body).unwrap_or(Value::Null),
         ));
-        if path == "/graphql" {
+        if path == "/app/installations/42/access_tokens" {
+            (
+                json!({"token":"synthetic-app-token","expires_at":"2099-01-01T00:00:00Z"}),
+                false,
+                false,
+            )
+        } else if path == "/graphql" {
             (s.graph.clone(), false, s.stall_graph)
         } else if path.ends_with("/pulls/7") {
             (s.rest.clone(), s.deny_rest, s.stall_rest)
@@ -97,6 +116,9 @@ async fn handler(State(state): State<Arc<Mutex<Data>>>, uri: Uri, body: Bytes) -
             .into_response();
     }
     let mut response = axum::Json(value).into_response();
+    if uri.path() == "/app/installations/42/access_tokens" {
+        *response.status_mut() = StatusCode::CREATED;
+    }
     if uri.path().starts_with("/pace-graphql") {
         let headers = response.headers_mut();
         headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
@@ -135,6 +157,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_installation(false).await
+    }
+
+    async fn with_installation(installation: bool) -> Self {
         let data = Arc::new(Mutex::new(Data {
             rest: metadata(),
             graph: selectors(),
@@ -144,12 +170,22 @@ impl Fixture {
             change_rest_on_checks: None,
             deny_rest_on_checks: false,
             calls: vec![],
+            tokens: vec![],
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let dir = tempfile::tempdir().unwrap();
         let client = Client::with_token(
             Config {
+                installation: installation.then(|| {
+                    hey_gh::AppInstallation::new(
+                        "synthetic-client".into(),
+                        42,
+                        vec!["acme/demo".into()],
+                        include_str!("fixtures/github-app-test-key.pem"),
+                    )
+                    .unwrap()
+                }),
                 rest_url: url.parse().unwrap(),
                 graphql_url: format!("{url}graphql").parse().unwrap(),
                 cache_path: dir.path().join("cache.sqlite"),
@@ -180,13 +216,133 @@ impl Fixture {
             .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
             .await
             .unwrap();
-        assert_eq!(report.state, "satisfied");
+        assert_eq!(report.state, "satisfied", "{:?}", report.errors);
         let old = report.observed_at_ms.unwrap() - 120_000;
         rusqlite::Connection::open(self.dir.path().join("cache.sqlite")).unwrap().execute(
             "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [old]
         ).unwrap();
         self.data.lock().unwrap().calls.clear();
+        self.data.lock().unwrap().tokens.clear();
         old
+    }
+
+    fn cache_ci_seed(&self, data: &Value, clock: u64) {
+        let db = rusqlite::Connection::open(self.dir.path().join("cache.sqlite")).unwrap();
+        assert_eq!(db.execute(
+            "INSERT OR REPLACE INTO cache(scope,key,response) SELECT scope,key||'#installation-ci-pr',json_set(response,'$.data',json(?1),'$.validated_at_ms',?2) FROM cache WHERE key LIKE '%/pulls/7'",
+            rusqlite::params![data.to_string(), clock],
+        ).unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn newer_cached_ci_selectors_refresh_the_personal_policy_seed_before_collection() {
+    let f = Fixture::with_installation(true).await;
+    let old = f.seed().await;
+    let merge = "dddddddddddddddddddddddddddddddddddddddd";
+    let mut next = metadata();
+    next["merge_commit_sha"] = json!(merge);
+    next["mergeable"] = Value::Null;
+    f.cache_ci_seed(&next, old + 60_000);
+    {
+        let mut data = f.data.lock().unwrap();
+        data.rest = next;
+        data.graph["data"]["repository"]["pullRequest"]["mergeable"] = json!("UNKNOWN");
+        data.graph["data"]["repository"]["pullRequest"]["potentialMergeCommit"] = Value::Null;
+    }
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+        .await
+        .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert_eq!(report.merge_sha.as_deref(), Some(merge));
+    let data = f.data.lock().unwrap();
+    assert_eq!(
+        data.calls[0].0, "/repos/acme/demo/pulls/7",
+        "known obsolete selectors must refresh before collecting"
+    );
+    let metadata_reads: Vec<_> = data
+        .calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.0.ends_with("/pulls/7"))
+        .collect();
+    assert_eq!(
+        metadata_reads.len(),
+        1,
+        "avoid a forced second confirmation after collecting a known obsolete merge"
+    );
+    assert_eq!(data.tokens[metadata_reads[0].0], "Bearer synthetic-token");
+    assert!(!data.calls.iter().any(|c| c.0 == "/graphql"));
+}
+
+#[tokio::test]
+async fn policy_seed_hints_do_not_replace_personal_evidence_or_change_offline_reads() {
+    let f = Fixture::with_installation(true).await;
+    let old = f.seed().await;
+    let mut next = metadata();
+    next["merge_commit_sha"] = json!("dddddddddddddddddddddddddddddddddddddddd");
+    f.cache_ci_seed(&next, old + 60_000);
+    f.data.lock().unwrap().deny_rest = true;
+    let offline = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap_err();
+    assert!(matches!(offline, hey_gh::Error::CacheMiss));
+    assert!(f.data.lock().unwrap().calls.is_empty());
+    let error = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, hey_gh::Error::GitHub { status: 403, .. }));
+    let cached = f
+        .client
+        .get("repos/acme/demo/pulls/7", Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(cached.data, metadata());
+    assert_eq!(cached.validated_at_ms, old);
+    let data = f.data.lock().unwrap();
+    assert_eq!(data.calls.len(), 1);
+    assert_eq!(data.calls[0].0, "/repos/acme/demo/pulls/7");
+    assert_eq!(data.tokens[0], "Bearer synthetic-token");
+}
+
+#[tokio::test]
+async fn older_future_or_unrelated_ci_metadata_does_not_force_a_personal_refresh() {
+    for kind in ["older", "future", "unrelated", "no_app"] {
+        let f = Fixture::with_installation(kind != "no_app").await;
+        let old = f.seed().await;
+        let mut next = metadata();
+        let clock = match kind {
+            "older" => old - 1,
+            "future" => old + 3_600_000,
+            _ => old + 60_000,
+        };
+        if kind == "unrelated" {
+            next["title"] = json!("Updated title");
+            next["updated_at"] = json!("2026-10-05T00:00:00Z");
+            // REST can omit absent native membership instead of using null.
+            next.as_object_mut().unwrap().remove("stack");
+        } else {
+            next["merge_commit_sha"] = json!("dddddddddddddddddddddddddddddddddddddddd");
+        }
+        f.cache_ci_seed(&next, clock);
+        f.data.lock().unwrap().deny_rest = true;
+        let report = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::default())
+            .await
+            .unwrap();
+        assert_eq!(report.state, "satisfied", "{kind}");
+        assert_eq!(report.merge_sha.as_deref(), Some(MERGE));
+        let data = f.data.lock().unwrap();
+        assert_eq!(data.calls.len(), 1, "{kind}: {:?}", data.calls);
+        assert_eq!(data.calls[0].0, "/graphql");
+        assert_eq!(data.tokens[0], "Bearer synthetic-token");
     }
 }
 
