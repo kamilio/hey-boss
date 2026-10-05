@@ -21,6 +21,26 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let gate = Arc::new(Gate::default());
         let router = axum::Router::new()
+            .route(
+                "/core-reserve/{remaining}",
+                axum::routing::get(
+                    |axum::extract::Path(remaining): axum::extract::Path<u64>| async move {
+                        use axum::response::IntoResponse;
+                        let mut response = axum::Json(json!({"ok":true})).into_response();
+                        let headers = response.headers_mut();
+                        headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-remaining",
+                            remaining.to_string().parse().unwrap(),
+                        );
+                        headers.insert(
+                            "x-ratelimit-reset",
+                            (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
+                        );
+                        response
+                    },
+                ),
+            )
             .fallback(
                 |axum::extract::State(gate): axum::extract::State<Arc<Gate>>,
                  axum::Json(body): axum::Json<Value>| async move {
@@ -177,4 +197,40 @@ async fn optional_graphql_still_runs_when_uncontended_and_reuses_fresh_cache() {
         *f.gate.calls.lock().unwrap(),
         ["optional", "gate", "required"]
     );
+}
+
+#[tokio::test]
+async fn optional_graphql_keeps_its_route_when_rest_quota_cannot_accept_the_fallback() {
+    for remaining in [0, 100] {
+        let f = Fixture::new().await;
+        f.client
+            .get(&format!("core-reserve/{remaining}"), Freshness::Revalidate)
+            .await
+            .unwrap();
+        let held = f.hold().await;
+        let required = tokio::spawn(read(f.client.clone(), "required", Freshness::Revalidate));
+        f.queued(2).await;
+        let optional = tokio::spawn(optional_selector_read(COMPLETION_VALIDATION.scope(
+            (),
+            read(f.client.clone(), "optional", Freshness::Revalidate),
+        )));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let premature = optional.is_finished();
+        f.gate.release.notify_one();
+        held.await.unwrap().unwrap();
+        required.await.unwrap().unwrap();
+        let response = optional.await.unwrap();
+        assert!(
+            !premature && response.is_ok(),
+            "do not send a usable GraphQL read into exhausted REST quota: {response:?}"
+        );
+        assert!(
+            f.gate
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|tag| tag == "optional")
+        );
+    }
 }
