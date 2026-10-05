@@ -19,6 +19,8 @@ use url::Url;
 
 mod ci_pull_request;
 mod ci_selectors;
+#[cfg(test)]
+mod confirmation_tests;
 
 // Admission probes apply ordinary freshness/version rules without dispatching,
 // minting credentials or joining an in-flight request when evidence is missing.
@@ -699,8 +701,10 @@ impl Client {
                 "pull_request" | "branch"
             ))
             || installation;
-        let completion_validation =
-            selector_validation && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
+        // The final selector scope also contains personal GraphQL confirmations.
+        // Give those the same completion turns as REST, including coalesced work.
+        let completion_validation = (selector_validation || body.is_some())
+            && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
         let receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
