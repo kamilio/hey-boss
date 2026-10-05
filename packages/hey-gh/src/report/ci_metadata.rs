@@ -4,7 +4,14 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub(super) mod discovery;
+mod late;
 mod status_versions;
+
+enum CachedList {
+    Ready(Vec<Value>),
+    Changed,
+    Unavailable,
+}
 
 struct VersionEvidence {
     versions: status_versions::Versions,
@@ -151,7 +158,7 @@ impl Client {
         Ok(None)
     }
 
-    pub(super) async fn commit_list_from_metadata(
+    async fn load_commit_list(
         &self,
         repository: &str,
         sha: &str,
@@ -159,6 +166,40 @@ impl Client {
         list: CommitList,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
+        match self
+            .cached_commit_list(repository, sha, rest_path, list, freshness)
+            .await?
+        {
+            CachedList::Ready(values) => Ok(values),
+            CachedList::Unavailable => self.pages(rest_path, Some(list.field()), freshness).await,
+            CachedList::Changed => {
+                // Newer metadata contradicts the old list. Offline reads
+                // cannot invent the missing full REST payload.
+                if matches!(freshness, Freshness::CachedOnly) {
+                    return Err(Error::CacheMiss);
+                }
+                let values = self
+                    .pages(rest_path, Some(list.field()), Freshness::Revalidate)
+                    .await?;
+                if values.is_empty() {
+                    return Err(Error::Invalid(format!(
+                        "{} disagree with newer CI metadata",
+                        list.label().replace('-', " ")
+                    )));
+                }
+                Ok(values)
+            }
+        }
+    }
+
+    async fn cached_commit_list(
+        &self,
+        repository: &str,
+        sha: &str,
+        rest_path: &str,
+        list: CommitList,
+        freshness: Freshness,
+    ) -> Result<CachedList> {
         if !matches!(freshness, Freshness::Revalidate)
             && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
             && let Some(ListEvidence {
@@ -189,7 +230,7 @@ impl Client {
                             source: Source::Cache,
                         })
                     });
-                    return Ok(Vec::new());
+                    return Ok(CachedList::Ready(Vec::new()));
                 }
                 let mut changed = false;
                 if let Some(proof) = versions
@@ -210,7 +251,7 @@ impl Client {
                                     source: Source::Cache,
                                 })
                             });
-                            return Ok(values);
+                            return Ok(CachedList::Ready(values));
                         }
                         status_versions::Cached::Changed => changed = true,
                         status_versions::Cached::Unavailable => {}
@@ -223,25 +264,11 @@ impl Client {
                             .is_some_and(Vec::is_empty)
                     })
                 {
-                    // Newer metadata contradicts the old list. Offline
-                    // reads cannot invent the missing full REST payload.
-                    if matches!(freshness, Freshness::CachedOnly) {
-                        return Err(Error::CacheMiss);
-                    }
-                    let values = self
-                        .pages(rest_path, Some(list.field()), Freshness::Revalidate)
-                        .await?;
-                    if values.is_empty() {
-                        return Err(Error::Invalid(format!(
-                            "{} disagree with newer CI metadata",
-                            list.label().replace('-', " ")
-                        )));
-                    }
-                    return Ok(values);
+                    return Ok(CachedList::Changed);
                 }
             }
         }
-        self.pages(rest_path, Some(list.field()), freshness).await
+        Ok(CachedList::Unavailable)
     }
 
     async fn cached_list_evidence(
