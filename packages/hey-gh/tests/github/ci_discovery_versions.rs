@@ -349,7 +349,7 @@ async fn discovery_status_versions_use_newer_partial_page_without_renewing_the_r
 #[tokio::test]
 async fn discovery_status_versions_query_upgrade_preserves_legacy_offline_scan_and_page_hints() {
     use sha2::Digest;
-    for app in [false, true] {
+    for (app, previous) in [(false, false), (false, true), (true, false), (true, true)] {
         let (h, c) = ci_status_versions::seeded(app).await;
         forget_point_proof(&h);
         h.mode("account-ci-selectors-empty");
@@ -365,16 +365,24 @@ async fn discovery_status_versions_query_upgrade_preserves_legacy_offline_scan_a
         }) {
             let mut body = call.body.clone();
             let current = format!("{:x}", sha2::Sha256::digest(body.to_string().as_bytes()));
-            body["query"] = json!(
-                body["query"]
-                    .as_str()
-                    .unwrap()
+            let query = body["query"]
+                .as_str()
+                .unwrap()
+                .replace(
+                    " statusCheckRollup { contexts(first: 1) { checkRunCount } }",
+                    "",
+                )
+                .replace("checkRunCount statusContextCount", "statusContextCount");
+            body["query"] = json!(if previous {
+                query
+            } else {
+                query
                     .replace(
                         " contexts { id updatedAt context state description targetUrl }",
-                        ""
+                        "",
                     )
                     .replace(" contexts(first: 1) { statusContextCount }", "")
-            );
+            });
             let legacy = format!("{:x}", sha2::Sha256::digest(body.to_string().as_bytes()));
             assert_ne!(current, legacy);
             assert_eq!(
