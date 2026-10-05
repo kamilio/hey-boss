@@ -96,7 +96,9 @@ impl Store {
     }
 
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
-        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed'),min(pr.status='merged') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
+        // Closing a task can precede observing its PR merge. Keep unresolved
+        // fixes in the ordinary metadata queue until their lifecycle is known.
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed'),min(pr.status='merged') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.purpose='fix' AND pr.status NOT IN ('merged','closed')) OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
             .query_map([], |r| {
                 Ok(TrackedPullRequest {
@@ -683,9 +685,9 @@ mod tests {
     }
 
     #[test]
-    fn tracks_distinct_active_issue_prs_and_resumes_when_reopened() {
+    fn tracks_distinct_active_issue_prs_and_resumes_references_when_reopened() {
         let (store, _, root) = fixture();
-        store.db.execute("UPDATE issue_pull_requests SET url='https://github.com/o/r/pull/99' WHERE issue_number=5", []).unwrap();
+        store.db.execute("UPDATE issue_pull_requests SET url='https://github.com/o/r/pull/99',purpose='supporting-evidence' WHERE issue_number=5", []).unwrap();
         assert!(
             !store
                 .tracked_pull_requests()
@@ -702,6 +704,61 @@ mod tests {
         assert!(
             prs.iter()
                 .any(|p| p.url.ends_with("/99") && p.checked_at.is_none())
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn closed_tasks_keep_unresolved_fix_prs_until_their_lifecycle_is_confirmed() {
+        let (mut store, _, root) = fixture();
+        store
+            .db
+            .execute("UPDATE issues SET state='closed'", [])
+            .unwrap();
+        store.db.execute("UPDATE issue_pull_requests SET url='https://github.com/o/r/pull/99' WHERE issue_number=4", []).unwrap();
+        let first = "https://github.com/o/r/pull/1";
+        let second = "https://github.com/o/r/pull/2";
+        store
+            .record_pr_status(first, Some("open"), 1000, None)
+            .unwrap();
+        let prs = store.tracked_pull_requests().unwrap();
+        assert_eq!(
+            prs.iter().map(|pr| pr.url.as_str()).collect::<Vec<_>>(),
+            [first, second],
+            "Closed tasks retain unresolved fixes, excluding reference-only and deleted task links"
+        );
+        store
+            .record_pr_status(first, Some("merged"), 2000, None)
+            .unwrap();
+        store
+            .record_pr_merge_details(
+                first,
+                "Recorded after task closure",
+                Some("2026-10-05T21:04:49Z"),
+                2000,
+            )
+            .unwrap();
+        store.record_pr_author(first, 42).unwrap();
+        store
+            .record_pr_status(second, Some("closed"), 2000, None)
+            .unwrap();
+        assert!(
+            store.tracked_pull_requests().unwrap().is_empty(),
+            "Resolved closed-task PRs leave the polling queue"
+        );
+        let history = merged_history(&store.db, "named:test", 100, 0).unwrap();
+        assert_eq!(history["pull_requests"][0]["url"], first);
+        assert_eq!(history["pull_requests"][0]["merged_at"], 1791234289000_i64);
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM issues WHERE state<>'closed'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
