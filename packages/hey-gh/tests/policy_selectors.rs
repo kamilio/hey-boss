@@ -23,6 +23,9 @@ mod ci;
 #[path = "policy_selectors/rules.rs"]
 mod rules;
 
+#[path = "policy_selectors/ci_retry.rs"]
+mod ci_retry;
+
 fn metadata() -> Value {
     json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
         "head":{"sha":HEAD},"base":{"ref":"main","sha":BASE,"repo":{"id":123,"node_id":"R_demo","full_name":"acme/demo"}},
@@ -47,6 +50,7 @@ struct Data {
     ci_graph: Value,
     deny_ci_app_metadata: bool,
     ci_graph_gate: Option<Arc<tokio::sync::Notify>>,
+    policy_graph_gate: Option<Arc<tokio::sync::Notify>>,
     check_conclusion: &'static str,
     status_state: Option<&'static str>,
     branch_graph_gate: Option<Arc<tokio::sync::Notify>>,
@@ -55,9 +59,11 @@ struct Data {
     deny_rules: bool,
     stall_rules: bool,
     stall_checks: bool,
+    deny_checks: bool,
     merge_base: &'static str,
     deny_rest: bool,
     stall_rest: bool,
+    rest_after_read: Option<Value>,
     stall_graph: bool,
     change_rest_on_checks: Option<Value>,
     deny_rest_on_checks: bool,
@@ -117,7 +123,11 @@ async fn handler(
             };
             (value, false, s.stall_graph)
         } else if path.ends_with("/pulls/7") {
-            (s.rest.clone(), s.deny_rest, s.stall_rest)
+            let result = (s.rest.clone(), s.deny_rest, s.stall_rest);
+            if let Some(next) = s.rest_after_read.take() {
+                s.rest = next;
+            }
+            result
         } else if path.contains("/branches/") && !path.contains("/rules/") {
             (s.branch.clone(), false, s.stall_branch)
         } else if path.ends_with("/check-runs") {
@@ -130,7 +140,7 @@ async fn handler(
             }
             (
                 json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"node_id":format!("CR_{}",sha.as_bytes()[0]),"name":"tests","app":{"id":1},"check_suite":{"id":sha.as_bytes()[0]},"head_sha":sha,"status":"completed","conclusion":s.check_conclusion,"started_at":null,"completed_at":null,"details_url":null}]}),
-                false,
+                s.deny_checks,
                 s.stall_checks,
             )
         } else if path.ends_with("/status") {
@@ -138,7 +148,7 @@ async fn handler(
             let statuses=s.status_state.map(|state|json!({"id":u64::from(sha.as_bytes()[0])+100,"node_id":format!("S_{}",sha.as_bytes()[0]),"context":"deploy","state":state,"updated_at":"2026-10-01T00:00:00Z","target_url":null})).into_iter().collect::<Vec<_>>();
             (
                 json!({"sha":sha,"total_count":statuses.len(),"statuses":statuses}),
-                false,
+                s.deny_checks,
                 s.stall_checks,
             )
         } else if path.contains("/rules/branches/") {
@@ -163,6 +173,11 @@ async fn handler(
             .is_some_and(|query| query.contains("RequiredPolicyBranch"))
         {
             s.branch_graph_gate.take()
+        } else if branch_query["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("RequiredPolicySelectors"))
+        {
+            s.policy_graph_gate.take()
         } else if path.ends_with("/check-runs")
             && path
                 .rsplit('/')
@@ -257,6 +272,7 @@ impl Fixture {
             ci_graph: Value::Null,
             deny_ci_app_metadata: false,
             ci_graph_gate: None,
+            policy_graph_gate: None,
             check_conclusion: "success",
             status_state: None,
             branch_graph_gate: None,
@@ -265,9 +281,11 @@ impl Fixture {
             deny_rules: false,
             stall_rules: false,
             stall_checks: false,
+            deny_checks: false,
             merge_base: BASE,
             deny_rest: false,
             stall_rest: false,
+            rest_after_read: None,
             stall_graph: false,
             change_rest_on_checks: None,
             deny_rest_on_checks: false,

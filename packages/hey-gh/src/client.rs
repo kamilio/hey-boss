@@ -1494,6 +1494,10 @@ impl Client {
         }
         locks.entry(resource.into()).or_default().clone()
     }
+    pub(crate) fn access_failure_epoch(&self) -> u64 {
+        self.0.metrics.access_failure_epoch.load(Ordering::Relaxed)
+    }
+
     pub fn status(&self) -> Status {
         Status {
             outstanding_requests: self.0.config.queue_capacity - self.0.permits.available_permits(),

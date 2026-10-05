@@ -79,6 +79,7 @@ pub(crate) struct Metrics {
     pub network: AtomicU64,
     pub conditional: AtomicU64,
     pub not_modified: AtomicU64,
+    pub access_failure_epoch: AtomicU64,
     pub active: AtomicU64,
     pub limits: Mutex<BTreeMap<String, RateLimit>>,
 }
@@ -1449,6 +1450,25 @@ impl Scheduler {
     }
 
     fn finish(&self, job: Job, result: Result<Response>) {
+        if matches!(
+            &result,
+            Err(Error::Auth(_)
+                | Error::LocalAuth(_)
+                | Error::GitHub {
+                    status: 401 | 403,
+                    ..
+                }
+                | Error::GraphQL {
+                    access_denied: true,
+                    ..
+                })
+        ) {
+            // A successful cache payload may remain after a denied refresh.
+            // Invalidate optional in-memory retry reuse before waking waiters.
+            self.metrics
+                .access_failure_epoch
+                .fetch_add(1, Ordering::Relaxed);
+        }
         // A collection can drop its last waiter before the shared request's
         // deadline. Keep that observation distinct from a waiting caller's
         // expiry; neither the sticky foreground flag nor elapsed time proves it.
