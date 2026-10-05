@@ -119,10 +119,19 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
             |r| r.get(0),
         )
         .unwrap();
-    let resume_repo = serde_json::from_str::<Value>(&schedule).unwrap()["data"]["next"][0]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let schedule = serde_json::from_str::<Value>(&schedule).unwrap();
+    let schedule = &schedule["data"];
+    // A wake may already have visited the ordinary cursor, leaving an urgent
+    // retry ahead of it. The restart must preserve both rotation lanes.
+    assert!(schedule["resume"].as_array().unwrap().is_empty());
+    let next = if schedule["prefer_urgent"] == true
+        && let Some(first) = schedule["urgent"].as_array().unwrap().first()
+    {
+        first
+    } else {
+        &schedule["next"]
+    };
+    let resume_repo = next[0].as_str().unwrap().to_owned();
     // A readiness wake may already have started the next turn before stop.
     // Force both cached rules pages stale to observe the persisted resume order.
     db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',1) WHERE key LIKE '%/rules/branches/%'",[]).unwrap();

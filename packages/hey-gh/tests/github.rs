@@ -34,6 +34,8 @@ mod ci_selectors;
 mod ci_status_versions;
 #[path = "github/discovery_partial.rs"]
 mod discovery_partial;
+#[path = "github/metadata_priority.rs"]
+mod metadata_priority;
 
 #[path = "github/ci_app_selectors.rs"]
 mod ci_app_selectors;
@@ -5569,6 +5571,8 @@ async fn discovery_failure_survives_restart_and_cached_reads_until_a_validated_s
             if status[0]["discovery_last_error"].is_string()
                 && status[0]["last_success_at_ms"].is_number()
                 && status[0]["ci_last_success_at_ms"].is_number()
+                && status[0]["policy_last_cycle"].is_object()
+                && c.status().outstanding_requests == 0
             {
                 break;
             }
@@ -5584,6 +5588,8 @@ async fn discovery_failure_survives_restart_and_cached_reads_until_a_validated_s
         .cursor;
     api.stop().await;
     task.abort();
+    let _ = task.await;
+    until(|| c.status().outstanding_requests == 0).await;
     drop(api);
     drop(c);
     h.mode("account-discovery-stalled");
@@ -5602,7 +5608,7 @@ async fn discovery_failure_survives_restart_and_cached_reads_until_a_validated_s
         })
     })
     .await;
-    // Let the independent CI/detail startup polls finish before measuring
+    // Let all independent startup polls finish before measuring
     // requests from cached reads; the discovery request remains stalled.
     let status: Value = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -5616,6 +5622,9 @@ async fn discovery_failure_survives_restart_and_cached_reads_until_a_validated_s
                 .unwrap();
             if status[0]["last_success_at_ms"].is_number()
                 && status[0]["ci_last_success_at_ms"].is_number()
+                && (status[0]["policy_last_success_at_ms"].is_number()
+                    || status[0]["policy_last_error"].is_string())
+                && c.status().outstanding_requests == 1
             {
                 return status;
             }
@@ -6816,6 +6825,8 @@ async fn account_cursor_reads_do_not_trigger_discovery_but_explicit_refresh_does
                 .unwrap();
             if statuses[0]["last_success_at_ms"].is_number()
                 && statuses[0]["ci_last_success_at_ms"].is_number()
+                && statuses[0]["policy_last_cycle"].is_object()
+                && c.status().outstanding_requests == 0
             {
                 break;
             }
@@ -10730,7 +10741,7 @@ async fn required_policy_promotes_coalesced_requests_and_keeps_background_fair()
 
 #[tokio::test]
 async fn background_pr_http_reads_do_not_promote_the_shared_queue() {
-    for suffix in ["required-checks", "ci", ""] {
+    for suffix in ["required-checks", "ci", "metadata", ""] {
         let h = Harness::new().await;
         h.phase(2);
         let c = h.client();
@@ -10774,6 +10785,11 @@ async fn background_pr_http_reads_do_not_promote_the_shared_queue() {
                 }
                 "ci" => {
                     sdk.ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+                        .await
+                        .unwrap();
+                }
+                "metadata" => {
+                    sdk.pull_request("acme/demo", 7, Freshness::Revalidate)
                         .await
                         .unwrap();
                 }
