@@ -50,3 +50,26 @@ destructive calls with `remove-dependencies` or `remove-worktree`; do not run
 script from ignoring these guards. Never edit a running remover's manifest as a
 substitute for acknowledged exclusions. Before any real sweep, confirm every
 active or retained root with its owner. Regression checks use disposable fixtures.
+
+## Recovering a full companion disk
+
+Measure available blocks and inodes on the home volume, then inspect directory
+allocation and APFS snapshots. A reconnect does not establish adequate build
+headroom. Record both allocated bytes removed and the net free-space change;
+concurrent builds and shared APFS blocks can make those numbers differ.
+
+Preserve worker intent, source, active validation dependencies, session rollouts,
+task databases and ownership records. A disconnected worker's missing run list
+does not prove its agents stopped. Reuse the existing supervisor connection and
+let its normal deployment retry recover after space is available.
+
+Diagnostic SQLite retention is separate from cache cleanup. Validate the exact
+schema first, retain recent evidence, and delete only expired diagnostic rows in
+bounded transactions with busy handling. Compact incrementally only when the
+database supports it; a full vacuum needs additional free space. Verify integrity
+and checkpoint results afterward. Never delete a database or its live sidecars
+to recover space.
+
+Verify installed receipts on every connected machine, a successful deployment,
+advancing heartbeat and sync on the same node, and the original worker/run
+records. Confirm retained source still exists before considering recovery done.
