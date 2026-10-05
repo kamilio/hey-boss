@@ -2580,6 +2580,54 @@ mod priority_tests {
         queued_probe_turn(false, false, false, false, ProbeReplies::LastSlot).await;
     }
 
+    #[tokio::test]
+    async fn first_foreground_validators_can_borrow_an_older_paced_turn() {
+        for (interactive, replies) in [
+            (true, ProbeReplies::Unchanged),
+            (false, ProbeReplies::UnchangedAfterBurst),
+        ] {
+            queued_probe_turn_with_warmup(interactive, false, true, false, replies, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn first_changed_foreground_probe_preserves_the_owed_background_turn() {
+        queued_probe_turn_with_warmup(
+            false,
+            false,
+            true,
+            false,
+            ProbeReplies::ChangedAfterBurst,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn first_foreground_probe_is_serial_across_lanes_and_keeps_the_last_slot() {
+        for replies in [ProbeReplies::Held, ProbeReplies::LastSlot] {
+            queued_probe_turn_with_warmup(true, false, true, false, replies, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn first_background_validators_cannot_borrow_an_unproven_wait() {
+        queued_probe_turn_with_warmup(false, false, false, false, ProbeReplies::Unchanged, 1).await;
+    }
+
+    #[tokio::test]
+    async fn first_changed_foreground_probes_cannot_renew_ordinary_turns_with_completion_reads() {
+        queued_probe_turn_with_warmup(
+            true,
+            false,
+            true,
+            false,
+            ProbeReplies::ChangedWithCompletions,
+            1,
+        )
+        .await;
+    }
+
     enum ProbeReplies {
         Changed,
         Unchanged,
@@ -2596,6 +2644,25 @@ mod priority_tests {
         probe_interactive: bool,
         probe_completion: bool,
         replies: ProbeReplies,
+    ) {
+        queued_probe_turn_with_warmup(
+            interactive,
+            completion,
+            probe_interactive,
+            probe_completion,
+            replies,
+            2,
+        )
+        .await;
+    }
+
+    async fn queued_probe_turn_with_warmup(
+        interactive: bool,
+        completion: bool,
+        probe_interactive: bool,
+        probe_completion: bool,
+        replies: ProbeReplies,
+        warmup_reads: usize,
     ) {
         let changed = matches!(
             replies,
@@ -2684,10 +2751,10 @@ mod priority_tests {
             "synthetic-token".into(),
         )
         .unwrap();
-        // Warm each probe with a 304. In the changed case they become charged
-        // 200s after the gate opens; only one may borrow the older read's wait.
+        // One warmup leaves an unproven validator; two establish a prior 304.
+        // Changed replies may borrow the older read's wait only once.
         for n in 1..=12 {
-            for _ in 0..2 {
+            for _ in 0..warmup_reads {
                 client
                     .get(&probe_path(n), Freshness::Revalidate)
                     .await
@@ -2794,7 +2861,12 @@ mod priority_tests {
             .iter()
             .position(|path| path == "/repos/acme/demo/pulls/99")
             .unwrap();
-        if last_slot {
+        if warmup_reads == 1 && !probe_interactive {
+            assert_eq!(
+                owed, 1,
+                "unproven background validators borrowed a turn: {calls:?}"
+            );
+        } else if last_slot {
             assert_eq!(
                 owed, 1,
                 "a speculative validator borrowed the last spendable quota slot: {calls:?}"
