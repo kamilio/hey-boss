@@ -14,7 +14,7 @@ async fn upgrading_selector_query_keeps_legacy_empty_status_evidence_offline() {
     }
   }
 }"#;
-    for app in [false, true] {
+    for (app, counted) in [(false, false), (true, false), (false, true), (true, true)] {
         let h = Harness::new().await;
         h.mode("account-ci-selectors");
         h.phase(2);
@@ -46,7 +46,14 @@ async fn upgrading_selector_query_keeps_legacy_empty_status_evidence_offline() {
             .body
             .clone();
         let current = format!("{:x}", sha2::Sha256::digest(body.to_string().as_bytes()));
-        body["query"] = json!(LEGACY);
+        body["query"] = json!(if counted {
+            LEGACY.replace(
+                "status { id }",
+                "status { id } statusCheckRollup { contexts(first: 1) { checkRunCount } }",
+            )
+        } else {
+            LEGACY.to_owned()
+        });
         let legacy = format!("{:x}", sha2::Sha256::digest(body.to_string().as_bytes()));
         let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
         assert_eq!(

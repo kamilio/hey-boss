@@ -24,6 +24,8 @@ const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 mod ci_empty_checks;
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
+#[path = "github/ci_status_versions.rs"]
+mod ci_status_versions;
 
 #[path = "github/ci_app_selectors.rs"]
 mod ci_app_selectors;
@@ -820,6 +822,25 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 node["potentialMergeCommit"]["statusCheckRollup"] =
                     json!({"contexts":{"checkRunCount":0}});
             }
+            if mode == "ci-point-status-versions" {
+                let state = if phase >= 3 { "FAILURE" } else { "SUCCESS" };
+                let version = if phase >= 3 { 2 } else { 1 };
+                let at = if phase >= 3 {
+                    "2026-09-19T00:01:00Z"
+                } else {
+                    "2026-09-19T00:00:00Z"
+                };
+                let status = |kind: &str| {
+                    json!({"id":format!("S_{kind}"),"contexts":[{
+                        "id":format!("SC_{kind}_{version}"),"updatedAt":at,"context":"deploy","state":state,
+                        "description":null,"targetUrl":format!("https://checks.example/{kind}")
+                    }]})
+                };
+                node["commits"] = json!({"nodes":[{"commit":{"oid":HEAD,"status":status("head"),"statusCheckRollup":{"contexts":{"checkRunCount":1,"statusContextCount":1}}}}]});
+                node["potentialMergeCommit"]["status"] = status("merge");
+                node["potentialMergeCommit"]["statusCheckRollup"] =
+                    json!({"contexts":{"checkRunCount":1,"statusContextCount":1}});
+            }
             match mode.as_str() {
                 "ci-point-head" => node["headRefOid"] = json!(NEW_HEAD),
                 "ci-point-base" => node["baseRefOid"] = json!(NEW_HEAD),
@@ -1345,6 +1366,23 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     }
     if mode == "ci-point-empty-checks" && normalized.ends_with("/check-runs") {
         value = json!({"total_count":0,"check_runs":[]});
+    }
+    if mode == "ci-point-status-versions" && normalized.ends_with("/status") {
+        let merge = normalized.contains(MERGE);
+        let kind = if merge { "merge" } else { "head" };
+        let version = if phase >= 3 { 2 } else { 1 };
+        let at = if phase >= 3 {
+            "2026-09-19T00:01:00Z"
+        } else {
+            "2026-09-19T00:00:00Z"
+        };
+        value = json!({"sha":if merge {MERGE} else {HEAD},"total_count":1,"statuses":[{
+            "id":if merge {700+version} else {600+version},"node_id":format!("SC_{kind}_{version}"),
+            "state":if phase >= 3 {"failure"} else {"success"},"context":"deploy",
+            "updated_at":at,"created_at":"2026-09-19T00:00:00Z","description":null,
+            "target_url":format!("https://checks.example/{kind}"),"creator":{"login":"integration"},
+            "retained_extra":{"synthetic":"raw"}
+        }]});
     }
     if mode.starts_with("account-multi-source") {
         if normalized.ends_with("/pulls/7") {

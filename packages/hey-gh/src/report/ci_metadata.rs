@@ -4,6 +4,20 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub(super) mod discovery;
+mod status_versions;
+
+struct VersionEvidence {
+    versions: status_versions::Versions,
+    at: u64,
+    resource: String,
+}
+
+struct ListEvidence {
+    empty: bool,
+    at: u64,
+    resource: String,
+    versions: Option<VersionEvidence>,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum CommitList {
@@ -147,7 +161,12 @@ impl Client {
     ) -> Result<Vec<Value>> {
         if !matches!(freshness, Freshness::Revalidate)
             && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
-            && let Some((empty, at, resource)) = self
+            && let Some(ListEvidence {
+                empty,
+                at,
+                resource,
+                versions,
+            }) = self
                 .cached_list_evidence(repository, sha, list, freshness)
                 .await?
         {
@@ -172,12 +191,39 @@ impl Client {
                     });
                     return Ok(Vec::new());
                 }
-                if rest.as_ref().is_none_or(|rest| {
-                    rest.data[list.field()]
-                        .as_array()
-                        .is_some_and(Vec::is_empty)
-                }) {
-                    // Newer metadata contradicts the old empty list. Offline
+                let mut changed = false;
+                if let Some(proof) = versions
+                    && rest
+                        .as_ref()
+                        .is_some_and(|r| r.data["sha"] == sha && r.validated_at_ms <= proof.at)
+                {
+                    match proof
+                        .versions
+                        .cached(self, rest_path, proof.at, freshness)
+                        .await?
+                    {
+                        status_versions::Cached::Matching(values) => {
+                            let _ = super::VALIDATIONS.try_with(|records| {
+                                records.borrow_mut().push(super::ResourceValidation {
+                                    resource: proof.resource,
+                                    validated_at_ms: proof.at,
+                                    source: Source::Cache,
+                                })
+                            });
+                            return Ok(values);
+                        }
+                        status_versions::Cached::Changed => changed = true,
+                        status_versions::Cached::Unavailable => {}
+                    }
+                }
+                if changed
+                    || rest.as_ref().is_none_or(|rest| {
+                        rest.data[list.field()]
+                            .as_array()
+                            .is_some_and(Vec::is_empty)
+                    })
+                {
+                    // Newer metadata contradicts the old list. Offline
                     // reads cannot invent the missing full REST payload.
                     if matches!(freshness, Freshness::CachedOnly) {
                         return Err(Error::CacheMiss);
@@ -204,14 +250,14 @@ impl Client {
         sha: &str,
         list: CommitList,
         freshness: Freshness,
-    ) -> Result<Option<(bool, u64, String)>> {
+    ) -> Result<Option<ListEvidence>> {
         let Some(owner) = crate::entity::current().filter(|owner| {
             owner.repository.eq_ignore_ascii_case(repository) && owner.node_id.is_some()
         }) else {
             return Ok(None);
         };
         // These are cache peeks only. CI never dispatches account discovery or
-        // an extra point query to obtain this optional empty-list evidence.
+        // an extra point query to obtain this optional list evidence.
         let mut candidates = Vec::new();
         match self
             .ci_selector_response(repository, owner.number, Freshness::CachedOnly)
@@ -229,6 +275,7 @@ impl Client {
             candidates.push((node, at, "my-open-prs"));
         }
         let mut latest = None;
+        let mut versions = None;
         for (node, at, source) in candidates {
             let Some(elapsed) = now_ms().checked_sub(at).filter(|_| at > 0) else {
                 continue;
@@ -245,6 +292,22 @@ impl Client {
             let Some(empty) = list_empty(&node, sha, list) else {
                 continue;
             };
+            // Discovery supplies presence only. A newer nonempty discovery
+            // cannot refresh this point proof's clock or invent its versions.
+            if matches!(list, CommitList::Statuses)
+                && source == "graphql"
+                && let Some(proof) = status_versions::Versions::from_node(&node, sha)
+            {
+                versions = Some(VersionEvidence {
+                    versions: proof,
+                    at,
+                    resource: format!(
+                        "graphql://{}/{repository}/pulls/{}#commit-status-versions:{sha}",
+                        self.hostname(),
+                        owner.number
+                    ),
+                });
+            }
             // A newer nonempty observation must defeat an older empty one.
             // Conflicting observations at the same clock also retain REST.
             if latest.as_ref().is_none_or(|&(_, old_at, _)| at >= old_at) {
@@ -254,17 +317,16 @@ impl Client {
                 latest = Some((empty, at, source));
             }
         }
-        Ok(latest.map(|(empty, at, source)| {
-            (
-                empty,
-                at,
-                format!(
-                    "{source}://{}/{repository}/pulls/{}#{}:{sha}",
-                    self.hostname(),
-                    owner.number,
-                    list.label()
-                ),
-            )
+        Ok(latest.map(|(empty, at, source)| ListEvidence {
+            empty,
+            at,
+            resource: format!(
+                "{source}://{}/{repository}/pulls/{}#{}:{sha}",
+                self.hostname(),
+                owner.number,
+                list.label()
+            ),
+            versions: versions.filter(|_| !empty),
         }))
     }
 

@@ -633,8 +633,22 @@ REST; explicit `--refresh` still requires revalidation.
 The point selector and account discovery queries also record whether head/test-merge
 commits have no legacy statuses. CI can reuse explicit null evidence within the requested
 cache age, saving the corresponding REST status read without another query.
-Nonempty or missing status fields retain REST's complete payloads and numeric
-IDs. Newer REST evidence takes precedence. Offline reads retain the original
+Missing status fields retain REST reads. Nonempty point-query status rosters can
+validate a complete cached REST list when node IDs, update times, context names,
+states, descriptions, URLs, and the independent rollup count all agree. This
+reuses the original REST payloads and numeric IDs, including every cached page;
+it neither synthesizes REST objects nor issues an extra query. The proof must
+already be cached when the status read starts; concurrent selector validation
+does not delay CI collection to obtain it. Changed versions force REST validation
+even when an older list is still within the requested cache age.
+Online reuse requires every raw REST page to be less than one day old. Auxiliary
+REST fields such as creator profile details retain their last REST observation;
+the GraphQL proof validates the status fields listed above. The proof appears as
+`graphql://HOST/OWNER/REPO/pulls/NUMBER#commit-status-versions:SHA` with its original
+validation time. Discovery presence cannot renew that proof. Malformed or
+incomplete rosters fall back to REST; missing pages and collection limits retain
+their existing behavior. Newer REST evidence takes precedence on every page.
+Offline reads retain the original REST page clocks as well as the proof's
 validation time, and explicit refresh bypasses this shortcut.
 Each CI/policy read shares one roster lookup while checking the current cached
 page for newer evidence. A fresh page from an unfinished scan can supply status
