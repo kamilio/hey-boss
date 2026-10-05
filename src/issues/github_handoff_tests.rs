@@ -14,6 +14,121 @@ fn evidence() -> Value {
     }])
 }
 
+#[test]
+fn large_reviewed_handoff_round_trips_and_wakes_once_for_real_changes() {
+    for change in ["thread", "head", "policy", "invalid-last"] {
+        let mut f = ready_fixture();
+        let mut snapshots = Vec::new();
+        for number in 1..=10 {
+            if number > 1 {
+                f.call(json!({"action":"add_pull_request","number":1,
+                    "url":format!("https://github.com/o/r/pull/{number}")}))
+                    .unwrap();
+            }
+            let mut snapshot = green_policy_evidence()[0].clone();
+            snapshot["report"]["data"]["number"] = json!(number);
+            snapshot["report"]["data"]["pull_request"]["number"] = json!(number);
+            snapshot["policy"]["pull_number"] = json!(number);
+            snapshot["report"]["data"]["reviews"][0]["body"] =
+                json!("Reviewed full diagnostic output.\n".repeat(30_000));
+            snapshots.push(snapshot);
+        }
+        let raw = serde_json::to_vec(&snapshots).unwrap();
+        assert!(raw.len() > 8 * 1024 * 1024);
+        if change == "invalid-last" {
+            snapshots[9]["policy"]["pr_base_sha"] = json!("wrong-base");
+        }
+        let before = f.call(json!({"action":"view","number":1})).unwrap();
+        f.request.operation = serde_json::from_value(json!({"action":"assign","number":1,
+            "target":"github","if_version":before["issue"]["version"],
+            "reviewed_evidence":snapshots}))
+        .unwrap();
+        let wire = serde_json::to_vec(&f.request).unwrap();
+        assert!(
+            wire.len() < 8 * 1024 * 1024,
+            "Full evidence must fit every transport"
+        );
+        let request: Request = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&request).unwrap(),
+            wire,
+            "Retry serialization is deterministic"
+        );
+        if let Operation::Assign {
+            reviewed_evidence: Some(decoded),
+            ..
+        } = &request.operation
+        {
+            let original: Vec<ReviewedGithubEvidence> =
+                serde_json::from_value(json!(snapshots)).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(original).unwrap(),
+                "Every report and policy field survives transport"
+            );
+        } else {
+            panic!("Missing reviewed evidence");
+        }
+        if change == "invalid-last" {
+            assert!(f.store.execute(&request).is_err());
+            assert_eq!(f.call(json!({"action":"view","number":1})).unwrap(), before);
+            assert_eq!(
+                f.store
+                    .db
+                    .query_row("SELECT count(*) FROM issue_github_signals", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            continue;
+        }
+        f.store.execute(&request).unwrap();
+        f.store = Store::open(&f.root.join("issues.db")).unwrap();
+        let handed_off = f.call(json!({"action":"view","number":1})).unwrap();
+        for (index, snapshot) in snapshots.iter().enumerate() {
+            f.store
+                .record_github_observation(
+                    &format!("https://github.com/o/r/pull/{}", index + 1),
+                    &observe(&json!([snapshot])),
+                    200,
+                )
+                .unwrap();
+        }
+        let quiet = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(quiet["issue"]["state"], "ready");
+        assert_eq!(quiet["issue"]["version"], handed_off["issue"]["version"]);
+        assert_eq!(quiet["comments"], handed_off["comments"]);
+        let snapshot = &mut snapshots[9];
+        match change {
+            "thread" => {
+                snapshot["report"]["data"]["review_threads"] = json!([
+                    {"id":"new-thread","isResolved":false,"isOutdated":false,
+                     "comments":{"nodes":[{"id":"new-comment","body":"Fix this race","author":{"login":"reviewer"}}]}}
+                ])
+            }
+            "head" => {
+                snapshot["report"]["data"]["pull_request"]["head"]["sha"] = json!("next");
+                snapshot["report"]["data"]["ci"]["head_sha"] = json!("next");
+                snapshot["policy"]["head_sha"] = json!("next");
+            }
+            "policy" => snapshot["policy"]["strict"] = json!(true),
+            _ => unreachable!(),
+        }
+        let observation = observe(&json!([snapshot]));
+        f.store
+            .record_github_observation("https://github.com/o/r/pull/10", &observation, 300)
+            .unwrap();
+        let awake = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(awake["issue"]["state"], "open", "{change}");
+        f.store
+            .record_github_observation("https://github.com/o/r/pull/10", &observation, 400)
+            .unwrap();
+        let duplicate = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(duplicate["issue"]["version"], awake["issue"]["version"]);
+        assert_eq!(duplicate["comments"], awake["comments"]);
+    }
+}
+
 fn observe(value: &Value) -> hey_gh::watcher::Observation {
     hey_gh::watcher::observe(
         &serde_json::from_value(value[0]["report"].clone()).unwrap(),

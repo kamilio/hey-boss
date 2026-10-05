@@ -15,6 +15,7 @@ pub(crate) mod model_recovery;
 pub mod planning;
 pub(crate) mod provenance;
 pub mod remote;
+mod reviewed_evidence;
 mod store;
 pub mod web;
 pub mod worker;
@@ -32,6 +33,7 @@ pub use store::coordination::{Coordinate, coordinate};
 
 pub const BODY_LIMIT: usize = 1024 * 1024;
 pub const WIRE_LIMIT: usize = 16 * 1024 * 1024;
+pub const REVIEWED_EVIDENCE_LIMIT: usize = 64 * 1024 * 1024;
 /// Full, unprojected evidence explicitly reconciled by the handoff caller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -423,7 +425,11 @@ pub enum Operation {
         number: i64,
         target: String,
         if_version: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "reviewed_evidence"
+        )]
         reviewed_evidence: Option<Vec<ReviewedGithubEvidence>>,
     },
     ReleaseAllocation {

@@ -416,7 +416,7 @@ enum Action {
     Assign {
         number: i64,
         target: String,
-        /// Path to a JSON file containing full {report, policy} snapshots as an array. GitHub only; CI may still be running or missing.
+        /// Full {report, policy} JSON array (up to 64 MiB; losslessly compressed for transport, 4 MiB compressed limit). GitHub only; CI may still be running or missing.
         #[arg(long, value_name = "PATH")]
         reviewed_evidence: Option<PathBuf>,
         /// Current issue version from issue view.
@@ -1114,7 +1114,8 @@ impl Options {
                                 "--reviewed-evidence requires the github target",
                             ));
                         }
-                        let text = read_text(std::fs::File::open(path)?, issues::WIRE_LIMIT / 2)?;
+                        let text =
+                            read_text(std::fs::File::open(path)?, issues::REVIEWED_EVIDENCE_LIMIT)?;
                         Ok(serde_json::from_str(&text)?)
                     })
                     .transpose()?,

@@ -77,7 +77,17 @@ one for every attached open GitHub PR. Capture raw reports with
 their JSON into the array, and review those exact saved snapshots before handoff.
 Projected PR lists, watcher summaries, and prose are not acknowledgement evidence.
 
-The transaction requires complete, settled evidence with matching PR, head, base,
+The input array may contain up to 64 MiB of UTF-8 JSON. Arrays above 8 MiB
+are transported losslessly as `{"encoding":"gzip-base64","data":"..."}`:
+standard padded base64 of gzip-compressed JSON containing the same full snapshots.
+The compressed payload is limited to 4 MiB; decoding is bounded to 64 MiB.
+The CLI does this automatically, keeping the existing command and file format.
+Upgrade both ends before sending large evidence; older receivers reject the
+envelope without applying a handoff. Corrupt, oversized, or mismatched evidence
+also rejects the whole request. No reports, bodies, or validation fields are
+trimmed to fit. Small arrays retain the original wire format.
+
+The transaction requires complete evidence with matching PR, head, base,
 CI, and policy. It records the reviewed signal identities even if the watcher has
 never fetched them. An unchanged delayed scan stays quiet; a changed review,
 thread, head, rerun result, or required-check policy wakes work once. Incomplete
