@@ -1,22 +1,11 @@
-//! A candidate list is never authorization: release and ownership are read again at removal.
+//! A candidate list is never authorization: ownership is read again at removal.
 use super::{preserved, worktrees};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 use std::{
-    fs,
-    io::{self, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    fs, io,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Release {
-    version: u32,
-    path: PathBuf,
-    owner: String,
-    at: u64,
-    fingerprint: String,
-}
 
 fn git_admin(root: &Path) -> io::Result<PathBuf> {
     // Inspect this marker explicitly: discovery can skip a corrupt .git directory
@@ -46,7 +35,7 @@ fn checkout(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
         .to_path_buf();
     if path != root && path.file_name().is_none_or(|n| n != "node_modules") {
         return Err(preserved(
-            "Only a checkout or its node_modules may be released; preserved",
+            "Only a checkout or its node_modules may be cleaned; preserved",
         ));
     }
     let admin = git_admin(&root)?;
@@ -56,38 +45,7 @@ fn checkout(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
     Ok((root, admin))
 }
 
-fn release_path(path: &Path, admin: &Path) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    admin.join(format!(
-        "cleanup-release-{:x}.json",
-        Sha256::digest(path.as_os_str().as_bytes())
-    ))
-}
-
-fn fingerprint(path: &Path, root: &Path, admin: &Path) -> io::Result<String> {
-    let mut hash = Sha256::new();
-    hash.update(worktrees::git_text(root, &["rev-parse", "HEAD"])?);
-    for p in [
-        path.to_path_buf(),
-        root.to_path_buf(),
-        admin.join("HEAD"),
-        admin.join("index"),
-    ] {
-        let m = fs::symlink_metadata(p)?;
-        hash.update(format!(
-            "{}:{}:{}:{}:{}:{}",
-            m.dev(),
-            m.ino(),
-            m.mtime(),
-            m.mtime_nsec(),
-            m.ctime(),
-            m.ctime_nsec()
-        ));
-    }
-    Ok(format!("{:x}", hash.finalize()))
-}
-
-fn verify(path: &Path, active: &[PathBuf], released: bool) -> io::Result<()> {
+fn verify(path: &Path, active: &[PathBuf]) -> io::Result<()> {
     let (root, admin) = checkout(path)?;
     // Match each declared session's path, never collapse sessions by application PID.
     for owned in active {
@@ -128,72 +86,15 @@ fn verify(path: &Path, active: &[PathBuf], released: bool) -> io::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    if released {
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(release_path(path, &admin))
-            .map_err(|e| {
-                preserved(format!(
-                    "No readable explicit cleanup release; preserved ({e})"
-                ))
-            })?;
-        let mut bytes = Vec::new();
-        if !file.metadata()?.is_file() {
-            return Err(preserved("Non-file cleanup release; preserved"));
-        }
-        Read::by_ref(&mut file).take(8193).read_to_end(&mut bytes)?;
-        if bytes.len() > 8192 {
-            return Err(preserved("Cleanup release exceeds limit; preserved"));
-        }
-        let release: Release = serde_json::from_slice(&bytes)
-            .map_err(|e| preserved(format!("Invalid cleanup release; preserved ({e})")))?;
-        if release.version != 1
-            || release.path != path
-            || release.owner.trim().is_empty()
-            || release.fingerprint != fingerprint(path, &root, &admin)?
-        {
-            return Err(preserved(
-                "Checkout changed since explicit cleanup release; preserved",
-            ));
-        }
-    }
     Ok(())
 }
 
-/// A release is a recorded owner attestation, not a force option or a lease expiry.
-fn release(path: &Path, owner: &str, active: &[PathBuf]) -> io::Result<()> {
-    if owner.trim().is_empty() || owner.len() > 256 || owner.chars().any(char::is_control) {
-        return Err(io::Error::other(
-            "Supply the releasing owner's session identity",
-        ));
-    }
-    verify(path, active, false)?;
-    let (root, admin) = checkout(path)?;
-    let record = Release {
-        version: 1,
-        path: path.into(),
-        owner: owner.into(),
-        at: super::now(),
-        fingerprint: fingerprint(path, &root, &admin)?,
-    };
-    let bytes = serde_json::to_vec(&record)?;
-    // Atomic create prevents replacing a prior owner's release or following a symlink.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(release_path(path, &admin))?;
-    file.write_all(&bytes)?;
-    file.sync_all()
-}
-
 pub(super) fn check(path: &Path) -> io::Result<()> {
-    // Cheap release/lock gate first; protected legacy candidates need no global process scan.
-    verify(path, &[], true)?;
+    // Cheap path/lock checks precede the global activity scan.
+    ownership_status(path)?;
     declared_owner_guard(path)?;
     let active = current_paths(path)?;
-    verify(path, &active, true)
+    verify(path, &active)
 }
 
 // Cleanup needs ownership, open files and command paths, not full conversation
@@ -232,19 +133,29 @@ fn declared_owner_guard(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(super) fn release_status(path: &Path) -> io::Result<()> {
-    verify(path, &[], true)
+pub(super) fn ownership_status(path: &Path) -> io::Result<()> {
+    verify(path, &[])
 }
 
-#[cfg(test)]
-pub(super) fn release_fixture(path: &Path) {
-    release(path, "fixture-owner", &[]).unwrap();
-}
-
-pub(super) fn consume(path: &Path) -> io::Result<()> {
-    check(path)?;
-    let (_, admin) = checkout(path)?;
-    fs::remove_file(release_path(path, &admin))
+fn inspect_dependencies(path: &Path) -> io::Result<()> {
+    let (root, _) = checkout(path)?;
+    let relative = path.strip_prefix(&root).map_err(io::Error::other)?;
+    if !worktrees::git_text(
+        &root,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--",
+            relative
+                .to_str()
+                .ok_or_else(|| preserved("Non-UTF-8 dependency path; preserved"))?,
+        ],
+    )?
+    .is_empty()
+    {
+        return Err(preserved("Tracked dependency content; preserved"));
+    }
+    inspect_tree(path)
 }
 
 fn remove_dependencies(path: &Path) -> io::Result<()> {
@@ -256,8 +167,13 @@ fn remove_dependencies(path: &Path) -> io::Result<()> {
     check(path)?;
     // Refuse the entire candidate before changing anything if it contains local
     // databases, mounted content, filesystem protections, or repository metadata.
-    inspect_tree(path)?;
-    consume(path)?; // fresh ownership, identity and release at the destructive boundary
+    let identity = fs::symlink_metadata(path)?;
+    inspect_dependencies(path)?;
+    check(path)?; // fresh ownership at the destructive boundary
+    let current = fs::symlink_metadata(path)?;
+    if (identity.dev(), identity.ino()) != (current.dev(), current.ino()) {
+        return Err(preserved("Dependency directory replaced; preserved"));
+    }
     fs::remove_dir_all(path)
 }
 
@@ -326,12 +242,7 @@ fn record_receipt(snapshot: &mut super::Snapshot, receipt: &Receipt) -> io::Resu
     Ok(())
 }
 
-pub fn run(
-    store: &super::Store,
-    path: &Path,
-    action: &str,
-    owner: Option<&str>,
-) -> io::Result<Receipt> {
+pub fn run(store: &super::Store, path: &Path, action: &str) -> io::Result<Receipt> {
     let _lock = store.lock()?;
     let mut state = store.state()?;
     state
@@ -339,14 +250,13 @@ pub fn run(
         .record("cleanup-request", format!("{action}: {}", path.display()));
     store.save("state.json", &state)?; // no destructive operation without its request receipt
     let result = match action {
-        "check" => check(path),
-        "release" => declared_owner_guard(path)
-            .and_then(|()| current_paths(path))
-            .and_then(|active| release(path, owner.unwrap_or(""), &active)),
-        "retain" => checkout(path).and_then(|(_, admin)| {
-            match fs::remove_file(release_path(path, &admin)) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                result => result,
+        "check" => ownership_status(path).and_then(|()| {
+            if path.file_name().is_some_and(|name| name == "node_modules") {
+                check(path)?;
+                inspect_dependencies(path)
+            } else {
+                declared_owner_guard(path)?;
+                worktrees::check_one(path, &store.config()?)
             }
         }),
         "remove-dependencies" => remove_dependencies(path),
@@ -365,16 +275,8 @@ pub fn run(
         .into(),
         reason: match result {
             Ok(()) => match action {
-                "check" => {
-                    "Explicit release and current ownership checks passed; removal will recheck"
-                        .into()
-                }
-                "release" => format!(
-                    "Explicit cleanup release recorded by {}",
-                    owner.unwrap_or("")
-                ),
-                "retain" => "Cleanup release withdrawn; target retained".into(),
-                _ => "Released dependencies removed".into(),
+                "check" => "Current safety and age checks passed; scheduled cleanup still requires quiet observations and removal will recheck".into(),
+                _ => "Disposable dependencies removed".into(),
             },
             Err(e) => e.to_string(),
         },
@@ -468,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ownership_is_not_permission_to_remove_old_dependencies() {
+    fn known_checkout_dependencies_need_no_release() {
         let f = Fixture::new();
         let path = f.0.join("node_modules");
         let file = fs::File::options()
@@ -476,32 +378,20 @@ mod tests {
             .open(path.join(".bin/tsc"))
             .unwrap();
         file.set_modified(std::time::UNIX_EPOCH).unwrap();
-        assert!(
-            verify(&path, &[], true)
-                .unwrap_err()
-                .to_string()
-                .contains("release")
-        );
+        verify(&path, &[]).unwrap();
         assert!(path.join(".bin/tsc").exists());
     }
 
     #[test]
-    fn empty_ancestor_marker_reaches_release_gate_for_registered_worktree() {
+    fn empty_ancestor_marker_allows_registered_worktree_without_release() {
         let f = Fixture::new();
         let ancestor = Fixture::new();
         fs::remove_dir_all(ancestor.0.join(".git")).unwrap();
         let root = f.worktree_under(&ancestor.0);
         for path in [&root, &root.join("node_modules")] {
+            verify(path, &[]).unwrap();
             assert!(
-                verify(path, &[], true)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("No readable explicit cleanup release")
-            );
-            release(path, "finished-session", &[]).unwrap();
-            verify(path, &[], true).unwrap();
-            assert!(
-                verify(path, std::slice::from_ref(&root), true)
+                verify(path, std::slice::from_ref(&root))
                     .unwrap_err()
                     .to_string()
                     .contains("retained owner")
@@ -522,8 +412,7 @@ mod tests {
         let ancestor = parent.join("ancestor");
         let root = f.worktree_under(&ancestor);
         let path = root.join("node_modules");
-        release(&path, "finished-session", &[]).unwrap();
-        verify(&path, &[], true).unwrap();
+        verify(&path, &[]).unwrap();
         worktrees::git_text(
             &f.0,
             &[
@@ -536,16 +425,14 @@ mod tests {
         )
         .unwrap();
         assert!(
-            verify(&path, &[], true)
+            verify(&path, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("parent validation")
         );
         worktrees::git_text(&f.0, &["worktree", "unlock", parent.to_str().unwrap()]).unwrap();
         fs::write(ancestor.join(".git/HEAD"), "corrupt").unwrap();
-        assert!(verify(&path, &[], true).is_err());
-        let (_, admin) = checkout(&path).unwrap();
-        assert!(release_path(&path, &admin).exists());
+        assert!(verify(&path, &[]).is_err());
         assert!(path.is_dir());
     }
 
@@ -570,7 +457,7 @@ mod tests {
                     std::os::unix::fs::symlink(destination, &marker).unwrap();
                 }
             }
-            assert!(verify(&root, &[], false).is_err(), "{kind}");
+            assert!(verify(&root, &[]).is_err(), "{kind}");
         }
     }
 
@@ -592,23 +479,19 @@ mod tests {
                 }
                 _ => fs::remove_file(admin.join("HEAD")).unwrap(),
             }
-            assert!(verify(&root, &[], false).is_err(), "{kind}");
-            assert!(
-                verify(&root.join("node_modules"), &[], false).is_err(),
-                "{kind}"
-            );
+            assert!(verify(&root, &[]).is_err(), "{kind}");
+            assert!(verify(&root.join("node_modules"), &[]).is_err(), "{kind}");
         }
     }
 
     #[test]
-    fn ownership_changes_after_candidate_load_reject_removal_and_preserve_release() {
+    fn ownership_changes_after_candidate_load_reject_removal() {
         let f = Fixture::new();
         let path = f.0.join("node_modules");
-        release(&path, "session-one", &[]).unwrap();
-        verify(&path, &[], true).unwrap(); // candidate list was loaded
+        verify(&path, &[]).unwrap(); // candidate list was loaded
         for owned in [f.0.clone(), f.0.join("validation")] {
             assert!(
-                verify(&path, &[owned], true)
+                verify(&path, &[owned])
                     .unwrap_err()
                     .to_string()
                     .contains("retained owner")
@@ -621,7 +504,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            verify(&path, &[], true)
+            verify(&path, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("session-two")
@@ -630,40 +513,21 @@ mod tests {
     }
 
     #[test]
-    fn explicitly_released_fixture_is_cleanable_but_replacement_is_not() {
+    fn databases_symlinks_and_unknown_ownership_fail_closed() {
         let f = Fixture::new();
         let path = f.0.join("node_modules");
-        release(&path, "finished-session", &[]).unwrap();
-        verify(&path, &[], true).unwrap();
-        inspect_tree(&path).unwrap();
-        let (_, admin) = checkout(&path).unwrap();
-        fs::remove_file(release_path(&path, &admin)).unwrap();
-        fs::remove_dir_all(&path).unwrap();
-        fs::create_dir(&path).unwrap();
-        assert!(verify(&path, &[], true).is_err());
-        release(&path, "finished-session", &[]).unwrap();
-        fs::rename(&path, f.0.join("old-dependencies")).unwrap();
-        fs::create_dir(&path).unwrap();
-        assert!(
-            verify(&path, &[], true)
-                .unwrap_err()
-                .to_string()
-                .contains("changed")
-        );
-    }
-
-    #[test]
-    fn malformed_releases_databases_and_symlinks_fail_closed() {
-        let f = Fixture::new();
-        let path = f.0.join("node_modules");
-        release(&path, "finished-session", &[]).unwrap();
         fs::write(path.join("saved.sqlite"), "local data").unwrap();
         assert!(inspect_tree(&path).is_err());
         assert!(path.join("saved.sqlite").exists());
-        let (_, admin) = checkout(&path).unwrap();
-        fs::write(release_path(&path, &admin), "broken").unwrap();
-        assert!(verify(&path, &[], true).is_err());
+        let unknown = Fixture::new();
+        fs::remove_dir_all(unknown.0.join(".git")).unwrap();
+        assert!(
+            verify(&unknown.0.join("node_modules"), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown checkout ownership")
+        );
         std::os::unix::fs::symlink(&path, f.0.join("alias")).unwrap();
-        assert!(verify(&f.0.join("alias"), &[], true).is_err());
+        assert!(verify(&f.0.join("alias"), &[]).is_err());
     }
 }

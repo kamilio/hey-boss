@@ -20,7 +20,7 @@ try {
     detail:'Locked worktree; preserved — owner fixture-session; queued validation; retain dependencies and receipts',
     eligible:false,worktree:{path:'/fixture/owned',age_seconds:100,repository:'example/project',github_url:null},
   }],harvested_processes:0,removed_worktrees:0,errors:[]};
-  for (const detail of ['No readable explicit cleanup release; preserved', 'Active, queued or retained owner at /fixture/queued-validation; preserved']) {
+  for (const detail of ['Untracked files; preserved', 'Active, queued or retained owner at /fixture/queued-validation; preserved']) {
     snapshot.worktrees.push({name:'/Users/example/Workspace/recovery-'+snapshot.worktrees.length,
       detail,eligible:false,worktree:{path:'/fixture/recovery',repository:'example/project',github_url:null}});
   }
@@ -64,15 +64,15 @@ try {
   assert(confirmation.includes('any other key')&&confirmation.includes('cancels'));
   await session.type('n');await wait('Enter Details');
   checks.push('Details return to the list and removal can be cancelled');
-  for (const message of ['No readable explicit cleanup release; preserved', 'Active, queued or retained owner at /fixture/queued-validation; preserved']) {
+  for (const message of ['Untracked files; preserved', 'Active, queued or retained owner at /fixture/queued-validation; preserved']) {
     await session.press('ArrowDown');await session.press('Enter');
     await wait('Selected entry');
-    await wait(message.startsWith('No readable')?'No readable explicit':'Active, queued or retained');
+    await wait(message.startsWith('Untracked')?'Untracked files':'Active, queued or retained');
     const detail=(await session.screen()).text.replace(/[│\n]/g,' ').replace(/\s+/g,' ');
     assert(detail.includes(message),`Full reason must remain readable: ${message}\n${detail}`);
     await session.type('x');
     await wait('Selected entry');
-    await capture(message.startsWith('No readable')?'missing-metadata':'uncommitted-work');
+    await capture(message.startsWith('Untracked')?'untracked-files':'uncommitted-work');
     checks.push(message+' remains readable and details do not dispatch cleanup');
     await session.press('Escape');await wait('Enter Details');
   }

@@ -172,11 +172,21 @@ fn list(repo: &Path) -> io::Result<Vec<Worktree>> {
 }
 
 fn roots(config: &Config) -> Vec<PathBuf> {
-    config
+    let mut roots: Vec<_> = config
         .workspace_roots
         .iter()
         .filter_map(|p| p.canonicalize().ok())
-        .collect()
+        .collect();
+    if config.aggressive {
+        for path in ["/private/tmp", "/tmp", "/Users/Shared"] {
+            if let Ok(path) = PathBuf::from(path).canonicalize()
+                && !roots.contains(&path)
+            {
+                roots.push(path);
+            }
+        }
+    }
+    roots
 }
 fn repositories(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut candidates = BTreeSet::new();
@@ -431,6 +441,8 @@ fn eligible(
         ));
     }
     let admin = PathBuf::from(git_text(&w.path, &["rev-parse", "--absolute-git-dir"])?);
+    // Missing indexes are recovery state, never an empty clean checkout.
+    std::fs::metadata(admin.join("index"))?;
     // A lock may have been acquired after the registration snapshot. Preserve
     // its reason too; failed reads still fail closed in the checks below.
     if let Ok(reason) = std::fs::read_to_string(admin.join("locked")) {
@@ -506,6 +518,16 @@ fn eligible(
         return Err(super::preserved(
             "Tracked files modified or staged; preserved",
         ));
+    }
+    if !super::visit_nul_output(
+        &mut git(
+            &w.path,
+            &["ls-files", "-z", "--others", "--exclude-standard"],
+        ),
+        Duration::from_secs(15),
+        |_| Ok(false),
+    )? {
+        return Err(super::preserved("Untracked files; preserved"));
     }
     let head = git_text(&w.path, &["rev-parse", "HEAD"])?;
     if head != w.head {
@@ -653,7 +675,7 @@ fn candidate_eligible(
     at: u64,
 ) -> io::Result<String> {
     // Only absence at the candidate path is expected. Do not follow a final
-    // symlink or suppress NotFound from release, index or later Git inspection.
+    // symlink or suppress NotFound from index or later Git inspection.
     match std::fs::symlink_metadata(&w.path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(super::preserved("Missing checkout; metadata preserved"));
@@ -661,7 +683,7 @@ fn candidate_eligible(
         Err(error) => return Err(error),
         Ok(_) => {}
     }
-    super::cleanup::release_status(&w.path)?;
+    super::cleanup::ownership_status(&w.path)?;
     if config.aggressive {
         aggressive_eligible(w, main, allowed, active_paths, table, at)
     } else {
@@ -957,14 +979,8 @@ mod tests {
     }
 
     #[test]
-    fn candidate_existing_checkout_keeps_release_and_ownership_checks() {
-        let fixture = CandidateFixture::new("release");
-        for aggressive in [false, true] {
-            let item = fixture.refusal(aggressive);
-            assert!(item.detail.contains("No readable explicit cleanup release"));
-            assert!(item.error.is_none());
-        }
-        super::super::cleanup::release_fixture(&fixture.work.path);
+    fn candidate_without_release_reaches_safety_checks() {
+        let fixture = CandidateFixture::new("no-release");
         for aggressive in [false, true] {
             assert_eq!(fixture.check(aggressive, &[]).unwrap(), fixture.work.head);
             let error = fixture
@@ -973,24 +989,6 @@ mod tests {
             assert!(super::super::is_preserved(&error));
             assert!(error.to_string().contains("Open in a process or agent"));
         }
-        let release = std::fs::read_dir(&fixture.admin)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| {
-                path.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("cleanup-release-")
-            })
-            .unwrap();
-        let bytes = std::fs::read(&release).unwrap();
-        std::fs::write(&release, "malformed").unwrap();
-        for aggressive in [false, true] {
-            let item = fixture.refusal(aggressive);
-            assert!(item.detail.contains("Invalid cleanup release"));
-            assert!(item.error.is_none());
-        }
-        std::fs::write(&release, bytes).unwrap();
         // An ENOENT after the checkout probe is still an inspection failure.
         std::fs::rename(
             fixture.admin.join("index"),
@@ -1008,6 +1006,65 @@ mod tests {
             snapshot.collect_item_errors();
             assert_eq!(snapshot.errors.len(), 1);
         }
+    }
+
+    #[test]
+    fn automatic_cleanup_observes_then_removes_without_release() {
+        let fixture = CandidateFixture::new("automatic-no-release");
+        let old = now() - 172800;
+        let status = git(&fixture.work.path, &["commit", "--amend", "--no-edit"])
+            .env("GIT_COMMITTER_DATE", format!("@{old} +0000"))
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        git_text(
+            &fixture.work.path,
+            &["push", "origin", "HEAD:refs/heads/aged"],
+        )
+        .unwrap();
+        for path in [
+            fixture.work.path.join("file"),
+            fixture.work.path.join(".git"),
+            fixture.admin.join("HEAD"),
+            fixture.admin.join("index"),
+            fixture.admin.join("logs/HEAD"),
+        ] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(old))
+                .unwrap();
+        }
+        let config = Config {
+            workspace_roots: vec![fixture.root.clone()],
+            worktree_min_age_days: 1,
+            observation_seconds: 60,
+            ..Config::default()
+        };
+        let mut observations = BTreeMap::new();
+        let (items, removed) = clean(&config, &Table::new(), &mut observations, true).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].detail.contains("observing"), "{}", items[0].detail);
+        assert!(fixture.work.path.exists());
+        assert_eq!(observations.len(), 1);
+        // Advance only the fixture's observation clock; never wait on or clean real work.
+        observations.values_mut().next().unwrap().first_seen -= 61;
+        let (_, removed) = clean(&config, &Table::new(), &mut observations, true).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!fixture.work.path.exists());
+        assert!(git_text(&fixture.main, &["rev-parse", "work"]).is_ok());
+    }
+
+    #[test]
+    fn candidate_without_release_preserves_untracked_source() {
+        let fixture = CandidateFixture::new("untracked");
+        std::fs::write(fixture.work.path.join("unfinished.rs"), "source").unwrap();
+        for aggressive in [false, true] {
+            assert!(fixture.refusal(aggressive).detail.contains("Untracked"));
+        }
+        assert!(fixture.work.path.join("unfinished.rs").exists());
     }
 
     #[test]
@@ -1212,7 +1269,7 @@ mod tests {
             )
             .unwrap();
             publish_fixture(&work);
-            crate::health::cleanup::release_fixture(&work);
+
             remove_checkout(&work).unwrap();
             assert!(!work.exists());
             assert_eq!(git_text(&main, &["rev-parse", "sparse"]).unwrap(), w.head);
@@ -1221,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_requires_pushed_commits_and_ignores_untracked_logs() {
+    fn cleanup_requires_pushed_commits_and_preserves_untracked_files() {
         let root = std::env::temp_dir().join(format!("harvester-pushed-{}", std::process::id()));
         std::fs::create_dir_all(root.join("main")).unwrap();
         let root = root.canonicalize().unwrap();
@@ -1270,9 +1327,10 @@ mod tests {
             .set_modified(UNIX_EPOCH + Duration::from_secs(now() + 172800))
             .unwrap();
         assert!(
-            check().is_ok(),
-            "untracked logs must not block eligibility or reset idle time"
+            check().unwrap_err().to_string().contains("Untracked"),
+            "untracked files must survive without owner attestations"
         );
+        std::fs::remove_file(work.join("debug.log")).unwrap();
         std::fs::write(work.join("source"), "uncommitted edits").unwrap();
         assert!(remove_checkout(&work).is_err());
         std::fs::write(work.join("source"), "local commit").unwrap();
@@ -1331,7 +1389,7 @@ mod tests {
             &["remote", "set-url", "origin", remote.to_str().unwrap()],
         )
         .unwrap();
-        crate::health::cleanup::release_fixture(&work);
+
         remove_checkout(&work).unwrap();
         assert!(!work.exists());
         std::fs::remove_dir_all(root).unwrap();
@@ -1421,7 +1479,7 @@ mod tests {
         std::fs::remove_file(work.join("module")).unwrap();
         std::fs::create_dir(work.join("module")).unwrap();
         publish_fixture(&work);
-        crate::health::cleanup::release_fixture(&work);
+
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "refs/heads/keep"]).is_ok());
@@ -1524,7 +1582,7 @@ mod tests {
         std::fs::write(&receipt, "completed fixture work").unwrap();
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
         publish_fixture(&work);
-        crate::health::cleanup::release_fixture(&work);
+
         remove_one(&work).unwrap();
         assert!(!work.exists() && !admin.exists());
         assert_eq!(
@@ -1630,7 +1688,12 @@ mod tests {
         );
         git_text(&work, &["update-index", "--no-skip-worktree", "file"]).unwrap();
         std::fs::write(work.join("private.env"), "important").unwrap();
-        assert!(check(&w, &[], future).is_ok());
+        assert!(
+            check(&w, &[], future)
+                .unwrap_err()
+                .to_string()
+                .contains("Untracked")
+        );
         std::fs::remove_file(work.join("private.env")).unwrap();
         std::fs::write(main.join(".git/info/exclude"), "secret.env\n").unwrap();
         std::fs::write(work.join("secret.env"), "must survive").unwrap();
@@ -1680,7 +1743,7 @@ mod tests {
         git_text(&work, &["checkout", "done"]).unwrap();
         // Manual removal of a young published checkout keeps its named branch.
         publish_fixture(&work);
-        crate::health::cleanup::release_fixture(&work);
+
         remove_one(&work).unwrap();
         assert!(!work.exists());
         assert_eq!(
@@ -1708,8 +1771,6 @@ mod tests {
 /// Recheck Git state and inspect databases before any deletion. Git itself enforces
 /// ownership locks; tracked state is rechecked at the final removal boundary.
 fn remove_checkout(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
     if path.canonicalize()? != path {
         return Err(io::Error::other("Noncanonical checkout preserved"));
     }
@@ -1734,6 +1795,39 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
         now(),
     )?;
     verify_published(path, &checked_head)?;
+    inspect_checkout(path)?;
+    let (table, paths) = activity()?;
+    eligible(
+        selected,
+        &main.path,
+        &[],
+        &paths,
+        &table,
+        Policy {
+            min_age: 0,
+            manual: true,
+        },
+        now(),
+    )?;
+    super::cleanup::check(path)?;
+    git_text(
+        &main.path,
+        &[
+            "worktree",
+            "remove",
+            // One force permits disposable untracked output. It still refuses
+            // locked worktrees; never use a second force to override ownership.
+            "--force",
+            "--",
+            path.to_str()
+                .ok_or_else(|| io::Error::other("Non-UTF-8 checkout preserved"))?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn inspect_checkout(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let device = std::fs::symlink_metadata(path)?.dev();
     let mut pending = vec![path.to_path_buf()];
@@ -1788,34 +1882,29 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+pub(super) fn check_one(path: &Path, config: &Config) -> io::Result<()> {
+    let trees = list(path)?;
+    let main = trees
+        .first()
+        .ok_or_else(|| super::preserved("No registered worktrees"))?;
+    let selected = trees
+        .iter()
+        .find(|w| w.path == path)
+        .ok_or_else(|| super::preserved("Worktree registration changed; preserved"))?;
     let (table, paths) = activity()?;
-    eligible(
+    candidate_eligible(
         selected,
         &main.path,
-        &[],
+        &roots(config),
         &paths,
         &table,
-        Policy {
-            min_age: 0,
-            manual: true,
-        },
+        config,
         now(),
     )?;
-    super::cleanup::consume(path)?;
-    git_text(
-        &main.path,
-        &[
-            "worktree",
-            "remove",
-            // One force permits disposable untracked output. It still refuses
-            // locked worktrees; never use a second force to override ownership.
-            "--force",
-            "--",
-            path.to_str()
-                .ok_or_else(|| io::Error::other("Non-UTF-8 checkout preserved"))?,
-        ],
-    )?;
-    Ok(())
+    inspect_checkout(path)
 }
 
 fn expired(w: &Worktree, at: u64) -> io::Result<bool> {
@@ -1900,14 +1989,7 @@ fn aggressive_clean(
         ));
     }
     let (fresh_table, active_paths) = activity()?;
-    let mut allowed = roots(config);
-    for p in ["/private/tmp", "/tmp", "/Users/Shared"] {
-        if let Ok(p) = PathBuf::from(p).canonicalize()
-            && !allowed.contains(&p)
-        {
-            allowed.push(p);
-        }
-    }
+    let allowed = roots(config);
     // Codex nests repositories one level below its randomly named worktree slot.
     let mut search = allowed.clone();
     for root in &allowed {
@@ -2130,7 +2212,9 @@ mod aggressive_tests {
                 &Table::new(),
                 now() + 172800
             )
-            .is_ok()
+            .unwrap_err()
+            .to_string()
+            .contains("Untracked")
         );
         assert!(work.join("receipt").exists());
         std::fs::remove_file(work.join("receipt")).unwrap();
@@ -2176,7 +2260,7 @@ mod aggressive_tests {
                 .contains("Locked")
         );
         git_text(&main, &["worktree", "unlock", work.to_str().unwrap()]).unwrap();
-        crate::health::cleanup::release_fixture(&work);
+
         remove_checkout(&work).unwrap();
         assert!(!work.exists());
         assert!(git_text(&main, &["rev-parse", "completed"]).is_ok());
@@ -2284,7 +2368,7 @@ mod aggressive_tests {
         git_text(&main, &["config", "user.email", "test@example.invalid"]).unwrap();
         git_text(&main, &["config", "user.name", "Test"]).unwrap();
         std::fs::write(main.join("file"), "committed").unwrap();
-        std::fs::write(main.join(".gitignore"), "node_modules\n").unwrap();
+        std::fs::write(main.join(".gitignore"), "node_modules\n*.sqlite\n").unwrap();
         git_text(&main, &["add", "."]).unwrap();
         git_text(&main, &["commit", "-m", "fixture"]).unwrap();
         git_text(
@@ -2420,7 +2504,7 @@ mod aggressive_tests {
         assert!(work.join("file").exists());
         std::fs::remove_file(work.join("local.sqlite")).unwrap();
         let head = git_text(&work, &["rev-parse", "HEAD"]).unwrap();
-        crate::health::cleanup::release_fixture(&work);
+
         remove_checkout(&work).unwrap();
         assert_eq!(git_text(&main, &["rev-parse", "owned"]).unwrap(), head);
         assert_eq!(
