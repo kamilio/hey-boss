@@ -40,6 +40,7 @@ struct Data {
     stall_graph: bool,
     change_rest_on_checks: Option<Value>,
     deny_rest_on_checks: bool,
+    checks_gate: Option<Arc<tokio::sync::Notify>>,
     calls: Vec<(String, Value)>,
     tokens: Vec<String>,
 }
@@ -50,7 +51,7 @@ async fn handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let (value, denied, stalled) = {
+    let ((value, denied, stalled), gate) = {
         let mut s = state.lock().unwrap();
         let path = uri.path();
         s.tokens.push(
@@ -64,7 +65,7 @@ async fn handler(
             path.into(),
             serde_json::from_slice(&body).unwrap_or(Value::Null),
         ));
-        if path == "/app/installations/42/access_tokens" {
+        let result = if path == "/app/installations/42/access_tokens" {
             (
                 json!({"token":"synthetic-app-token","expires_at":"2099-01-01T00:00:00Z"}),
                 false,
@@ -103,8 +104,22 @@ async fn handler(
             )
         } else {
             (json!([]), false, false)
-        }
+        };
+        let gate = if path.ends_with("/check-runs")
+            && path
+                .rsplit('/')
+                .nth(1)
+                .is_some_and(|sha| sha != HEAD && sha != MERGE)
+        {
+            s.checks_gate.take()
+        } else {
+            None
+        };
+        (result, gate)
     };
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
     if stalled {
         std::future::pending::<()>().await;
     }
@@ -169,6 +184,7 @@ impl Fixture {
             stall_graph: false,
             change_rest_on_checks: None,
             deny_rest_on_checks: false,
+            checks_gate: None,
             calls: vec![],
             tokens: vec![],
         }));
@@ -232,6 +248,134 @@ impl Fixture {
             "INSERT OR REPLACE INTO cache(scope,key,response) SELECT scope,key||'#installation-ci-pr',json_set(response,'$.data',json(?1),'$.validated_at_ms',?2) FROM cache WHERE key LIKE '%/pulls/7'",
             rusqlite::params![data.to_string(), clock],
         ).unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn uncertain_merge_policy_seeds_refresh_before_collecting_obsolete_checks() {
+    for installation in [false, true] {
+        for kind in ["unknown", "conflicting"] {
+            let f = Fixture::with_installation(installation).await;
+            let mut seed = metadata();
+            match kind {
+                "unknown" => seed["mergeable"] = Value::Null,
+                "conflicting" => seed["mergeable"] = json!(false),
+                _ => unreachable!(),
+            }
+            f.data.lock().unwrap().rest = seed.clone();
+            let old = f.seed().await;
+            // Both caches agree. The newer-CI mismatch shortcut cannot help.
+            if installation {
+                f.cache_ci_seed(&seed, old + 60_000);
+            }
+            let merge = "dddddddddddddddddddddddddddddddddddddddd";
+            f.data.lock().unwrap().rest["merge_commit_sha"] = json!(merge);
+            let report = f
+                .client
+                .required_checks_for_pr("acme/demo", 7, Freshness::default())
+                .await
+                .unwrap();
+            assert_eq!(report.state, "satisfied", "{kind}");
+            assert_eq!(report.merge_sha.as_deref(), Some(merge));
+            assert!(
+                report
+                    .checks
+                    .iter()
+                    .all(|check| check.sha.as_deref() == Some(merge))
+            );
+            let data = f.data.lock().unwrap();
+            let reads: Vec<_> = data
+                .calls
+                .iter()
+                .enumerate()
+                .filter(|(_, call)| call.0.ends_with("/pulls/7"))
+                .collect();
+            assert_eq!(
+                reads.len(),
+                1,
+                "{kind}: collecting old selectors caused a second metadata read: {:?}",
+                data.calls
+            );
+            assert_eq!(reads[0].0, 0, "metadata must precede commit collection");
+            assert_eq!(data.tokens[0], "Bearer synthetic-token");
+            assert!(!data.calls.iter().any(|call| call.0 == "/graphql"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn early_rest_seed_expiry_still_confirms_and_recollects_a_changed_merge() {
+    for (age, expired_ms) in [(30, 16_000), (1, 2_000)] {
+        let f = Fixture::new().await;
+        f.data.lock().unwrap().rest["mergeable"] = Value::Null;
+        f.seed().await;
+        let merge = "dddddddddddddddddddddddddddddddddddddddd";
+        let changed_merge = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let gate = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut data = f.data.lock().unwrap();
+            data.rest["merge_commit_sha"] = json!(merge);
+            let mut changed = data.rest.clone();
+            changed["merge_commit_sha"] = json!(changed_merge);
+            data.change_rest_on_checks = Some(changed);
+            data.checks_gate = Some(gate.clone());
+        }
+        let reader = tokio::spawn({
+            let client = f.client.clone();
+            async move {
+                client
+                    .required_checks_for_pr(
+                        "acme/demo",
+                        7,
+                        Freshness::MaxAge(Duration::from_secs(age)),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if f.data
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .any(|call| call.0 == format!("/repos/acme/demo/commits/{merge}/check-runs"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap().execute(
+            "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'", [now - expired_ms]
+        ).unwrap();
+        gate.notify_one();
+        let report = reader.await.unwrap().unwrap();
+        assert_eq!(report.state, "satisfied");
+        assert_eq!(report.merge_sha.as_deref(), Some(changed_merge));
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|check| check.sha.as_deref() == Some(changed_merge))
+        );
+        assert_eq!(
+            f.data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| call.0.ends_with("/pulls/7"))
+                .count(),
+            3,
+            "early read, expired final confirmation, and changed-merge retry must each validate"
+        );
     }
 }
 
