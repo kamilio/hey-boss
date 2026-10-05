@@ -1058,6 +1058,22 @@ mod tests {
     }
 
     #[test]
+    fn replacement_checkout_preserves_new_persistent_data() {
+        let fixture = CandidateFixture::new("replacement");
+        let identity = std::fs::symlink_metadata(&fixture.work.path).unwrap();
+        std::fs::rename(&fixture.work.path, fixture.root.join("original")).unwrap();
+        std::fs::create_dir(&fixture.work.path).unwrap();
+        std::fs::write(fixture.work.path.join("local.sqlite"), "persistent").unwrap();
+        assert!(
+            super::super::cleanup::unchanged_directory(&fixture.work.path, &identity)
+                .unwrap_err()
+                .to_string()
+                .contains("replaced")
+        );
+        assert!(fixture.work.path.join("local.sqlite").exists());
+    }
+
+    #[test]
     fn candidate_without_release_preserves_untracked_source() {
         let fixture = CandidateFixture::new("untracked");
         std::fs::write(fixture.work.path.join("unfinished.rs"), "source").unwrap();
@@ -1774,6 +1790,7 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
     if path.canonicalize()? != path {
         return Err(io::Error::other("Noncanonical checkout preserved"));
     }
+    let identity = std::fs::symlink_metadata(path)?;
     let trees = list(path)?;
     let main = trees
         .first()
@@ -1810,6 +1827,7 @@ fn remove_checkout(path: &Path) -> io::Result<()> {
         now(),
     )?;
     super::cleanup::check(path)?;
+    super::cleanup::unchanged_directory(path, &identity)?;
     git_text(
         &main.path,
         &[

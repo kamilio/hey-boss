@@ -170,11 +170,16 @@ fn remove_dependencies(path: &Path) -> io::Result<()> {
     let identity = fs::symlink_metadata(path)?;
     inspect_dependencies(path)?;
     check(path)?; // fresh ownership at the destructive boundary
-    let current = fs::symlink_metadata(path)?;
-    if (identity.dev(), identity.ino()) != (current.dev(), current.ino()) {
-        return Err(preserved("Dependency directory replaced; preserved"));
-    }
+    unchanged_directory(path, &identity)?;
     fs::remove_dir_all(path)
+}
+
+pub(super) fn unchanged_directory(path: &Path, identity: &fs::Metadata) -> io::Result<()> {
+    let current = fs::symlink_metadata(path)?;
+    if !current.is_dir() || (identity.dev(), identity.ino()) != (current.dev(), current.ino()) {
+        return Err(preserved("Cleanup directory replaced; preserved"));
+    }
+    Ok(())
 }
 
 fn inspect_tree(path: &Path) -> io::Result<()> {
