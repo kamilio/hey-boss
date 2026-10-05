@@ -5,13 +5,14 @@ const {createServer} = require('node:http');
 const {resolve} = require('node:path');
 const {chromium, webkit} = require('playwright');
 const root = resolve('src/issues/web');
-const project = {id:'named:Badge QA',name:'Badge QA',open:4,closed:0,ready:0,blocked:0,deleted:0,unassigned:0,prs_enabled:true};
+const project = {id:'named:Badge QA',name:'Badge QA',open:5,closed:0,ready:0,blocked:0,deleted:0,unassigned:1,prs_enabled:true};
 const issues = [
   {title:'Recover the native stream after upstream closes',assignment:{kind:'agent',actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
   {title:'Expose the existing filesystem to packaged Workers',assignment:{kind:'boss'},assignee:'human:boss'},
   {title:'Check required reviews and CI for the release',assignment:{kind:'github',waiting:true,actor:'codex:astra'},assignee:'watcher:github'},
   {title:'Verify the new snapshot on the development machine',assignment:{kind:'machine',machine:'box',machine_name:'Devbox'}},
-].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:2,body:'Fixture issue',comments:[],events:[],pull_requests:[],...i}));
+  {title:'An unassigned issue keeps comments in the same column',assignment:{kind:'unassigned'}},
+].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',comments:[],events:[],pull_requests:[],...i}));
 const common={ok:true,csrf:'fixture',actor:{id:'human:boss'},boss:{id:'human:boss',name:'Boss'},project,projects:[project],labels:['needs-boss'],actor_models:{'codex:astra':'gpt-6-astra'},assignees:['codex:astra','human:boss','watcher:github'],assignment_machines:[{id:'box',name:'Devbox'}]};
 const requests=[];
 const server=createServer(async(req,res)=>{
@@ -51,6 +52,17 @@ const server=createServer(async(req,res)=>{
           const badge=n=>page.locator(`[data-issue-number="${n}"] .assignment-badge`);
           const card=n=>page.locator('#assignment-card-'+n);
           await list();
+          const alignment = await page.locator('.issue-row-end').evaluateAll(ends => ends.map(end => {
+            const badge = end.querySelector('.assignment-badge')?.getBoundingClientRect();
+            const comments = end.querySelector('.comment-count')?.getBoundingClientRect();
+            const row = end.closest('.issue-row').getBoundingClientRect();
+            return {badge:badge?.x, badgeRight:badge?.right, comments:comments?.x, commentsRight:comments?.right, rowRight:row.right};
+          }));
+          const badges = alignment.filter(r => r.badge != null), comments = alignment.filter(r => r.comments != null);
+          assert(Math.max(...badges.map(r=>r.badge))-Math.min(...badges.map(r=>r.badge))<1, 'Badge column aligns across empty, short and long counts');
+          assert(Math.max(...comments.map(r=>r.comments))-Math.min(...comments.map(r=>r.comments))<1, 'Comments align even without an assignee');
+          assert(badges.every(r=>r.commentsRight==null||r.commentsRight<r.badge), 'Badges are to the right of comments');
+          assert(badges.every(r=>r.rowRight-r.badgeRight<25), 'Badges sit at the far right');
           for(const [number,owner] of [[1,'codex:astra'],[2,'human:boss'],[3,'watcher:github'],[4,'machine:box']]){
             await list();
             if(touch){
@@ -99,6 +111,11 @@ const server=createServer(async(req,res)=>{
           await list();
           for(const scheme of ['light','dark']){
             await page.emulateMedia({colorScheme:scheme});
+            const colors=await page.locator('.assignment-badge').evaluateAll(badges=>badges.map(b=>getComputedStyle(b).color));
+            assert.notEqual(colors[0],colors[1], 'Workers have a distinct green color');
+            assert.notEqual(colors[3],colors[1], 'Machines have a distinct orange color');
+            assert.notEqual(colors[0],colors[3], 'Machine and worker colors differ');
+            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${touch?'touch':'desktop'}-${scheme}-aligned.png`});
             if(touch)await badge(1).tap();else await badge(1).hover();
             const box=await card(1).boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=(touch?390:1440));
             if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${touch?'touch':'desktop'}-${scheme}.png`});

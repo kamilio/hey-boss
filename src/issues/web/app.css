@@ -286,14 +286,16 @@
   text-decoration: underline;
 }
 .issue-row-end {
-  display: flex;
-  gap: 17px;
+  display: grid;
+  grid-template-columns: 48px 36px;
+  gap: 12px;
   align-items: center;
   align-self: center;
   flex-shrink: 0;
-  min-width: 68px;
-  justify-content: flex-end;
+  justify-content: end;
 }
+.issue-row-end > .comment-count { grid-column: 1; grid-row: 1; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.issue-row-end > .list-assignee { grid-column: 2; grid-row: 1; }
 .comment-count {
   display: flex;
   align-items: center;
@@ -3049,7 +3051,7 @@ button.avatar.self:hover {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--assignment-color, var(--accent));
   cursor: pointer;
   text-decoration: none;
   border-radius: 50%;
@@ -3061,11 +3063,17 @@ button.avatar.self:hover {
   height: 28px;
   border-radius: 50%;
   border: 1px solid var(--line);
-  background: var(--accent-soft);
+  background: var(--assignment-background, var(--accent-soft));
+}
+.assignment-badge[data-assignment-kind="machine"] { --assignment-color: #a65b13; --assignment-background: #fff0dd; }
+.assignment-badge[data-assignment-kind="agent"] { --assignment-color: var(--green); --assignment-background: #e4f4eb; }
+@media (prefers-color-scheme: dark) {
+  .assignment-badge[data-assignment-kind="machine"] { --assignment-color: #f4b56a; --assignment-background: #3d3023; }
+  .assignment-badge[data-assignment-kind="agent"] { --assignment-background: #233a32; }
 }
 .assignment-avatar svg { width: 16px; height: 16px; }
 .assignment-badge:hover .assignment-avatar,
-.assignment-badge[aria-expanded="true"] .assignment-avatar { border-color: var(--accent); }
+.assignment-badge[aria-expanded="true"] .assignment-avatar { border-color: currentColor; }
 .assignment-badge:focus-visible, .assignment-card-action:focus-visible, .list-label-filter:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -3109,6 +3117,7 @@ button.avatar.self:hover {
 .assignment-card-action:hover { background: var(--hover); }
 .assignment-card-action svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
 @media (max-width: 640px), (pointer: coarse) {
+  .issue-row-end { grid-template-columns: 48px 44px; }
   .assignment-badge { width: 44px; height: 44px; }
   .assignment-card-action { min-height: 44px; }
   .list-label-filter { min-height: 32px; display: inline-flex; align-items: center; }
