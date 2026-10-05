@@ -51,6 +51,8 @@ and the poll response's `validations` expose source freshness. `status` is
 offline and does not refresh those times. Errors produce `unknown` while
 retaining older evidence and observed failures. Inspect the JSON even when
 `poll` exits nonzero.
+An interrupted gate retains the run records already collected, with
+`history_complete=false`, `satisfied=false`, and no new gate confirmation.
 Historical `confirmations` retain when a deployment was confirmed even if a
 later rerun, force-push, or read error changes the current report.
 
