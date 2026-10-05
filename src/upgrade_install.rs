@@ -363,7 +363,9 @@ fn publish_to(
         if let Some(harvester) = harvester {
             refresh_harvester(harvester)?;
         }
-        if companion || app.is_some() {
+        // CLI-only supervisors also replace hey-gh. Its registered owner must
+        // reload before this installation can be reported as successful.
+        if companion_bins.contains(&binary.with_file_name("hey-gh")) {
             refresh_shared_api(binary, companion, &home()?)?;
         }
         // The durable receipt is the last publication step. Failed installations
@@ -430,6 +432,88 @@ mod tests {
             fs::read_to_string(&calls).unwrap(),
             "install\nservice restart\n"
         );
+        #[cfg(target_os = "macos")]
+        {
+            let registration = temp.0.join("Library/LaunchAgents/local.hey-gh.plist");
+            fs::create_dir_all(registration.parent().unwrap()).unwrap();
+            fs::write(&registration, "managed supervisor").unwrap();
+            fs::write(&calls, "").unwrap();
+            refresh_shared_api(&binary, false, &temp.0).unwrap();
+            assert_eq!(
+                fs::read_to_string(&calls).unwrap(),
+                "install\nservice restart\n"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_supervisor_refreshes_shared_api_before_publishing_receipt() {
+        for fail_install in [false, true] {
+            let temp = Temp::new().unwrap();
+            let bin = temp.0.join("installed/hey-boss");
+            let built = temp.0.join("built/hey-boss");
+            let api = bin.with_file_name("hey-gh");
+            let state = temp.0.join("state");
+            let receipt_path = state.join("upgrade-receipt.json");
+            let calls = temp.0.join("api-calls");
+            fs::create_dir_all(&state).unwrap();
+            fs::write(&receipt_path, "old-receipt").unwrap();
+            script(&bin, "echo previous");
+            script(&api, "echo previous-api");
+            script(
+                &built,
+                "if [ \"$1\" = --version ]; then echo 'hey-boss (build 1234567890abcdef)'; fi",
+            );
+            script(
+                &built.with_file_name("hey-gh"),
+                &format!(
+                    "test \"$(cat '{}')\" = old-receipt || exit 19\necho \"$*\" >> '{}'\nif test '{}' = true; then echo api-install-failed >&2; exit 61; fi",
+                    receipt_path.display(),
+                    calls.display(),
+                    fail_install
+                ),
+            );
+            let result = publish_to(
+                &temp.0,
+                &bin,
+                &built,
+                &state,
+                &receipt(),
+                &Services {
+                    app: None,
+                    companion: false,
+                    companion_bins: vec![api.clone()],
+                    skills: Vec::new(),
+                    harvester: None,
+                },
+                |_| panic!("No harvester schedule in this fixture"),
+            );
+            let calls = fs::read_to_string(&calls).unwrap_or_default();
+            assert!(
+                calls.starts_with("install\n"),
+                "CLI supervisor skipped API refresh"
+            );
+            if fail_install {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("api-install-failed")
+                );
+                assert_eq!(fs::read_to_string(&receipt_path).unwrap(), "old-receipt");
+                assert_eq!(
+                    fs::read_to_string(&bin).unwrap(),
+                    "#!/bin/sh\necho previous\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(&api).unwrap(),
+                    "#!/bin/sh\necho previous-api\n"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(json::<Receipt>(&receipt_path).unwrap(), receipt());
+            }
+        }
     }
     #[test]
     fn desktop_bundle_replacement_reloads_registration_and_propagates_bootstrap_errors() {
