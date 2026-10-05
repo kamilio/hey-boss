@@ -1,6 +1,61 @@
 use super::*;
 
 #[tokio::test]
+async fn installation_proofs_do_not_request_other_apps_private_metadata() {
+    let f = Fixture::with_installation(true).await;
+    f.seed_ci_proof().await;
+    f.data.lock().unwrap().deny_ci_app_metadata = true;
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+        .await
+        .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert_eq!(f.ci_proof_calls(), 1);
+    assert_eq!(f.ci_rest_calls(), 0);
+}
+
+#[tokio::test]
+async fn suite_identity_preserves_cached_app_filters() {
+    let f = Fixture::with_installation(true).await;
+    f.seed_ci_proof().await;
+    let db = rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap();
+    db.execute("UPDATE cache SET response=json_set(response,'$.data.check_runs[0].app.id',2) WHERE key LIKE '%/check-runs%'",[]).unwrap();
+    f.data.lock().unwrap().stall_checks = true;
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.state, "missing",
+        "a check owned by app 2 cannot satisfy app 1's requirement"
+    );
+    assert_eq!(f.ci_rest_calls(), 0);
+}
+
+#[tokio::test]
+async fn changed_suite_identity_cannot_reuse_cached_app_ownership() {
+    let f = Fixture::with_installation(true).await;
+    f.seed_ci_proof().await;
+    {
+        let mut data = f.data.lock().unwrap();
+        let suite = &mut data.ci_graph["data"]["repository"]["head"]["checkSuites"]["nodes"][0];
+        suite["id"] = json!("CS_other");
+        suite["databaseId"] = json!(900);
+        suite["checkRuns"]["nodes"][0]["checkSuite"]["databaseId"] = json!(900);
+        data.check_conclusion = "failure";
+    }
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::default())
+        .await
+        .unwrap();
+    assert_eq!(report.state, "failure");
+    assert_eq!(f.ci_rest_calls(), 4);
+}
+
+#[tokio::test]
 async fn a_matching_rollup_cannot_hide_later_workflow_checks() {
     let f = Fixture::new().await;
     f.seed_ci_proof().await;
@@ -32,7 +87,7 @@ fn commit(sha: &str) -> Value {
             "checkRuns":{"totalCount":1,"pageInfo":{"hasNextPage":false},"nodes":[{
                 "__typename":"CheckRun","id":format!("CR_{}",sha.as_bytes()[0]),"databaseId":sha.as_bytes()[0],
                 "name":"tests","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":null,"startedAt":null,"completedAt":null,
-                "checkSuite":{"app":{"databaseId":1},"commit":{"oid":sha}}
+                "checkSuite":{"databaseId":sha.as_bytes()[0],"commit":{"oid":sha}}
             }]}
         }]
     }})
@@ -175,7 +230,7 @@ async fn malformed_changed_or_truncated_ci_proofs_require_fresh_rest() {
             json!("https://example.test/new"),
         ),
         (
-            "/head/checkSuites/nodes/0/checkRuns/nodes/0/checkSuite/app/databaseId",
+            "/head/checkSuites/nodes/0/checkRuns/nodes/0/checkSuite/databaseId",
             json!(2),
         ),
         (
@@ -216,7 +271,7 @@ async fn later_suites_preserve_cancelled_failures_and_pending_reruns() {
         f.seed_ci_proof().await;
         let db = rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap();
         let id = u64::from(MERGE.as_bytes()[0]) + 100;
-        let run = json!({"id":id,"node_id":"CR_rerun","name":"tests","app":{"id":1},"head_sha":MERGE,"status":status,"conclusion":if conclusion.is_empty(){Value::Null}else{json!(conclusion)},"started_at":null,"completed_at":null,"details_url":null});
+        let run = json!({"id":id,"node_id":"CR_rerun","name":"tests","app":{"id":1},"check_suite":{"id":id},"head_sha":MERGE,"status":status,"conclusion":if conclusion.is_empty(){Value::Null}else{json!(conclusion)},"started_at":null,"completed_at":null,"details_url":null});
         db.execute("UPDATE cache SET response=json_set(response,'$.data.total_count',2,'$.data.check_runs[#]',json(?1)) WHERE key LIKE ?2",rusqlite::params![run.to_string(),format!("%/commits/{MERGE}/check-runs%")]).unwrap();
         {
             let mut data = f.data.lock().unwrap();
@@ -227,6 +282,7 @@ async fn later_suites_preserve_cancelled_failures_and_pending_reruns() {
             let check = &mut later["checkRuns"]["nodes"][0];
             check["id"] = json!("CR_rerun");
             check["databaseId"] = json!(id);
+            check["checkSuite"]["databaseId"] = json!(id);
             check["status"] = json!(status.to_ascii_uppercase());
             check["conclusion"] = if conclusion.is_empty() {
                 Value::Null
@@ -268,6 +324,7 @@ async fn unseen_later_check_forces_rest_even_when_rollup_matches() {
         later["databaseId"] = json!(500);
         later["checkRuns"]["nodes"][0]["id"] = json!("CR_later");
         later["checkRuns"]["nodes"][0]["databaseId"] = json!(500);
+        later["checkRuns"]["nodes"][0]["checkSuite"]["databaseId"] = json!(500);
         later["checkRuns"]["nodes"][0]["conclusion"] = json!("FAILURE");
         c["checkSuites"]["nodes"]
             .as_array_mut()

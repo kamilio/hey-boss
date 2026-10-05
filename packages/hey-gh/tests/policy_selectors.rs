@@ -45,6 +45,7 @@ struct Data {
     branch: Value,
     branch_graph: Value,
     ci_graph: Value,
+    deny_ci_app_metadata: bool,
     ci_graph_gate: Option<Arc<tokio::sync::Notify>>,
     check_conclusion: &'static str,
     status_state: Option<&'static str>,
@@ -97,7 +98,15 @@ async fn handler(
                 .as_str()
                 .is_some_and(|q| q.contains("RequiredPolicyCi"))
             {
-                s.ci_graph.clone()
+                if s.deny_ci_app_metadata
+                    && query["query"]
+                        .as_str()
+                        .is_some_and(|q| q.contains("app { databaseId }"))
+                {
+                    json!({"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration","path":["repository","head","checkSuites","nodes",0,"checkRuns","nodes",0,"checkSuite","app"]}]})
+                } else {
+                    s.ci_graph.clone()
+                }
             } else if query["query"]
                 .as_str()
                 .is_some_and(|query| query.contains("RequiredPolicyBranch"))
@@ -120,7 +129,7 @@ async fn handler(
                 s.deny_rest |= s.deny_rest_on_checks;
             }
             (
-                json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"node_id":format!("CR_{}",sha.as_bytes()[0]),"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":s.check_conclusion,"started_at":null,"completed_at":null,"details_url":null}]}),
+                json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"node_id":format!("CR_{}",sha.as_bytes()[0]),"name":"tests","app":{"id":1},"check_suite":{"id":sha.as_bytes()[0]},"head_sha":sha,"status":"completed","conclusion":s.check_conclusion,"started_at":null,"completed_at":null,"details_url":null}]}),
                 false,
                 s.stall_checks,
             )
@@ -246,6 +255,7 @@ impl Fixture {
             branch: json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
             branch_graph: Value::Null,
             ci_graph: Value::Null,
+            deny_ci_app_metadata: false,
             ci_graph_gate: None,
             check_conclusion: "success",
             status_state: None,
