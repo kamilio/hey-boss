@@ -122,14 +122,14 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             .iter()
             .filter(|p| p.starts_with(path))
             .count();
-        json!({"name":"main","commit":{"sha":if mode.starts_with("archive_") {E} else if matches!(mode,"force_push"|"fast_forward") && count>1 {D}else{C}}})
+        json!({"name":"main","commit":{"sha":if mode.starts_with("archive_") {E} else if matches!(mode,"force_push"|"fast_forward"|"partial_confirmation") && count>1 {D}else{C}}})
     } else if path.contains("/compare/") {
         let (base, head) = path.rsplit('/').next().unwrap().split_once("...").unwrap();
         let ahead = base <= head
             && !(mode == "unrelated" && head == C)
             && !(mode == "side_branch" && base == A && head == B)
             && !(mode == "paged_branch_side" && base == A && head == B)
-            && !(mode == "force_push" && head == D);
+            && !(matches!(mode, "force_push" | "partial_confirmation") && head == D);
         let mut result = json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}});
         if mode.starts_with("paged_branch")
             && base == A
@@ -221,7 +221,10 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             }
         }
         result
-    } else if path == "/repos/o/r/actions/workflows/ci.yml/runs" {
+    } else if matches!(
+        path,
+        "/repos/o/r/actions/workflows/ci.yml/runs" | "/repos/o/r/actions/workflows/early.yml/runs"
+    ) {
         if mode == "forbidden" {
             return (
                 StatusCode::FORBIDDEN,
@@ -246,6 +249,10 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
                 },
             ),
         ];
+        if path.ends_with("/early.yml/runs") {
+            rows.retain(|row| row["id"] == 2);
+            rows[0]["path"] = json!(".github/workflows/early.yml");
+        }
         if mode == "archive_many" {
             rows.extend([run(4, D, "cancelled"), run(5, E, "cancelled")]);
         }
@@ -437,6 +444,57 @@ async fn assert_partial_gate(mode: &str) {
     assert_eq!(entries[0].failures.len(), 1);
     assert_eq!(entries[0].failures[0].id, 1);
     assert!(entries[0].confirmations.is_empty());
+    assert_eq!(
+        h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.as_str() == "/repos/o/r/branches/main")
+            .count(),
+        1,
+        "an entirely incomplete report has no confirmation needing a final branch read"
+    );
+}
+
+#[tokio::test]
+async fn partial_gate_does_not_skip_branch_validation_for_a_completed_gate() {
+    let h = Harness::new("partial_confirmation").await;
+    let mut config = project();
+    let mut early = config.gates[0].clone();
+    early.name = "early tests".into();
+    early.workflow = "early.yml".into();
+    config.gates.insert(0, early);
+    let batch = h
+        .client
+        .release_report(
+            &Request {
+                project: config,
+                targets: vec![A.into()],
+            },
+            Freshness::default(),
+        )
+        .await
+        .unwrap();
+    let report = &batch.reports[0];
+    assert_eq!(report.state, "unknown");
+    assert_eq!(report.gates.len(), 2);
+    assert!(report.gates[0].history_complete);
+    assert!(!report.gates[1].history_complete);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("branch changed")),
+        "{:?}",
+        report.errors
+    );
+    assert!(
+        report
+            .gates
+            .iter()
+            .all(|gate| !gate.satisfied && gate.confirmation.is_none())
+    );
 }
 
 #[tokio::test]

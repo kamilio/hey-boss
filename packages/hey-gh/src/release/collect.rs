@@ -540,7 +540,13 @@ impl Collector<'_> {
         Ok(())
     }
     async fn validate_branch(&self, reports: &mut [Report]) -> Result<()> {
-        if !reports.iter().any(|r| !r.gates.is_empty()) {
+        // Partial records are historical evidence in an unknown report. Only
+        // finished gates or confirmations need a final branch proof.
+        if !reports.iter().any(|r| {
+            r.gates
+                .iter()
+                .any(|g| g.history_complete || g.confirmation.is_some())
+        }) {
             return Ok(());
         }
         let branch = self
