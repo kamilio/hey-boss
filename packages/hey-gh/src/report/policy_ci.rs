@@ -25,13 +25,13 @@ fn nullable(value: Option<&Value>) -> bool {
 }
 
 fn check_version(value: &Value, graph: bool, sha: &str) -> Option<(String, Value)> {
-    let (id, name, status, conclusion, app, actual_sha, started, completed, url) = if graph {
+    let (id, name, status, conclusion, suite, actual_sha, started, completed, url) = if graph {
         (
             &value["databaseId"],
             &value["name"],
             &value["status"],
             value.get("conclusion")?,
-            &value["checkSuite"]["app"]["databaseId"],
+            &value["checkSuite"]["databaseId"],
             &value["checkSuite"]["commit"]["oid"],
             value.get("startedAt"),
             value.get("completedAt"),
@@ -43,7 +43,7 @@ fn check_version(value: &Value, graph: bool, sha: &str) -> Option<(String, Value
             &value["name"],
             &value["status"],
             value.get("conclusion")?,
-            &value["app"]["id"],
+            &value["check_suite"]["id"],
             &value["head_sha"],
             value.get("started_at"),
             value.get("completed_at"),
@@ -59,7 +59,8 @@ fn check_version(value: &Value, graph: bool, sha: &str) -> Option<(String, Value
     };
     if id.as_u64().is_none_or(|id| id == 0)
         || text(name).is_none()
-        || app.as_u64().is_none_or(|id| id == 0)
+        || suite.as_u64().is_none_or(|id| id == 0)
+        || (!graph && value["app"]["id"].as_u64().is_none_or(|id| id == 0))
         || actual_sha != sha
         || !matches!(
             status.as_str(),
@@ -86,10 +87,14 @@ fn check_version(value: &Value, graph: bool, sha: &str) -> Option<(String, Value
     {
         return None;
     }
+    // A check run and its suite belong permanently to the creating app. Match
+    // both immutable identities to retain the REST app ID. GraphQL App metadata
+    // can be forbidden to an installation even when its check results are public
+    // to that installation; requesting it would make this optional proof fail.
     Some((
         node.to_owned(),
         json!([
-            id, name, status, conclusion, app, sha, started, completed, url
+            id, name, status, conclusion, suite, sha, started, completed, url
         ]),
     ))
 }
@@ -188,7 +193,10 @@ impl Seed {
                 return false;
             };
             if graph_checks.len() + runs.len() > 100
-                || runs.iter().any(|run| run["__typename"] != "CheckRun")
+                || runs.iter().any(|run| {
+                    run["__typename"] != "CheckRun"
+                        || run["checkSuite"]["databaseId"].as_u64() != Some(database_id)
+                })
             {
                 return false;
             }

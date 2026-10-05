@@ -18,7 +18,7 @@ fragment RequiredCiCommit on Commit {
         totalCount pageInfo { hasNextPage }
         nodes {
           __typename id databaseId name status conclusion startedAt completedAt detailsUrl
-          checkSuite { app { databaseId } commit { oid } }
+          checkSuite { databaseId commit { oid } }
         }
       }
     }
