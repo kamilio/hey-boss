@@ -72,14 +72,42 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
     h.mode("account-policy-rotation-stalled");
     let c = seed(&h, Duration::from_millis(400)).await;
     let (api, sdk, server) = start(&c).await;
-    let status = wait_cycle(&sdk, 0).await;
+    // Either CI row can become ready first. The healthy neighbor may complete
+    // a policy turn while the stalled target still awaits its CI completion.
+    // Observe the actual interruption, not merely the first attempted turn.
+    let status = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut after = 0;
+        loop {
+            let status = wait_cycle(&sdk, after).await;
+            let cycle = status.policy_last_cycle.as_ref().unwrap();
+            if cycle.interrupted > 0 {
+                break status;
+            }
+            assert_eq!(cycle.failed, 0, "{cycle:?}; {:?}", status.policy_last_error);
+            assert!(
+                cycle.waiting_for_ci > 0,
+                "unexpected policy turn: {cycle:?}"
+            );
+            after = cycle.finished_at_ms;
+        }
+    })
+    .await
+    .expect("stalled policy target never interrupted its rotation");
     let cycle = status.policy_last_cycle.unwrap();
     assert_eq!(cycle.attempted, 1);
-    assert_eq!(cycle.interrupted, 1);
+    assert_eq!(
+        cycle.interrupted, 1,
+        "{cycle:?}; {:?}",
+        status.policy_last_error
+    );
     assert_eq!(cycle.deferred, 1);
     assert!(cycle.cycle_budget_exhausted);
     assert!(status.policy_last_error.is_some());
-    assert!(status.policy_last_success_at_ms.is_none());
+    assert!(
+        status
+            .policy_last_success_at_ms
+            .is_none_or(|at| at <= cycle.started_at_ms)
+    );
     assert_eq!(status.ci_last_cycle.unwrap().succeeded, 2);
     assert!(status.ci_last_error.is_none());
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
