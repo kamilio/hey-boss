@@ -292,6 +292,10 @@ async fn native_stack_registration_and_trunk_changes_retry_with_unchanged_head()
         (Value::Null, stack("main")),
         (stack("main"), stack("release")),
         (stack("main"), Value::Null),
+        (
+            stack("main"),
+            json!({"id":12,"number":4,"position":2,"size":3,"base":{"ref":"main","sha":TRUNK}}),
+        ),
     ] {
         let (c, s, _dir, task) = fixture(before).await;
         s.lock().unwrap().next_membership = Some(after.clone());
@@ -309,14 +313,15 @@ async fn native_stack_registration_and_trunk_changes_retry_with_unchanged_head()
                 "failure"
             }
         );
-        assert!(
+        assert_eq!(
             s.lock()
                 .unwrap()
                 .calls
                 .iter()
                 .filter(|p| p.ends_with("/pulls/7"))
-                .count()
-                >= 4
+                .count(),
+            3,
+            "reuse the changed confirmation as the retry seed, then confirm again"
         );
         task.abort();
     }
@@ -328,6 +333,10 @@ async fn expired_policy_seed_rechecks_native_membership_before_returning() {
         (Value::Null, stack("main")),
         (stack("main"), stack("release")),
         (stack("main"), Value::Null),
+        (
+            stack("main"),
+            json!({"id":12,"number":4,"position":2,"size":3,"base":{"ref":"main","sha":TRUNK}}),
+        ),
     ] {
         let (c, s, dir, task) = fixture(before).await;
         c.required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
@@ -360,7 +369,7 @@ async fn expired_policy_seed_rechecks_native_membership_before_returning() {
                 .iter()
                 .filter(|p| p.ends_with("/pulls/7"))
                 .count(),
-            3
+            2
         );
         task.abort();
     }

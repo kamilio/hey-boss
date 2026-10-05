@@ -11426,7 +11426,7 @@ async fn required_policy_seed_collects_before_confirmation_and_rejects_changed_s
             ) {
                 1
             } else {
-                3
+                2
             },
             "{changed}"
         );
@@ -11489,7 +11489,7 @@ async fn required_policy_final_validation_reuses_newer_shared_cache_evidence() {
         (0, 0, false, 1, 1),
         (20_000, 0, false, 2, 1),
         (0, 40_000, false, 1, 2),
-        (0, 0, true, 3, 3),
+        (0, 0, true, 2, 3),
     ] {
         let h = Harness::new().await;
         h.mode("ruleset-only-policy");

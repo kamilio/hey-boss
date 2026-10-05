@@ -38,6 +38,8 @@ struct Data {
     deny_rest: bool,
     stall_rest: bool,
     stall_graph: bool,
+    change_rest_on_checks: Option<Value>,
+    deny_rest_on_checks: bool,
     calls: Vec<(String, Value)>,
 }
 
@@ -61,6 +63,12 @@ async fn handler(State(state): State<Arc<Mutex<Data>>>, uri: Uri, body: Bytes) -
             )
         } else if path.ends_with("/check-runs") {
             let sha = path.rsplit('/').nth(1).unwrap();
+            if sha != HEAD && sha != MERGE {
+                if let Some(next) = s.change_rest_on_checks.take() {
+                    s.rest = next;
+                }
+                s.deny_rest |= s.deny_rest_on_checks;
+            }
             (
                 json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":"success"}]}),
                 false,
@@ -112,6 +120,8 @@ impl Fixture {
             deny_rest: false,
             stall_rest: false,
             stall_graph: false,
+            change_rest_on_checks: None,
+            deny_rest_on_checks: false,
             calls: vec![],
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -358,8 +368,60 @@ async fn selector_change_recollects_the_new_head_before_returning() {
     assert_eq!(calls.iter().filter(|c| c.0 == "/graphql").count(), 1);
     assert_eq!(
         calls.iter().filter(|c| c.0.ends_with("/pulls/7")).count(),
-        3
+        2,
+        "the confirmation that discovers a new head is already a usable retry seed"
     );
+}
+
+#[tokio::test]
+async fn a_reused_retry_seed_still_requires_final_metadata_confirmation() {
+    for denied in [false, true] {
+        let f = Fixture::new().await;
+        f.seed().await;
+        let head = "dddddddddddddddddddddddddddddddddddddddd";
+        let merge = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        {
+            let mut s = f.data.lock().unwrap();
+            s.rest["head"]["sha"] = json!(head);
+            s.rest["merge_commit_sha"] = json!(merge);
+            s.graph["data"]["repository"]["pullRequest"]["headRefOid"] = json!(head);
+            if denied {
+                s.deny_rest_on_checks = true;
+            } else {
+                // A second head change occurs while the retry's CI is read.
+                // It cannot certify either the old or new head without a
+                // further collection, beyond this report's retry bound.
+                s.change_rest_on_checks = Some(metadata());
+            }
+        }
+        let error = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap_err();
+        if denied {
+            assert!(matches!(error, hey_gh::Error::GitHub { status: 403, .. }));
+        } else {
+            assert!(
+                matches!(error, hey_gh::Error::Invalid(ref message) if message.contains("changed repeatedly"))
+            );
+        }
+        let s = f.data.lock().unwrap();
+        let metadata_reads: Vec<_> = s
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| call.0.ends_with("/pulls/7"))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(metadata_reads.len(), 2);
+        assert!(
+            s.calls[metadata_reads[0] + 1..metadata_reads[1]]
+                .iter()
+                .any(|call| call.0 == format!("/repos/acme/demo/commits/{head}/check-runs")),
+            "retry must recollect its new head before the final confirmation"
+        );
+    }
 }
 
 #[tokio::test]
