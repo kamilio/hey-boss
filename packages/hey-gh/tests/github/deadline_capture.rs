@@ -28,6 +28,11 @@ async fn gate(
         .query()
         .is_some_and(|q| q.contains("cached_only=true"))
     {
+        assert_eq!(
+            request.uri().query().unwrap().contains("capture_only=true"),
+            !matches!(gate.capture, Capture::CachedOnly),
+            "Only auxiliary fallback reads should suppress publication"
+        );
         gate.cached.fetch_add(1, Ordering::SeqCst);
         gate.cache_started.notify_one();
         match gate.capture {
@@ -192,4 +197,97 @@ async fn blocked_cache_and_live_reads_still_obey_the_total_deadline() {
 #[tokio::test]
 async fn cached_success_never_masks_a_live_failure() {
     scenario(Capture::LiveFailed).await;
+}
+
+#[tokio::test]
+async fn fallback_capture_does_not_wait_for_or_publish_observation_writes() {
+    let h = Harness::new().await;
+    let client = h.client();
+    client
+        .pr_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    let before = client.bootstrap().await.unwrap().cursor;
+    let mut writer = rusqlite::Connection::open(&h.config().cache_path).unwrap();
+    writer.execute(
+        "UPDATE cache SET response=json_set(response,'$.data',json(?1)) WHERE key LIKE '%/issues/7/comments?per_page=100'",
+        [json!([{"id":999,"body":"captured comment","user":{"login":"fixture"},"created_at":"2026-01-01T00:00:00Z"}]).to_string()],
+    ).unwrap();
+    let api = hey_gh::api::Api::new(client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let router = api.router();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let http = reqwest::Client::new();
+    let calls = h.calls().len();
+    for endpoint in ["", "/ci"] {
+        let transaction = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let captured = tokio::time::timeout(Duration::from_millis(500), async {
+            http.get(format!(
+                "{base}v1/prs/acme/demo/7{endpoint}?cached_only=true&capture_only=true"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+        })
+        .await;
+        transaction.rollback().unwrap();
+        let captured = captured.expect("fallback capture waited for an observation writer");
+        assert_eq!(captured["complete"], true);
+        assert_eq!(captured["cursor"], Value::Null);
+        if endpoint.is_empty() {
+            assert_eq!(captured["data"]["comments"][0]["body"], "captured comment");
+        }
+    }
+    assert_eq!(
+        client.bootstrap().await.unwrap().cursor,
+        before,
+        "fallback capture published a replacement"
+    );
+    assert_eq!(h.calls().len(), calls, "fallback capture fetched GitHub");
+    // Explicit cached reads retain the existing cache-recovery behavior.
+    let normal = hey_gh::ApiClient::new(base.parse().unwrap())
+        .unwrap()
+        .pr_report("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert!(normal.cursor.is_some());
+    assert_ne!(client.bootstrap().await.unwrap().cursor, before);
+    api.stop().await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn fallback_capture_rejects_live_reads_without_fetching_github() {
+    let h = Harness::new().await;
+    let api = hey_gh::api::Api::new(h.client()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = api.router();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let http = reqwest::Client::new();
+    for endpoint in ["", "/ci"] {
+        for query in [
+            "capture_only=true",
+            "capture_only=true&refresh=true",
+            "capture_only=true&cached_only=false",
+        ] {
+            let response = http
+                .get(format!("{base}/v1/prs/acme/demo/7{endpoint}?{query}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+    assert!(h.calls().is_empty());
+    api.stop().await;
+    server.abort();
 }

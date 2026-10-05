@@ -54,6 +54,12 @@ fn can_publish() -> bool {
     !PUBLICATION_READ_ONLY.with(|flag| flag.load(Ordering::Relaxed))
 }
 
+pub(crate) async fn capture_only<T>(future: impl std::future::Future<Output = T>) -> T {
+    PUBLICATION_READ_ONLY
+        .scope(Arc::new(AtomicBool::new(true)), future)
+        .await
+}
+
 fn usable_pr_seed(data: &Value, number: u64) -> bool {
     data["number"] == number
         // A terminal seed can start work too. Final metadata still validates
@@ -72,6 +78,9 @@ async fn acquire_report_lock(
     freshness: Freshness,
 ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
     if matches!(freshness, Freshness::CachedOnly) && !preserves_ci_health() {
+        if !can_publish() {
+            return None;
+        }
         match lock.try_lock_owned() {
             Ok(guard) => Some(guard),
             Err(_) => {
@@ -1620,6 +1629,22 @@ const REVIEW_EVENTS_QUERY: &str = "query ReviewEvents($owner:String!,$repo:Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_only_capture_never_owns_a_free_report_lock() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        PUBLICATION_READ_ONLY
+            .scope(Arc::new(AtomicBool::new(true)), async {
+                let guard = acquire_report_lock(lock.clone(), Freshness::CachedOnly).await;
+                assert!(guard.is_none());
+                assert!(
+                    lock.try_lock().is_ok(),
+                    "capture must not block live readers"
+                );
+                assert!(!can_publish());
+            })
+            .await;
+    }
 
     #[tokio::test]
     async fn monitored_projection_waits_for_publication_while_cached_read_stays_nonblocking() {

@@ -23,6 +23,7 @@ pub struct ApiClient {
     base: Url,
     http: reqwest::Client,
     background: bool,
+    capture_reports: bool,
 }
 impl ApiClient {
     /// Explicit release observations; does not register watches or notify agents.
@@ -165,6 +166,7 @@ impl ApiClient {
             base,
             http,
             background: false,
+            capture_reports: false,
         })
     }
     /// Use the daemon's background lane and bounded request lifetime for
@@ -177,6 +179,23 @@ impl ApiClient {
     pub fn foreground(mut self) -> Self {
         self.background = false;
         self
+    }
+    /// Internal deadline fallback: cached PR/CI evidence without observation publication.
+    /// Other endpoints retain their normal behavior.
+    #[doc(hidden)]
+    pub fn capture_reports(mut self) -> Self {
+        self.capture_reports = true;
+        self
+    }
+    fn report_query(&self, freshness: Freshness) -> Result<Vec<(&'static str, String)>> {
+        let mut query = self.pr_query(freshness)?;
+        if self.capture_reports {
+            if !matches!(freshness, Freshness::CachedOnly) {
+                return Err(Error::Invalid("capture_only requires cached_only".into()));
+            }
+            query.push(("capture_only", "true".into()));
+        }
+        Ok(query)
     }
     fn pr_query(&self, freshness: Freshness) -> Result<Vec<(&'static str, String)>> {
         let mut query = freshness_query(freshness)?;
@@ -209,7 +228,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}")))
-                .query(&self.pr_query(freshness)?),
+                .query(&self.report_query(freshness)?),
         )
         .await
     }
@@ -223,7 +242,7 @@ impl ApiClient {
         self.read(
             self.http
                 .get(self.url(&format!("v1/prs/{repository}/{number}/ci")))
-                .query(&self.pr_query(freshness)?),
+                .query(&self.report_query(freshness)?),
         )
         .await
     }

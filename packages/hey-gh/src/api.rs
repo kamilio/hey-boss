@@ -715,10 +715,46 @@ impl ReadQuery {
     }
 }
 
+#[derive(Default, Deserialize)]
+struct ReportReadQuery {
+    refresh: Option<bool>,
+    cached_only: Option<bool>,
+    max_age_seconds: Option<u64>,
+    #[serde(default)]
+    background: bool,
+    #[serde(default)]
+    capture_only: bool,
+}
+impl ReportReadQuery {
+    fn read(&self) -> ReadQuery {
+        ReadQuery {
+            refresh: self.refresh,
+            cached_only: self.cached_only,
+            max_age_seconds: self.max_age_seconds,
+            background: self.background,
+        }
+    }
+    fn freshness(&self) -> Result<Freshness> {
+        let freshness = self.read().freshness()?;
+        if self.capture_only && !matches!(freshness, Freshness::CachedOnly) {
+            return Err(Error::Invalid("capture_only requires cached_only".into()));
+        }
+        Ok(freshness)
+    }
+    async fn run<T>(&self, future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+        let read = self.read();
+        if self.capture_only {
+            crate::report::capture_only(read.run(future)).await
+        } else {
+            read.run(future).await
+        }
+    }
+}
+
 async fn pr(
     State(api): State<Api>,
     Path((owner, repo, number)): Path<(String, String, u64)>,
-    Query(query): Query<ReadQuery>,
+    Query(query): Query<ReportReadQuery>,
 ) -> ApiResult<Json<Report>> {
     Ok(Json(
         query
@@ -769,7 +805,7 @@ async fn pr_metadata(
 async fn ci(
     State(api): State<Api>,
     Path((owner, repo, number)): Path<(String, String, u64)>,
-    Query(query): Query<ReadQuery>,
+    Query(query): Query<ReportReadQuery>,
 ) -> ApiResult<Json<crate::CiObservation>> {
     Ok(Json(
         query

@@ -92,9 +92,10 @@ pub(super) async fn read(
                 let mut cache_options = options.clone();
                 cache_options.refresh = false;
                 cache_options.cached_only = true;
+                let capture_api = api.clone().capture_reports();
                 with_fallback(
                     &mut cached,
-                    run_pr(api, cache_options, selected_repo.clone(), None),
+                    run_pr(&capture_api, cache_options, selected_repo.clone(), None),
                     run_pr(api, options, selected_repo, None),
                 )
                 .await
@@ -106,8 +107,13 @@ pub(super) async fn read(
                 cached_only,
             } => {
                 identity = json!({"repository":repository,"number":number});
+                let capture_api = if cached_only {
+                    api.clone()
+                } else {
+                    api.clone().capture_reports()
+                };
                 let capture = async {
-                    match api
+                    match capture_api
                         .ci_for_pr(&repository, number, Freshness::CachedOnly)
                         .await
                     {
