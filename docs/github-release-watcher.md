@@ -77,11 +77,17 @@ per-commit workflow history directly, avoiding unrelated days. Date-based
 discovery can reuse closed-day pages after a complete branch comparison. Large
 archives with usable node IDs refresh known workflow metadata in GraphQL batches
 of at most 100, using the requested freshness and shared collection byte budget.
-Current-day REST discovery retains new dispatches on those same commits; rerun
-attempts and job/step evidence still use REST. Missing or mismatched nodes and
+Current-day REST discovery retains new dispatches on those same commits. Missing or mismatched nodes and
 API errors remain unknown. Nullable branches or unsynchronized suite metadata
 retain REST history reads. App-backed repositories, explicit refreshes, and
 cached-only reads keep their existing REST path.
+Completed first attempts can collect complete job/step evidence in groups of up
+to 20 runs. A fresh version check after collection detects a rerun starting
+during the query. Rerun attempts, oversized job/step rosters, and unsynchronized
+suite metadata retain explicit REST attempt reads. Completed job versions are
+reused for up to one day after fresh parent validation; explicit refresh bypasses
+that memo. Interrupted batches retain earlier completed evidence without
+confirming partial history.
 A page observed before that day closed must be revalidated, or remains incomplete
 for cached-only reads. Current-day discovery keeps its normal freshness.
 Date-based history older than a year or requiring

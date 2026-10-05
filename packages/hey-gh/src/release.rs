@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 mod collect;
 pub mod queue;
+mod workflow_jobs;
 mod workflow_metadata;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
