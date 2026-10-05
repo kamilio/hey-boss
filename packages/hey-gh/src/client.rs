@@ -42,6 +42,10 @@ tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Ins
 tokio::task_local! { pub(crate) static READ_DEADLINE: tokio::time::Instant; }
 tokio::task_local! { static OPTIONAL_SELECTOR_DEADLINE: tokio::time::Instant; }
 
+#[cfg(test)]
+#[path = "client/optional_tests.rs"]
+mod optional_tests;
+
 pub(crate) async fn optional_selector_read<T>(
     read: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -737,8 +741,10 @@ impl Client {
             // Give those the same completion turns as REST, including coalesced work.
             let completion_validation = (selector_validation || body.is_some())
                 && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
+            let required_read =
+                body.is_none() || OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_err();
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((receiver, interactive, shared_deadline, completion)) =
+            if let Some((receiver, interactive, shared_deadline, completion, required)) =
                 inflight.active.get(&key)
             {
                 if interactive_read() {
@@ -746,6 +752,9 @@ impl Client {
                 }
                 if completion_validation {
                     completion.store(true, Ordering::Relaxed);
+                }
+                if required_read {
+                    required.store(true, Ordering::Relaxed);
                 }
                 if selector_validation {
                     track_pending_validation(completion);
@@ -808,11 +817,13 @@ impl Client {
                 let interactive = Arc::new(AtomicBool::new(false));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let completion = Arc::new(AtomicBool::new(completion_validation));
+                let required = Arc::new(AtomicBool::new(required_read));
                 if selector_validation {
                     track_pending_validation(&completion);
                 }
                 let job = Job {
                     completion_validation: completion.clone(),
+                    required_reader: required.clone(),
                     installation: installation
                         || (body.is_none()
                         // The installation quota is only for CI status reads.
@@ -849,9 +860,16 @@ impl Client {
                     mpsc::error::TrySendError::Closed(_) => Error::Stopped,
                     mpsc::error::TrySendError::Full(_) => self.queue_full(),
                 })?;
-                inflight
-                    .active
-                    .insert(key, (receiver.clone(), interactive, deadline, completion));
+                inflight.active.insert(
+                    key,
+                    (
+                        receiver.clone(),
+                        interactive,
+                        deadline,
+                        completion,
+                        required,
+                    ),
+                );
                 break receiver;
             }
         };
@@ -880,11 +898,20 @@ impl Client {
                     // sharing the same request keeps its deadline and queue turn.
                     return Err(Error::Deadline);
                 }
+                SharedResult::OptionalDeferred
+                    if OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_ok() =>
+                {
+                    // Only the shortcut falls back to REST. Required callers
+                    // sharing this request retain the job and its quota gates.
+                    return Err(Error::Deadline);
+                }
                 state => {
                     if let Some(wait) = &mut wait {
                         wait.update(matches!(
                             state,
-                            SharedResult::Queued | SharedResult::QueuedUntil(_)
+                            SharedResult::Queued
+                                | SharedResult::QueuedUntil(_)
+                                | SharedResult::OptionalDeferred
                         ));
                     }
                 }
@@ -1788,7 +1815,7 @@ mod priority_tests {
                 .unwrap()
                 .active
                 .values()
-                .all(|(_, priority, _, _)| priority.load(Ordering::Relaxed)),
+                .all(|(_, priority, _, _, _)| priority.load(Ordering::Relaxed)),
             "the shared request itself must retain foreground priority"
         );
         assert!(
@@ -1930,7 +1957,9 @@ mod priority_tests {
                             .unwrap()
                             .active
                             .get(&key)
-                            .is_some_and(|(_, _, _, completing)| completing.load(Ordering::Relaxed))
+                            .is_some_and(|(_, _, _, completing, _)| {
+                                completing.load(Ordering::Relaxed)
+                            })
                     };
                     if cached_ci {
                         // Only metadata remains. The gate makes dispatch order
@@ -3367,7 +3396,7 @@ mod priority_tests {
                 .unwrap()
                 .active
                 .values()
-                .any(|(_, priority, _, _)| priority.load(Ordering::Relaxed))
+                .any(|(_, priority, _, _, _)| priority.load(Ordering::Relaxed))
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while client.status().outstanding_requests != 0 {

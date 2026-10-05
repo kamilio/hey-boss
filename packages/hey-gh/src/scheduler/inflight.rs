@@ -7,6 +7,7 @@ type Flight = (
     Arc<AtomicBool>,
     Arc<Mutex<Instant>>,
     Arc<AtomicBool>,
+    Arc<AtomicBool>,
 );
 
 pub(crate) type Inflight = Arc<Mutex<Flights>>;

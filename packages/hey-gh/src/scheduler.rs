@@ -33,6 +33,8 @@ pub(crate) enum SharedResult {
     Queued,
     /// Known pacing/backoff lower bound; not a dispatch promise or new deadline.
     QueuedUntil(Instant),
+    /// A queued required read needs this quota; optional callers can use REST.
+    OptionalDeferred,
     Active,
     Complete(Result<Arc<Response>>),
 }
@@ -86,6 +88,8 @@ pub(crate) struct Metrics {
 
 pub(crate) struct Job {
     pub completion_validation: Arc<AtomicBool>,
+    // Once a required caller joins, optional fallback must not defer its job.
+    pub required_reader: Arc<AtomicBool>,
     pub installation: bool,
     pub minting: bool,
     pub auth_attempts: u32,
@@ -136,6 +140,12 @@ impl Job {
         } else {
             self.resource.clone()
         }
+    }
+    fn defers_optional(&self, required_quotas: &std::collections::HashSet<String>) -> bool {
+        self.body.is_some()
+            && !self.minting
+            && !self.required_reader.load(Ordering::Relaxed)
+            && required_quotas.contains(&self.quota())
     }
     pub(crate) fn deadline(&self) -> Instant {
         *self.deadline.lock().unwrap_or_else(|e| e.into_inner())
@@ -700,18 +710,45 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary.until);
+            let required_quotas: std::collections::HashSet<_> = pending
+                .iter()
+                .filter(|job| job.required_reader.load(Ordering::Relaxed))
+                .map(Job::quota)
+                .collect();
+            let defers_optional = |job: &Job| job.defers_optional(&required_quotas);
             // Optional GraphQL selectors have a short REST-fallback budget.
-            // Tell waiters when known pacing alone exceeds that budget instead
-            // of making them wait out a shortcut that cannot dispatch in time.
-            // Ordinary/coalesced callers still wait; no quota or turn changes.
+            // Yield to queued required reads using the same provider's quota,
+            // or fall back when known pacing alone exceeds the shortcut budget.
+            // Required coalescers keep their job and its existing quota gates.
             for job in pending.iter().filter(|job| job.body.is_some()) {
                 let until = ready(job, &budgets, global);
-                if until > now {
+                if defers_optional(job) {
+                    if job.notify.send_if_modified(|state| {
+                        if !matches!(state, SharedResult::OptionalDeferred) {
+                            *state = SharedResult::OptionalDeferred;
+                            true
+                        } else {
+                            false
+                        }
+                    }) {
+                        tracing::info!(request_id=%job.request_id, endpoint=job.endpoint,
+                            "Optional GraphQL shortcut yielded to a required read");
+                    }
+                } else if until > now {
                     job.notify.send_if_modified(|state| {
-                        if matches!(state, SharedResult::Queued)
+                        if matches!(state, SharedResult::Queued | SharedResult::OptionalDeferred)
                             || matches!(state, SharedResult::QueuedUntil(previous) if *previous != until)
                         {
                             *state = SharedResult::QueuedUntil(until);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                } else {
+                    job.notify.send_if_modified(|state| {
+                        if matches!(state, SharedResult::OptionalDeferred) {
+                            *state = SharedResult::Queued;
                             true
                         } else {
                             false
@@ -727,6 +764,7 @@ impl Scheduler {
             let mut turns = HashMap::new();
             for (index, job) in pending.iter().enumerate() {
                 if job.ready_at > now
+                    || defers_optional(job)
                     || (job.installation && minting)
                     || lane_busy(&active, job, prod)
                 {
@@ -771,11 +809,12 @@ impl Scheduler {
                     && budgets.for_resource(&quota).all(|budget| conditional_probe_eligible(job, budget))
             };
             let waiting_for_turn = |index: usize, job: &Job| {
-                job.ready_at <= now
-                    && turns
-                        .get(&job.quota())
-                        .is_some_and(|(_, selected)| *selected != index)
-                    && !can_probe(index, job)
+                defers_optional(job)
+                    || (job.ready_at <= now
+                        && turns
+                            .get(&job.quota())
+                            .is_some_and(|(_, selected)| *selected != index)
+                        && !can_probe(index, job))
             };
             let next = {
                 let eligible = |index: usize, job: &Job| {
@@ -1682,6 +1721,7 @@ mod tests {
     fn core_job() -> Job {
         Job {
             completion_validation: Arc::new(AtomicBool::new(false)),
+            required_reader: Arc::new(AtomicBool::new(true)),
             installation: false,
             minting: false,
             auth_attempts: 0,
@@ -1708,6 +1748,25 @@ mod tests {
                 .try_acquire_owned()
                 .unwrap(),
         }
+    }
+
+    #[test]
+    fn optional_fallback_keeps_personal_installation_and_rest_quota_waits_separate() {
+        let mut optional = core_job();
+        optional.required_reader.store(false, Ordering::Relaxed);
+        optional.resource = "graphql".into();
+        optional.body = Some(serde_json::json!({"query":"query { viewer { login } }"}));
+        let personal = std::collections::HashSet::from(["graphql".into()]);
+        let installation = std::collections::HashSet::from(["installation/graphql".into()]);
+        let rest = std::collections::HashSet::from(["core".into()]);
+        assert!(optional.defers_optional(&personal));
+        assert!(!optional.defers_optional(&installation));
+        assert!(!optional.defers_optional(&rest));
+        optional.installation = true;
+        assert!(!optional.defers_optional(&personal));
+        assert!(optional.defers_optional(&installation));
+        optional.required_reader.store(true, Ordering::Relaxed);
+        assert!(!optional.defers_optional(&installation));
     }
 
     fn first_validator() -> Job {
