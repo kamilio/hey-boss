@@ -181,8 +181,15 @@ impl Client {
                             return Ok(false);
                         }
                         crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
-                        let ci = self
-                            .required_ci_report(repository, head, merge, Freshness::CachedOnly)
+                        // Use the same freshness/version proofs as the pending
+                        // policy read. Offline reports intentionally retain old
+                        // REST clocks too, even when a fresh version proves that
+                        // payload unchanged; those clocks cannot gate admission.
+                        let ci = crate::client::CACHE_PROBE
+                            .scope(
+                                (),
+                                self.required_ci_report(repository, head, merge, freshness),
+                            )
                             .await?;
                         Ok(ci.errors.is_empty()
                             && crate::report::VALIDATIONS.with(|records| {
