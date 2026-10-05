@@ -16,6 +16,9 @@ const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+#[path = "policy_selectors/branches.rs"]
+mod branches;
+
 fn metadata() -> Value {
     json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
         "head":{"sha":HEAD},"base":{"ref":"main","sha":BASE,"repo":{"id":123,"node_id":"R_demo","full_name":"acme/demo"}},
@@ -35,6 +38,10 @@ fn selectors() -> Value {
 struct Data {
     rest: Value,
     graph: Value,
+    branch: Value,
+    branch_graph: Value,
+    branch_graph_gate: Option<Arc<tokio::sync::Notify>>,
+    stall_branch: bool,
     rules: Value,
     deny_rules: bool,
     stall_checks: bool,
@@ -76,15 +83,20 @@ async fn handler(
                 false,
             )
         } else if path == "/graphql" {
-            (s.graph.clone(), false, s.stall_graph)
+            let query = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            let value = if query["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("RequiredPolicyBranch"))
+            {
+                s.branch_graph.clone()
+            } else {
+                s.graph.clone()
+            };
+            (value, false, s.stall_graph)
         } else if path.ends_with("/pulls/7") {
             (s.rest.clone(), s.deny_rest, s.stall_rest)
         } else if path.contains("/branches/") && !path.contains("/rules/") {
-            (
-                json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
-                false,
-                false,
-            )
+            (s.branch.clone(), false, s.stall_branch)
         } else if path.ends_with("/check-runs") {
             let sha = path.rsplit('/').nth(1).unwrap();
             if sha != HEAD && sha != MERGE {
@@ -111,7 +123,13 @@ async fn handler(
         } else {
             (json!([]), false, false)
         };
-        let gate = if path.ends_with("/check-runs")
+        let branch_query = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        let gate = if branch_query["query"]
+            .as_str()
+            .is_some_and(|query| query.contains("RequiredPolicyBranch"))
+        {
+            s.branch_graph_gate.take()
+        } else if path.ends_with("/check-runs")
             && path
                 .rsplit('/')
                 .nth(1)
@@ -200,6 +218,10 @@ impl Fixture {
         let data = Arc::new(Mutex::new(Data {
             rest: metadata(),
             graph: selectors(),
+            branch: json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
+            branch_graph: Value::Null,
+            branch_graph_gate: None,
+            stall_branch: false,
             rules: json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),
             deny_rules: false,
             stall_checks: false,
