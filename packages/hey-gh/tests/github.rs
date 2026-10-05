@@ -20,6 +20,9 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/deadline_capture.rs"]
+mod deadline_capture;
+
 #[path = "github/account_policy.rs"]
 mod account_policy;
 #[path = "github/ci_discovery_checks.rs"]
