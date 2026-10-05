@@ -1,6 +1,6 @@
 use super::*;
 
-fn edit_discovery(h: &Harness, mut edit: impl FnMut(&mut Value)) {
+pub(super) fn edit_discovery(h: &Harness, mut edit: impl FnMut(&mut Value)) {
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
     let rows: Vec<(String,String)> = db.prepare("SELECT key,response FROM cache WHERE key='account-discovery-complete:v1' OR json_type(response,'$.data.data.viewer.pullRequests.nodes')='array'")
         .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<Result<_,_>>().unwrap();

@@ -20,6 +20,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/ci_discovery_versions.rs"]
+mod ci_discovery_versions;
 #[path = "github/ci_empty_checks.rs"]
 mod ci_empty_checks;
 #[path = "github/ci_selectors.rs"]
@@ -953,6 +955,20 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     node["commits"]["nodes"][0]["commit"]["status"] = json!({"id":"S_head"});
                     node["potentialMergeCommit"]["status"] = json!({"id":"S_merge"});
                 }
+                if mode == "account-ci-selectors-status-versions" {
+                    let (version, at, state) = if phase >= 3 {
+                        (2, "2026-09-19T00:01:00Z", "FAILURE")
+                    } else {
+                        (1, "2026-09-19T00:00:00Z", "SUCCESS")
+                    };
+                    node["commits"]["nodes"][0]["commit"]["status"] = json!({"id":"S_head","contexts":[{
+                        "id":format!("SC_head_{version}"),"updatedAt":at,"context":"deploy","state":state,
+                        "description":null,"targetUrl":"https://checks.example/head"
+                    }]});
+                    node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["statusContextCount"] =
+                        json!(1);
+                    node["potentialMergeCommit"]["status"] = json!({"id":"S_merge"});
+                }
                 node
             };
             if body["query"]
@@ -1367,7 +1383,11 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "ci-point-empty-checks" && normalized.ends_with("/check-runs") {
         value = json!({"total_count":0,"check_runs":[]});
     }
-    if mode == "ci-point-status-versions" && normalized.ends_with("/status") {
+    if matches!(
+        mode.as_str(),
+        "ci-point-status-versions" | "account-ci-selectors-status-versions"
+    ) && normalized.ends_with("/status")
+    {
         let merge = normalized.contains(MERGE);
         let kind = if merge { "merge" } else { "head" };
         let version = if phase >= 3 { 2 } else { 1 };

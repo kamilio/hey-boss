@@ -85,7 +85,7 @@ pub(super) fn edit_selector_cache(h: &Harness, edit: impl FnOnce(&mut Value)) {
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
     let (key, raw): (String, String) = db
         .query_row(
-            "SELECT key,response FROM cache WHERE key LIKE '%/graphql#%'",
+            "SELECT key,response FROM cache WHERE key LIKE '%/graphql#%' AND json_type(response,'$.data.data.repository.pullRequest')='object'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

@@ -633,8 +633,9 @@ REST; explicit `--refresh` still requires revalidation.
 The point selector and account discovery queries also record whether head/test-merge
 commits have no legacy statuses. CI can reuse explicit null evidence within the requested
 cache age, saving the corresponding REST status read without another query.
-Missing status fields retain REST reads. Nonempty point-query status rosters can
-validate a complete cached REST list when node IDs, update times, context names,
+Missing status fields retain REST reads. Nonempty point-query status rosters and
+head-status rosters from existing account-discovery pages can validate a complete
+cached REST list when node IDs, update times, context names,
 states, descriptions, URLs, and the independent rollup count all agree. This
 reuses the original REST payloads and numeric IDs, including every cached page;
 it neither synthesizes REST objects nor issues an extra query. The proof must
@@ -644,9 +645,13 @@ even when an older list is still within the requested cache age.
 Online reuse requires every raw REST page to be less than one day old. Auxiliary
 REST fields such as creator profile details retain their last REST observation;
 the GraphQL proof validates the status fields listed above. The proof appears as
-`graphql://HOST/OWNER/REPO/pulls/NUMBER#commit-status-versions:SHA` with its original
-validation time. Discovery presence cannot renew that proof. Malformed or
-incomplete rosters fall back to REST; missing pages and collection limits retain
+`graphql://HOST/OWNER/REPO/pulls/NUMBER#commit-status-versions:SHA` or
+`my-open-prs://HOST/OWNER/REPO/pulls/NUMBER#commit-status-versions:SHA` with its
+original point/page validation time. The newest full roster owns the proof;
+conflicting rosters at the same time or newer malformed rosters retain REST.
+Legacy discovery presence alone cannot renew a proof. Offline discovery scans
+and page hints can still read the preceding query's cache after an upgrade.
+Malformed or incomplete rosters fall back to REST; missing pages and collection limits retain
 their existing behavior. Newer REST evidence takes precedence on every page.
 Offline reads retain the original REST page clocks as well as the proof's
 validation time, and explicit refresh bypasses this shortcut.
