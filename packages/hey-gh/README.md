@@ -151,7 +151,9 @@ For lifecycle-only consumers, Rust `ApiClient::pull_request` and
 `GET /v1/prs/OWNER/REPO/NUMBER/metadata` return the cached REST metadata envelope
 with its original validation timestamp. They share the daemon queue and cooldowns,
 honor `cached_only`/`max_age_seconds`, and never hydrate CI/comments/reviews or
-register watches. Metadata refresh work has a 15-second background deadline.
+register watches. Metadata honors the caller's foreground/background priority.
+Its HTTP wait and newly queued work have a 15-second deadline; a longer reader
+sharing that work can continue after the metadata caller expires.
 
 Watcher integrations can use `ApiClient::background()` or `background=true` on
 targeted PR, CI, and required-check HTTP reads. These share the background queue

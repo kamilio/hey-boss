@@ -746,20 +746,23 @@ async fn pr_metadata(
     Path((owner, repo, number)): Path<(String, String, u64)>,
     Query(query): Query<ReadQuery>,
 ) -> ApiResult<Json<crate::Response>> {
-    // Background lane, bounded queue lifetime even if the caller disconnects.
+    // Honor the caller's priority without extending this lightweight read's
+    // lifetime. Its wait is bounded even when a longer reader shares the job.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     Ok(Json(
-        crate::client::BACKGROUND_READ
-            .scope(
-                (),
-                crate::client::REQUEST_DEADLINE.scope(
-                    Some(tokio::time::Instant::now() + Duration::from_secs(15)),
+        query
+            .run(crate::client::READ_DEADLINE.scope(deadline, async {
+                tokio::time::timeout_at(
+                    deadline,
                     api.0.client.pull_request(
                         &format!("{owner}/{repo}"),
                         number,
                         query.freshness()?,
                     ),
-                ),
-            )
+                )
+                .await
+                .map_err(|_| Error::Deadline)?
+            }))
             .await?,
     ))
 }

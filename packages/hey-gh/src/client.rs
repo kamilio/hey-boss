@@ -23,6 +23,9 @@ mod ci_selectors;
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
 // abandoned socket can occupy its lane long after hydration has moved on.
 tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Instant>; }
+// A bounded HTTP read keeps its own limit even at foreground priority. Other
+// consumers can still extend the lifetime of a coalesced shared request.
+tokio::task_local! { pub(crate) static READ_DEADLINE: tokio::time::Instant; }
 tokio::task_local! { pub(crate) static INTERACTIVE_READ: Arc<AtomicBool>; }
 tokio::task_local! { pub(crate) static BACKGROUND_READ: (); }
 // One final selector read can complete an otherwise collected PR report.
@@ -650,6 +653,9 @@ impl Client {
                     deadline.min(now + self.0.config.queue_timeout)
                 })
         };
+        let caller_deadline = READ_DEADLINE
+            .try_with(|deadline| caller_deadline.min(*deadline))
+            .unwrap_or(caller_deadline);
         let selector_validation = (body.is_none()
             && matches!(
                 endpoint_class(&url, false, &self.0.config.rest_url),
