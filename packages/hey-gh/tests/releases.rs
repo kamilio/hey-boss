@@ -61,6 +61,11 @@ impl Harness {
                 cache_path: dir.path().join("cache"),
                 min_spacing: Duration::ZERO,
                 max_attempts: 1,
+                max_collection_bytes: if mode == "paged_branch_budget" {
+                    1024
+                } else {
+                    Config::default().max_collection_bytes
+                },
                 ..Config::default()
             },
             "synthetic".into(),
@@ -118,8 +123,67 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         let ahead = base <= head
             && !(mode == "unrelated" && head == C)
             && !(mode == "side_branch" && base == A && head == B)
+            && !(mode == "paged_branch_side" && base == A && head == B)
             && !(mode == "force_push" && head == D);
         let mut result = json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}});
+        if mode.starts_with("paged_branch")
+            && base == A
+            && head == C
+            && uri
+                .query()
+                .is_some_and(|query| query.contains("per_page=100"))
+        {
+            let page = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())
+                .find(|(key, _)| key == "page")
+                .map(|(_, value)| value.parse::<usize>().unwrap())
+                .unwrap_or(1);
+            if mode == "paged_branch_denied" && page == 2 {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"message":"synthetic access denial"})),
+                )
+                    .into_response();
+            }
+            let mut parent = if mode == "paged_branch_side" { D } else { A }.to_owned();
+            let mut commits: Vec<_> = std::iter::once(B.to_owned())
+                .chain((1..100).map(|n| format!("b{n:039x}")))
+                .chain(std::iter::once(C.to_owned()))
+                .map(|sha| {
+                    let mut parents = vec![json!({"sha":parent})];
+                    if sha == C && mode == "paged_branch_side" {
+                        parents.push(json!({"sha":A}));
+                    }
+                    parent = sha.clone();
+                    json!({"sha":sha,"parents":parents})
+                })
+                .collect();
+            if mode == "paged_branch_reverse" {
+                commits[..100].reverse();
+            }
+            result["total_commits"] = json!(if mode == "paged_branch_bound" {
+                10001
+            } else if mode == "paged_branch_changed" && page == 2 {
+                102
+            } else {
+                101
+            });
+            let start = (page - 1) * 100;
+            result["commits"] = json!(
+                commits
+                    .into_iter()
+                    .skip(start)
+                    .take(100)
+                    .collect::<Vec<_>>()
+            );
+            if page == 2 {
+                match mode {
+                    "paged_branch_short" => result["commits"] = json!([]),
+                    "paged_branch_duplicate" => result["commits"][0]["sha"] = json!(B),
+                    "paged_branch_invalid" => result["commits"][0]["sha"] = json!("invalid"),
+                    _ => {}
+                }
+            }
+        }
         if matches!(
             mode,
             "branch_roster" | "truncated_branch_roster" | "side_branch" | "branch_parents"
@@ -250,8 +314,8 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         let id = path.split('/').nth(6).unwrap().parse::<u64>().unwrap();
         let mut jobs = match id {
             4 | 5 if mode == "archive_many" => vec![],
-            2 if mode == "side_branch" => vec![job(2, B, "success")],
-            3 if mode == "side_branch" => vec![job(3, C, "skipped")],
+            2 if matches!(mode, "side_branch" | "paged_branch_side") => vec![job(2, B, "success")],
+            3 if matches!(mode, "side_branch" | "paged_branch_side") => vec![job(3, C, "skipped")],
             1 if mode == "old_failure" => vec![job(1, A, "failure")],
             1 => vec![],
             2 => vec![job(2, if mode == "old_failure" { A } else { B }, "skipped")],
@@ -584,6 +648,112 @@ async fn complete_parent_links_prove_containing_runs_without_more_comparisons() 
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn paged_branch_comparisons_reuse_complete_parent_proofs_and_cached_pages() {
+    for mode in ["paged_branch", "paged_branch_reverse"] {
+        let h = Harness::new(mode).await;
+        let batch = h.report(&[A]).await;
+        assert_eq!(
+            batch.reports[0].state, "verified",
+            "{mode}: {:?}",
+            batch.reports[0].errors
+        );
+        let calls = h.mock.calls.lock().unwrap().clone();
+        let compares: Vec<_> = calls.iter().filter(|p| p.contains("/compare/")).collect();
+        assert_eq!(
+            compares.len(),
+            2,
+            "complete pages replace individual ancestry calls: {compares:?}"
+        );
+        assert!(compares.iter().any(|p| p.contains("page=2")));
+        let cached = h
+            .client
+            .release_report(
+                &Request {
+                    project: project(),
+                    targets: vec![A.into()],
+                },
+                Freshness::CachedOnly,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            cached.reports[0].state, "verified",
+            "{:?}",
+            cached.reports[0].errors
+        );
+        assert_eq!(h.mock.calls.lock().unwrap().len(), calls.len());
+    }
+}
+
+#[tokio::test]
+async fn paged_branch_incomplete_rosters_keep_individual_ancestry_checks() {
+    for mode in [
+        "paged_branch_short",
+        "paged_branch_duplicate",
+        "paged_branch_invalid",
+        "paged_branch_bound",
+    ] {
+        let h = Harness::new(mode).await;
+        let batch = h.report(&[A]).await;
+        assert_eq!(
+            batch.reports[0].state, "verified",
+            "{mode}: {:?}",
+            batch.reports[0].errors
+        );
+        let calls = h.mock.calls.lock().unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|p| p.contains(&format!("/compare/{A}...{B}?per_page=1"))),
+            "{mode}"
+        );
+        if mode == "paged_branch_bound" {
+            assert!(!calls.iter().any(|p| p.contains("page=2")));
+        }
+    }
+}
+
+#[tokio::test]
+async fn paged_branch_changed_or_denied_pages_do_not_certify() {
+    for mode in ["paged_branch_changed", "paged_branch_denied"] {
+        let h = Harness::new(mode).await;
+        let batch = h.report(&[A]).await;
+        assert_eq!(batch.reports[0].state, "unknown", "{mode}");
+        assert!(!batch.reports[0].errors.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn paged_branch_comparisons_obey_the_collection_byte_budget() {
+    let h = Harness::new("paged_branch_budget").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "unknown");
+    assert!(
+        batch.reports[0]
+            .errors
+            .iter()
+            .any(|error| error
+                .contains("branch comparison exceeds configured collection byte limit"))
+    );
+    assert!(
+        !h.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|path| path.contains("page=2"))
+    );
+}
+
+#[tokio::test]
+async fn paged_branch_side_branch_membership_is_not_target_coverage() {
+    let h = Harness::new("paged_branch_side").await;
+    let batch = h.report(&[A]).await;
+    assert_eq!(batch.reports[0].state, "watching");
+    assert!(!batch.reports[0].gates[0].satisfied);
 }
 
 #[tokio::test]
