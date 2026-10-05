@@ -30,6 +30,8 @@ mod ci_empty_checks;
 mod ci_selectors;
 #[path = "github/ci_status_versions.rs"]
 mod ci_status_versions;
+#[path = "github/discovery_partial.rs"]
+mod discovery_partial;
 
 #[path = "github/ci_app_selectors.rs"]
 mod ci_app_selectors;
@@ -953,7 +955,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 if mode == "account-ci-selectors-empty-checks" {
                     node["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = Value::Null;
                 }
-                if mode == "account-ci-selectors-counted-checks" {
+                if mode == "account-ci-selectors-counted-checks"
+                    || mode.starts_with("account-ci-selectors-partial")
+                {
                     let query = body["query"].as_str().unwrap();
                     if query.contains("checkRunCount statusContextCount") {
                         node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] =
@@ -988,7 +992,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 .unwrap()
                 .contains("MyOpenPullRequestsBoundary")
             {
-                let (total, tail) = if mode == "account-page-timeout" {
+                let (total, tail) = if mode.starts_with("account-ci-selectors-partial") {
+                    (3, Some("acme/other"))
+                } else if mode == "account-page-timeout" {
                     (60, Some("acme/page59"))
                 } else if mode.starts_with("account-large") {
                     (25, Some("acme/watch23"))
@@ -1012,6 +1018,46 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     json!({"data":{"viewer":{"pullRequests":{
                         "totalCount":total,"nodes":nodes
                     }}}}),
+                    &[],
+                );
+            }
+            if mode.starts_with("account-ci-selectors-partial") {
+                tokio::time::sleep(Duration::from_millis(3)).await;
+                if body["variables"]["after"] == "PR-next" {
+                    if mode.ends_with("-slow") {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    return reply(
+                        200,
+                        json!({"data":{"viewer":{"pullRequests":{
+                            "totalCount":3,"nodes":[node("acme/other")],
+                            "pageInfo":{"hasNextPage":false,"endCursor":null}
+                        }}}}),
+                        &[],
+                    );
+                }
+                let mut response = json!({"data":{"viewer":{"pullRequests":{
+                    "totalCount":3,"nodes":[node("acme/demo"),null],
+                    "pageInfo":{"hasNextPage":true,"endCursor":"PR-next"}
+                }}},"errors":[{"type":"FORBIDDEN","message":"Synthetic repository access denied",
+                    "path":["viewer","pullRequests","nodes",1]}]});
+                if mode.ends_with("-field") {
+                    response["errors"].as_array_mut().unwrap().push(json!({"type":"FORBIDDEN","message":"Synthetic field denied", "path":["viewer","pullRequests","nodes",0,"commits"]}));
+                }
+                if mode.ends_with("-root") {
+                    response["errors"][0]["path"] = json!(["viewer"]);
+                }
+                if mode.ends_with("-identity") {
+                    response["data"]["viewer"]["pullRequests"]["nodes"][0]["id"] =
+                        json!("PR_replaced");
+                }
+                if mode.ends_with("-large") {
+                    response["data"]["viewer"]["pullRequests"]["nodes"][1] =
+                        json!({"unusable": "x".repeat(8192)});
+                }
+                return reply(
+                    if mode.ends_with("-http") { 403 } else { 200 },
+                    response,
                     &[],
                 );
             }

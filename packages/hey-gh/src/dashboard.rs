@@ -12,6 +12,7 @@ use std::{
 #[cfg(test)]
 mod bootstrap_tests;
 mod hydration;
+pub(crate) mod partial;
 mod schedule;
 
 // PR updatedAt versions mutable PR metadata, not CI or mergeability. These
@@ -41,7 +42,7 @@ pub(crate) const DISCOVERY_CACHE: &str = "account-discovery-complete:v1";
 tokio::task_local! { static ACCOUNT_PUBLICATION: (); }
 
 // Large discovery pages can time out and amplify retries; bound per-request work.
-const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
+pub(crate) const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
   viewer { pullRequests(first: 25, after: $after, states: OPEN,
     orderBy: {field: CREATED_AT, direction: ASC}) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
@@ -208,6 +209,24 @@ struct Discovery {
 
 impl Client {
     pub(crate) async fn cached_discovery_page(&self, after: Value) -> Result<crate::Response> {
+        let complete = self.cached_complete_discovery_page(after.clone()).await;
+        if !matches!(complete, Ok(_) | Err(Error::CacheMiss)) {
+            return complete;
+        }
+        match self.peek_partial_discovery(after.clone()).await {
+            Ok(partial)
+                if complete
+                    .as_ref()
+                    .map_or(true, |full| partial.validated_at_ms >= full.validated_at_ms) =>
+            {
+                Ok(partial::decode(partial, after)?.response)
+            }
+            Ok(_) | Err(Error::CacheMiss) => complete,
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn cached_complete_discovery_page(&self, after: Value) -> Result<crate::Response> {
         match self.peek_graphql(MY_PRS, json!({"after":after})).await {
             Err(Error::CacheMiss) => {
                 for query in legacy_discovery_queries() {
@@ -382,9 +401,12 @@ impl Client {
         let mut validated_at = boundary.validated_at_ms;
         let mut validated_by_pr = BTreeMap::new();
         let mut page_after_by_pr = BTreeMap::new();
+        let mut observed_slots = 0_u64;
+        let mut partial_failure = None;
         for page in 0..1000 {
             let page_after = after.as_str().map(str::to_owned);
-            let response = match self
+            let requested_at = crate::now_ms();
+            let (response, partial_page, original_bytes) = match self
                 .graphql(MY_PRS, json!({"after":after}), freshness)
                 .await
             {
@@ -398,12 +420,36 @@ impl Client {
                             break;
                         }
                     }
-                    cached?
+                    (cached?, false, None)
                 }
-                result => result?,
+                Err(
+                    error @ Error::GraphQL {
+                        access_denied: true,
+                        ..
+                    },
+                ) if !matches!(freshness, Freshness::CachedOnly) => {
+                    // Continue only with evidence observed after this request began.
+                    // A stale advisory page cannot turn a new failure into progress.
+                    let cached = self.peek_partial_discovery(after.clone()).await;
+                    let Ok(cached) = cached else {
+                        return Err(error);
+                    };
+                    if cached.validated_at_ms <= requested_at
+                        || cached.validated_at_ms > crate::now_ms()
+                    {
+                        return Err(error);
+                    }
+                    let Ok(partial) = partial::decode(cached, after.clone()) else {
+                        return Err(error);
+                    };
+                    partial_failure.get_or_insert(error);
+                    (partial.response, true, Some(partial.source_bytes))
+                }
+                result => (result?, false, None),
             };
             validated_at = validated_at.min(response.validated_at_ms);
-            bytes = bytes.saturating_add(response.data.to_string().len());
+            bytes = bytes
+                .saturating_add(original_bytes.unwrap_or_else(|| response.data.to_string().len()));
             if bytes > self.collection_limit() {
                 return Err(Error::Invalid(
                     "PR discovery exceeds collection limit".into(),
@@ -424,7 +470,7 @@ impl Client {
             let has_next = conn["pageInfo"]["hasNextPage"]
                 .as_bool()
                 .ok_or_else(|| Error::Invalid("PR discovery page info missing".into()))?;
-            let page_end = pulls.len().saturating_add(nodes.len()) as u64;
+            let page_end = observed_slots.saturating_add(nodes.len() as u64);
             if page_end > count || (has_next && page_end == count) {
                 return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
             }
@@ -440,6 +486,10 @@ impl Client {
             }
             let mut reached_tail = false;
             for node in nodes {
+                observed_slots = observed_slots.saturating_add(1);
+                if node.is_null() && partial_page {
+                    continue;
+                }
                 let identity = key(node)?;
                 validated_by_pr.insert(
                     format!("{}/{}", identity.0, identity.1),
@@ -452,7 +502,7 @@ impl Client {
                         "invalid or repeated PR in discovery; retry".into(),
                     ));
                 }
-                if pulls.len() as u64 > total {
+                if observed_slots > total {
                     return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
                 }
                 if node["id"] == tail {
@@ -461,8 +511,11 @@ impl Client {
                 }
             }
             if reached_tail {
-                if pulls.len() as u64 != total {
+                if observed_slots != total {
                     return Err(Error::Invalid("PR discovery count mismatch; retry".into()));
+                }
+                if let Some(error) = partial_failure {
+                    return Err(error);
                 }
                 let pulls: Vec<_> = pulls.into_values().collect();
                 tracing::info!(
@@ -480,6 +533,9 @@ impl Client {
                 });
             }
             if !has_next {
+                if let Some(error) = partial_failure {
+                    return Err(error);
+                }
                 return Err(Error::Invalid(
                     "PR discovery boundary disappeared; retry".into(),
                 ));
