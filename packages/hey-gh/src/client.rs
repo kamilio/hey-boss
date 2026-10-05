@@ -852,6 +852,7 @@ impl Client {
                     notify,
                     deadline: deadline.clone(),
                     ready_at: now,
+                    protected_pacing: Vec::new(),
                     attempts: 0,
                     resource: resource.into(),
                     _permit: permit,
@@ -2610,6 +2611,27 @@ mod priority_tests {
     }
 
     #[tokio::test]
+    async fn foreground_conditional_reads_progress_during_a_completion_turns_pacing_wait() {
+        for warmup_reads in [1, 2] {
+            queued_probe_turn_with_warmup(
+                true,
+                true,
+                true,
+                false,
+                ProbeReplies::Unchanged,
+                warmup_reads,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_completions_keep_their_slot_after_first_changed_validators() {
+        queued_probe_turn_with_warmup(true, true, true, false, ProbeReplies::Changed, 1).await;
+        queued_probe_turn(true, true, true, false, ProbeReplies::LastSlot).await;
+    }
+
+    #[tokio::test]
     async fn first_foreground_validators_can_borrow_an_older_paced_turn() {
         for (interactive, replies) in [
             (true, ProbeReplies::Unchanged),
@@ -2715,20 +2737,26 @@ mod priority_tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let completion_at = Arc::new(Mutex::new(None));
         let live = Arc::new(AtomicBool::new(false));
         let gate = Arc::new(tokio::sync::Notify::new());
         let reset = now_ms() / 1000 + if last_slot { 3 } else { 3600 };
         let router = axum::Router::new().fallback({
             let calls = calls.clone();
+            let completion_at = completion_at.clone();
             let live = live.clone();
             let gate = gate.clone();
             move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
                 let calls = calls.clone();
+                let completion_at = completion_at.clone();
                 let live = live.clone();
                 let gate = gate.clone();
                 async move {
                     use axum::response::IntoResponse;
                     calls.lock().unwrap().push(uri.path().to_owned());
+                    if uri.path().ends_with("/pulls/99") {
+                        *completion_at.lock().unwrap() = Some(tokio::time::Instant::now());
+                    }
                     if uri.path() == "/gate"
                         || (held
                             && live.load(Ordering::Relaxed)
@@ -2858,6 +2886,9 @@ mod priority_tests {
             .await
             .unwrap();
         }
+        let released_at = tokio::time::Instant::now();
+        let original_spacing =
+            Duration::from_secs_f64(reset.saturating_sub(now_ms() / 1000) as f64 / 4900.0);
         if !held {
             gate.notify_one();
         }
@@ -2928,6 +2959,16 @@ mod priority_tests {
             assert!(
                 owed <= 2,
                 "a stream of changed probes postponed the owed turn: {calls:?}"
+            );
+        } else if interactive && probe_interactive && completion && !probe_completion {
+            assert_eq!(
+                owed, 2,
+                "only one charged validator may borrow a protected completion slot: {calls:?}"
+            );
+            assert!(
+                completion_at.lock().unwrap().unwrap() - released_at
+                    < original_spacing.mul_f64(1.5),
+                "the changed validator charged its pacing delay before the protected completion"
             );
         } else {
             assert_eq!(
