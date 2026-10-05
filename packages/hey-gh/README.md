@@ -718,6 +718,14 @@ zero traffic. Cache hits remain visible in `status`; they do not dispatch reques
 
 The daemon owns one bounded queue: active, waiting, and retrying distinct requests share its 256-request capacity. Identical in-flight requests share one operation, even when callers cancel. Eligible ready requests retain FIFO order within each bucket and priority class; an exhausted resource bucket does not block a ready request from another bucket. REST core, search, and GraphQL use separate budgets, refined from GitHub's `x-ratelimit-resource` header.
 
+Core and GraphQL pacing estimate shared allowance consumption from response
+headers, including other clients and GraphQL queries that cost multiple points.
+This estimate is scoped to each authentication provider and reset window; it is
+not an attribution of exact query cost. Work queued before its quota slot stays
+active demand during long pacing waits. A genuinely idle client still discards
+the old estimate when it resumes. Both resources retain 100 points of headroom;
+caller deadlines and server cooldowns remain authoritative.
+
 Three of those slots are reserved for interactive PR/CI/policy reads, so polling
 cannot fill every admission slot. Embedded queues reserve `min(3, capacity / 4)`
 slots (none below four). New background requests are rejected at that boundary;

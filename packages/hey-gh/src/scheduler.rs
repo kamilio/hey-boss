@@ -166,14 +166,33 @@ struct ProbeTurn {
 
 struct Reservation {
     resource: String,
-    resets: Vec<u64>,
+    resets: Vec<(u64, bool)>,
     dispatched_at: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct ReservedWindow {
+    dispatched_at: Instant,
+    waited_for_quota: bool,
+}
+
 impl Reservation {
-    fn for_window(&self, resource: &str, reset: u64) -> Option<Instant> {
-        (self.resource == resource && self.resets.contains(&reset)).then_some(self.dispatched_at)
+    fn for_window(&self, resource: &str, reset: u64) -> Option<ReservedWindow> {
+        if self.resource != resource {
+            return None;
+        }
+        self.resets
+            .iter()
+            .find(|(window, _)| *window == reset)
+            .map(|(_, waited)| ReservedWindow {
+                dispatched_at: self.dispatched_at,
+                waited_for_quota: *waited,
+            })
     }
+}
+
+fn shared_quota(resource: &str) -> bool {
+    matches!(resource.rsplit('/').next(), Some("core" | "graphql"))
 }
 
 fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
@@ -303,7 +322,7 @@ impl SharedUsage {
         }
     }
 
-    fn observe(&mut self, remaining: u64, charged: bool, now: Instant) {
+    fn observe(&mut self, remaining: u64, charged: bool, now: Instant, waited_for_quota: bool) {
         self.charged += u64::from(charged);
         let elapsed = now.duration_since(self.since);
         if elapsed >= Duration::from_secs(30) {
@@ -313,7 +332,13 @@ impl SharedUsage {
             // Sparse/idle observations cannot estimate sustained local demand.
             // Don't punish the first interactive read after an idle period with
             // an entire interval of unrelated account traffic.
-            if self.charged >= 4 && elapsed <= Duration::from_secs(60) {
+            // A request already queued before its quota slot was available is
+            // sustained demand, even if pacing allows fewer than four replies
+            // per minute. Resetting that sample to one restarts a burst that
+            // exhausts shared or multi-point GraphQL budgets early.
+            if self.charged > 0
+                && (waited_for_quota || (self.charged >= 4 && elapsed <= Duration::from_secs(60)))
+            {
                 self.share = (self.remaining.saturating_sub(remaining) as f64
                     / self.charged as f64)
                     .max(1.0);
@@ -391,7 +416,7 @@ impl Budgets {
         remaining: u64,
         reset: u64,
         unchanged: bool,
-        reserved_at: Option<Instant>,
+        reservation: Option<ReservedWindow>,
     ) {
         let now = Instant::now();
         let seconds_now = now_ms() / 1000;
@@ -421,12 +446,17 @@ impl Budgets {
         let mut usage = SharedUsage::new(remaining, now);
         if let Some(previous) = &previous {
             usage = previous.usage.clone();
-            usage.observe(remaining, !unchanged, now);
+            usage.observe(
+                remaining,
+                !unchanged,
+                now,
+                reservation.is_some_and(|r| r.waited_for_quota),
+            );
         }
         let seconds = reset.saturating_sub(seconds_now);
         let spacing = if remaining == 0 {
             Duration::from_secs(seconds.saturating_add(1))
-        } else if resource.rsplit('/').next() == Some("core") {
+        } else if shared_quota(resource) {
             usage.spacing(remaining, seconds)
         } else {
             Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
@@ -438,12 +468,9 @@ impl Budgets {
             // Revise its spacing from dispatch, without charging header latency
             // again or erasing later reservations. Unreserved probes/new windows
             // still start pacing at observation. Exhaustion always waits to reset.
-            let anchor = reserved_at
-                .filter(|_| {
-                    remaining > 0
-                        && (resource.rsplit('/').next() != Some("core")
-                            || remaining > QUOTA_RESERVE)
-                })
+            let anchor = reservation
+                .filter(|_| remaining > 0 && (!shared_quota(resource) || remaining > QUOTA_RESERVE))
+                .map(|r| r.dispatched_at)
                 .unwrap_or(now);
             let deadline = anchor
                 .checked_add(spacing)
@@ -474,8 +501,10 @@ impl Budgets {
                     && budget.reset_at_seconds > now_ms() / 1000
                     && !conditional_budget_exempt(job, budget)
                 {
+                    reservation
+                        .resets
+                        .push((budget.reset_at_seconds, job.queued_at < budget.next));
                     budget.next = quota_deadline(budget.spacing);
-                    reservation.resets.push(budget.reset_at_seconds);
                 }
             }
         }
@@ -610,7 +639,8 @@ impl Scheduler {
                     || budgets.for_resource(&job.quota()).any(|budget| {
                         budget.next > now
                             && (budget.remaining == 0
-                                || (job.resource == "core" && budget.remaining <= QUOTA_RESERVE))
+                                || (shared_quota(&job.resource)
+                                    && budget.remaining <= QUOTA_RESERVE))
                     })
             };
             // Expiry is independent of quota availability, including exhausted
@@ -1684,8 +1714,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn reserved_response_cannot_shorten_exhaustion_or_core_headroom() {
-        for (resource, remaining) in [("core", 0), ("core", 100), ("search", 0)] {
+    async fn reserved_response_cannot_shorten_exhaustion_or_shared_headroom() {
+        for (resource, remaining) in [
+            ("core", 0),
+            ("core", 100),
+            ("graphql", 0),
+            ("graphql", 100),
+            ("installation/graphql", 100),
+            ("search", 0),
+        ] {
             let mut budgets = Budgets::default();
             let reset = now_ms() / 1000 + 3600;
             budgets.observe(resource, 5000, reset, true, None);
@@ -1727,7 +1764,7 @@ mod tests {
                     }
                     remaining -= 1;
                     *calls += 1;
-                    usage.observe(remaining, true, now);
+                    usage.observe(remaining, true, now, false);
                     *next = ms
                         + usage
                             .spacing(remaining, (3_600_000 - ms).div_ceil(1000))
@@ -1750,20 +1787,159 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn graphql_pacing_learns_shared_point_consumption() {
+        for resource in ["graphql", "installation/graphql"] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe(resource, 5000, reset, false, None);
+            for i in 1..=6 {
+                tokio::time::advance(Duration::from_secs(5)).await;
+                // Three consumers, each executing a 20-point batched query.
+                budgets.observe(resource, 5000 - i * 60, reset, false, None);
+            }
+            let budget = budgets.for_resource(resource).next().unwrap();
+            assert_eq!(budget.usage.share, 60.0);
+            assert!(
+                budget.spacing >= Duration::from_secs(45),
+                "{resource}: {:?}",
+                budget.spacing
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_wait_is_not_mistaken_for_idle_demand() {
+        for resource in ["core", "graphql", "installation/graphql"] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe(resource, 5000, reset, false, None);
+            for i in 1..=6 {
+                tokio::time::advance(Duration::from_secs(5)).await;
+                budgets.observe(resource, 5000 - i * 60, reset, false, None);
+            }
+            let mut waiting = core_job();
+            waiting.resource = resource.into();
+            tokio::time::advance(Duration::from_secs(90)).await;
+            let reservation = budgets.reserve(&waiting);
+            budgets.observe(
+                resource,
+                4580,
+                reset,
+                false,
+                reservation.for_window(resource, reset),
+            );
+            assert_eq!(
+                budgets.for_resource(resource).next().unwrap().usage.share,
+                60.0,
+                "{resource}"
+            );
+
+            // A newly queued read after real inactivity must not inherit the
+            // account's unrelated traffic from the entire idle interval.
+            tokio::time::advance(Duration::from_secs(300)).await;
+            let mut resumed = core_job();
+            resumed.resource = resource.into();
+            let reservation = budgets.reserve(&resumed);
+            budgets.observe(
+                resource,
+                4000,
+                reset,
+                false,
+                reservation.for_window(resource, reset),
+            );
+            assert_eq!(
+                budgets.for_resource(resource).next().unwrap().usage.share,
+                1.0,
+                "{resource}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_graphql_workloads_keep_capacity_throughout_the_hour() {
+        for scenario in ["one-point", "twenty-point", "mixed", "cost-change"] {
+            for external_interval in [None, Some(3000)] {
+                let start = Instant::now();
+                let mut clients: Vec<_> = (0..3)
+                    .map(|_| (SharedUsage::new(5000, start), 0u64, 0u64, 0u64))
+                    .collect();
+                let mut remaining = 5000u64;
+                for ms in (0u64..3_600_000).step_by(10) {
+                    if external_interval.is_some_and(|interval| ms % interval == 0) {
+                        remaining = remaining.checked_sub(1).expect("external quota exhausted");
+                    }
+                    for (index, (usage, next, calls, last)) in clients.iter_mut().enumerate() {
+                        if ms < *next {
+                            continue;
+                        }
+                        let cost = match scenario {
+                            "one-point" => 1,
+                            "twenty-point" => 20,
+                            "mixed" => {
+                                if index == 0 {
+                                    20
+                                } else {
+                                    1
+                                }
+                            }
+                            "cost-change" => {
+                                if ms < 1_800_000 {
+                                    20
+                                } else {
+                                    1
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        remaining = remaining.checked_sub(cost).expect("local quota exhausted");
+                        *calls += 1;
+                        *last = ms;
+                        // These consumers always have work queued before their
+                        // next slot. The reservation regression above separately
+                        // proves that real idle reads do not set this flag.
+                        usage.observe(remaining, true, start + Duration::from_millis(ms), true);
+                        *next = ms
+                            + usage
+                                .spacing(remaining, (3_600_000 - ms).div_ceil(1000))
+                                .as_millis() as u64;
+                    }
+                    assert!(
+                        remaining >= 40,
+                        "{scenario} {external_interval:?}: depleted at {ms}: {remaining}"
+                    );
+                }
+                assert!(remaining < 300, "{scenario}: unused capacity {remaining}");
+                assert!(
+                    clients.iter().all(|(_, _, _, last)| *last > 3_300_000),
+                    "{scenario} {external_interval:?}: early stall {:?}",
+                    clients
+                        .iter()
+                        .map(|(_, _, calls, last)| (*calls, *last))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    clients.iter().all(|(_, _, calls, _)| *calls >= 45),
+                    "{scenario}: starved consumer"
+                );
+            }
+        }
+    }
+
     #[test]
     fn shared_usage_counts_charged_responses_and_ignores_free_validations() {
         let start = Instant::now();
         let mut usage = SharedUsage::new(5000, start);
         for i in 1..=10 {
             let now = start + Duration::from_secs(i * 3);
-            usage.observe(5000 - i * 3, false, now - Duration::from_millis(1));
-            usage.observe(5000 - i * 3, true, now);
+            usage.observe(5000 - i * 3, false, now - Duration::from_millis(1), false);
+            usage.observe(5000 - i * 3, true, now, false);
         }
         assert_eq!(usage.share, 3.0);
         assert_eq!(usage.spacing(1000, 900), Duration::from_secs(3));
         assert_eq!(usage.spacing(100, 900), Duration::from_secs(901));
         assert_eq!(usage.spacing(101, u64::MAX), Duration::from_secs(86400));
-        usage.observe(1000, true, start + Duration::from_secs(300));
+        usage.observe(1000, true, start + Duration::from_secs(300), false);
         assert_eq!(
             usage.share, 1.0,
             "an idle consumer can resume interactive work"
