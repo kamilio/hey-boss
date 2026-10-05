@@ -81,7 +81,7 @@ async fn empty_status_selectors_preserve_explicit_refresh() {
     );
 }
 
-fn edit_selector_cache(h: &Harness, edit: impl FnOnce(&mut Value)) {
+pub(super) fn edit_selector_cache(h: &Harness, edit: impl FnOnce(&mut Value)) {
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
     let (key, raw): (String, String) = db
         .query_row(
@@ -272,7 +272,7 @@ async fn empty_status_selectors_do_not_extend_freshness_or_validation_clocks() {
     );
 }
 
-async fn seeded() -> (Harness, Client) {
+pub(super) async fn seeded() -> (Harness, Client) {
     let h = Harness::new().await;
     h.mode("account-ci-selectors");
     h.phase(2);

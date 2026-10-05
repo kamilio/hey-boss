@@ -20,6 +20,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/ci_empty_checks.rs"]
+mod ci_empty_checks;
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
 
@@ -812,6 +814,12 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 node["commits"] = json!({"nodes":[{"commit":{"oid":HEAD,"status":null}}]});
                 node["potentialMergeCommit"]["status"] = Value::Null;
             }
+            if mode == "ci-point-empty-checks" {
+                node["commits"] =
+                    json!({"nodes":[{"commit":{"oid":HEAD,"statusCheckRollup":null}}]});
+                node["potentialMergeCommit"]["statusCheckRollup"] =
+                    json!({"contexts":{"checkRunCount":0}});
+            }
             match mode.as_str() {
                 "ci-point-head" => node["headRefOid"] = json!(NEW_HEAD),
                 "ci-point-base" => node["baseRefOid"] = json!(NEW_HEAD),
@@ -916,6 +924,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 if mode == "account-ci-selectors-empty" {
                     node["commits"]["nodes"][0]["commit"]["status"] = Value::Null;
                     node["potentialMergeCommit"]["status"] = Value::Null;
+                }
+                if mode == "account-ci-selectors-empty-checks" {
+                    node["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = Value::Null;
                 }
                 if mode == "account-ci-selectors-nonempty" {
                     node["commits"]["nodes"][0]["commit"]["status"] = json!({"id":"S_head"});
@@ -1331,6 +1342,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     ) && normalized.ends_with("/status")
     {
         value = json!({"state":"pending","total_count":0,"statuses":[]});
+    }
+    if mode == "ci-point-empty-checks" && normalized.ends_with("/check-runs") {
+        value = json!({"total_count":0,"check_runs":[]});
     }
     if mode.starts_with("account-multi-source") {
         if normalized.ends_with("/pulls/7") {

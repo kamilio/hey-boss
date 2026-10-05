@@ -6,8 +6,8 @@ const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!,
     pullRequest(number: $number) {
       id number state merged mergeable headRefOid baseRefOid
       repository { nameWithOwner }
-      commits(last: 1) { nodes { commit { oid status { id } } } }
-      potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
+      commits(last: 1) { nodes { commit { oid status { id } statusCheckRollup { contexts(first: 1) { checkRunCount } } } } }
+      potentialMergeCommit { oid status { id } statusCheckRollup { contexts(first: 1) { checkRunCount } } parents(first: 2) { totalCount nodes { oid } } }
     }
   }
 }"#;
@@ -39,12 +39,29 @@ impl Client {
             return Err(Error::Invalid("invalid CI pull request number".into()));
         }
         let (owner, repo) = repository.split_once('/').expect("validated repository");
-        self.request_versioned(
+        let response = self.request_versioned(
             self.0.config.graphql_url.to_string(),
             Some(json!({"query":CI_SELECTORS,"variables":{"owner":owner,"repo":repo,"number":number}})),
             freshness,
             None,
             self.ci_uses_installation(repository),
-        ).await
+        ).await;
+        if matches!(freshness, Freshness::CachedOnly) && matches!(response, Err(Error::CacheMiss)) {
+            // Preserve pre-count selector/status evidence across upgrades.
+            // This exact old query is only a cache lookup, under the same
+            // provider and generation fences; online reads use the new query.
+            let legacy = CI_SELECTORS.replace(
+                " statusCheckRollup { contexts(first: 1) { checkRunCount } }",
+                "",
+            );
+            return self.request_versioned(
+                self.0.config.graphql_url.to_string(),
+                Some(json!({"query":legacy,"variables":{"owner":owner,"repo":repo,"number":number}})),
+                Freshness::CachedOnly,
+                None,
+                self.ci_uses_installation(repository),
+            ).await;
+        }
+        response
     }
 }

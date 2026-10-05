@@ -1062,9 +1062,13 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
         self.collect_ci_source(repository, sha, source, async {
-            if source == "commit_statuses" {
+            if let Some(list) = match source {
+                "commit_statuses" => Some(ci_metadata::CommitList::Statuses),
+                "check_runs" => Some(ci_metadata::CommitList::Checks),
+                _ => None,
+            } {
                 return self
-                    .commit_statuses_from_metadata(repository, sha, path, freshness)
+                    .commit_list_from_metadata(repository, sha, path, list, freshness)
                     .await;
             }
             self.pages(path, Some(field), freshness).await

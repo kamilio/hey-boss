@@ -5,22 +5,50 @@ use std::time::Duration;
 
 pub(super) mod discovery;
 
-fn status_empty(pr: &Value, sha: &str) -> Option<bool> {
-    let status = |commit: &Value| {
+#[derive(Clone, Copy)]
+pub(super) enum CommitList {
+    Statuses,
+    Checks,
+}
+
+impl CommitList {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Statuses => "statuses",
+            Self::Checks => "check_runs",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Statuses => "commit-statuses",
+            Self::Checks => "check-runs",
+        }
+    }
+}
+
+fn list_empty(pr: &Value, sha: &str, list: CommitList) -> Option<bool> {
+    let evidence = |commit: &Value| {
         if commit["oid"] != sha {
             return None;
         }
-        match commit.get("status")? {
-            Value::Null => Some(true),
-            value if value["id"].as_str().is_some_and(|id| !id.is_empty()) => Some(false),
-            _ => None,
+        match list {
+            CommitList::Statuses => match commit.get("status")? {
+                Value::Null => Some(true),
+                value if value["id"].as_str().is_some_and(|id| !id.is_empty()) => Some(false),
+                _ => None,
+            },
+            CommitList::Checks => match commit.get("statusCheckRollup")? {
+                Value::Null => Some(true),
+                value => value["contexts"]["checkRunCount"].as_u64().map(|n| n == 0),
+            },
         }
     };
     let head = pr["commits"]["nodes"]
         .as_array()
         .filter(|nodes| nodes.len() == 1 && pr["headRefOid"] == sha)
-        .and_then(|nodes| status(&nodes[0]["commit"]));
-    let merge = status(&pr["potentialMergeCommit"]);
+        .and_then(|nodes| evidence(&nodes[0]["commit"]));
+    let merge = evidence(&pr["potentialMergeCommit"]);
     match (head, merge) {
         (Some(false), _) | (_, Some(false)) => Some(false),
         (Some(true), _) | (_, Some(true)) => Some(true),
@@ -109,17 +137,18 @@ impl Client {
         Ok(None)
     }
 
-    pub(super) async fn commit_statuses_from_metadata(
+    pub(super) async fn commit_list_from_metadata(
         &self,
         repository: &str,
         sha: &str,
         rest_path: &str,
+        list: CommitList,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
         if !matches!(freshness, Freshness::Revalidate)
             && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
             && let Some((empty, at, resource)) = self
-                .cached_status_evidence(repository, sha, freshness)
+                .cached_list_evidence(repository, sha, list, freshness)
                 .await?
         {
             let rest = match self.peek_get(rest_path).await {
@@ -127,8 +156,12 @@ impl Client {
                 Err(Error::CacheMiss) => None,
                 Err(error) => return Err(error),
             };
-            // A later REST response can observe newly posted statuses.
-            if rest.as_ref().is_none_or(|rest| rest.validated_at_ms < at) {
+            // A later REST response can observe newly posted checks/statuses.
+            // At the same clock, positive evidence from either source wins;
+            // an empty payload cannot certify contradictory presence metadata.
+            if rest.as_ref().is_none_or(|rest| {
+                rest.validated_at_ms < at || (!empty && rest.validated_at_ms == at)
+            }) {
                 if empty {
                     let _ = super::VALIDATIONS.try_with(|records| {
                         records.borrow_mut().push(super::ResourceValidation {
@@ -139,34 +172,37 @@ impl Client {
                     });
                     return Ok(Vec::new());
                 }
-                if rest
-                    .as_ref()
-                    .is_none_or(|rest| rest.data["statuses"].as_array().is_some_and(Vec::is_empty))
-                {
+                if rest.as_ref().is_none_or(|rest| {
+                    rest.data[list.field()]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                }) {
                     // Newer metadata contradicts the old empty list. Offline
                     // reads cannot invent the missing full REST payload.
                     if matches!(freshness, Freshness::CachedOnly) {
                         return Err(Error::CacheMiss);
                     }
-                    let statuses = self
-                        .pages(rest_path, Some("statuses"), Freshness::Revalidate)
+                    let values = self
+                        .pages(rest_path, Some(list.field()), Freshness::Revalidate)
                         .await?;
-                    if statuses.is_empty() {
-                        return Err(Error::Invalid(
-                            "commit statuses disagree with newer CI metadata".into(),
-                        ));
+                    if values.is_empty() {
+                        return Err(Error::Invalid(format!(
+                            "{} disagree with newer CI metadata",
+                            list.label().replace('-', " ")
+                        )));
                     }
-                    return Ok(statuses);
+                    return Ok(values);
                 }
             }
         }
-        self.pages(rest_path, Some("statuses"), freshness).await
+        self.pages(rest_path, Some(list.field()), freshness).await
     }
 
-    async fn cached_status_evidence(
+    async fn cached_list_evidence(
         &self,
         repository: &str,
         sha: &str,
+        list: CommitList,
         freshness: Freshness,
     ) -> Result<Option<(bool, u64, String)>> {
         let Some(owner) = crate::entity::current().filter(|owner| {
@@ -175,7 +211,7 @@ impl Client {
             return Ok(None);
         };
         // These are cache peeks only. CI never dispatches account discovery or
-        // an extra point query to obtain this optional status evidence.
+        // an extra point query to obtain this optional empty-list evidence.
         let mut candidates = Vec::new();
         match self
             .ci_selector_response(repository, owner.number, Freshness::CachedOnly)
@@ -206,7 +242,7 @@ impl Client {
             {
                 continue;
             }
-            let Some(empty) = status_empty(&node, sha) else {
+            let Some(empty) = list_empty(&node, sha, list) else {
                 continue;
             };
             // A newer nonempty observation must defeat an older empty one.
@@ -223,9 +259,10 @@ impl Client {
                 empty,
                 at,
                 format!(
-                    "{source}://{}/{repository}/pulls/{}#commit-statuses:{sha}",
+                    "{source}://{}/{repository}/pulls/{}#{}:{sha}",
                     self.hostname(),
-                    owner.number
+                    owner.number,
+                    list.label()
                 ),
             )
         }))
