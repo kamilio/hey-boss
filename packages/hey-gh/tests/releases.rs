@@ -122,14 +122,17 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             .iter()
             .filter(|p| p.starts_with(path))
             .count();
-        json!({"name":"main","commit":{"sha":if mode.starts_with("archive_") {E} else if matches!(mode,"force_push"|"fast_forward"|"partial_confirmation") && count>1 {D}else{C}}})
+        json!({"name":"main","commit":{"sha":if mode.starts_with("archive_") {E} else if matches!(mode,"force_push"|"fast_forward"|"partial_confirmation"|"incomplete_history_force_push") && count>1 {D}else{C}}})
     } else if path.contains("/compare/") {
         let (base, head) = path.rsplit('/').next().unwrap().split_once("...").unwrap();
         let ahead = base <= head
             && !(mode == "unrelated" && head == C)
             && !(mode == "side_branch" && base == A && head == B)
             && !(mode == "paged_branch_side" && base == A && head == B)
-            && !(matches!(mode, "force_push" | "partial_confirmation") && head == D);
+            && !(matches!(
+                mode,
+                "force_push" | "partial_confirmation" | "incomplete_history_force_push"
+            ) && head == D);
         let mut result = json!({"status":if ahead {"ahead"}else{"diverged"},"base_commit":{"sha":base},"merge_base_commit":{"sha":if ahead {base}else{D}}});
         if mode.starts_with("paged_branch")
             && base == A
@@ -321,7 +324,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
                 at >= start && at <= end
             });
         }
-        json!({"total_count":if mode=="truncated" || dense {1000}else{rows.len()},"workflow_runs":rows})
+        json!({"total_count":if mode=="truncated" || dense {1000}else if mode=="incomplete_history_force_push" {rows.len()+1}else{rows.len()},"workflow_runs":rows})
     } else if path.ends_with("/jobs") {
         let id = path.split('/').nth(6).unwrap().parse::<u64>().unwrap();
         if mode.starts_with("partial_") && id == 3 {
@@ -337,7 +340,13 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         let mut jobs = match id {
             4 | 5 if mode == "archive_many" => vec![],
             2 if matches!(mode, "side_branch" | "paged_branch_side") => vec![job(2, B, "success")],
-            3 if matches!(mode, "side_branch" | "paged_branch_side") => vec![job(3, C, "skipped")],
+            3 if matches!(
+                mode,
+                "side_branch" | "paged_branch_side" | "incomplete_history_force_push"
+            ) =>
+            {
+                vec![job(3, C, "skipped")]
+            }
             1 if mode == "old_failure" => vec![job(1, A, "failure")],
             1 => vec![],
             2 => vec![job(2, if mode == "old_failure" { A } else { B }, "skipped")],
@@ -494,6 +503,25 @@ async fn partial_gate_does_not_skip_branch_validation_for_a_completed_gate() {
             .gates
             .iter()
             .all(|gate| !gate.satisfied && gate.confirmation.is_none())
+    );
+}
+
+#[tokio::test]
+async fn incomplete_history_still_validates_branch_for_a_watching_report() {
+    let h = Harness::new("incomplete_history_force_push").await;
+    let batch = h.report(&[A]).await;
+    let report = &batch.reports[0];
+    assert_eq!(report.gates.len(), 1);
+    assert!(!report.gates[0].history_complete);
+    assert!(report.gates[0].confirmation.is_none());
+    assert_eq!(report.state, "unknown");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("branch changed")),
+        "{:?}",
+        report.errors
     );
 }
 

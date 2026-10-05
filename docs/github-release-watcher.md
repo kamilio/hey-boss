@@ -53,8 +53,9 @@ retaining older evidence and observed failures. Inspect the JSON even when
 `poll` exits nonzero.
 An interrupted gate retains the run records already collected, with
 `history_complete=false`, `satisfied=false`, and no new gate confirmation.
-An entirely incomplete report stops without another branch read; any completed
-gate or candidate confirmation still requires the final branch check.
+An interrupted, unknown report with no completed gates or confirmations stops
+without another branch read. Watching/failed reports, completed gates, and
+confirmations still require the final branch check.
 Historical `confirmations` retain when a deployment was confirmed even if a
 later rerun, force-push, or read error changes the current report.
 
