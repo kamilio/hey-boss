@@ -102,6 +102,9 @@ pub(crate) struct Job {
     pub auth_generation: u64,
     // Shared with coalesced readers so interactive use can promote queued work.
     pub interactive: Arc<AtomicBool>,
+    // Report-lock waiters promote the owner's entire collection independently
+    // of callers joining just one of its shared requests.
+    pub report_priority: Arc<AtomicBool>,
     pub detail_lane: bool,
     pub collection_slice: bool,
     /// Random per-job correlation, independent of credentials and request data.
@@ -129,8 +132,12 @@ pub(crate) struct Job {
 // retain their lane; headers reach the scheduler before any body wait so quota
 // exhaustion and shared cooldowns take effect immediately.
 impl Job {
+    fn interactive(&self) -> bool {
+        self.interactive.load(Ordering::Relaxed) || self.report_priority.load(Ordering::Relaxed)
+    }
+
     fn background_collection(&self) -> bool {
-        self.collection_slice && !self.interactive.load(Ordering::Relaxed)
+        self.collection_slice && !self.interactive()
     }
 
     fn quota(&self) -> String {
@@ -709,7 +716,7 @@ impl Scheduler {
                 {
                     continue;
                 }
-                let interactive = job.interactive.load(Ordering::Relaxed);
+                let interactive = job.interactive();
                 let quota = job.quota();
                 let completing = job.completion_validation.load(Ordering::Relaxed);
                 let priority = (
@@ -734,13 +741,13 @@ impl Scheduler {
                 index != *selected
                     && !blocked_probes.contains_key(&quota)
                     && !probing_quotas.contains(&quota)
-                    && ((job.interactive.load(Ordering::Relaxed) == turn.interactive.load(Ordering::Relaxed)
+                    && ((job.interactive() == turn.interactive()
                         && job.completion_validation.load(Ordering::Relaxed) == turn.completion_validation.load(Ordering::Relaxed))
                         // Foreground validators may use an owed background
                         // turn's pacing wait. The turn and its one-probe debt
                         // remain owned by that exact background request.
-                        || (job.interactive.load(Ordering::Relaxed)
-                            && !turn.interactive.load(Ordering::Relaxed)))
+                        || (job.interactive()
+                            && !turn.interactive()))
                     // The class's turn is held by soft pacing, not by a retry,
                     // socket or global spacing.
                     && ready(turn, &budgets, now) > now
@@ -775,7 +782,7 @@ impl Scheduler {
                 // retries, cooldowns and expiry remain unchanged.
                 let preferred = |index: usize, job: &Job| {
                     eligible(index, job)
-                        && job.interactive.load(Ordering::Relaxed)
+                        && job.interactive()
                             == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 };
                 let completing = |job: &Job| job.completion_validation.load(Ordering::Relaxed);
@@ -844,14 +851,14 @@ impl Scheduler {
                 // renew speculative borrowing before the debt is repaid.
                 if probe.is_none() {
                     let streak = interactive_streaks.entry(job.quota()).or_default();
-                    *streak = if job.interactive.load(Ordering::Relaxed) {
+                    *streak = if job.interactive() {
                         streak.saturating_add(1)
                     } else {
                         0
                     };
                 }
                 if !job.minting && probe.is_none() {
-                    let class = (job.quota(), job.interactive.load(Ordering::Relaxed));
+                    let class = (job.quota(), job.interactive());
                     if job.completion_validation.load(Ordering::Relaxed) {
                         completion_yields.insert(class);
                     } else {
@@ -874,7 +881,7 @@ impl Scheduler {
                     .max_by_key(|budget| budget.spacing);
                 tracing::info!(request_id=%job.request_id, attempt=job.attempts + job.auth_attempts,
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
-                    foreground=job.interactive.load(Ordering::Relaxed),
+                    foreground=job.interactive(),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
                     pacing_probe=probe.is_some(),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
@@ -1430,7 +1437,7 @@ impl Scheduler {
         tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts+job.auth_attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,
             request_key=%crate::digest(&job.key),
             auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope },
-            foreground=job.interactive.load(Ordering::Relaxed),
+            foreground=job.interactive(),
             completion_validation=job.completion_validation.load(Ordering::Relaxed),
             deadline_context,
             "GitHub request finished");
@@ -1598,6 +1605,7 @@ mod tests {
             auth_attempts: 0,
             auth_generation: 0,
             interactive: Arc::new(AtomicBool::new(true)),
+            report_priority: Arc::new(AtomicBool::new(false)),
             detail_lane: false,
             collection_slice: false,
             request_id: "test".into(),
