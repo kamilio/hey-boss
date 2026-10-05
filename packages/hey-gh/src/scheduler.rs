@@ -236,6 +236,7 @@ fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
 
 enum Attempt {
     Headers(std::result::Result<reqwest::Response, reqwest::Error>),
+    Stored(Result<Response>),
     Body {
         status: StatusCode,
         headers: HeaderMap,
@@ -546,6 +547,31 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    fn persist(
+        &self,
+        job: Job,
+        active: &mut Vec<Active>,
+        write: impl Future<Output = Result<Response>> + Send + 'static,
+    ) {
+        // Storage shares the request's bounded lane and admission permit.
+        // Poll it beside sockets so a slow writer cannot prevent independent
+        // headers, cooldowns, expiry or dispatch from reaching the scheduler.
+        active.push(Active {
+            resource: job.resource.clone(),
+            detail_lane: job.detail_lane,
+            reservation: None,
+            probe: None,
+            future: Box::pin(async move {
+                let started = Instant::now();
+                let result = write.await;
+                tracing::info!(request_id=%job.request_id,
+                    elapsed_ms=started.elapsed().as_millis() as u64,
+                    "GitHub response persistence finished");
+                (job, Attempt::Stored(result))
+            }),
+        });
+    }
+
     fn transport_failed(&self, mut job: Job, error: reqwest::Error, pending: &mut VecDeque<Job>) {
         if job.minting {
             let error = if error.is_timeout() {
@@ -1005,6 +1031,10 @@ impl Scheduler {
             // before its own response headers update the observed quota debt.
             let probe = probe.map(|turn| (budgets.probe(&turn.quota), turn));
             let (status, headers, bytes) = match outcome {
+                Attempt::Stored(result) => {
+                    self.finish(job, result);
+                    continue;
+                }
                 Attempt::Headers(response) => {
                     let response = match response {
                         Ok(r) => r,
@@ -1074,19 +1104,25 @@ impl Scheduler {
                         blocked_probes.insert(turn.quota.clone(), turn.owed.clone());
                     }
                     if status == StatusCode::NOT_MODIFIED && !job.minting {
-                        let result = if let Some(mut cached) = job.cached.clone() {
+                        if let Some(mut cached) = job.cached.take() {
                             // Validators and pagination metadata may be updated on 304.
                             cached.etag = header(&headers, "etag").or(cached.etag);
                             cached.last_modified =
                                 header(&headers, "last-modified").or(cached.last_modified);
                             cached.link = header(&headers, "link").or(cached.link);
-                            self.store.revalidated(&self.scope, &job.key, cached).await
+                            let (store, scope, key) =
+                                (self.store.clone(), self.scope.clone(), job.key.clone());
+                            self.persist(job, &mut active, async move {
+                                store.revalidated(&scope, &key, cached).await
+                            });
                         } else {
-                            Err(Error::Invalid(
-                                "GitHub returned 304 without a cached representation".into(),
-                            ))
-                        };
-                        self.finish(job, result);
+                            self.finish(
+                                job,
+                                Err(Error::Invalid(
+                                    "GitHub returned 304 without a cached representation".into(),
+                                )),
+                            );
+                        }
                         continue;
                     }
                     let retry = retry_after(&headers);
@@ -1321,7 +1357,7 @@ impl Scheduler {
                 continue;
             }
             if !graphql_errors.is_empty() {
-                if status.is_success()
+                let partial = if status.is_success()
                     && !job.installation
                     && let Ok(data) = serde_json::from_slice(&bytes)
                     && let Some(data) = crate::dashboard::partial::capture(job.body.as_ref(), data)
@@ -1340,15 +1376,10 @@ impl Scheduler {
                         &job.key,
                         crate::dashboard::partial::CACHE_TAG,
                     );
-                    match self.store.put(&self.scope, &key, &response).await {
-                        Ok(()) => {
-                            tracing::info!(request_id=%job.request_id, "Retained permitted discovery nodes from incomplete response")
-                        }
-                        Err(error) => {
-                            tracing::warn!(request_id=%job.request_id,error_code=error.diagnostic_code(), "Partial discovery evidence could not be retained")
-                        }
-                    }
-                }
+                    Some((key, response))
+                } else {
+                    None
+                };
                 let access_denied = graphql_errors.iter().any(|error| {
                     matches!(
                         error.get("type").and_then(|value| value.as_str()),
@@ -1371,7 +1402,22 @@ impl Scheduler {
                         message,
                     }
                 };
-                self.finish(job, Err(error));
+                if let Some((key, response)) = partial {
+                    let (store, scope, request_id) = (
+                        self.store.clone(),
+                        self.scope.clone(),
+                        job.request_id.clone(),
+                    );
+                    self.persist(job, &mut active, async move {
+                        match store.put(&scope, &key, &response).await {
+                            Ok(()) => tracing::info!(%request_id, "Retained permitted discovery nodes from incomplete response"),
+                            Err(error) => tracing::warn!(%request_id, error_code=error.diagnostic_code(), "Partial discovery evidence could not be retained"),
+                        }
+                        Err(error)
+                    });
+                } else {
+                    self.finish(job, Err(error));
+                }
                 continue;
             }
             if !status.is_success() {
@@ -1390,7 +1436,7 @@ impl Scheduler {
                 serde_json::from_slice(&bytes)
                     .map_err(|e| Error::Invalid(format!("invalid GitHub JSON: {e}")))
             };
-            let result = match data {
+            match data {
                 Ok(data) => {
                     let stamp = now_ms();
                     let response = Response {
@@ -1402,14 +1448,14 @@ impl Scheduler {
                         last_modified: header(&headers, "last-modified"),
                         link: header(&headers, "link"),
                     };
-                    self.store
-                        .put(&self.scope, &job.key, &response)
-                        .await
-                        .map(|_| response)
+                    let (store, scope, key) =
+                        (self.store.clone(), self.scope.clone(), job.key.clone());
+                    self.persist(job, &mut active, async move {
+                        store.put(&scope, &key, &response).await.map(|_| response)
+                    });
                 }
-                Err(e) => Err(e),
+                Err(e) => self.finish(job, Err(e)),
             };
-            self.finish(job, result);
         }
     }
 
@@ -1546,6 +1592,8 @@ async fn read_body(
     Ok(bytes)
 }
 
+#[cfg(test)]
+mod persistence_tests;
 #[cfg(test)]
 mod transport_tests;
 
