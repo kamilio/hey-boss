@@ -10,6 +10,7 @@ const SELECTORS: &str = r#"query RequiredPolicySelectors($owner: String!, $repo:
       id number state merged mergeable headRefOid baseRefName baseRefOid
       baseRepository { id databaseId nameWithOwner }
       potentialMergeCommit { oid parents(first: 2) { totalCount nodes { oid } } }
+      mergeCommit { oid }
       stack { id } stackEntry { id }
     }
   }
@@ -21,14 +22,28 @@ fn recent(response: &Response, age: Duration) -> bool {
         .is_some_and(|elapsed| (elapsed as u128) < age.as_millis())
 }
 
+fn lifecycle(pr: &Value) -> Option<&'static str> {
+    match (pr["state"].as_str(), pr["merged"].as_bool()) {
+        (Some("open"), Some(false)) => Some("OPEN"),
+        (Some("closed"), Some(false)) => Some("CLOSED"),
+        (Some("closed"), Some(true)) => Some("MERGED"),
+        _ => None,
+    }
+}
+
+pub(super) fn merged_seed(pr: &Value, repository: &str, number: u64) -> bool {
+    lifecycle(pr) == Some("MERGED") && eligible(pr, repository, number)
+}
+
 fn eligible(pr: &Value, repository: &str, number: u64) -> bool {
     let nonempty = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
     let sha = |v: &Value| v.as_str().is_some_and(crate::repository::valid_sha);
     pr["number"] == number
         && nonempty(&pr["node_id"])
-        && pr["state"] == "open"
-        && pr["merged"] == false
-        && pr["mergeable"] == true
+        && lifecycle(pr).is_some()
+        // A merged PR's merge SHA is its actual merge/squash commit, not an
+        // uncertain test merge. Its current mergeability is no longer relevant.
+        && (pr["merged"] == true || pr["mergeable"] == true)
         && pr["stack"].is_null()
         && sha(&pr["head"]["sha"])
         && sha(&pr["base"]["sha"])
@@ -52,18 +67,31 @@ fn matches(pr: &Value, response: &Value) -> bool {
             && repo["databaseId"] == base["id"]
             && repo["nameWithOwner"] == base["full_name"]
     };
-    let merge = &node["potentialMergeCommit"];
+    let merge_matches = if pr["merged"] == true {
+        node["mergeCommit"]["oid"] == pr["merge_commit_sha"]
+    } else {
+        let merge = &node["potentialMergeCommit"];
+        merge["oid"] == pr["merge_commit_sha"]
+            && merge["parents"]["totalCount"] == 2
+            && merge["parents"]["nodes"].as_array().is_some_and(|parents| {
+                parents.len() == 2
+                    && parents.iter().all(|parent| {
+                        parent["oid"]
+                            .as_str()
+                            .is_some_and(crate::repository::valid_sha)
+                    })
+                    && parents
+                        .iter()
+                        .any(|parent| parent["oid"] == node["headRefOid"])
+            })
+    };
     same_repository(repository) && same_repository(&node["baseRepository"])
         && node["id"] == pr["node_id"] && node["number"] == pr["number"]
-        && node["state"] == "OPEN" && node["merged"] == false && node["mergeable"] == "MERGEABLE"
+        && node["state"].as_str() == lifecycle(pr) && node["merged"] == pr["merged"]
+        && (pr["merged"] == true || node["mergeable"] == "MERGEABLE")
         && node["headRefOid"] == pr["head"]["sha"]
         && node["baseRefName"] == pr["base"]["ref"] && node["baseRefOid"] == pr["base"]["sha"]
-        && merge["oid"] == pr["merge_commit_sha"] && merge["parents"]["totalCount"] == 2
-        && merge["parents"]["nodes"].as_array().is_some_and(|parents| {
-            parents.len() == 2
-                && parents.iter().all(|parent| parent["oid"].as_str().is_some_and(crate::repository::valid_sha))
-                && parents.iter().any(|parent| parent["oid"] == node["headRefOid"])
-        })
+        && merge_matches
         // Missing fields are unknown, not evidence of absent native membership.
         && node.get("stack") == Some(&Value::Null)
         && node.get("stackEntry") == Some(&Value::Null)

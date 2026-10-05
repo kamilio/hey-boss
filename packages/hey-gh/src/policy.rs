@@ -280,6 +280,7 @@ impl Client {
                     }
                     if cached.data["stack"].is_null()
                         && cached.data["mergeable"].as_bool() != Some(true)
+                        && !selectors::merged_seed(&cached.data, repository, number)
                         && cached.data["merge_commit_sha"]
                             .as_str()
                             .is_some_and(crate::repository::valid_sha)
