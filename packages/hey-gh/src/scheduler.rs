@@ -1281,6 +1281,34 @@ impl Scheduler {
                 continue;
             }
             if !graphql_errors.is_empty() {
+                if status.is_success()
+                    && !job.installation
+                    && let Ok(data) = serde_json::from_slice(&bytes)
+                    && let Some(data) = crate::dashboard::partial::capture(job.body.as_ref(), data)
+                {
+                    let stamp = now_ms();
+                    let response = Response {
+                        data,
+                        fetched_at_ms: stamp,
+                        validated_at_ms: stamp,
+                        source: Source::Network,
+                        etag: None,
+                        last_modified: None,
+                        link: None,
+                    };
+                    let key = crate::client::tagged_cache_key(
+                        &job.key,
+                        crate::dashboard::partial::CACHE_TAG,
+                    );
+                    match self.store.put(&self.scope, &key, &response).await {
+                        Ok(()) => {
+                            tracing::info!(request_id=%job.request_id, "Retained permitted discovery nodes from incomplete response")
+                        }
+                        Err(error) => {
+                            tracing::warn!(request_id=%job.request_id,error_code=error.diagnostic_code(), "Partial discovery evidence could not be retained")
+                        }
+                    }
+                }
                 let access_denied = graphql_errors.iter().any(|error| {
                     matches!(
                         error.get("type").and_then(|value| value.as_str()),

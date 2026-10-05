@@ -661,6 +661,17 @@ evidence without changing roster completeness. Newer nonempty metadata defeats
 older empty evidence and requires the full REST status payload; conflicting or
 unavailable payloads remain incomplete.
 
+Node-scoped discovery access denials exclude the affected PR nodes, including
+nodes with only one denied field. Other nodes are retained separately as partial
+evidence, using the original response clock. Discovery continues pagination
+within its existing deadline and collection limits but still reports failure;
+partial evidence cannot renew or replace the complete roster. CI reads can use
+the retained nodes with the same identity, freshness, and generation checks.
+Failed network operations still return their access errors; partial pages do not
+satisfy generic GraphQL cache reads. Excluded nodes still count toward the scan's
+byte budget. Unscoped errors, rate limits, and malformed pagination do not supply
+this partial evidence.
+
 Point selectors and existing discovery pages also provide head/test-merge
 check-run counts. A zero count or explicit null rollup can satisfy an empty list
 using the original query/page clock. Nonempty, missing, or invalid counts retain

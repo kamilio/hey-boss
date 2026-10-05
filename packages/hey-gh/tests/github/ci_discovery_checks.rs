@@ -1,6 +1,6 @@
 use super::*;
 
-async fn seeded(app: bool) -> (Harness, Client) {
+pub(super) async fn seeded(app: bool) -> (Harness, Client) {
     let h = Harness::new().await;
     h.mode("account-ci-selectors-counted-checks");
     h.phase(2);

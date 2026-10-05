@@ -54,6 +54,15 @@ pub(crate) fn interactive_read() -> bool {
         .unwrap_or(false)
 }
 
+// Keep auxiliary representations under the same repository-generation fence.
+pub(crate) fn tagged_cache_key(key: &str, tag: &str) -> String {
+    if let Some((base, generation)) = key.rsplit_once("#repository-generation=") {
+        format!("{base}#{tag}#repository-generation={generation}")
+    } else {
+        format!("{key}#{tag}")
+    }
+}
+
 pub(crate) fn foreground_priority() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(true))
 }
@@ -383,6 +392,16 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn peek_partial_discovery(&self, after: Value) -> Result<Response> {
+        self.request_versioned(
+            self.0.config.graphql_url.to_string(),
+            Some(serde_json::json!({"query":crate::dashboard::MY_PRS.trim(),"variables":{"after":after}})),
+            Freshness::CachedOnly,
+            Some(crate::dashboard::partial::CACHE_TAG),
+            false,
+        ).await
+    }
+
     async fn graphql_response(
         &self,
         query: &str,
@@ -415,7 +434,7 @@ impl Client {
         url: String,
         body: Option<Value>,
         freshness: Freshness,
-        completed_version: Option<&str>,
+        cache_tag: Option<&str>,
         installation: bool,
     ) -> Result<Response> {
         let repository = if let Some(body) = &body {
@@ -451,8 +470,8 @@ impl Client {
             } else {
                 self.rest_cache_key(&url)?
             };
-            let base_key = match completed_version {
-                Some(version) => format!("{base_key}#completed-jobs-version={version}"),
+            let base_key = match cache_tag {
+                Some(tag) => tagged_cache_key(&base_key, tag),
                 None => base_key,
             };
             // CI-only installation metadata must never coalesce with or populate
@@ -852,13 +871,14 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Response> {
         let url = self.rest_url(path)?.to_string();
+        let cache_tag = format!("completed-jobs-version={version}");
         if !matches!(freshness, Freshness::Revalidate) {
             match self
                 .request_versioned(
                     url.clone(),
                     None,
                     Freshness::CachedOnly,
-                    Some(version),
+                    Some(&cache_tag),
                     false,
                 )
                 .await
@@ -892,7 +912,7 @@ impl Client {
                 url.clone(),
                 None,
                 Freshness::Revalidate,
-                Some(version),
+                Some(&cache_tag),
                 false,
             )
             .await?;
