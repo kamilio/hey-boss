@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 mod branch;
+mod ci_retry;
 mod rules;
 mod selectors;
 mod timings;
@@ -416,6 +417,8 @@ impl Client {
         timings.enter(Phase::Lock);
         let _guard = lock.lock().await;
         let mut retry_seed = None;
+        let caller_freshness = freshness;
+        let mut previous_ci = None;
         for attempt in 0..2 {
             timings.enter(Phase::Seed);
             let freshness = if attempt == 0 {
@@ -617,9 +620,22 @@ impl Client {
             let checks = if requirements.is_empty() && errors.is_empty() {
                 Vec::new()
             } else {
+                let ci_identity =
+                    ci_retry::Identity::current(&pr.data, self.access_failure_epoch());
                 let ci = self
-                    .required_ci_report(repository, head, merge, freshness)
+                    .required_ci_report(
+                        repository,
+                        head,
+                        merge,
+                        ci_retry::freshness(
+                            caller_freshness,
+                            freshness,
+                            previous_ci.as_ref(),
+                            ci_identity.as_ref(),
+                        ),
+                    )
                     .await?;
+                previous_ci = ci.errors.is_empty().then_some(ci_identity).flatten();
                 errors.extend(ci.errors.iter().cloned());
                 evaluate(&ci, &requirements)
             };
@@ -723,8 +739,9 @@ impl Client {
             {
                 // This confirmation already supplies the new selectors. Use
                 // its full REST body to seed the retry instead of immediately
-                // fetching it again. CI/policy and final confirmation still
-                // revalidate under the new entity identity on the next pass.
+                // fetching it again. Policy and final confirmation revalidate;
+                // CI can use the caller's age bound only for the same identity
+                // and commits, through the ordinary cache/contradiction checks.
                 retry_seed = final_rest_pr;
                 continue;
             }
