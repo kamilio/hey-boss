@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(test)]
+mod decode_tests;
+
 // Keep the partial index and bootstrap selection identical. Malformed PR JSON
 // remains a candidate so reads report corruption instead of silently hiding it.
 const OPEN_PR_SELECTION: &str = "resource GLOB 'pr-status://*' AND
@@ -191,6 +194,7 @@ fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, 
 pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
     readers: Option<Readers>,
+    payload_decoders: Arc<tokio::sync::Semaphore>,
     retention: std::time::Duration,
     max_events: usize,
     max_snapshot_bytes: usize,
@@ -423,6 +427,7 @@ impl Store {
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
             readers,
+            payload_decoders: Arc::new(tokio::sync::Semaphore::new(4)),
             retention,
             max_events,
             max_snapshot_bytes,
@@ -458,6 +463,35 @@ impl Store {
             .await
     }
 
+    async fn read_decode<T: Send + 'static, U: Send + 'static>(
+        &self,
+        read: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        decode: impl FnOnce(T) -> Result<U> + Send + 'static,
+    ) -> Result<U> {
+        let store = self.clone();
+        // Bound both raw buffers and CPU work before reading. Admission must
+        // progress independently of a hydration caller that pauses its peers.
+        tokio::spawn(async move {
+            let permit = store
+                .payload_decoders
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(storage)?;
+            let captured = store.read(read).await?;
+            // The transaction, ownership checks and raw payload belong to one
+            // snapshot. Decoding that captured value needs no database lock.
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                decode(captured)
+            })
+            .await
+            .map_err(storage)?
+        })
+        .await
+        .map_err(storage)?
+    }
+
     async fn read_on<T: Send + 'static>(
         &self,
         connection: Option<&Arc<tokio::sync::Mutex<Connection>>>,
@@ -491,19 +525,24 @@ impl Store {
 
     pub async fn get(&self, scope: &str, key: &str) -> Result<Option<Response>> {
         let (scope, key) = (scope.to_owned(), key.to_owned());
-        self.read(move |conn| {
-            let value: Option<String> = conn
-                .query_row(
-                    "SELECT response FROM cache WHERE scope=?1 AND key=?2",
-                    params![scope, key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            value
-                .map(|v| serde_json::from_str(&v).map_err(storage))
-                .transpose()
-        })
+        self.read_decode(
+            move |conn| {
+                let value: Option<String> = conn
+                    .query_row(
+                        "SELECT response FROM cache WHERE scope=?1 AND key=?2",
+                        params![scope, key],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(storage)?;
+                Ok(value)
+            },
+            |value| {
+                value
+                    .map(|v| serde_json::from_str(&v).map_err(storage))
+                    .transpose()
+            },
+        )
         .await
     }
 
@@ -520,23 +559,28 @@ impl Store {
         resource: &str,
     ) -> Result<Option<(Value, String)>> {
         let (scope, resource) = (scope.to_owned(), resource.to_owned());
-        self.read(move |conn| {
-            let resource = resolve_pr_resource(conn, &scope, &resource)?;
-            let data: Option<(String, String)> = conn
-                .query_row(
-                    "SELECT data,hash FROM snapshots WHERE scope=?1 AND resource=?2",
-                    params![scope, resource],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(storage)?;
-            data.map(|(data, hash)| {
-                serde_json::from_str(&data)
-                    .map(|data| (data, hash))
-                    .map_err(storage)
-            })
-            .transpose()
-        })
+        self.read_decode(
+            move |conn| {
+                let resource = resolve_pr_resource(conn, &scope, &resource)?;
+                let data: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT data,hash FROM snapshots WHERE scope=?1 AND resource=?2",
+                        params![scope, resource],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(storage)?;
+                Ok(data)
+            },
+            |data| {
+                data.map(|(data, hash)| {
+                    serde_json::from_str(&data)
+                        .map(|data| (data, hash))
+                        .map_err(storage)
+                })
+                .transpose()
+            },
+        )
         .await
     }
 
@@ -563,7 +607,7 @@ impl Store {
         };
         let prefix_length = prefix.chars().count();
         let (scope, key, suffix) = (scope.to_owned(), key.to_owned(), suffix.to_owned());
-        self.read(move |conn| {
+        self.read_decode(move |conn| {
             // Only the host/repository prefix is case-insensitive. Branches,
             // refs, pagination/query values, and generation suffixes stay exact.
             // Seek the complete key first; a cold miss must not scan every
@@ -572,8 +616,8 @@ impl Store {
                 "SELECT response FROM cache WHERE scope=?1 AND key=?2 COLLATE NOCASE AND substr(key,?3)=?4 COLLATE BINARY LIMIT 1",
                 params![scope,key,prefix_length+1,suffix], |r|r.get(0),
             ).optional().map_err(storage)?;
-            data.map(|data|serde_json::from_str(&data).map_err(storage)).transpose()
-        }).await
+            Ok(data)
+        }, |data| data.map(|data|serde_json::from_str(&data).map_err(storage)).transpose()).await
     }
 
     pub async fn repository_generation(&self, scope: &str, repository: &str) -> Result<u64> {
@@ -647,10 +691,11 @@ impl Store {
             repository.to_ascii_lowercase(),
             node_id.map(str::to_owned),
         );
-        self.read(move |conn| {
-            let resource = resolve_pr_resource(conn, &scope, &resource)?;
-            let generation = repository_generation(conn, &scope, &repository)?;
-            let owner: Option<(Option<String>, u64)> = conn
+        self.read_decode(
+            move |conn| {
+                let resource = resolve_pr_resource(conn, &scope, &resource)?;
+                let generation = repository_generation(conn, &scope, &repository)?;
+                let owner: Option<(Option<String>, u64)> = conn
                 .query_row(
                     "SELECT node_id,generation FROM source_owner WHERE scope=?1 AND resource=?2",
                     params![scope, resource],
@@ -658,30 +703,34 @@ impl Store {
                 )
                 .optional()
                 .map_err(storage)?;
-            let usable = match owner {
-                Some((id, epoch)) => {
-                    epoch == generation
-                        && node_id
-                            .as_ref()
-                            .is_none_or(|expected| id.as_ref() == Some(expected))
-                        && (generation == 0 || id.is_some())
+                let usable = match owner {
+                    Some((id, epoch)) => {
+                        epoch == generation
+                            && node_id
+                                .as_ref()
+                                .is_none_or(|expected| id.as_ref() == Some(expected))
+                            && (generation == 0 || id.is_some())
+                    }
+                    None => generation == 0,
+                };
+                if !usable {
+                    return Ok(None);
                 }
-                None => generation == 0,
-            };
-            if !usable {
-                return Ok(None);
-            }
-            let data: Option<String> = conn
-                .query_row(
-                    "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2",
-                    params![scope, resource],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(storage)?;
-            data.map(|data| serde_json::from_str(&data).map_err(storage))
-                .transpose()
-        })
+                let data: Option<String> = conn
+                    .query_row(
+                        "SELECT data FROM snapshots WHERE scope=?1 AND resource=?2",
+                        params![scope, resource],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(storage)?;
+                Ok(data)
+            },
+            |data| {
+                data.map(|data| serde_json::from_str(&data).map_err(storage))
+                    .transpose()
+            },
+        )
         .await
     }
 

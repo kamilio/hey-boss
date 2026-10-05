@@ -71,7 +71,7 @@ async fn empty_status_selectors_preserve_explicit_refresh() {
         .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
         .await
         .unwrap();
-    assert!(report.complete);
+    assert!(report.complete, "{:?}", report.data.errors);
     assert_eq!(
         h.calls()[before..]
             .iter()
