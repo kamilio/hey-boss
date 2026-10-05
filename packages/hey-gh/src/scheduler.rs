@@ -713,10 +713,15 @@ impl Scheduler {
                 index != *selected
                     && !blocked_probes.contains_key(&quota)
                     && !probing_quotas.contains(&quota)
-                    && job.interactive.load(Ordering::Relaxed) == turn.interactive.load(Ordering::Relaxed)
-                    && job.completion_validation.load(Ordering::Relaxed) == turn.completion_validation.load(Ordering::Relaxed)
+                    && ((job.interactive.load(Ordering::Relaxed) == turn.interactive.load(Ordering::Relaxed)
+                        && job.completion_validation.load(Ordering::Relaxed) == turn.completion_validation.load(Ordering::Relaxed))
+                        // Foreground validators may use an owed background
+                        // turn's pacing wait. The turn and its one-probe debt
+                        // remain owned by that exact background request.
+                        || (job.interactive.load(Ordering::Relaxed)
+                            && !turn.interactive.load(Ordering::Relaxed)))
                     // The class's turn is held by soft pacing, not by a retry,
-                    // socket, global spacing or a different priority class.
+                    // socket or global spacing.
                     && ready(turn, &budgets, now) > now
                     && budgets.for_resource(&quota).next().is_some()
                     && budgets.for_resource(&quota).all(|budget| {
@@ -739,8 +744,10 @@ impl Scheduler {
                         && !lane_busy(&active, job, prod)
                         && !waiting_for_turn(index, job)
                 };
-                // Prefer interactive policy, but admit an eligible background job
-                // after at most three foreground dispatches in the same quota.
+                // Prefer interactive policy, but owe the background a turn
+                // after three foreground turns in the same quota. Validators
+                // can borrow its pacing wait; one changed probe closes that
+                // allowance and repays its spacing before the owed job runs.
                 // CI and details spend the same core allowance despite using
                 // separate socket lanes. GraphQL keeps its own counter.
                 // Quotas, lane limits,
@@ -811,13 +818,18 @@ impl Scheduler {
                 // Reserve every live window before another socket can dispatch.
                 let reservation = (!job.minting).then(|| budgets.reserve(&job));
                 let probe = probe.filter(|_| !job.minting);
-                let streak = interactive_streaks.entry(job.quota()).or_default();
-                *streak = if job.interactive.load(Ordering::Relaxed) {
-                    streak.saturating_add(1)
-                } else {
-                    0
-                };
-                if !job.minting {
+                // A borrowed wait is not a new scheduling turn. Advancing the
+                // priority counters here can replace its owed request and
+                // renew speculative borrowing before the debt is repaid.
+                if probe.is_none() {
+                    let streak = interactive_streaks.entry(job.quota()).or_default();
+                    *streak = if job.interactive.load(Ordering::Relaxed) {
+                        streak.saturating_add(1)
+                    } else {
+                        0
+                    };
+                }
+                if !job.minting && probe.is_none() {
                     let class = (job.quota(), job.interactive.load(Ordering::Relaxed));
                     if job.completion_validation.load(Ordering::Relaxed) {
                         completion_yields.insert(class);

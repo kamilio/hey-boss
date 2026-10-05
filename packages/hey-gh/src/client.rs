@@ -2338,6 +2338,16 @@ mod priority_tests {
     }
 
     #[tokio::test]
+    async fn foreground_validators_progress_while_background_owns_the_next_paced_turn() {
+        queued_probe_turn(false, false, true, false, ProbeReplies::UnchangedAfterBurst).await;
+    }
+
+    #[tokio::test]
+    async fn changed_foreground_validator_preserves_the_owed_background_turn() {
+        queued_probe_turn(false, false, true, false, ProbeReplies::ChangedAfterBurst).await;
+    }
+
+    #[tokio::test]
     async fn changed_probes_cannot_postpone_a_higher_priority_turn() {
         queued_probe_turn(true, false, false, false, ProbeReplies::Changed).await;
         queued_probe_turn(true, true, true, false, ProbeReplies::Changed).await;
@@ -2368,6 +2378,8 @@ mod priority_tests {
     enum ProbeReplies {
         Changed,
         Unchanged,
+        UnchangedAfterBurst,
+        ChangedAfterBurst,
         Held,
         ChangedWithCompletions,
         LastSlot,
@@ -2382,7 +2394,13 @@ mod priority_tests {
     ) {
         let changed = matches!(
             replies,
-            ProbeReplies::Changed | ProbeReplies::ChangedWithCompletions
+            ProbeReplies::Changed
+                | ProbeReplies::ChangedWithCompletions
+                | ProbeReplies::ChangedAfterBurst
+        );
+        let foreground_burst = matches!(
+            replies,
+            ProbeReplies::UnchangedAfterBurst | ProbeReplies::ChangedAfterBurst
         );
         let held = matches!(replies, ProbeReplies::Held);
         let mixed = matches!(replies, ProbeReplies::ChangedWithCompletions);
@@ -2471,11 +2489,29 @@ mod priority_tests {
                     .unwrap();
             }
         }
+        if foreground_burst {
+            for path in ["burst/1", "burst/2"] {
+                INTERACTIVE_READ
+                    .scope(
+                        foreground_priority(),
+                        client.get(path, Freshness::Revalidate),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
         calls.lock().unwrap().clear();
         live.store(true, Ordering::Relaxed);
         let mut tasks = vec![tokio::spawn({
             let c = client.clone();
-            async move { c.get("gate", Freshness::Revalidate).await }
+            async move {
+                INTERACTIVE_READ
+                    .scope(
+                        Arc::new(AtomicBool::new(foreground_burst)),
+                        c.get("gate", Freshness::Revalidate),
+                    )
+                    .await
+            }
         })];
         tokio::time::timeout(Duration::from_secs(3), async {
             while calls.lock().unwrap().is_empty() {
@@ -2576,6 +2612,11 @@ mod priority_tests {
             assert!(
                 owed > 1,
                 "unchanged validations waited behind soft pacing: {calls:?}"
+            );
+        } else if foreground_burst {
+            assert_eq!(
+                owed, 2,
+                "exactly one changed validator may borrow the background turn: {calls:?}"
             );
         } else if interactive == probe_interactive && completion == probe_completion {
             assert!(
@@ -2687,7 +2728,10 @@ mod priority_tests {
         let calls = calls.lock().unwrap();
         let position = calls.iter().position(|path| path == "/owed").unwrap();
         assert!(
-            position <= if after_completion { 2 } else { 4 },
+            // Three ordinary foreground turns may be followed by one known
+            // validator borrowing the background wait. A changed response
+            // closes that allowance until the owed background job runs.
+            position <= if after_completion { 2 } else { 5 },
             "conditional probes postponed an owed turn (after completion={after_completion}): {calls:?}"
         );
     }
