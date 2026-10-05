@@ -8,7 +8,8 @@ const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!,
     pullRequest(number: $number) {
       id number state merged mergeable headRefOid baseRefOid
       repository { nameWithOwner }
-      potentialMergeCommit { oid parents(first: 2) { totalCount nodes { oid } } }
+      commits(last: 1) { nodes { commit { oid status { id } } } }
+      potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
     }
   }
 }"#;
@@ -79,6 +80,82 @@ impl CiMetadata {
 }
 
 impl Client {
+    pub(super) async fn empty_commit_statuses(
+        &self,
+        repository: &str,
+        sha: &str,
+        rest_path: &str,
+        freshness: Freshness,
+    ) -> Result<bool> {
+        if matches!(freshness, Freshness::Revalidate)
+            || matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
+        {
+            return Ok(false);
+        }
+        let Some(owner) = crate::entity::current().filter(|owner| {
+            owner.repository.eq_ignore_ascii_case(repository) && owner.node_id.is_some()
+        }) else {
+            return Ok(false);
+        };
+        let (repo_owner, repo) = repository.split_once('/').expect("validated repository");
+        // Only reuse a query already made for metadata. Do not add a network
+        // request, wait for another collector, or relabel a rollup as full CI.
+        let response = match self
+            .peek_graphql(
+                CI_SELECTORS,
+                json!({"owner":repo_owner,"repo":repo,"number":owner.number}),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(Error::CacheMiss) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if response.validated_at_ms == 0
+            || response.validated_at_ms > now_ms()
+            || matches!(freshness, Freshness::MaxAge(age) if !recent(&response, age))
+        {
+            return Ok(false);
+        }
+        let pr = &response.data["data"]["repository"]["pullRequest"];
+        if pr["id"].as_str() != owner.node_id.as_deref()
+            || pr["number"] != owner.number
+            || !pr["repository"]["nameWithOwner"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        {
+            return Ok(false);
+        }
+        // Commit.status is null only when no legacy statuses exist. Missing
+        // fields, null commits, and nonempty statuses are not empty evidence.
+        // Nonempty statuses retain REST's numeric IDs and complete payloads.
+        let empty =
+            |commit: &Value| commit["oid"] == sha && commit.get("status") == Some(&Value::Null);
+        let head_empty = pr["headRefOid"] == sha
+            && pr["commits"]["nodes"]
+                .as_array()
+                .is_some_and(|nodes| nodes.len() == 1 && empty(&nodes[0]["commit"]));
+        if !head_empty && !empty(&pr["potentialMergeCommit"]) {
+            return Ok(false);
+        }
+        match self.peek_get(rest_path).await {
+            // A later REST read can observe a newly posted status. Never let
+            // older empty evidence hide it, including during offline reads.
+            Ok(rest) if rest.validated_at_ms >= response.validated_at_ms => return Ok(false),
+            Ok(_) | Err(Error::CacheMiss) => {}
+            Err(error) => return Err(error),
+        }
+        super::record_validation(
+            &format!(
+                "graphql://{}/{repository}/pulls/{}#commit-statuses:{sha}",
+                self.hostname(),
+                owner.number
+            ),
+            &response,
+        );
+        Ok(true)
+    }
+
     pub(super) async fn initial_ci_metadata(
         &self,
         repository: &str,

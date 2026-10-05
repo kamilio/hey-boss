@@ -1025,12 +1025,16 @@ impl Client {
         field: &str,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
-        self.collect_ci_source(
-            repository,
-            sha,
-            source,
-            self.pages(path, Some(field), freshness),
-        )
+        self.collect_ci_source(repository, sha, source, async {
+            if source == "commit_statuses"
+                && self
+                    .empty_commit_statuses(repository, sha, path, freshness)
+                    .await?
+            {
+                return Ok(Vec::new());
+            }
+            self.pages(path, Some(field), freshness).await
+        })
         .await
     }
 

@@ -732,6 +732,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 "mergeable":"MERGEABLE","headRefOid":HEAD,"baseRefOid":BASE,
                 "repository":{"nameWithOwner":"acme/demo"},
                 "potentialMergeCommit":{"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":OTHER_BASE},{"oid":HEAD}]}}});
+            if mode == "ci-point-empty-status" {
+                node["commits"] = json!({"nodes":[{"commit":{"oid":HEAD,"status":null}}]});
+                node["potentialMergeCommit"]["status"] = Value::Null;
+            }
             match mode.as_str() {
                 "ci-point-head" => node["headRefOid"] = json!(NEW_HEAD),
                 "ci-point-base" => node["baseRefOid"] = json!(NEW_HEAD),
@@ -1229,6 +1233,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         } else if normalized.ends_with("/actions/runs") && query.contains(MERGE) {
             value = json!({"workflow_runs":[]});
         }
+    }
+    if mode == "ci-point-empty-status" && normalized.ends_with("/status") {
+        value = json!({"state":"pending","total_count":0,"statuses":[]});
     }
     if mode.starts_with("account-multi-source") {
         if normalized.ends_with("/pulls/7") {
