@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGENTS"] == "1" { auditNotificationAgents(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUIET_HOURS"] == "1" { auditQuietHours(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WEB_INBOX_ONLY"] == "1" {
@@ -3092,4 +3093,62 @@ func auditQuietHours() {
     ui.add(try! store.database.get("alert")); ui.add(try! store.database.get("prompt"))
     precondition(ui.cards.isEmpty && ui.questions.isEmpty && ui.current == nil)
     print("PASS quiet hours: boundaries, timezone, DST, disabled mode, durable inbox, restart suppression, native surfaces")
+}
+
+func auditNotificationAgents() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-senders-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = try! Store(root.appendingPathComponent("history.db").path)
+    func call(_ payload: [String: Any]) -> [String: Any] {
+        let request = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: payload.merging(["sync": false]) { a, _ in a }))
+        var fds: [Int32] = [0, 0]; precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        store.handle(request, Reply(fds[1]))
+        return try! JSONSerialization.jsonObject(with: FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()) as! [String: Any]
+    }
+    func send(_ agent: String, _ machine: String = "mac", _ command: String = "alert") -> Record {
+        let origin: [String: Any] = ["cwd":"/tmp/project", "pid":123, "executable":"/bin/hey-boss", "launchers":[], "agent":["id":agent, "kind":"codex", "machine":machine, "host":"mac.local", "session_id":agent, "source":"CODEX_THREAD_ID", "creation_run":["id":"run-1", "project_id":"named:Trace", "number":1, "started_at":1], "invocation":["offset":42,"call_id":"call-1"]]]
+        let reply = call(["command":command,"project":"Trace","title":"Synthetic","question":"Synthetic","description":"Synthetic","origin":origin])
+        return try! store.database.get(reply["task_id"] as! String)
+    }
+    var shown = [String](); store.show = { shown.append($0.taskID) }
+    let first = send("agent-1", "mac", "update"), second = send("agent-2")
+    let mute = call(["command":"inbox_mute_agent", "task_id":first.taskID, "muted":true])
+    precondition(mute["status"] as? String == "ok")
+    let suppressed = send("agent-1")
+    precondition(shown == [first.taskID,second.taskID], "Muted sender must not show new banners")
+    precondition(suppressed.status == "pending" && suppressed.agentMuted == true, "Muting keeps history and never answers")
+    let question = send("agent-1", "mac", "ask")
+    precondition(question.status == "pending" && question.agentMuted == true)
+    let otherHost = send("agent-1", "other")
+    precondition(shown.last == otherHost.taskID, "Mute identity includes machine")
+    let restarted = try! Store(root.appendingPathComponent("history.db").path)
+    var restored = [String](); restarted.show = { restored.append($0.taskID) }; restarted.restore()
+    precondition(!restored.contains(first.taskID) && !restored.contains(suppressed.taskID))
+    _ = call(["command":"inbox_mute_agent", "task_id":first.taskID, "muted":false])
+    let unmuted = send("agent-1"); precondition(shown.last == unmuted.taskID)
+    precondition(try! store.database.get(suppressed.taskID).agentMuted == true, "Unmute does not replay suppressed notices")
+    var links = [URL]()
+    let card = Card(first, open: {}, openURL: { links.append($0) }, complete: { _,_ in preconditionFailure("Sender actions must not dismiss") })
+    for title in ["Mute agent", "Open agent", "Steer agent"] {
+        let button = card.view.content.subviews.compactMap { $0 as? ActionButton }.first { $0.title == title }!
+        button.performClick(nil)
+    }
+    precondition(links.count == 3 && links.allSatisfy { $0.host == "hey-boss.test" })
+    precondition(links[1].fragment!.contains("run=run-1") && links[1].fragment!.contains("at=42"))
+    precondition(links[2].fragment!.contains("steer=1"))
+    card.configure(grouped: false)
+    let senderButtons = card.view.content.subviews.compactMap { $0 as? ActionButton }.filter { $0.title.hasSuffix("agent") }
+    precondition(senderButtons.count == 3)
+    for button in senderButtons {
+        precondition(card.view.bounds.contains(button.frame))
+        precondition(!button.frame.intersects(card.body.frame))
+        if let link = card.link { precondition(!button.frame.intersects(link.frame)) }
+    }
+    let ui = Interface(present: false); var questionLinks = [URL]()
+    ui.openURL = { questionLinks.append($0) }; ui.add(question)
+    let questionButtons = (ui.question.contentView as! Surface).content.subviews.compactMap { $0 as? ActionButton }.filter { $0.title.hasSuffix("agent") }
+    precondition(questionButtons.count == 3)
+    questionButtons[2].performClick(nil); precondition(questionLinks.count == 1 && ui.current?.taskID == question.taskID)
+    print("PASS sender trace, native web actions, persistent scoped mute, pending questions, unmute without replay")
 }

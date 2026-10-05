@@ -92,7 +92,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
     const device=store.db.prepare('SELECT * FROM devices WHERE id=?').get(row.device);
     const body=JSON.parse(row.body);const task=store.get(body.id);
     const age=now()-Number(task.createdAt??now()/1000)*1000;
-    if(!device?.subscription||task.status!=='pending'||!['approval','prompt'].includes(task.kind)&&age>1800000){store.db.prepare('DELETE FROM outbox WHERE id=?').run(row.id);continue;}
+    if(!device?.subscription||task.agentMuted===true||task.status!=='pending'||!['approval','prompt'].includes(task.kind)&&age>1800000){store.db.prepare('DELETE FROM outbox WHERE id=?').run(row.id);continue;}
     if(!store.routing(now()).notifyPhone)continue;
     if(!groups.has(row.device))groups.set(row.device,{device,rows:[]});
     groups.get(row.device).rows.push({row,body,task});
@@ -103,7 +103,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
     for(const candidates of batches){
      if(store.routing(now()).quietHoursActive){store.db.exec('DELETE FROM outbox');break;}
      if(!store.routing(now()).notifyPhone)break;
-     const batch=candidates.filter(x=>store.get(x.task.taskID).status==='pending');
+     const batch=candidates.filter(x=>{const task=store.get(x.task.taskID);return task.status==='pending'&&task.agentMuted!==true;});
      if(!batch.length)continue;
      const decisions=batch.filter(x=>['approval','prompt'].includes(x.task.kind)).length;
      const body=batch.length===1?{...batch[0].body,...pushContent(batch[0].task)}:{id:'inbox',kind:'digest',taskIDs:batch.map(x=>x.task.taskID),title:`${batch.length} requests waiting`,body:decisions?`${decisions} ${decisions===1?'decision needs':'decisions need'} your answer. Open your inbox to catch up.`:'Your agents have updates ready. Open your inbox to catch up.'};

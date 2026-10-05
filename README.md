@@ -390,6 +390,13 @@ Click a notification’s title or body to open it; click a collapsed project sum
 `hide` also cancels a question, whether it is queued on the server or already
 displayed on the Mac. Repeating it preserves the stored terminal status and answer.
 
+Notifications capture their sending agent, session, worker run, invocation, and
+process trace. **Open agent** and **Steer agent** open that session on the web;
+**Mute agent** opens its Inbox sender controls. Muting persists across restarts,
+silences desktop and phone delivery from that agent on that machine, and keeps
+history and unanswered questions. Unmuting does not replay suppressed notices.
+Older notices without a recorded agent show their available process trace.
+
 Creation commands (`alert`, `update`, `ask`, `prompt`, and `approval`) accept optional appearance flags:
 
 - `--severity neutral|info|success|warning|error` adds a subtle status badge color. The default is neutral. Info marks useful context, success marks a completed outcome, warning means something needs attention, and error means an actual failure.

@@ -91,6 +91,7 @@ struct Request: Decodable {
     let bridge_host: String?
     let source_host: String?
     let origin: LaunchOrigin?
+    let muted: Bool?
     let severity: String?
     let icon: String?
     let icon_path: String?
@@ -113,6 +114,40 @@ struct LaunchOrigin: Codable {
     let executable: String
     let git: GitContext?
     let launchers: [Launcher]
+    var agent: NotificationAgent?
+}
+
+struct NotificationAgent: Codable {
+    let id: String
+    let kind: String
+    let machine: String
+    let host: String
+    let session_id: String?
+    let source: String?
+    let model: String?
+    let creation_run: Run?
+    let invocation: Invocation?
+    struct Run: Codable { let id: String; let project_id: String; let number: Int64; let started_at: Int64; let title: String? }
+    struct Invocation: Codable { let offset: UInt64; let call_id: String? }
+    var key: String { machine + ":" + id }
+    func webURL(steer: Bool = false) -> URL? {
+        guard let session_id else { return nil }
+        var params = URLComponents()
+        params.queryItems = [URLQueryItem(name: "host", value: host), URLQueryItem(name: "run", value: creation_run?.id ?? "session:" + session_id), URLQueryItem(name: "project", value: creation_run?.project_id ?? "")]
+        if let invocation { params.queryItems!.append(URLQueryItem(name: "at", value: String(invocation.offset))) }
+        if steer { params.queryItems!.append(URLQueryItem(name: "steer", value: "1")) }
+        var url = URLComponents(string: "http://hey-boss.test/agents/session")!
+        url.percentEncodedFragment = params.percentEncodedQuery
+        return url.url
+    }
+}
+
+func notificationSenderURL(_ row: Record) -> URL {
+    var params = URLComponents()
+    params.queryItems = [URLQueryItem(name: "view", value: "inbox"), URLQueryItem(name: "notice", value: row.taskID), URLQueryItem(name: "sender", value: "mute")]
+    var url = URLComponents(string: "http://hey-boss.test/")!
+    url.percentEncodedFragment = params.percentEncodedQuery
+    return url.url!
 }
 
 struct DocumentAttachment: Codable {
@@ -210,6 +245,7 @@ struct Record: Codable {
     var iconData: Data?
     var bannerHidden: Bool?
     var quietHoursMuted: Bool?
+    var agentMuted: Bool?
     var issue: IssueReference?
 
     var isLocalSource: Bool { sourceHost == "This Mac" }
@@ -311,6 +347,7 @@ final class Database {
         db = opened
         sqlite3_busy_timeout(db, 3000)
         try execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS dialogs (id TEXT PRIMARY KEY, status TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pending ON dialogs(status);")
+        try execute("CREATE TABLE IF NOT EXISTS muted_agents (sender TEXT PRIMARY KEY)")
         try execute("CREATE INDEX IF NOT EXISTS inbox_issue ON dialogs(json_extract(body,'$.issue.project'),json_extract(body,'$.issue.number'),coalesce(json_extract(body,'$.issue.host'),'')) WHERE json_valid(body)")
         try execute("UPDATE dialogs SET body=json_set(body, '$.title', json_extract(body, '$.description')) WHERE json_valid(body) AND json_extract(body, '$.kind')='update' AND json_extract(body, '$.title') IS NULL;")
         try execute("CREATE VIEW IF NOT EXISTS notifications AS SELECT id, json_extract(body, '$.project') AS project, json_extract(body, '$.title') AS title, json_extract(body, '$.kind') AS kind, json_extract(body, '$.question') AS message, json_extract(body, '$.description') AS summary, status, json_extract(body, '$.createdAt') AS created_at, json_extract(body, '$.presentedAt') AS presented_at, json_extract(body, '$.completedAt') AS completed_at FROM dialogs;")
@@ -333,6 +370,21 @@ final class Database {
         for (index, value) in [row.taskID, row.status, body].enumerated() {
             guard sqlite3_bind_text(stmt, Int32(index + 1), value, -1, transient) == SQLITE_OK else { throw failure() }
         }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
+    }
+    func agentMuted(_ agent: NotificationAgent?) throws -> Bool {
+        guard let agent else { return false }
+        let stmt = try statement("SELECT 1 FROM muted_agents WHERE sender=?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, agent.key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        let result = sqlite3_step(stmt)
+        guard [SQLITE_ROW, SQLITE_DONE].contains(result) else { throw failure() }
+        return result == SQLITE_ROW
+    }
+    func muteAgent(_ agent: NotificationAgent, muted: Bool) throws {
+        let stmt = try statement(muted ? "INSERT OR IGNORE INTO muted_agents(sender) VALUES(?)" : "DELETE FROM muted_agents WHERE sender=?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, agent.key, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
     }
     func get(_ id: String) throws -> Record {
@@ -377,7 +429,7 @@ final class Database {
     }
     func inboxRows() throws -> [[String: Any]] {
         // Project list metadata and bounded 128px icon snapshots, never document/attachment bodies.
-        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
+        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'agent',json_extract(body,'$.origin.agent'),'agentMuted',json_extract(body,'$.agentMuted'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
         defer { sqlite3_finalize(stmt) }
         var rows: [[String: Any]] = []
         while true {
@@ -471,7 +523,7 @@ final class MobileHub {
         guard let response else { throw StorageError(description: "No mobile response") }; return response
     }
     func payload(_ row: Record) -> [String: Any] {
-        ["taskID":row.taskID,"kind":row.kind,"title":String((row.title ?? "Update").prefix(256)),"project":String((row.project ?? "Workspace").prefix(256)),"question":row.question,"description":row.description,"options":row.options,"sourceHost":row.sourceLabel,"severity":row.severity ?? "info","createdAt":row.createdAt,"linkURL":row.linkURL as Any? ?? NSNull(),"linkLabel":row.linkLabel as Any? ?? NSNull(),"commentsEnabled":row.commentsEnabled ?? false,"issue":row.issue.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]
+        ["taskID":row.taskID,"kind":row.kind,"title":String((row.title ?? "Update").prefix(256)),"project":String((row.project ?? "Workspace").prefix(256)),"question":row.question,"description":row.description,"options":row.options,"sourceHost":row.sourceLabel,"agentMuted":row.agentMuted ?? false,"origin":row.origin.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull(),"severity":row.severity ?? "info","createdAt":row.createdAt,"linkURL":row.linkURL as Any? ?? NSNull(),"linkLabel":row.linkLabel as Any? ?? NSNull(),"commentsEnabled":row.commentsEnabled ?? false,"issue":row.issue.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]
     }
     func publish(_ row: Record, presenceAlreadyPublished: Bool = false) throws -> [String: Any] {
         // Publish presence first so a new item cannot race an outdated away state.
@@ -601,7 +653,8 @@ final class Store {
                 if let expiry = row.expiresAt, expiry <= Date().timeIntervalSince1970 { complete(row.taskID, nil) }
                 else {
                     if muted { row.quietHoursMuted = true; try database.save(row) }
-                    if row.quietHoursMuted == true { continue }
+                    if row.quietHoursMuted == true || row.agentMuted == true { continue }
+                    if try database.agentMuted(row.origin?.agent) { continue }
                     if row.bannerHidden == true { row.bannerHidden = false; try database.save(row) }
                     show(row)
                 }
@@ -636,10 +689,11 @@ final class Store {
             row.severity = request.severity; row.icon = request.icon
             row.iconData = request.icon_path.flatMap(snapshotIcon)
             row.quietHoursMuted = notificationsMuted()
+            row.agentMuted = try database.agentMuted(row.origin?.agent)
             try database.transaction { try database.save(row); try mobile?.track(row) }
             refreshPendingCount()
             if request.sync { waiters[row.taskID] = [reply] } else { reply.send(["task_id": row.taskID]) }
-            if row.quietHoursMuted != true { show(row) }
+            if row.quietHoursMuted != true && row.agentMuted != true { show(row) }
             return
         }
         guard ["status", "hide", "wait"].contains(request.command) else { throw invalid("Unknown command") }
@@ -668,7 +722,11 @@ final class Store {
     func inboxReply(_ reply: Reply, task: Record? = nil, rows: [[String:Any]]? = nil, changed: Bool = false) throws {
         var value: [String:Any] = ["changed":changed]
         if let rows { value["tasks"] = rows; value["unread"] = rows.filter { $0["status"] as? String == "pending" }.count }
-        if let task { value["task"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task)) }
+        if let task {
+            var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task)) as! [String: Any]
+            object["senderMuted"] = try database.agentMuted(task.origin?.agent)
+            value["task"] = object
+        }
         let data = try JSONSerialization.data(withJSONObject:value)
         reply.send(["task_id":task?.taskID ?? "inbox", "status":"ok","result":String(decoding:data,as:UTF8.self)])
     }
@@ -703,6 +761,7 @@ final class Store {
         guard let id = request.task_id, !id.isEmpty, id.utf8.count <= 256 else { throw StorageError(description:"Task ID is required") }
         var row = try database.get(id)
         let before = try JSONEncoder().encode(row)
+        var senderChanged = false
         let completed: (Result<Record, Error>) -> Void = { result in
             do {
                 let updated = try result.get()
@@ -710,6 +769,21 @@ final class Store {
             } catch { reply.send(["status":"error", "error":String(describing:error)]) }
         }
         switch request.command {
+        case "inbox_mute_agent":
+            guard let agent = row.origin?.agent, !agent.id.isEmpty, !agent.machine.isEmpty, let muted = request.muted else { throw StorageError(description: "This notice has no recorded sender identity") }
+            senderChanged = try database.agentMuted(agent) != muted
+            var hidden: [String] = []
+            try database.transaction {
+                try database.muteAgent(agent, muted: muted)
+                if muted {
+                    for var pending in try database.pending() where pending.origin?.agent?.key == agent.key {
+                        pending.agentMuted = true
+                        try database.save(pending); try mobile?.track(pending)
+                        hidden.append(pending.taskID)
+                    }
+                }
+            }
+            removeMany(hidden)
         case "inbox_view": break
         case "inbox_read":
             if row.status == "pending" && ["alert","update"].contains(row.kind) && row.commentsEnabled != true { finishAsync(id,nil,completion:completed); return }
@@ -747,7 +821,7 @@ final class Store {
         default: throw StorageError(description:"Unknown Inbox command")
         }
         let updated = try database.get(id)
-        try inboxReply(reply,task:updated,changed:before != JSONEncoder().encode(updated))
+        try inboxReply(reply,task:updated,changed:senderChanged || before != JSONEncoder().encode(updated))
     }
     func addComment(_ id: String, text: String, quote: String?, commentID: String? = nil, selection: DocumentSelection? = nil) throws -> Record {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2483,6 +2557,19 @@ final class NotificationClick: NSObject, NSGestureRecognizerDelegate {
     }
 }
 
+func addNotificationAgentButtons(_ row: Record, to view: NSView, openURL: @escaping (URL) -> Void) {
+    for (index, title) in ["Mute agent", "Open agent", "Steer agent"].enumerated() {
+        let button = ActionButton(title, frame: NSRect(x: 12 + CGFloat(index) * ((view.bounds.width - 24) / 3), y: 7, width: (view.bounds.width - 24) / 3 - 2, height: 24), style: .quiet) {
+            let destination = index == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL(steer: index == 2) ?? notificationSenderURL(row))
+            openURL(destination)
+        }
+        button.font = .systemFont(ofSize: 11)
+        button.toolTip = row.origin?.agent?.id ?? "Sender identity was not recorded. Open available trace details."
+        button.setAccessibilityLabel(title + " in web")
+        view.addSubview(button)
+    }
+}
+
 final class Card {
     let row: Record
     let view: Surface
@@ -2515,7 +2602,8 @@ final class Card {
         let hasAction = row.kind == "update" || row.linkURL != nil
         let actionTitle = row.kind == "update" ? "Read update" : (row.linkLabel ?? "")
         let actionWidth: CGFloat = min(260, max(126, ceil((actionTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]).width) + 32))
-        let actionSpace: CGFloat = hasAction ? 34 : 0
+        let senderSpace: CGFloat = 30
+        let actionSpace: CGFloat = (hasAction ? 34 : 0) + senderSpace
         headerRight = 280
         let height = body.frame.height + 72 + actionSpace
         view = effect(NSRect(x: 0, y: 0, width: 344, height: height))
@@ -2523,7 +2611,7 @@ final class Card {
         contentHeight = height
         body.setFrameOrigin(NSPoint(x: 16, y: 32 + actionSpace))
         view.content.addSubview(body)
-        let source = NSTextField(labelWithString: row.sourceLabel)
+        let source = NSTextField(labelWithString: row.origin?.agent.map { "\($0.model ?? $0.kind) · \($0.id.suffix(8)) · \(row.sourceLabel)" } ?? row.sourceLabel)
         source.font = .systemFont(ofSize: 10, weight: .medium)
         source.textColor = .tertiaryLabelColor
         source.lineBreakMode = .byTruncatingTail
@@ -2565,13 +2653,14 @@ final class Card {
             else if let link = row.linkURL, let url = URL(string: link) { openURL(url) }
             if row.commentsEnabled != true { complete(row.taskID, nil) }
         }
+        addNotificationAgentButtons(row, to: view.content, openURL: openURL)
         contentClick = NotificationClick(view: view, action: activate)
         body.isSelectable = false
         if hasAction {
-            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: 28), style: .secondary, action: activate)
+            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10 + senderSpace, width: actionWidth, height: 28), style: .secondary, action: activate)
             button.font = .systemFont(ofSize: 12, weight: .medium)
             button.controlSize = .regular
-            button.frame = NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: button.intrinsicContentSize.height)
+            button.frame = NSRect(x: 328 - actionWidth, y: 10 + senderSpace, width: actionWidth, height: button.intrinsicContentSize.height)
             button.alignment = .center
             button.cell!.lineBreakMode = .byTruncatingTail
             button.toolTip = row.kind == "update" ? "Read update" : (row.linkLabel ?? "Open")
@@ -3000,16 +3089,17 @@ final class Interface {
         let inputHeight: CGFloat = row.kind == "prompt" ? 120 : inlineOptions ? 48 : optionHeights.reduce(CGFloat(0)) { $0 + $1 + 8 }
         let natural = 68 + title.frame.height + description.frame.height + inputHeight
         let screen = question.visibleArea
-        let height = min(natural, screen.height - 80)
+        let height = min(natural + 30, screen.height - 80)
         let view = effect(NSRect(x: 0, y: 0, width: 480, height: height))
         let body = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: natural))
-        let bodyScroll = NSScrollView(frame: view.bounds)
+        let bodyScroll = NSScrollView(frame: NSRect(x: 0, y: 30, width: 480, height: height - 30))
         bodyScroll.drawsBackground = false
         bodyScroll.hasVerticalScroller = true
         bodyScroll.scrollerStyle = .overlay
         bodyScroll.autohidesScrollers = true
         bodyScroll.documentView = body
         view.content.addSubview(bodyScroll)
+        addNotificationAgentButtons(row, to: view.content, openURL: { [weak self] in self?.openURL($0) })
         let header = DragHeader(labelWithString: row.heading)
         header.toolTip = row.heading
         header.lineBreakMode = .byTruncatingTail
@@ -3037,10 +3127,10 @@ final class Interface {
                 guard abs(delta) > 0.5 else { return }
                 input.frame.size.height = height; body.frame.size.height += delta
                 for child in body.subviews where child !== input && child !== submit { child.frame.origin.y += delta }
-                let nextHeight = min(body.frame.height, screen.height - 80)
+                let nextHeight = min(body.frame.height + 30, screen.height - 80)
                 var rect = self.question.frame; rect.origin.y -= (nextHeight - rect.height) / 2; rect.size.height = nextHeight
                 self.question.place(rect, display: self.present)
-                bodyScroll.frame.size.height = nextHeight
+                bodyScroll.frame.size.height = nextHeight - 30
                 input.resizeEditor()
             }
             input.stringValue = questionDrafts[row.taskID] ?? ""
@@ -3068,11 +3158,12 @@ final class Interface {
                 x += optionWidths[index] + 8
             }
         }
-        let finalHeight = min(body.frame.height, screen.height - 80)
-        view.frame.size.height = finalHeight; bodyScroll.frame = view.bounds
+        let finalHeight = min(body.frame.height + 30, screen.height - 80)
+        view.frame.size.height = finalHeight
+        bodyScroll.frame = NSRect(x: 0, y: 30, width: 480, height: finalHeight - 30)
         question.contentView = view
         question.place(NSRect(x: screen.midX - 240, y: screen.midY - finalHeight / 2, width: 480, height: finalHeight), display: present)
-        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, body.frame.height - finalHeight)))
+        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, body.frame.height - bodyScroll.frame.height)))
         bodyScroll.reflectScrolledClipView(bodyScroll.contentView)
         if present {
             question.makeKeyAndOrderFront(nil)
