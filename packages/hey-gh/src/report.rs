@@ -53,6 +53,17 @@ fn can_publish() -> bool {
     !PUBLICATION_READ_ONLY.with(|flag| flag.load(Ordering::Relaxed))
 }
 
+fn usable_pr_seed(data: &Value, number: u64) -> bool {
+    data["number"] == number
+        && data["state"] == "open"
+        && data["merged"] != true
+        && data["node_id"].as_str().is_some_and(|id| !id.is_empty())
+        && data["head"]["sha"].as_str().is_some_and(valid_sha)
+        && data["base"]["sha"].as_str().is_some_and(valid_sha)
+        && (data["merge_commit_sha"].is_null()
+            || data["merge_commit_sha"].as_str().is_some_and(valid_sha))
+}
+
 async fn acquire_report_lock(
     lock: Arc<tokio::sync::Mutex<()>>,
     freshness: Freshness,
@@ -524,7 +535,7 @@ impl Client {
                         Freshness::Revalidate
                     };
                     crate::entity::clear();
-                    let seed = self.cached_pr_seed(repository, number, policy).await?;
+                    let seed = self.cached_ci_pr_seed(repository, number, policy).await?;
                     let (pr, data) = if let Some(seed) = seed {
                         crate::entity::set(self.pr_owner(repository, number, &seed.data).await?);
                         let head = sha(&seed.data, "head")?;
@@ -622,6 +633,34 @@ impl Client {
         validate_repository(repository)?;
         if number == 0 {
             return Err(Error::Invalid("pull number must be positive".into()));
+        }
+        if self.ci_uses_installation(repository)
+            && !matches!(freshness, Freshness::Revalidate)
+            && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
+        {
+            let cached = match self
+                .peek_get(&format!("repos/{repository}/pulls/{number}"))
+                .await
+            {
+                Ok(cached) => Some(cached),
+                Err(Error::CacheMiss) => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(cached) = cached
+                && self
+                    .personal_pr_metadata_superseded(repository, number, &cached)
+                    .await?
+            {
+                if matches!(freshness, Freshness::CachedOnly) {
+                    return Err(Error::CacheMiss);
+                }
+                return self
+                    .get(
+                        &format!("repos/{repository}/pulls/{number}"),
+                        Freshness::Revalidate,
+                    )
+                    .await;
+            }
         }
         self.get(&format!("repos/{repository}/pulls/{number}"), freshness)
             .await
@@ -765,18 +804,10 @@ impl Client {
                 .await
             {
                 Ok(cached)
-                    if cached.data["number"] == number
-                        && cached.data["state"] == "open"
-                        && cached.data["merged"] != true
-                        && cached.data["node_id"]
-                            .as_str()
-                            .is_some_and(|id| !id.is_empty())
-                        && cached.data["head"]["sha"].as_str().is_some_and(valid_sha)
-                        && cached.data["base"]["sha"].as_str().is_some_and(valid_sha)
-                        && (cached.data["merge_commit_sha"].is_null()
-                            || cached.data["merge_commit_sha"]
-                                .as_str()
-                                .is_some_and(valid_sha)) =>
+                    if usable_pr_seed(&cached.data, number)
+                        && !self
+                            .personal_pr_metadata_superseded(repository, number, &cached)
+                            .await? =>
                 {
                     // Only a collection seed, not a validation or observation.
                     // CI validates independently while details start loading;

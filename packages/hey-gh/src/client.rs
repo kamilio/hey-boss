@@ -17,6 +17,7 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::instrument::WithSubscriber;
 use url::Url;
 
+mod ci_pull_request;
 mod ci_selectors;
 
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
@@ -454,10 +455,15 @@ impl Client {
                 Some(version) => format!("{base_key}#completed-jobs-version={version}"),
                 None => base_key,
             };
-            // Generic GraphQL must never share cache or in-flight evidence with
-            // the sealed installation query, even when their bodies are equal.
+            // CI-only installation metadata must never coalesce with or populate
+            // generic personal metadata, even for an identical query or REST URL.
             let base_key = if installation {
-                format!("{base_key}#installation-ci-selectors")
+                let provider = if body.is_some() {
+                    "installation-ci-selectors"
+                } else {
+                    "installation-ci-pr"
+                };
+                format!("{base_key}#{provider}")
             } else {
                 base_key
             };
