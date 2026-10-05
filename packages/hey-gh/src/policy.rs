@@ -130,6 +130,23 @@ impl Client {
         let Freshness::MaxAge(age) = freshness else {
             return Ok(true);
         };
+        // A small completion record lets cold candidates yield without loading
+        // full PR/CI payloads. Its wrapper clock is only a scheduling hint, not
+        // source evidence; identity and freshness are still checked below.
+        let completion = self
+            .peek_derived(&format!(
+                "account-status-validated:ci:{}/{number}",
+                repository.to_ascii_lowercase()
+            ))
+            .await?;
+        if completion.is_none_or(|record| {
+            record.validated_at_ms == 0
+                || !crate::now_ms()
+                    .checked_sub(record.validated_at_ms)
+                    .is_some_and(|elapsed| (elapsed as u128) < age.as_millis())
+        }) {
+            return Ok(false);
+        }
         crate::report::VALIDATIONS
             .scope(
                 std::cell::RefCell::new(Vec::new()),
@@ -853,6 +870,9 @@ fn rank(state: &str) -> u8 {
         _ => 0,
     }
 }
+
+#[cfg(test)]
+mod admission_tests;
 
 #[cfg(test)]
 mod tests {
