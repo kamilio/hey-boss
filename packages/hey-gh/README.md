@@ -603,6 +603,13 @@ The final CI selector check can reuse REST or matching discovery evidence under
 evidence validated while CI was loading. Older evidence is revalidated through
 REST; explicit `--refresh` still requires revalidation.
 
+The point selector query also records whether head/test-merge commits have no
+legacy statuses. CI can reuse that explicit null evidence within the requested
+cache age, saving the corresponding REST status read without another query.
+Nonempty or missing status fields retain REST's complete payloads and numeric
+IDs. Newer REST evidence takes precedence. Offline reads retain the original
+validation time, and explicit refresh bypasses this shortcut.
+
 Check-run summaries and failure lists use the newest check ID per immutable SHA,
 app, and check name. GitHub's `filter=latest` is scoped to a check suite, so old
 suite failures can remain in the raw `check_runs` evidence after a successful
