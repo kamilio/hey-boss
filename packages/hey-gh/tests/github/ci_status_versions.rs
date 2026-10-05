@@ -19,13 +19,13 @@ fn edit_status_cache(h: &Harness, sha: &str, edit: impl FnOnce(&mut Value)) {
     .unwrap();
 }
 
-fn proof_clock(h: &Harness) -> u64 {
+pub(super) fn proof_clock(h: &Harness) -> u64 {
     let mut at = 0;
     edit_selector_cache(h, |r| at = r["validated_at_ms"].as_u64().unwrap());
     at
 }
 
-fn age_statuses(h: &Harness, at: u64) {
+pub(super) fn age_statuses(h: &Harness, at: u64) {
     for sha in [HEAD, MERGE] {
         edit_status_cache(h, sha, |r| r["validated_at_ms"] = json!(at));
     }
@@ -39,7 +39,7 @@ fn version_count(report: &hey_gh::CiObservation) -> usize {
         .count()
 }
 
-async fn seeded(app: bool) -> (Harness, Client) {
+pub(super) async fn seeded(app: bool) -> (Harness, Client) {
     let h = Harness::new().await;
     h.mode("ci-point-status-versions");
     h.phase(2);

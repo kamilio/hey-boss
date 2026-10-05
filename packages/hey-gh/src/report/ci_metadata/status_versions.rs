@@ -74,6 +74,24 @@ pub(super) enum Cached {
 }
 
 impl Versions {
+    pub(super) fn has_fields(node: &Value, sha: &str) -> bool {
+        std::iter::once(&node["potentialMergeCommit"])
+            .chain(
+                node["commits"]["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|n| &n["commit"]),
+            )
+            .filter(|commit| commit["oid"] == sha)
+            .any(|commit| {
+                commit["status"].get("contexts").is_some()
+                    || commit["statusCheckRollup"]["contexts"]
+                        .get("statusContextCount")
+                        .is_some()
+            })
+    }
+
     fn commit(commit: &Value, sha: &str) -> Option<Self> {
         if commit["oid"] != sha || text(&commit["status"]["id"]).is_none() {
             return None;

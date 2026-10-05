@@ -276,6 +276,7 @@ impl Client {
         }
         let mut latest = None;
         let mut versions = None;
+        let mut version_at = 0;
         for (node, at, source) in candidates {
             let Some(elapsed) = now_ms().checked_sub(at).filter(|_| at > 0) else {
                 continue;
@@ -292,21 +293,29 @@ impl Client {
             let Some(empty) = list_empty(&node, sha, list) else {
                 continue;
             };
-            // Discovery supplies presence only. A newer nonempty discovery
-            // cannot refresh this point proof's clock or invent its versions.
+            // Full rosters use their own page/point clock. Legacy presence
+            // alone cannot renew a proof. Newer malformed version evidence or
+            // disagreement at the same clock must not certify an older list.
             if matches!(list, CommitList::Statuses)
-                && source == "graphql"
-                && let Some(proof) = status_versions::Versions::from_node(&node, sha)
+                && status_versions::Versions::has_fields(&node, sha)
             {
-                versions = Some(VersionEvidence {
-                    versions: proof,
-                    at,
-                    resource: format!(
-                        "graphql://{}/{repository}/pulls/{}#commit-status-versions:{sha}",
-                        self.hostname(),
-                        owner.number
-                    ),
-                });
+                let proof = status_versions::Versions::from_node(&node, sha);
+                if at > version_at {
+                    version_at = at;
+                    versions = proof.map(|proof| VersionEvidence {
+                        versions: proof,
+                        at,
+                        resource: format!(
+                            "{source}://{}/{repository}/pulls/{}#commit-status-versions:{sha}",
+                            self.hostname(),
+                            owner.number
+                        ),
+                    });
+                } else if at == version_at
+                    && versions.as_ref().map(|v| &v.versions) != proof.as_ref()
+                {
+                    versions = None;
+                }
             }
             // A newer nonempty observation must defeat an older empty one.
             // Conflicting observations at the same clock also retain REST.

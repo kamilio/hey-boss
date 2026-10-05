@@ -47,8 +47,8 @@ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
       headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus reviewDecision
       potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
-      commits(last: 1) { nodes { commit { oid status { id } statusCheckRollup {
-        state
+      commits(last: 1) { nodes { commit { oid status { id contexts { id updatedAt context state description targetUrl } } statusCheckRollup {
+        state contexts(first: 1) { statusContextCount }
       } } } }
       author { login } repository { nameWithOwner } }
     pageInfo { hasNextPage endCursor }
@@ -63,6 +63,15 @@ const MY_PRS_BOUNDARY: &str = r#"query MyOpenPullRequestsBoundary {
     totalCount nodes { id }
   } }
 }"#;
+
+fn legacy_discovery_query() -> String {
+    MY_PRS
+        .replace(
+            " contexts { id updatedAt context state description targetUrl }",
+            "",
+        )
+        .replace(" contexts(first: 1) { statusContextCount }", "")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -192,7 +201,13 @@ struct Discovery {
 
 impl Client {
     pub(crate) async fn cached_discovery_page(&self, after: Value) -> Result<crate::Response> {
-        self.peek_graphql(MY_PRS, json!({"after":after})).await
+        match self.peek_graphql(MY_PRS, json!({"after":after})).await {
+            Err(Error::CacheMiss) => {
+                self.peek_graphql(&legacy_discovery_query(), json!({"after":after}))
+                    .await
+            }
+            result => result,
+        }
     }
 
     /// Read private, durable account-cycle progress without GitHub requests or
@@ -357,9 +372,20 @@ impl Client {
         let mut page_after_by_pr = BTreeMap::new();
         for page in 0..1000 {
             let page_after = after.as_str().map(str::to_owned);
-            let response = self
+            let response = match self
                 .graphql(MY_PRS, json!({"after":after}), freshness)
-                .await?;
+                .await
+            {
+                Err(Error::CacheMiss) if matches!(freshness, Freshness::CachedOnly) => {
+                    self.graphql(
+                        &legacy_discovery_query(),
+                        json!({"after":after}),
+                        Freshness::CachedOnly,
+                    )
+                    .await?
+                }
+                result => result?,
+            };
             validated_at = validated_at.min(response.validated_at_ms);
             bytes = bytes.saturating_add(response.data.to_string().len());
             if bytes > self.collection_limit() {
