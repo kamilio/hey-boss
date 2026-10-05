@@ -61,6 +61,11 @@ impl Harness {
                 cache_path: dir.path().join("cache"),
                 min_spacing: Duration::ZERO,
                 max_attempts: 1,
+                report_timeout: if mode.starts_with("partial_") {
+                    Duration::from_secs(2)
+                } else {
+                    Config::default().report_timeout
+                },
                 max_collection_bytes: if mode == "paged_branch_budget" {
                     1024
                 } else {
@@ -234,7 +239,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             run(
                 1,
                 A,
-                if mode == "old_failure" {
+                if matches!(mode, "old_failure" | "partial_error") {
                     "failure"
                 } else {
                     "cancelled"
@@ -312,6 +317,16 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         json!({"total_count":if mode=="truncated" || dense {1000}else{rows.len()},"workflow_runs":rows})
     } else if path.ends_with("/jobs") {
         let id = path.split('/').nth(6).unwrap().parse::<u64>().unwrap();
+        if mode.starts_with("partial_") && id == 3 {
+            if mode == "partial_deadline" {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+            }
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"synthetic access denial"})),
+            )
+                .into_response();
+        }
         let mut jobs = match id {
             4 | 5 if mode == "archive_many" => vec![],
             2 if matches!(mode, "side_branch" | "paged_branch_side") => vec![job(2, B, "success")],
@@ -321,6 +336,16 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             2 => vec![job(2, if mode == "old_failure" { A } else { B }, "skipped")],
             _ => vec![job(3, C, "success")],
         };
+        if mode.starts_with("partial_") {
+            jobs = vec![job(
+                id,
+                if id == 1 { A } else { B },
+                if id == 1 { "failure" } else { "success" },
+            )];
+            // The later run overlaps this candidate confirmation, so its
+            // collection must finish before certifying the gate.
+            jobs[0]["completed_at"] = json!("2026-10-04T04:09:00Z");
+        }
         if mode == "past_attempt" && id == 3 {
             let attempt = path.split('/').nth(8).unwrap().parse::<u64>().unwrap();
             jobs = vec![job(3, C, if attempt == 1 { "failure" } else { "success" })];
@@ -359,6 +384,61 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
     };
     Json(result).into_response()
 }
+#[tokio::test]
+async fn partial_gate_deadline_retains_evidence_without_certifying() {
+    assert_partial_gate("partial_deadline").await;
+}
+
+#[tokio::test]
+async fn partial_gate_error_retains_evidence_without_certifying() {
+    assert_partial_gate("partial_error").await;
+}
+
+async fn assert_partial_gate(mode: &str) {
+    let h = Harness::new(mode).await;
+    let batch = h.report(&[A]).await;
+    let report = &batch.reports[0];
+    assert_eq!(report.state, "unknown");
+    assert!(!report.errors.is_empty());
+    if mode == "partial_deadline" {
+        assert!(report.errors.iter().any(|error| error.contains("deadline")));
+    }
+    assert_eq!(
+        report.gates.len(),
+        1,
+        "already collected evidence survives interruption"
+    );
+    let gate = &report.gates[0];
+    assert_eq!(gate.runs.len(), 2);
+    assert!(!gate.satisfied);
+    assert!(!gate.history_complete);
+    assert!(gate.confirmation.is_none());
+    assert_eq!(
+        gate.runs[0].verdict.state,
+        if mode == "partial_error" {
+            hey_gh::release::RunState::Failed
+        } else {
+            hey_gh::release::RunState::Cancelled
+        }
+    );
+    assert_eq!(gate.runs[0].verdict.failed_jobs, ["test"]);
+    assert_eq!(
+        gate.runs[1].verdict.state,
+        hey_gh::release::RunState::Passed
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("queue.sqlite");
+    let mut queue = hey_gh::release::queue::Queue::open(&path).unwrap();
+    queue.add(&project(), &[A.into()]).unwrap();
+    queue.record(&batch).unwrap();
+    drop(queue);
+    let queue = hey_gh::release::queue::Queue::open(&path).unwrap();
+    let entries = queue.entries().unwrap();
+    assert_eq!(entries[0].failures.len(), 1);
+    assert_eq!(entries[0].failures[0].id, 1);
+    assert!(entries[0].confirmations.is_empty());
+}
+
 #[tokio::test]
 async fn follows_cancelled_and_skipped_runs_to_a_containing_successor() {
     let h = Harness::new("").await;

@@ -354,14 +354,18 @@ impl Collector<'_> {
                 self.runs(&gate.workflow, &since, branch_commits.as_ref())
                     .await?
             };
-            let mut observed = GateReport {
+            report.gates.push(GateReport {
                 name: gate.name.clone(),
                 purpose: gate.purpose,
                 satisfied: false,
-                history_complete,
+                history_complete: false,
                 confirmation: None,
                 runs: vec![],
-            };
+            });
+            let observed = report.gates.last_mut().unwrap();
+            // Keep collected records if an await is interrupted, but publish
+            // no candidate confirmation until the gate's collection finishes.
+            let mut confirmation: Option<RunRecord> = None;
             // Latest run per commit wins. A rerun of an older run is not allowed
             // to overwrite a newer run for the same commit.
             let mut latest = BTreeMap::<String, u64>::new();
@@ -384,7 +388,7 @@ impl Collector<'_> {
                 )
             });
             for run in runs {
-                if let Some(confirmation) = &observed.confirmation
+                if let Some(confirmation) = &confirmation
                     && run["created_at"]
                         .as_str()
                         .zip(confirmation.verdict.completed_at.as_deref())
@@ -507,17 +511,18 @@ impl Collector<'_> {
                     if n == attempt
                         && latest.get(&head) == Some(&id)
                         && matches!(record.verdict.state, RunState::Passed | RunState::Unchanged)
-                        && observed.confirmation.as_ref().is_none_or(|old| {
+                        && confirmation.as_ref().is_none_or(|old| {
                             record.verdict.completed_at < old.verdict.completed_at
                         })
                     {
-                        observed.confirmation = Some(record.clone());
+                        confirmation = Some(record.clone());
                     }
                     observed.runs.push(record);
                 }
             }
-            observed.satisfied = observed.confirmation.is_some() && history_complete;
-            report.gates.push(observed);
+            observed.satisfied = confirmation.is_some() && history_complete;
+            observed.history_complete = history_complete;
+            observed.confirmation = confirmation;
         }
         let failed = report
             .gates
