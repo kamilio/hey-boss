@@ -46,9 +46,9 @@ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
     orderBy: {field: CREATED_AT, direction: ASC}) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
       headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus reviewDecision
-      potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
+      potentialMergeCommit { oid status { id } statusCheckRollup { contexts(first: 1) { checkRunCount } } parents(first: 2) { totalCount nodes { oid } } }
       commits(last: 1) { nodes { commit { oid status { id contexts { id updatedAt context state description targetUrl } } statusCheckRollup {
-        state contexts(first: 1) { statusContextCount }
+        state contexts(first: 1) { checkRunCount statusContextCount }
       } } } }
       author { login } repository { nameWithOwner } }
     pageInfo { hasNextPage endCursor }
@@ -64,13 +64,20 @@ const MY_PRS_BOUNDARY: &str = r#"query MyOpenPullRequestsBoundary {
   } }
 }"#;
 
-fn legacy_discovery_query() -> String {
-    MY_PRS
+fn legacy_discovery_queries() -> [String; 2] {
+    let previous = MY_PRS
+        .replace(
+            " statusCheckRollup { contexts(first: 1) { checkRunCount } }",
+            "",
+        )
+        .replace("checkRunCount statusContextCount", "statusContextCount");
+    let original = previous
         .replace(
             " contexts { id updatedAt context state description targetUrl }",
             "",
         )
-        .replace(" contexts(first: 1) { statusContextCount }", "")
+        .replace(" contexts(first: 1) { statusContextCount }", "");
+    [previous, original]
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -203,8 +210,13 @@ impl Client {
     pub(crate) async fn cached_discovery_page(&self, after: Value) -> Result<crate::Response> {
         match self.peek_graphql(MY_PRS, json!({"after":after})).await {
             Err(Error::CacheMiss) => {
-                self.peek_graphql(&legacy_discovery_query(), json!({"after":after}))
-                    .await
+                for query in legacy_discovery_queries() {
+                    let cached = self.peek_graphql(&query, json!({"after":after})).await;
+                    if !matches!(cached, Err(Error::CacheMiss)) {
+                        return cached;
+                    }
+                }
+                Err(Error::CacheMiss)
             }
             result => result,
         }
@@ -377,12 +389,16 @@ impl Client {
                 .await
             {
                 Err(Error::CacheMiss) if matches!(freshness, Freshness::CachedOnly) => {
-                    self.graphql(
-                        &legacy_discovery_query(),
-                        json!({"after":after}),
-                        Freshness::CachedOnly,
-                    )
-                    .await?
+                    let mut cached = Err(Error::CacheMiss);
+                    for query in legacy_discovery_queries() {
+                        cached = self
+                            .graphql(&query, json!({"after":after}), Freshness::CachedOnly)
+                            .await;
+                        if !matches!(cached, Err(Error::CacheMiss)) {
+                            break;
+                        }
+                    }
+                    cached?
                 }
                 result => result?,
             };

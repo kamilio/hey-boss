@@ -20,6 +20,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/ci_discovery_checks.rs"]
+mod ci_discovery_checks;
 #[path = "github/ci_discovery_versions.rs"]
 mod ci_discovery_versions;
 #[path = "github/ci_empty_checks.rs"]
@@ -950,6 +952,16 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 }
                 if mode == "account-ci-selectors-empty-checks" {
                     node["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = Value::Null;
+                }
+                if mode == "account-ci-selectors-counted-checks" {
+                    let query = body["query"].as_str().unwrap();
+                    if query.contains("checkRunCount statusContextCount") {
+                        node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] =
+                            json!({"checkRunCount":0,"statusContextCount":1});
+                    }
+                    if query.contains("status { id } statusCheckRollup") {
+                        node["potentialMergeCommit"]["statusCheckRollup"] = Value::Null;
+                    }
                 }
                 if mode == "account-ci-selectors-nonempty" {
                     node["commits"]["nodes"][0]["commit"]["status"] = json!({"id":"S_head"});

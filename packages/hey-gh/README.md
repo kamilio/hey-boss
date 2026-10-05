@@ -650,7 +650,7 @@ the GraphQL proof validates the status fields listed above. The proof appears as
 original point/page validation time. The newest full roster owns the proof;
 conflicting rosters at the same time or newer malformed rosters retain REST.
 Legacy discovery presence alone cannot renew a proof. Offline discovery scans
-and page hints can still read the preceding query's cache after an upgrade.
+and page hints can still read both preceding query formats after an upgrade.
 Malformed or incomplete rosters fall back to REST; missing pages and collection limits retain
 their existing behavior. Newer REST evidence takes precedence on every page.
 Offline reads retain the original REST page clocks as well as the proof's
@@ -660,6 +660,11 @@ page for newer evidence. A fresh page from an unfinished scan can supply status
 evidence without changing roster completeness. Newer nonempty metadata defeats
 older empty evidence and requires the full REST status payload; conflicting or
 unavailable payloads remain incomplete.
+
+Point selectors and existing discovery pages also provide head/test-merge
+check-run counts. A zero count or explicit null rollup can satisfy an empty list
+using the original query/page clock. Nonempty, missing, or invalid counts retain
+REST reads. No extra query obtains these proofs; explicit refresh still reads REST.
 
 Check-run summaries and failure lists use the newest check ID per immutable SHA,
 app, and check name. GitHub's `filter=latest` is scoped to a check suite, so old
