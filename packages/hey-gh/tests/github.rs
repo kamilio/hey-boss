@@ -10511,7 +10511,10 @@ async fn issue73_deadline_bounds_cold_cache_branch_resolution_and_backoff() {
         assert_eq!(value["validations"], json!([]));
         assert_eq!(value["oldestValidationAtMs"], Value::Null);
         if mode == "issue73-backoff" {
-            assert!(c.status().outstanding_requests > 0);
+            // The disconnected metadata handler no longer owns this queued
+            // retry. Reclaim it without waiting through the 60-second backoff;
+            // active responses and requests with another caller stay shared.
+            until(|| c.status().outstanding_requests == 0).await;
             assert_eq!(
                 h.calls()
                     .iter()
