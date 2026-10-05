@@ -70,7 +70,9 @@ async fn seed(h: &Harness, timeout: Duration) -> Client {
 async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_after_restart() {
     let h = Harness::new().await;
     h.mode("account-policy-rotation-stalled");
-    let c = seed(&h, Duration::from_millis(400)).await;
+    // This budget also covers the healthy CI rotation. The policy request is
+    // gated indefinitely, so a subsecond budget only adds a host-load race.
+    let c = seed(&h, Duration::from_secs(2)).await;
     let (api, sdk, server) = start(&c).await;
     // Either CI row can become ready first. The healthy neighbor may complete
     // a policy turn while the stalled target still awaits its CI completion.
@@ -222,7 +224,32 @@ async fn policy_access_failure_stays_explicit_without_overwriting_ci_health() {
     h.mode("account-policy-rotation-denied");
     let c = seed(&h, Duration::from_secs(5)).await;
     let (api, sdk, server) = start(&c).await;
-    let status = wait_cycle(&sdk, 0).await;
+    // CI can wake policy after only one row finishes. A partial turn must
+    // retain its denial while waiting for the other row's readiness wake.
+    let status = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let status = sdk.watches().await.unwrap().into_iter().next().unwrap();
+            if let Some(cycle) = &status.policy_last_cycle {
+                assert_eq!(cycle.interrupted, 0, "{status:?}");
+                assert_eq!(cycle.succeeded, 0, "{status:?}");
+                assert_eq!(cycle.failed + cycle.waiting_for_ci, 2, "{status:?}");
+                // Health is published after the durable cycle, so even the
+                // final cycle can briefly be paired with an older CI deferral.
+                if cycle.waiting_for_ci == 0
+                    && status
+                        .policy_last_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Synthetic policy access denied"))
+                    && status.ci_last_success_at_ms.is_some()
+                {
+                    break status;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("policy did not observe both access failures after CI completed");
     api.stop().await;
     server.abort();
     let _ = server.await;
@@ -263,7 +290,11 @@ async fn policy_waits_for_fresh_ci_without_upstream_probes_and_wakes_on_completi
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let watches = sdk.watches().await.unwrap();
-            if let Some(cycle) = &watches[0].policy_last_cycle {
+            // The durable cycle is visible before the monitor publishes its
+            // health fields. Wait for both parts of the observation.
+            if let Some(cycle) = &watches[0].policy_last_cycle
+                && watches[0].policy_last_error.is_some()
+            {
                 assert_eq!(cycle.attempted, 0);
                 assert_eq!(cycle.deferred, 2);
                 assert!(!cycle.cycle_budget_exhausted);
