@@ -10,7 +10,7 @@ const project = 'github.com/example/runtime';
 const now = Date.now();
 const rows = Array.from({length:104}, (_, i) => ({url:`https://github.com/example/runtime/pull/${1000+i}`,title:i===0?'Keep background requests responsive when a companion reconnects and a very long repository name crosses the phone screen':'Improve the runtime '+i,merged_at:now-i*3600000,issues:[{number:i+1,title:i===0?'A linked issue with a long title that should wrap naturally':'Runtime task '+i}]}));
 rows.push({url:'https://github.com/example/runtime/pull/999',title:'Earlier merge without a recorded date',merged_at:null,observed_at:now,issues:[]});
-let failing=false, delayed=false, pending=false;
+let failing=false, delayed=false, pending=false, mergeRequests=0;
 const server=createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json');
   if(req.url==='/api/bootstrap')return res.end(JSON.stringify({ok:true,csrf:'fixture',project:{id:project,name:'Runtime'},projects:[{id:project,name:'Runtime'},{id:'named:empty',name:'Empty project'}]}));
@@ -18,6 +18,7 @@ const server=createServer(async(req,res)=>{
     let body='';for await(const part of req)body+=part;
     const value=JSON.parse(body);
     if(value.operation.action!=='merged_pull_requests')return res.end(JSON.stringify({ok:true,issues:[]}));
+    mergeRequests++;
     if(failing){res.statusCode=503;return res.end(JSON.stringify({ok:false,error:{message:'Connection interrupted. Retry.'}}));}
     if(delayed)await new Promise(done=>setTimeout(done,350));
     const data=value.project===project?rows:[],offset=value.operation.offset||0,limit=value.operation.limit;
@@ -68,7 +69,8 @@ try{
   assert.equal(await page.locator('.merge-title').count(),105);
   failing=true;await page.locator('#merged-refresh').click();await page.locator('#merged-error').waitFor({state:'visible'});
   assert.equal(await page.locator('.merge-row').count(),105,'Refresh failure retains history');
-  failing=false;await page.locator('#merged-refresh').click();await page.waitForFunction(()=>document.querySelectorAll('.merge-row').length===100);
+  failing=false;await page.locator('#merged-refresh').click();await page.locator('#merged-error').waitFor({state:'hidden'});await page.waitForFunction(()=>!document.querySelector('#merged-refresh').disabled);
+  assert.equal(await page.locator('.merge-row').count(),105,'Manual refresh preserves expanded history');
   assert.equal(await page.locator('#merged-error').isVisible(),false);
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:empty"]').click();
   await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged fix PRs authored by your GitHub account'));
@@ -95,6 +97,39 @@ try{
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Paired mobile ${width} ${colorScheme}: no overflow`);
     if(output)await page.screenshot({path:resolve(output,`paired-${width}-${colorScheme}.png`)});
   }
+  await page.close();
+  const live=await context.newPage();
+  await live.clock.install();
+  await live.addInitScript(()=>{
+    window.fixtureHidden=false;
+    Object.defineProperty(document,'hidden',{get:()=>window.fixtureHidden});
+  });
+  await live.goto("" || origin+'/merged-prs#project='+encodeURIComponent(project));
+  await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===100);
+  await live.locator('#merged-more').click();
+  await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===105);
+  rows.unshift({url:'https://github.com/example/runtime/pull/2000',title:'New merge arrives',merged_at:now+1000,issues:[]});
+  await live.clock.fastForward(30000);
+  await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===106,{},{timeout:3000});
+  assert.equal(await live.locator('.merge-title').first().textContent(),'New merge arrives','New merges appear without clicking refresh');
+  assert.match(await live.locator('.merge-day').last().textContent(),/Merge date unavailable/,'Automatic refresh preserves expanded history');
+  failing=true;
+  await live.clock.fastForward(30000);
+  await live.locator('#merged-error').waitFor({state:'visible'});
+  assert.equal(await live.locator('.merge-row').count(),106);
+  failing=false;
+  await live.clock.fastForward(30000);
+  await live.locator('#merged-error').waitFor({state:'hidden'});
+  await live.waitForFunction(()=>!document.querySelector('#merged-refresh').disabled);
+  await live.evaluate(()=>{window.fixtureHidden=true;document.dispatchEvent(new Event('visibilitychange'));});
+  const beforeHidden=mergeRequests;
+  await live.clock.fastForward(90000);
+  assert.equal(mergeRequests,beforeHidden,'Hidden pages do not poll');
+  rows.unshift({url:'https://github.com/example/runtime/pull/2001',title:'Merge while hidden',merged_at:now+2000,issues:[]});
+  await live.evaluate(()=>{window.fixtureHidden=false;document.dispatchEvent(new Event('visibilitychange'));});
+  await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===107);
+  assert.equal(await live.locator('.merge-title').first().textContent(),'Merge while hidden','Returning to the page refreshes immediately');
+  await live.close();
   assert.deepEqual(errors,[]);
-  console.log('Passed: day groups, pagination, desktop/tablet/phone light and dark layouts, links, project switching, stale responses, keyboard refresh, empty state, error recovery.');
+  console.log('Passed: day groups, pagination, desktop/tablet/phone light and dark layouts, links, project switching, stale responses, keyboard refresh, empty state, error recovery, automatic refresh, expanded history, hidden-tab suspension.');
 }finally{await browser?.close();await new Promise(done=>server.close(done));}
