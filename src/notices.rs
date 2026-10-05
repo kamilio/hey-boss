@@ -8,6 +8,15 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Capture on the sending machine, before any companion transport. Never guess
+/// a session from the checkout's newest agent or the issue's current assignee.
+pub(crate) fn capture_sender(cwd: &std::path::Path) -> Option<crate::issues::Actor> {
+    let machine = crate::issues::identity::machine().ok()?;
+    let mut actor = crate::issues::identity::resolve(None, &machine, cwd).ok()?;
+    crate::issues::identity::creation_context(&mut actor);
+    Some(actor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct IssueReference {
@@ -43,6 +52,10 @@ pub enum Action {
     },
     View {
         task_id: String,
+    },
+    MuteAgent {
+        task_id: String,
+        muted: bool,
     },
     Read {
         task_id: String,
@@ -93,6 +106,7 @@ impl Action {
             Self::List | Self::Count | Self::Related { .. } => ("inbox_list", None),
             Self::Clear { .. } => ("inbox_clear", None),
             Self::View { task_id } => ("inbox_view", Some(task_id)),
+            Self::MuteAgent { task_id, .. } => ("inbox_mute_agent", Some(task_id)),
             Self::Read { task_id } => ("inbox_read", Some(task_id)),
             Self::Respond { task_id, .. } => ("inbox_respond", Some(task_id)),
             Self::Dismiss { task_id } => ("inbox_dismiss", Some(task_id)),
@@ -107,6 +121,7 @@ impl Action {
         }
         let mut value = json!({"command":command,"sync":false,"task_id":id});
         match self {
+            Self::MuteAgent { muted, .. } => value["muted"] = json!(muted),
             Self::Count => value["count_only"] = json!(true),
             Self::Related { issue } => {
                 issue.validate()?;

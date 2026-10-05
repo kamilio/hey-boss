@@ -180,6 +180,8 @@ pub struct Origin {
     pub executable: PathBuf,
     pub git: Option<GitContext>,
     pub launchers: Vec<Launcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<issues::Actor>,
 }
 
 impl Origin {
@@ -282,6 +284,7 @@ impl Origin {
             executable: std::env::current_exe().unwrap_or_default(),
             git,
             launchers,
+            agent: None,
         }
     }
 }
@@ -496,7 +499,9 @@ impl Client {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
                 })?);
             }
-            request.origin = Some(Origin::capture());
+            let mut origin = Origin::capture();
+            origin.agent = notices::capture_sender(&origin.cwd);
+            request.origin = Some(origin);
         }
         let mut stream = UnixStream::connect(&self.socket)?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;

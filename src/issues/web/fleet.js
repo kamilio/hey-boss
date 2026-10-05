@@ -634,6 +634,11 @@ if (typeof document !== 'undefined') (() => {
     $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
     $('session-status').textContent=run.state==='infrastructure_blocked'?infrastructureGuidance(run):!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
     renderTakeover();
+    if(route().get('steer')==='1') {
+      const params=route();params.delete('steer');history.replaceState(null,'',location.pathname+'#'+params);
+      if(!$('steer-open').hidden&&!$('steer-open').disabled)$('steer-open').click();
+      else {$('steer-note').hidden=false;$('steer-note').textContent='This agent cannot be steered right now. Its conversation remains available; steering requires a connected, running task.';}
+    }
     if(!loaded&&!loading)loadConversation();
   }
   function render(data) {last=data;if(detail)renderDetail(data);else renderOverview(data);}

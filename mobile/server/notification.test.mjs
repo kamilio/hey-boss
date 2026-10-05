@@ -116,3 +116,21 @@ test('a slow read receipt does not delay opening the notification reader',async(
  let waiting;handlers.notificationclick({notification:{data:{id:'update'},close(){}},waitUntil(promise){waiting=promise.then(()=>{finished=true;});}});
  await new Promise(resolve=>setImmediate(resolve));assert.equal(opened,true);assert.equal(finished,false);release();await waiting;assert.equal(finished,true);
 });
+
+test('muted agents retain notices but drop queued and future push delivery',()=>{
+ const store=new HubStore();
+ store.setPreferences({mode:'always',awayAfterSeconds:120});
+ store.db.prepare('INSERT INTO devices(id,secret,subscription,created) VALUES(?,?,?,?)').run('mute-device','secret','{}',Date.now());
+ const row={taskID:'muted',kind:'alert',title:'Synthetic',question:'Synthetic',description:'',options:[],origin:{agent:{id:'exact',machine:'mac'}}};
+ store.upsert(row);store.enqueue({id:'muted'});
+ assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,1);
+ store.upsert({...row,agentMuted:true});
+ assert.equal(store.get('muted').status,'pending');
+ assert.equal(store.get('muted').origin.agent.id,'exact');
+ assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);
+ store.enqueue({id:'muted'});
+ assert.equal(store.db.prepare('SELECT count(*) AS n FROM outbox').get().n,0);
+ store.upsert({...row,agentMuted:false});
+ assert.equal(store.get('muted').agentMuted,true);
+ store.close();
+});

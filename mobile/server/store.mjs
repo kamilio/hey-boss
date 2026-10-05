@@ -67,7 +67,14 @@ export class HubStore{
  });}
  upsert(row){return this.transaction(()=>{
   const existing=this.db.prepare('SELECT status FROM tasks WHERE id=?').get(row.taskID);
-  if(existing)return {task:this.get(row.taskID),created:false};
+  if(existing){
+   // A mute is sticky for this delivery, including delayed pre-mute retries.
+   if(row.agentMuted===true){
+    this.db.prepare("UPDATE tasks SET body=json_set(body,'$.agentMuted',json('true')) WHERE id=?").run(row.taskID);
+    this.db.prepare("DELETE FROM outbox WHERE json_extract(body,'$.id')=?").run(row.taskID);
+   }
+   return {task:this.get(row.taskID),created:false};
+  }
   this.insertTask(row);
   return {task:this.get(row.taskID),created:true};
  });}
@@ -97,7 +104,8 @@ export class HubStore{
  });}
  device(secret){return this.db.prepare('SELECT * FROM devices WHERE secret=?').get(hash(secret));}
  enqueue(body,now=Date.now()){
-  if(this.routing(now).quietHoursActive||this.get(body.id).quietHoursMuted===true)return;
+  if(this.routing(now).quietHoursActive)return;
+  const task=this.get(body.id);if(task.quietHoursMuted===true||task.agentMuted===true)return;
   const data=JSON.stringify(body),eligible=this.preferences().mode==='automatic'?now+30000:now;
   this.db.prepare('INSERT INTO outbox(device,body,retry) SELECT id,?,? FROM devices WHERE subscription IS NOT NULL').run(data,eligible);
  }

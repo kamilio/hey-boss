@@ -281,3 +281,29 @@ fn overrides_reuse_unique_names_silently_and_preserve_hidden_state() {
         json!("Atlas")
     );
 }
+
+#[test]
+fn notifications_capture_the_sending_session_before_transport() {
+    let fixture = Fixture::new();
+    let mut command = fixture.command(&fixture.cwd);
+    command
+        .env("CODEX_THREAD_ID", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        .env_remove("HEY_BOSS_WORKER_RUN")
+        .args([
+            "notif",
+            "alert",
+            "--project",
+            "Trace",
+            "--title",
+            "Trace",
+            "Synthetic",
+            "--json",
+        ]);
+    let request = fixture.notify(&mut command);
+    let sender = &request["origin"]["agent"];
+    assert_eq!(sender["id"], "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    assert_eq!(sender["session_id"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    assert_eq!(sender["source"], "CODEX_THREAD_ID");
+    assert!(sender["machine"].as_str().is_some_and(|v| !v.is_empty()));
+    assert!(sender["host"].as_str().is_some_and(|v| !v.is_empty()));
+}

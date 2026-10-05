@@ -118,3 +118,16 @@ test('a late count cannot overwrite a related-notice update after returning to t
   await counting;
   assert.equal(f.elements.get('#inbox-unread').textContent, 4);
 });
+
+test('sender controls target the captured session and retain unknown historical trace', () => {
+  const f = fixture();
+  f.context.URLSearchParams = URLSearchParams;
+  f.context.task = {taskID:'notice', issue:{project:'named:Trace'}, origin:{cwd:'/tmp/work',pid:123,agent:{id:'codex:exact',kind:'codex',machine:'m',host:'remote',session_id:'exact',creation_run:{id:'run/one',project_id:'named:Trace'},invocation:{offset:42}}}};
+  assert.match(f.run('noticeAgentURL(task)'), /run=run%2Fone/);
+  assert.match(f.run('noticeAgentURL(task)'), /at=42/);
+  assert.match(f.run('noticeAgentURL(task, true)'), /steer=1/);
+  assert.match(f.run('noticeSender(task)'), /Mute agent/);
+  assert.match(f.run('noticeSender({...task,senderMuted:true})'), /Unmute agent/);
+  assert.match(f.run('noticeSender({origin:{cwd:"old-checkout",pid:44}})'), /not recorded/);
+  assert.match(f.run('noticeSender({origin:{cwd:"old-checkout",pid:44}})'), /old-checkout/);
+});
