@@ -380,6 +380,16 @@ impl SharedUsage {
 struct Budgets(HashMap<String, BTreeMap<u64, Budget>>);
 
 impl Budgets {
+    fn rest_fallback_has_headroom(&self, job: &Job) -> bool {
+        let quota = if job.installation {
+            "installation/core"
+        } else {
+            "core"
+        };
+        self.for_resource(quota)
+            .all(|budget| budget.remaining > QUOTA_RESERVE)
+    }
+
     fn probe(&self, quota: &str) -> PacingProbe {
         PacingProbe {
             quota: quota.to_owned(),
@@ -715,11 +725,15 @@ impl Scheduler {
                 .filter(|job| job.required_reader.load(Ordering::Relaxed))
                 .map(Job::quota)
                 .collect();
-            let defers_optional = |job: &Job| job.defers_optional(&required_quotas);
+            let defers_optional = |job: &Job| {
+                job.defers_optional(&required_quotas) && budgets.rest_fallback_has_headroom(job)
+            };
             // Optional GraphQL selectors have a short REST-fallback budget.
             // Yield to queued required reads using the same provider's quota,
             // or fall back when known pacing alone exceeds the shortcut budget.
             // Required coalescers keep their job and its existing quota gates.
+            // When REST is exhausted, keep the GraphQL route eligible: yielding
+            // would send an otherwise viable read into an unavailable fallback.
             for job in pending.iter().filter(|job| job.body.is_some()) {
                 let until = ready(job, &budgets, global);
                 if defers_optional(job) {
@@ -1767,6 +1781,32 @@ mod tests {
         assert!(optional.defers_optional(&installation));
         optional.required_reader.store(true, Ordering::Relaxed);
         assert!(!optional.defers_optional(&installation));
+    }
+
+    #[test]
+    fn optional_rest_fallback_respects_each_live_window_and_its_provider() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        let mut job = core_job();
+        assert!(budgets.rest_fallback_has_headroom(&job));
+        budgets.observe("installation/core", 0, reset, false, None);
+        assert!(budgets.rest_fallback_has_headroom(&job));
+        job.installation = true;
+        assert!(!budgets.rest_fallback_has_headroom(&job));
+        job.installation = false;
+        budgets.observe("core", 5000, reset, false, None);
+        assert!(budgets.rest_fallback_has_headroom(&job));
+        budgets.observe("core", QUOTA_RESERVE, reset + 60, false, None);
+        assert!(
+            !budgets.rest_fallback_has_headroom(&job),
+            "a newer window cannot erase the protected reserve"
+        );
+        let mut expired = Budgets::default();
+        expired.observe("core", 0, now_ms() / 1000 - 2, false, None);
+        assert!(
+            expired.rest_fallback_has_headroom(&job),
+            "expired windows must not suppress fallback"
+        );
     }
 
     fn first_validator() -> Job {
