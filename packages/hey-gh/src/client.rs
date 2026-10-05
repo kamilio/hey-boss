@@ -21,6 +21,7 @@ mod ci_pull_request;
 mod ci_selectors;
 #[cfg(test)]
 mod confirmation_tests;
+mod policy_ci;
 
 // Admission probes apply ordinary freshness/version rules without dispatching,
 // minting credentials or joining an in-flight request when evidence is missing.

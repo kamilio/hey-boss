@@ -18,6 +18,8 @@ const MERGE: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 #[path = "policy_selectors/branches.rs"]
 mod branches;
+#[path = "policy_selectors/ci.rs"]
+mod ci;
 #[path = "policy_selectors/rules.rs"]
 mod rules;
 
@@ -42,6 +44,10 @@ struct Data {
     graph: Value,
     branch: Value,
     branch_graph: Value,
+    ci_graph: Value,
+    ci_graph_gate: Option<Arc<tokio::sync::Notify>>,
+    check_conclusion: &'static str,
+    status_state: Option<&'static str>,
     branch_graph_gate: Option<Arc<tokio::sync::Notify>>,
     stall_branch: bool,
     rules: Value,
@@ -89,6 +95,11 @@ async fn handler(
             let query = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
             let value = if query["query"]
                 .as_str()
+                .is_some_and(|q| q.contains("RequiredPolicyCi"))
+            {
+                s.ci_graph.clone()
+            } else if query["query"]
+                .as_str()
                 .is_some_and(|query| query.contains("RequiredPolicyBranch"))
             {
                 s.branch_graph.clone()
@@ -109,12 +120,18 @@ async fn handler(
                 s.deny_rest |= s.deny_rest_on_checks;
             }
             (
-                json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":"success"}]}),
+                json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"node_id":format!("CR_{}",sha.as_bytes()[0]),"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":s.check_conclusion,"started_at":null,"completed_at":null,"details_url":null}]}),
                 false,
                 s.stall_checks,
             )
         } else if path.ends_with("/status") {
-            (json!({"statuses":[]}), false, s.stall_checks)
+            let sha = path.rsplit('/').nth(1).unwrap();
+            let statuses=s.status_state.map(|state|json!({"id":u64::from(sha.as_bytes()[0])+100,"node_id":format!("S_{}",sha.as_bytes()[0]),"context":"deploy","state":state,"updated_at":"2026-10-01T00:00:00Z","target_url":null})).into_iter().collect::<Vec<_>>();
+            (
+                json!({"sha":sha,"total_count":statuses.len(),"statuses":statuses}),
+                false,
+                s.stall_checks,
+            )
         } else if path.contains("/rules/branches/") {
             (s.rules.clone(), s.deny_rules, s.stall_rules)
         } else if path.contains("/compare/") {
@@ -128,6 +145,11 @@ async fn handler(
         };
         let branch_query = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
         let gate = if branch_query["query"]
+            .as_str()
+            .is_some_and(|q| q.contains("RequiredPolicyCi"))
+        {
+            s.ci_graph_gate.take()
+        } else if branch_query["query"]
             .as_str()
             .is_some_and(|query| query.contains("RequiredPolicyBranch"))
         {
@@ -223,6 +245,10 @@ impl Fixture {
             graph: selectors(),
             branch: json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
             branch_graph: Value::Null,
+            ci_graph: Value::Null,
+            ci_graph_gate: None,
+            check_conclusion: "success",
+            status_state: None,
             branch_graph_gate: None,
             stall_branch: false,
             rules: json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),

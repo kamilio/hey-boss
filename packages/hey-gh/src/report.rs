@@ -11,6 +11,7 @@ use std::{
 
 mod ci_collection;
 mod ci_metadata;
+mod policy_ci;
 pub(crate) use ci_metadata::discovery::scope as ci_discovery_scope;
 mod review_events;
 
@@ -1048,8 +1049,13 @@ impl Client {
         merge: Option<&str>,
         freshness: Freshness,
     ) -> Result<CiReport> {
-        self.collect_ci_report(repository, head, merge, freshness, false)
-            .await
+        match Box::pin(self.unchanged_policy_ci(repository, head, merge, freshness)).await? {
+            policy_ci::Proof::Matching(report) => Ok(*report),
+            policy_ci::Proof::Rest(freshness) => {
+                self.collect_ci_report(repository, head, merge, freshness, false)
+                    .await
+            }
+        }
     }
 
     async fn ci_source(
