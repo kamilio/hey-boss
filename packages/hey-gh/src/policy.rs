@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+mod branch;
 mod selectors;
 mod timings;
 use timings::{Phase, Timings};
@@ -453,7 +454,10 @@ impl Client {
             timings.enter(Phase::Policy);
             let ((branch, protection_res), rules_first_res) = tokio::join!(
                 async {
-                    let branch = self.get(&policy_path, freshness).await;
+                    // Keep the optional selector's future out of the nested
+                    // account collector's stack frame.
+                    let branch =
+                        Box::pin(self.policy_branch(repository, &identity.branch, freshness)).await;
                     let protection = if branch
                         .as_ref()
                         .is_ok_and(|r| classic_checks_disabled(&r.data))
@@ -696,7 +700,11 @@ impl Client {
                     .scope((), async {
                         tokio::join!(
                             self.confirm_policy_pr(repository, number, &pr, pr_policy),
-                            self.get(&policy_path, branch_policy),
+                            Box::pin(self.policy_branch(
+                                repository,
+                                &identity.branch,
+                                branch_policy
+                            )),
                         )
                     })
                     .await;
