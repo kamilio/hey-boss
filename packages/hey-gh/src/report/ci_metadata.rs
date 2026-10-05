@@ -1,20 +1,9 @@
 //! Confirm CI selectors without refreshing unrelated REST metadata.
 use crate::{Client, Error, Freshness, Response, Result, Source, now_ms};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::time::Duration;
 
 pub(super) mod discovery;
-
-const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      id number state merged mergeable headRefOid baseRefOid
-      repository { nameWithOwner }
-      commits(last: 1) { nodes { commit { oid status { id } } } }
-      potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
-    }
-  }
-}"#;
 
 fn status_empty(pr: &Value, sha: &str) -> Option<bool> {
     let status = |commit: &Value| {
@@ -170,15 +159,11 @@ impl Client {
         }) else {
             return Ok(None);
         };
-        let (repo_owner, repo) = repository.split_once('/').expect("validated repository");
         // These are cache peeks only. CI never dispatches account discovery or
         // an extra point query to obtain this optional status evidence.
         let mut candidates = Vec::new();
         match self
-            .peek_graphql(
-                CI_SELECTORS,
-                json!({"owner":repo_owner,"repo":repo,"number":owner.number}),
-            )
+            .ci_selector_response(repository, owner.number, Freshness::CachedOnly)
             .await
         {
             Ok(response) => candidates.push((
@@ -284,24 +269,23 @@ impl Client {
                     .as_str()
                     .is_some_and(crate::repository::valid_sha)
             {
-                let (owner, repo) = repository.split_once('/').expect("validated repository");
-                // Confirm just the CI selectors in the main account's GraphQL
-                // quota. Preserve REST capacity for complete metadata/detail reads,
-                // and leave time for REST if this optional path stalls.
+                let installation = self.ci_uses_installation(repository);
+                // The installation route is authoritative and retains the caller's
+                // normal deadline. Personal GraphQL remains an optional shortcut
+                // with time reserved for complete REST metadata on a stall.
                 // Only consumed selector evidence belongs in the report's
                 // validation clocks; malformed or mismatched optional reads
                 // must not age a successful REST fallback.
                 let (result, validations) = super::VALIDATIONS
                     .scope(std::cell::RefCell::new(Vec::new()), async {
-                        let result = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            self.graphql(
-                                CI_SELECTORS,
-                                json!({"owner":owner,"repo":repo,"number":number}),
-                                freshness,
-                            ),
-                        )
-                        .await;
+                        let query = self.ci_selectors(repository, number, freshness);
+                        let result = if installation {
+                            query.await
+                        } else {
+                            tokio::time::timeout(Duration::from_secs(2), query)
+                                .await
+                                .unwrap_or(Err(Error::Deadline))
+                        };
                         (
                             result,
                             super::VALIDATIONS.with(|records| records.borrow().clone()),
@@ -309,7 +293,7 @@ impl Client {
                     })
                     .await;
                 match result {
-                    Ok(Ok(response))
+                    Ok(response)
                         if response.validated_at_ms >= cached.validated_at_ms
                             && recent(&response, age)
                             && response.data["data"]["repository"]["pullRequest"]["merged"]
@@ -327,7 +311,8 @@ impl Client {
                             validated_at: response.validated_at_ms,
                         });
                     }
-                    Ok(Err(
+                    Err(error) if installation => return Err(error),
+                    Err(
                         error @ (Error::Auth(_)
                         | Error::LocalAuth(_)
                         | Error::Storage(_)
@@ -339,7 +324,7 @@ impl Client {
                         | Error::GitHub {
                             status: 401 | 403, ..
                         }),
-                    )) => return Err(error),
+                    ) => return Err(error),
                     _ => {}
                 }
                 // Changed or ambiguous selectors must not certify the seed.

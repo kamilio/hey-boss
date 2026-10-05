@@ -17,6 +17,8 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::instrument::WithSubscriber;
 use url::Url;
 
+mod ci_selectors;
+
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
 // abandoned socket can occupy its lane long after hydration has moved on.
 tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Instant>; }
@@ -57,8 +59,8 @@ pub(crate) fn foreground_priority() -> Arc<AtomicBool> {
 
 #[derive(Clone)]
 pub struct Config {
-    /// Optional read-only installation for explicitly selected REST repositories.
-    /// Discovery and GraphQL continue using the user's gh authentication.
+    /// Optional installation for CI REST reads and the fixed CI-selector query.
+    /// Discovery, generic GraphQL, and ordinary activity retain user authentication.
     pub installation: Option<crate::AppInstallation>,
     pub gh_program: PathBuf,
     pub hostname: String,
@@ -403,7 +405,8 @@ impl Client {
         body: Option<Value>,
         freshness: Freshness,
     ) -> Result<Response> {
-        self.request_versioned(url, body, freshness, None).await
+        self.request_versioned(url, body, freshness, None, false)
+            .await
     }
 
     async fn request_versioned(
@@ -412,6 +415,7 @@ impl Client {
         body: Option<Value>,
         freshness: Freshness,
         completed_version: Option<&str>,
+        installation: bool,
     ) -> Result<Response> {
         let repository = if let Some(body) = &body {
             let vars = &body["variables"];
@@ -450,6 +454,13 @@ impl Client {
                 Some(version) => format!("{base_key}#completed-jobs-version={version}"),
                 None => base_key,
             };
+            // Generic GraphQL must never share cache or in-flight evidence with
+            // the sealed installation query, even when their bodies are equal.
+            let base_key = if installation {
+                format!("{base_key}#installation-ci-selectors")
+            } else {
+                base_key
+            };
             let key = if generation == 0 {
                 base_key
             } else {
@@ -466,6 +477,7 @@ impl Client {
                 policy,
                 key,
                 repository_prefix,
+                installation,
             ))
             .await?;
             if let Some(repo) = &repository {
@@ -568,6 +580,7 @@ impl Client {
         freshness: Freshness,
         key: String,
         repository_prefix: Option<String>,
+        installation: bool,
     ) -> Result<Response> {
         let cached = self
             .0
@@ -603,11 +616,12 @@ impl Client {
                     deadline.min(now + self.0.config.queue_timeout)
                 })
         };
-        let selector_validation = body.is_none()
+        let selector_validation = (body.is_none()
             && matches!(
                 endpoint_class(&url, false, &self.0.config.rest_url),
                 "pull_request" | "branch"
-            );
+            ))
+            || installation;
         let completion_validation =
             selector_validation && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
         let mut receiver = {
@@ -666,11 +680,12 @@ impl Client {
                 }
                 let job = Job {
                     completion_validation: completion.clone(),
-                    installation: body.is_none()
+                    installation: installation
+                        || (body.is_none()
                         // The installation quota is only for CI status reads.
                         // All other activity retains the user's authentication.
                         && matches!(endpoint, "check_runs" | "commit_statuses" | "workflow_runs" | "workflow_jobs")
-                        && self.request_repository(&url).is_some_and(|repo| self.ci_uses_installation(&repo)),
+                        && self.request_repository(&url).is_some_and(|repo| self.ci_uses_installation(&repo))),
                     minting: false,
                     auth_attempts: 0,
                     auth_generation: 0,
@@ -833,7 +848,13 @@ impl Client {
         let url = self.rest_url(path)?.to_string();
         if !matches!(freshness, Freshness::Revalidate) {
             match self
-                .request_versioned(url.clone(), None, Freshness::CachedOnly, Some(version))
+                .request_versioned(
+                    url.clone(),
+                    None,
+                    Freshness::CachedOnly,
+                    Some(version),
+                    false,
+                )
                 .await
             {
                 Ok(response) => {
@@ -861,7 +882,13 @@ impl Client {
             return self.get(path, freshness).await;
         }
         let response = self
-            .request_versioned(url.clone(), None, Freshness::Revalidate, Some(version))
+            .request_versioned(
+                url.clone(),
+                None,
+                Freshness::Revalidate,
+                Some(version),
+                false,
+            )
             .await?;
         if response.data["jobs"].as_array().is_some_and(|jobs| {
             !jobs.is_empty() && jobs.iter().all(|job| job["status"] == "completed")
