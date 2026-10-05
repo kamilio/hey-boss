@@ -150,7 +150,7 @@ struct Active {
     future: Pin<Box<dyn Future<Output = (Job, Attempt)> + Send>>,
 }
 
-// A known unchanged validator may borrow a paced turn's wait. If it returns a
+// A conditional validation may borrow a paced turn's wait. If it returns a
 // charged response, repay the full interval from the existing future slot,
 // rather than replacing that debt with an interval starting at the response.
 struct PacingProbe {
@@ -768,11 +768,7 @@ impl Scheduler {
                     // socket or global spacing.
                     && ready(turn, &budgets, now) > now
                     && budgets.for_resource(&quota).next().is_some()
-                    && budgets.for_resource(&quota).all(|budget| {
-                        conditional_budget_exempt(job, budget)
-                            // Leave a charged slot for the turn being borrowed.
-                            && budget.remaining > QUOTA_RESERVE + 1
-                    })
+                    && budgets.for_resource(&quota).all(|budget| conditional_probe_eligible(job, budget))
             };
             let waiting_for_turn = |index: usize, job: &Job| {
                 job.ready_at <= now
@@ -783,7 +779,7 @@ impl Scheduler {
             };
             let next = {
                 let eligible = |index: usize, job: &Job| {
-                    ready(job, &budgets, global) <= now
+                    ready_with_probe(job, &budgets, global, can_probe(index, job)) <= now
                         && !(job.installation && minting)
                         && !lane_busy(&active, job, prod)
                         && !waiting_for_turn(index, job)
@@ -859,9 +855,11 @@ impl Scheduler {
                 } else {
                     self.token.clone()
                 };
-                // Reserve every live window before another socket can dispatch.
-                let reservation = (!job.minting).then(|| budgets.reserve(&job));
                 let probe = probe.filter(|_| !job.minting);
+                // Ordinary work reserves every live window before dispatch.
+                // A probe repays its borrowed slot on charged/unknown headers;
+                // reserving it here too would charge that interval twice.
+                let reservation = (!job.minting && probe.is_none()).then(|| budgets.reserve(&job));
                 // A borrowed wait is not a new scheduling turn. Advancing the
                 // priority counters here can replace its owed request and
                 // renew speculative borrowing before the debt is repaid.
@@ -994,7 +992,8 @@ impl Scheduler {
                         // never spin on its old ready time. Deadlines still apply.
                         job.deadline()
                     } else {
-                        ready(job, &budgets, global).min(job.deadline())
+                        ready_with_probe(job, &budgets, global, can_probe(index, job))
+                            .min(job.deadline())
                     }
                 })
                 .min();
@@ -1509,13 +1508,19 @@ impl Scheduler {
 }
 
 fn ready(job: &Job, budgets: &Budgets, global: Instant) -> Instant {
+    ready_with_probe(job, budgets, global, false)
+}
+
+fn ready_with_probe(job: &Job, budgets: &Budgets, global: Instant, probe: bool) -> Instant {
     let now = Instant::now();
     let stamp = now_ms();
     job.ready_at.max(global).max(
         budgets
             .for_resource(&job.quota())
             .map(|budget| {
-                if conditional_budget_exempt(job, budget) {
+                if conditional_budget_exempt(job, budget)
+                    || (probe && conditional_probe_eligible(job, budget))
+                {
                     job.ready_at
                 } else if budget.reset_at_seconds != 0 {
                     // Wake at known expiry even if no response or new job can
@@ -1541,14 +1546,30 @@ fn ready(job: &Job, budgets: &Budgets, global: Instant) -> Instant {
 
 fn conditional_budget_exempt(job: &Job, budget: &Budget) -> bool {
     // A validator alone does not predict a free response: some endpoints return
-    // 200 on every poll. Only previously unchanged representations may probe
-    // without pacing. A changed response revokes that exemption automatically.
+    // 200 on every poll. Only previously unchanged representations get an
+    // ordinary pacing exemption. A changed response revokes it automatically.
     job.body.is_none()
         && budget.remaining > QUOTA_RESERVE
         && job.cached.as_ref().is_some_and(|cached| {
             matches!(cached.source, Source::Revalidated)
                 && (cached.etag.is_some() || cached.last_modified.is_some())
         })
+}
+
+fn conditional_probe_eligible(job: &Job, budget: &Budget) -> bool {
+    // The first foreground REST validation may borrow an older paced turn too.
+    // One probe per quota awaits headers; a charged/unknown reply repays the
+    // interval and blocks further borrowing until that exact owed job leaves.
+    // This does not grant an unproven validator an ordinary pacing exemption.
+    budget.remaining > QUOTA_RESERVE + 1
+        && (conditional_budget_exempt(job, budget)
+            || (job.interactive()
+                && job.resource == "core"
+                && job.body.is_none()
+                && job
+                    .cached
+                    .as_ref()
+                    .is_some_and(|cached| cached.etag.is_some() || cached.last_modified.is_some())))
 }
 
 pub(crate) fn header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1687,6 +1708,93 @@ mod tests {
                 .try_acquire_owned()
                 .unwrap(),
         }
+    }
+
+    fn first_validator() -> Job {
+        let mut job = core_job();
+        job.cached = Some(Response {
+            data: serde_json::json!({}),
+            fetched_at_ms: 0,
+            validated_at_ms: 0,
+            source: Source::Network,
+            etag: Some("synthetic".into()),
+            last_modified: None,
+            link: None,
+        });
+        job
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_validator_borrows_only_when_selected_and_keeps_global_and_retry_gates() {
+        let now = Instant::now();
+        let reset = now_ms() / 1000 + 3600;
+        for installation in [false, true] {
+            let mut job = first_validator();
+            job.installation = installation;
+            let mut budgets = Budgets::default();
+            budgets.observe(&job.quota(), 5000, reset, false, None);
+            let paced = ready(&job, &budgets, now);
+            assert!(paced > now);
+            assert_eq!(ready_with_probe(&job, &budgets, now, true), now);
+            let cooldown = now + Duration::from_secs(120);
+            assert_eq!(ready_with_probe(&job, &budgets, cooldown, true), cooldown);
+            job.ready_at = cooldown;
+            assert_eq!(ready_with_probe(&job, &budgets, now, true), cooldown);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_validator_keeps_reserve_and_every_overlapping_window() {
+        let now = Instant::now();
+        let reset = now_ms() / 1000 + 3600;
+        for remaining in [0, QUOTA_RESERVE, QUOTA_RESERVE + 1] {
+            let job = first_validator();
+            let mut budgets = Budgets::default();
+            budgets.observe("core", 5000, reset, false, None);
+            budgets.observe("core", remaining, reset + 60, false, None);
+            assert_eq!(
+                ready_with_probe(&job, &budgets, now, true),
+                ready(&job, &budgets, now),
+            );
+            assert!(!conditional_probe_eligible(
+                &job,
+                &budgets.0["core"][&(reset + 60)]
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_probe_requires_foreground_core_get_and_an_http_validator() {
+        let reset = now_ms() / 1000 + 3600;
+        let mut budgets = Budgets::default();
+        budgets.observe("core", 5000, reset, false, None);
+        let budget = &budgets.0["core"][&reset];
+        for case in [
+            "background",
+            "search",
+            "graphql",
+            "body",
+            "cold",
+            "no-validator",
+        ] {
+            let mut job = first_validator();
+            match case {
+                "background" => job.interactive.store(false, Ordering::Relaxed),
+                "search" | "graphql" => job.resource = case.into(),
+                "body" => job.body = Some(serde_json::json!({"query":"synthetic"})),
+                "cold" => job.cached = None,
+                "no-validator" => job.cached.as_mut().unwrap().etag = None,
+                _ => unreachable!(),
+            }
+            assert!(!conditional_probe_eligible(&job, budget), "{case}");
+        }
+        let mut promoted = first_validator();
+        promoted.interactive.store(false, Ordering::Relaxed);
+        promoted.report_priority.store(true, Ordering::Relaxed);
+        promoted.cached.as_mut().unwrap().etag = None;
+        promoted.cached.as_mut().unwrap().last_modified = Some("synthetic-date".into());
+        assert!(conditional_probe_eligible(&promoted, budget));
+        assert!(!conditional_budget_exempt(&promoted, budget));
     }
 
     #[tokio::test(start_paused = true)]
