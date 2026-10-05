@@ -1,5 +1,6 @@
 //! Account-wide PR status and a replayable feed of complete PR replacements.
 
+use crate::store::PrBootstrapCursor;
 use crate::{Client, Error, Freshness, Result, Watch, WatchKind, digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -8,6 +9,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+#[cfg(test)]
+mod bootstrap_tests;
 mod hydration;
 mod schedule;
 
@@ -1430,7 +1433,11 @@ impl Client {
         if let Some(repo) = repository {
             crate::client::validate_repository(repo)?;
         }
-        self.validate_change_cursor(raw_pr_cursor(&pr_cursor_scope(repository), cursor)?)
+        let raw = raw_pr_cursor(&pr_cursor_scope(repository), cursor)?;
+        let prefix = self.status_prefix();
+        let prefix = repository.map_or(prefix.clone(), |repo| format!("{prefix}{repo}/"));
+        let bootstrap = PrBootstrapCursor::decode(raw, &prefix)?;
+        self.validate_change_cursor(bootstrap.as_ref().map_or(raw, |c| c.boundary.as_str()))
             .await
     }
 
@@ -1476,8 +1483,14 @@ impl Client {
         let prefix = self.status_prefix();
         let selection_prefix =
             repository.map_or_else(|| prefix.clone(), |repo| format!("{prefix}{repo}/"));
-        if let Some(cursor) = cursor {
-            let raw = raw_pr_cursor(&scope, cursor)?;
+        let raw_cursor = cursor
+            .map(|cursor| raw_pr_cursor(&scope, cursor))
+            .transpose()?;
+        let bootstrap = raw_cursor
+            .map(|raw| PrBootstrapCursor::decode(raw, &selection_prefix))
+            .transpose()?
+            .flatten();
+        if let Some(raw) = raw_cursor.filter(|_| bootstrap.is_none()) {
             let deadline = tokio::time::Instant::now() + wait;
             let mut position = raw.to_owned();
             loop {
@@ -1532,26 +1545,54 @@ impl Client {
                 }
             }
         }
-        let page = self.bootstrap_open_prs(&prefix, repository, fields).await?;
-        let pulls: Vec<_> = page
-            .snapshots
-            .into_iter()
-            .filter(|s| {
-                s.resource.starts_with(&prefix)
-                    && s.data["pullRequest"]["removed"] != true
-                    && s.data["pullRequest"]["state"] == "OPEN"
-                    && matches(&s.data["pullRequest"])
-            })
-            .filter_map(|mut s| s.data.get_mut("pullRequest").map(Value::take))
-            .collect();
-        let complete = pulls.iter().all(|p| p["complete"] == true);
+        let page = self
+            .bootstrap_open_prs(&prefix, repository, fields, raw_cursor)
+            .await?;
+        let mut pulls = Vec::new();
+        let mut changes = Vec::new();
+        for mut snapshot in page.snapshots.into_iter().filter(|s| {
+            s.resource.starts_with(&prefix)
+                && s.data["pullRequest"]["removed"] != true
+                && s.data["pullRequest"]["state"] == "OPEN"
+                && matches(&s.data["pullRequest"])
+        }) {
+            let Some(row) = snapshot.data.get_mut("pullRequest").map(Value::take) else {
+                continue;
+            };
+            if let Some(bootstrap) = &bootstrap {
+                changes.push(PrStatusChange {
+                    cursor: wrap(
+                        &PrBootstrapCursor {
+                            boundary: bootstrap.boundary.clone(),
+                            after: snapshot.resource,
+                        }
+                        .encode(),
+                    ),
+                    changed_fields: row
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|o| o.keys().cloned())
+                        .collect(),
+                    observed_at_ms: snapshot.observed_at_ms,
+                    kind: "baseline".into(),
+                    activity: vec![],
+                    pull_request: row,
+                });
+            } else {
+                pulls.push(row);
+            }
+        }
+        let complete = pulls
+            .iter()
+            .chain(changes.iter().map(|c| &c.pull_request))
+            .all(|p| p["complete"] == true);
         self.with_discovery_health(
             repository,
             PrStatusPage {
                 pull_requests: pulls,
-                changes: vec![],
+                changes,
                 cursor: wrap(&page.cursor),
-                has_more: false,
+                has_more: page.has_more,
                 complete,
                 errors: vec![],
                 coverage: None,
@@ -1767,9 +1808,20 @@ mod incremental_tests {
         assert_eq!(projected.pull_requests.len(), 1);
         assert_eq!(projected.pull_requests[0]["number"], 1);
         assert!(projected.pull_requests[0].get("body").is_none());
+        let partial = client
+            .pr_status_page_projected(None, None, 1000, Duration::ZERO, Some(&["number"]))
+            .await
+            .unwrap();
+        assert!(partial.has_more);
         assert!(
             client
-                .pr_status_page_projected(None, None, 1000, Duration::ZERO, Some(&["number"]))
+                .pr_status_page_projected(
+                    None,
+                    Some(&partial.cursor),
+                    1000,
+                    Duration::ZERO,
+                    Some(&["number"])
+                )
                 .await
                 .is_err(),
             "projection cannot bypass selected rows' stored-byte limit"
@@ -1792,9 +1844,14 @@ mod incremental_tests {
             no_change.changes.is_empty(),
             "bootstrap uses the global atomic feed head"
         );
+        let partial = client
+            .pr_status_page(None, None, 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(partial.has_more);
         assert!(
             client
-                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .pr_status_page(None, Some(&partial.cursor), 1000, Duration::ZERO)
                 .await
                 .is_err(),
             "selected open rows still obey their original stored-byte budget"

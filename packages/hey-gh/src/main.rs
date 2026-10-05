@@ -742,6 +742,7 @@ async fn run_pr(
             .chain(page.changes.iter().map(|c| &c.pull_request))
             .all(|p| p["sourceErrors"].as_object().is_some_and(|e| e.is_empty()));
     let total = page.pull_requests.len();
+    let total_known = !page.has_more;
     let truncated = initial_limit.is_some_and(|l| total > l);
     if let Some(limit) = initial_limit {
         page.pull_requests.truncate(limit);
@@ -768,7 +769,7 @@ async fn run_pr(
     }
     let mut value = serde_json::to_value(page)?;
     if cursor.is_none() {
-        value["totalCount"] = serde_json::json!(total);
+        value["totalCount"] = serde_json::json!(total_known.then_some(total));
         value["truncated"] = serde_json::json!(truncated);
     }
     Ok((value, complete))

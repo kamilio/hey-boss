@@ -218,8 +218,9 @@ cursor atomically; keep paging while `hasMore` is true. An empty `changes` page
 with `hasMore=true` is valid because unrelated source events share the underlying
 feed. Updates are coalesced: only the latest value of each resource is retained.
 A repeated request can therefore return newer current data after another poll;
-intermediate versions are not an audit history. Each returned replacement keeps
-its own latest observation cursor and timestamp.
+intermediate versions are not an audit history. Incremental replacements keep
+their latest observation cursor and timestamp. Bootstrap continuation cursors
+mark scan positions; their rows retain their original observation timestamps.
 
 `kind` is `baseline`, `opened`, `updated`, `closed`, `merged`, `reopened`, or
 `removed`. Closures and merges include terminal state and available
@@ -440,8 +441,14 @@ converge through the existing background monitoring.
 
 `pr list --limit N` truncates the initial display with `totalCount` and
 `truncated=true`; it is not a complete consumer bootstrap. Omit it when building
-local state. On cursor reads the limit bounds scanned events; always drain
-`hasMore` pages. Incremental pages also use a byte budget: normally the configured
+local state. Large open rosters page within the bootstrap byte limit (256 MiB
+by default), at most 1,000 rows at a time. The first page uses `pullRequests`;
+continuations use `changes` with `kind=baseline`, then replay updates from the
+scan's starting watermark. Persist each page and its cursor together and drain
+`hasMore`, including after the initial response. Restarts preserve scan progress;
+an expired cursor requires a new bootstrap. CLI `totalCount` is null while the
+initial roster is paginated. On ordinary cursor reads the limit bounds scanned
+events. Incremental pages also use a byte budget: normally the configured
 collection limit (64 MiB by default), with one indivisible larger observation
 allowed up to the bootstrap limit (256 MiB by default). A page can contain fewer
 events than requested; preserve its cursor and drain `hasMore`. PR cursor reads
