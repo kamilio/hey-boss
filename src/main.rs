@@ -1,6 +1,7 @@
 mod access;
 mod claude_auth;
 mod config;
+mod gemini_cli;
 #[cfg(test)]
 mod mode_tests;
 mod model_registry;
@@ -88,6 +89,15 @@ enum Command {
     },
     /// Configure the current user's Pi with this proxy's providers and models
     ConfigurePi,
+    /// Configure Gemini CLI to use this proxy's native Gemini API
+    ConfigureGeminiCli {
+        /// Native model or alias (default: first configured Gemini destination)
+        #[arg(long)]
+        model: Option<String>,
+        /// Gemini configuration directory (default: ~/.gemini)
+        #[arg(long)]
+        gemini_home: Option<PathBuf>,
+    },
 }
 
 fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
@@ -137,6 +147,16 @@ async fn main() -> Result<()> {
             model.as_deref(),
             token.as_deref(),
         );
+    }
+    if let Some(Command::ConfigureGeminiCli { model, gemini_home }) = &args.command {
+        let path = config_path(args.config.clone())?;
+        let config = config::load(&path)?;
+        let api_key = if config.mode == config::Mode::Host {
+            access::ensure(&path, &[])?.local
+        } else {
+            "hey-proxy".to_owned()
+        };
+        return gemini_cli::configure(&config, &api_key, model.as_deref(), gemini_home.as_deref());
     }
     if matches!(args.command, Some(Command::ConfigurePi)) {
         // Everything comes from the proxy's own config: where it listens, and
