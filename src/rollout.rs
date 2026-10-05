@@ -74,7 +74,7 @@ fn edit_codex_token(
     }
     Ok(doc.to_string())
 }
-fn write_private(path: &Path, content: &[u8], backup: bool) -> Result<()> {
+pub(crate) fn write_private(path: &Path, content: &[u8], backup: bool) -> Result<()> {
     let parent = path.parent().context("File has no parent")?;
     fs::create_dir_all(parent)?;
     if path.exists() && fs::read(path)? == content {

@@ -240,6 +240,28 @@ This writes `gemini.config.toml` in Codex's configuration directory. It uses Res
 
 Normal startup, `--init`, credential checks, and remote rollout do not create or modify Codex files.
 
+## Configure Gemini CLI — optional
+
+Install [Gemini CLI](https://github.com/google-gemini/gemini-cli), then connect it to your configured Gemini provider:
+
+```sh
+npm install -g @google/gemini-cli
+hey-proxy configure-gemini-cli
+gemini
+```
+
+Like `configure-pi`, setup reads the proxy's listening address and routing. It selects the first Gemini destination from your aliases (including reasoning routes), then checks `model_registry` and fallbacks if needed. It uses the native model name and API, with credentials supplied by the proxy. To choose a specific model, or when your provider has no model routes:
+
+```sh
+hey-proxy configure-gemini-cli --model gemini-2.5-pro
+```
+
+The command updates `~/.gemini/settings.json` and `.env`, selects API-key authentication, and sets the proxy URL without a `/v1` suffix. Host mode uses the local proxy access key with bearer authentication; standalone and client modes use a placeholder. A client relay requires `--model`, since model routing belongs to its host. Use `--config` for another proxy config and `--gemini-home` for another Gemini configuration directory. `GEMINI_CLI_HOME` is also respected as Gemini CLI's user-home override (setup writes its `.gemini` subdirectory).
+
+Existing hooks, MCP servers, trust settings, and unrelated environment values are preserved. Stale model/auth environment overrides are removed. Changed files receive private backups, and repeating setup with identical settings does not rewrite them. Restart Gemini after setup. Gemini CLI loads `.gemini/.env` in trusted workspaces; for headless use in a workspace you trust, run `gemini --skip-trust -p "Your prompt"`. Existing shell variables and project `.env` files may override the generated configuration.
+
+This command configures Gemini CLI only. The existing `configure-gemini` command above continues to configure the Gemini **Codex profile**. Normal proxy startup and rollout do not modify Gemini CLI files.
+
 ## Configure Pi — optional
 
 After the proxy is running, connect [Pi](https://pi.dev):
