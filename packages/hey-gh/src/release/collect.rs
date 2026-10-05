@@ -825,14 +825,7 @@ impl Collector<'_> {
             ])
             .to_string(),
         );
-        let settled_cancelled = run["conclusion"] == "cancelled"
-            && run["updated_at"]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .is_some_and(|at| {
-                    at.timestamp_millis() >= 0
-                        && crate::now_ms().saturating_sub(at.timestamp_millis() as u64) > 600_000
-                });
+        let settled_cancelled = crate::report::settled_cancelled(run);
         let first_path = path.clone();
         let mut path = path;
         let mut rows = Vec::new();

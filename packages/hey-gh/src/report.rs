@@ -13,6 +13,22 @@ mod ci_collection;
 mod ci_metadata;
 mod review_events;
 
+// Cancelled jobs can appear after the parent stops; reuse empty pages only
+// once the existing ten-minute settling interval has elapsed.
+pub(crate) fn settled_cancelled(run: &Value) -> bool {
+    run["status"] == "completed"
+        && run["conclusion"] == "cancelled"
+        && run["updated_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|at| {
+                at.timestamp_millis() >= 0
+                    && now_ms()
+                        .checked_sub(at.timestamp_millis() as u64)
+                        .is_some_and(|elapsed| elapsed > 600_000)
+            })
+}
+
 // Nested PR/CI reads share this flag: contention makes the entire cached
 // observation read-only, preventing stale writes over an active refresh.
 tokio::task_local! { static PUBLICATION_READ_ONLY: Arc<AtomicBool>; }
@@ -1060,6 +1076,7 @@ impl Client {
         let path =
             format!("repos/{repository}/actions/runs/{id}/attempts/{attempt}/jobs?per_page=100");
         let finished = run["status"] == "completed";
+        let allow_empty = settled_cancelled(run);
         let version = json!({"updated_at":run["updated_at"],"completed_at":run["completed_at"],"conclusion":run["conclusion"],"attempt":attempt});
         let key = format!(
             "completed-jobs://{}/{repository}/{id}/{attempt}#{}",
@@ -1082,8 +1099,13 @@ impl Client {
                 "jobs",
                 async {
                     if finished {
-                        self.completed_job_pages(&path, &crate::digest(&key), freshness)
-                            .await
+                        self.completed_job_pages(
+                            &path,
+                            &crate::digest(&key),
+                            allow_empty,
+                            freshness,
+                        )
+                        .await
                     } else {
                         self.pages(&path, Some("jobs"), freshness).await
                     }
@@ -1091,7 +1113,7 @@ impl Client {
             )
             .await?;
         if finished
-            && !jobs.is_empty()
+            && (allow_empty || !jobs.is_empty())
             && jobs.iter().all(|j| j["status"] == "completed")
             && !matches!(freshness, Freshness::CachedOnly)
         {

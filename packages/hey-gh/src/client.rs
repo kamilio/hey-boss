@@ -819,9 +819,10 @@ impl Client {
         &self,
         path: &str,
         version: &str,
+        allow_empty: bool,
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
-        self.collect_pages(path, Some("jobs"), freshness, Some((version, false)))
+        self.collect_pages(path, Some("jobs"), freshness, Some((version, allow_empty)))
             .await
     }
 
