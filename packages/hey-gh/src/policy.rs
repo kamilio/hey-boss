@@ -422,7 +422,8 @@ impl Client {
             let identity = policy_identity(&pr.data)?;
             let head = pr.data["head"]["sha"]
                 .as_str()
-                .ok_or_else(|| Error::Invalid("PR lacks head SHA".into()))?;
+                .filter(|sha| crate::repository::valid_sha(sha))
+                .ok_or_else(|| Error::Invalid("PR lacks immutable head SHA".into()))?;
             let merge = pr.data["merge_commit_sha"]
                 .as_str()
                 .filter(|sha| crate::repository::valid_sha(sha));
@@ -433,8 +434,7 @@ impl Client {
                 "repos/{repository}/rules/branches/{}",
                 segment(&identity.branch)
             );
-            let (ci_res, (branch, protection_res), rules_first_res) = tokio::join!(
-                self.required_ci_report(repository, head, merge, freshness),
+            let ((branch, protection_res), rules_first_res) = tokio::join!(
                 async {
                     let branch = self.get(&policy_path, freshness).await;
                     let protection = if branch
@@ -449,8 +449,7 @@ impl Client {
                 },
                 self.policy_get(&rules_path, freshness),
             );
-            let ci = ci_res?;
-            let mut errors = ci.errors.clone();
+            let mut errors = Vec::new();
             let direct_branch = if identity.branch == base {
                 branch.clone()
             } else {
@@ -589,6 +588,18 @@ impl Client {
                     ));
                 }
             }
+            // A definitive empty policy does not depend on CI. In particular,
+            // unavailable optional checks must not delay a not_required result.
+            // Uncertain policy still collects and retains its source errors.
+            let checks = if requirements.is_empty() && errors.is_empty() {
+                Vec::new()
+            } else {
+                let ci = self
+                    .required_ci_report(repository, head, merge, freshness)
+                    .await?;
+                errors.extend(ci.errors.iter().cloned());
+                evaluate(&ci, &requirements)
+            };
             let up_to_date = if strict
                 && let Some(base_sha) = branch
                     .as_ref()
@@ -598,10 +609,7 @@ impl Client {
             {
                 match self
                     .get(
-                        &format!(
-                            "repos/{repository}/compare/{base_sha}...{}?per_page=1",
-                            ci.head_sha
-                        ),
+                        &format!("repos/{repository}/compare/{base_sha}...{head}?per_page=1"),
                         freshness,
                     )
                     .await
@@ -627,7 +635,6 @@ impl Client {
             } else {
                 None
             };
-            let checks = evaluate(&ci, &requirements);
             let state = if !errors.is_empty() || (strict && up_to_date.is_none()) {
                 "unknown"
             } else if checks.iter().any(|c| c.state == "failure") {
@@ -724,7 +731,7 @@ impl Client {
             let mut report = RequiredChecksReport {
                 repository: repository.into(),
                 pull_number: number,
-                head_sha: ci.head_sha,
+                head_sha: head.into(),
                 base_branch: base,
                 policy_identity: Some(identity),
                 policy_sha,
@@ -733,7 +740,7 @@ impl Client {
                     .as_str()
                     .filter(|sha| crate::repository::valid_sha(sha))
                     .map(str::to_owned),
-                merge_sha: ci.merge_sha,
+                merge_sha: merge.map(str::to_owned),
                 state: state.into(),
                 strict,
                 up_to_date,

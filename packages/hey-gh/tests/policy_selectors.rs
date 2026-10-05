@@ -35,6 +35,10 @@ fn selectors() -> Value {
 struct Data {
     rest: Value,
     graph: Value,
+    rules: Value,
+    deny_rules: bool,
+    stall_checks: bool,
+    merge_base: &'static str,
     deny_rest: bool,
     stall_rest: bool,
     stall_graph: bool,
@@ -92,13 +96,15 @@ async fn handler(
             (
                 json!({"total_count":1,"check_runs":[{"id":sha.as_bytes()[0],"name":"tests","app":{"id":1},"head_sha":sha,"status":"completed","conclusion":"success"}]}),
                 false,
-                false,
+                s.stall_checks,
             )
         } else if path.ends_with("/status") {
-            (json!({"statuses":[]}), false, false)
+            (json!({"statuses":[]}), false, s.stall_checks)
         } else if path.contains("/rules/branches/") {
+            (s.rules.clone(), s.deny_rules, false)
+        } else if path.contains("/compare/") {
             (
-                json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),
+                json!({"merge_base_commit":{"sha":s.merge_base}}),
                 false,
                 false,
             )
@@ -179,6 +185,10 @@ impl Fixture {
         let data = Arc::new(Mutex::new(Data {
             rest: metadata(),
             graph: selectors(),
+            rules: json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),
+            deny_rules: false,
+            stall_checks: false,
+            merge_base: BASE,
             deny_rest: false,
             stall_rest: false,
             stall_graph: false,
@@ -248,6 +258,128 @@ impl Fixture {
             "INSERT OR REPLACE INTO cache(scope,key,response) SELECT scope,key||'#installation-ci-pr',json_set(response,'$.data',json(?1),'$.validated_at_ms',?2) FROM cache WHERE key LIKE '%/pulls/7'",
             rusqlite::params![data.to_string(), clock],
         ).unwrap(), 1);
+    }
+}
+
+#[tokio::test]
+async fn empty_policy_finishes_without_collecting_or_publishing_ci() {
+    for installation in [false, true] {
+        let f = Fixture::with_installation(installation).await;
+        {
+            let mut data = f.data.lock().unwrap();
+            data.rules = json!([{"type":"pull_request"}]);
+            data.stall_checks = true;
+        }
+        for freshness in [Freshness::Revalidate, Freshness::CachedOnly] {
+            let report = tokio::time::timeout(
+                Duration::from_secs(2),
+                f.client.required_checks_for_pr("acme/demo", 7, freshness),
+            )
+            .await
+            .expect("empty required-check policy waited for unrelated CI")
+            .unwrap();
+            assert_eq!(report.state, "not_required", "{:?}", report.errors);
+            assert_eq!(report.head_sha, HEAD);
+            assert_eq!(report.merge_sha.as_deref(), Some(MERGE));
+            assert!(report.checks.is_empty());
+            assert!(
+                !report
+                    .validations
+                    .iter()
+                    .any(|v| v.resource.contains("/commits/"))
+            );
+        }
+        assert!(
+            !f.data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|(path, _)| { path.contains("/commits/") || path.contains("/access_tokens") })
+        );
+        let db = rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap();
+        let ci_rows: u64 = db
+            .query_row(
+                "SELECT count(*) FROM snapshots WHERE resource LIKE 'ci://%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            ci_rows, 0,
+            "policy absence must not publish a fabricated CI result"
+        );
+    }
+}
+
+#[tokio::test]
+async fn empty_policy_still_checks_strict_ancestry_and_revalidates_new_requirements() {
+    let f = Fixture::new().await;
+    let required = f.data.lock().unwrap().rules.clone();
+    for merge_base in [HEAD, BASE] {
+        {
+            let mut data = f.data.lock().unwrap();
+            data.rules = json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[]}}]);
+            data.merge_base = merge_base;
+            data.stall_checks = true;
+        }
+        let report = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(report.strict);
+        assert_eq!(report.up_to_date, Some(merge_base == BASE));
+        assert_eq!(
+            report.state,
+            if merge_base == BASE {
+                "not_required"
+            } else {
+                "pending"
+            }
+        );
+        assert!(
+            !f.data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|(path, _)| path.contains("/commits/"))
+        );
+    }
+    {
+        let mut data = f.data.lock().unwrap();
+        data.rules = required;
+        data.stall_checks = false;
+    }
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert_eq!(report.state, "satisfied", "{:?}", report.errors);
+    assert_eq!(report.checks.len(), 1);
+    assert!(
+        f.data
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(path, _)| path.ends_with("/check-runs"))
+    );
+    for denied in [false, true] {
+        {
+            let mut data = f.data.lock().unwrap();
+            data.deny_rules = denied;
+            data.rules = json!([{"type":"required_status_checks","parameters":{}}]);
+        }
+        let report = f
+            .client
+            .required_checks_for_pr("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert_eq!(report.state, "unknown");
+        assert!(report.errors.iter().any(|error| error.source == "rulesets"));
     }
 }
 
