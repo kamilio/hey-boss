@@ -12,6 +12,7 @@ pub(super) enum Phase {
     Ancestry,
     Confirmation,
     Publication,
+    StatusPublication,
 }
 
 pub(super) struct Timings {
@@ -20,7 +21,7 @@ pub(super) struct Timings {
     started: Instant,
     entered: Instant,
     phase: Phase,
-    times: [Duration; 8],
+    times: [Duration; 9],
     attempts: u32,
     background: bool,
     outcome: &'static str,
@@ -41,7 +42,7 @@ impl Timings {
             started: now,
             entered: now,
             phase: Phase::Prepare,
-            times: [Duration::ZERO; 8],
+            times: [Duration::ZERO; 9],
             attempts: 0,
             background: crate::client::BACKGROUND_READ.try_with(|_| ()).is_ok(),
             outcome: "interrupted",
@@ -94,6 +95,7 @@ impl Drop for Timings {
             "ancestry",
             "confirmation",
             "publication",
+            "status_publication",
         ][self.phase as usize];
         // No bodies, URLs, credentials or raw errors. Drop also records caller
         // cancellation, when the report future cannot return its own error.
@@ -103,7 +105,9 @@ impl Drop for Timings {
             elapsed_ms=elapsed.as_millis() as u64,
             prepare_ms=ms(Phase::Prepare), lock_ms=ms(Phase::Lock), seed_ms=ms(Phase::Seed),
             policy_ms=ms(Phase::Policy), ci_ms=ms(Phase::Ci), ancestry_ms=ms(Phase::Ancestry),
-            confirmation_ms=ms(Phase::Confirmation), publication_ms=ms(Phase::Publication),
+            confirmation_ms=ms(Phase::Confirmation),
+            publication_ms=ms(Phase::Publication)+ms(Phase::StatusPublication),
+            observation_ms=ms(Phase::Publication), status_publication_ms=ms(Phase::StatusPublication),
             "Required-check read finished");
     }
 }
