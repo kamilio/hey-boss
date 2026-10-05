@@ -83,15 +83,25 @@ async fn poll_required(
     batch_deadline: tokio::time::Instant,
     force: bool,
 ) -> hey_gh::Result<Option<RequiredEvidence>> {
-    let _ = batch_deadline;
     let freshness = fetch_freshness(force);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(60));
     let policy = tokio::time::timeout_at(
         deadline,
         client.required_checks_for_pr(repository, number, freshness),
     )
     .await
-    .map_err(|_| hey_gh::Error::Deadline)??;
+    .unwrap_or(Err(hey_gh::Error::Deadline));
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(error) => {
+            // Do not turn a policy failure into readiness. Only independently
+            // confirmed terminal metadata can finish this watch.
+            return match confirm_terminal(ctx, client, url, repository, number, deadline).await {
+                Ok(()) => Ok(None),
+                Err(_) => Err(error),
+            };
+        }
+    };
     if !policy.repository.eq_ignore_ascii_case(repository)
         || policy.pull_number != number
         || policy.head_sha.is_empty()
@@ -125,43 +135,7 @@ async fn poll_required(
         false
     };
     if policy.pull_request_state.as_deref() == Some("closed") {
-        let response = tokio::time::timeout_at(
-            batch_deadline,
-            client.pull_request(repository, number, Freshness::Revalidate),
-        )
-        .await
-        .map_err(|_| hey_gh::Error::Deadline)??;
-        let status = super::pr_status(&response.data, repository, number);
-        if !fresh(response.validated_at_ms) || !matches!(status, Some("merged" | "closed")) {
-            return Err(hey_gh::Error::Invalid(
-                "Pull request changed while confirming its closure; refreshing again".into(),
-            ));
-        }
-        let mut store = Store::open(&ctx.path).map_err(storage)?;
-        store
-            .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)
-            .map_err(storage)?;
-        if status == Some("merged") {
-            if let Some(id) = response.data["user"]["id"].as_i64() {
-                store.record_pr_author(url, id).map_err(storage)?;
-            }
-            store
-                .record_pr_merge_details(
-                    url,
-                    response.data["title"].as_str().unwrap_or(""),
-                    response.data["merged_at"].as_str(),
-                    timestamp(response.validated_at_ms)?,
-                )
-                .map_err(storage)?;
-        }
-        let mut actor = ctx
-            .actor()
-            .map_err(|error| hey_gh::Error::Invalid(error.to_string()))?;
-        actor.id = "human:pr-monitor".into();
-        store.close_merged_pull_requests(&actor).map_err(storage)?;
-        store
-            .reconcile_github_assignments(&actor)
-            .map_err(storage)?;
+        confirm_terminal(ctx, client, url, repository, number, batch_deadline).await?;
         return Ok(None);
     }
     Ok(Some(RequiredEvidence {
@@ -169,6 +143,56 @@ async fn poll_required(
         published: published_required,
         force,
     }))
+}
+
+// Lifecycle is independent of check policy: a merged native stack may no
+// longer contain enough metadata to evaluate its former required checks.
+async fn confirm_terminal(
+    ctx: &Context,
+    client: &ApiClient,
+    url: &str,
+    repository: &str,
+    number: u64,
+    deadline: tokio::time::Instant,
+) -> hey_gh::Result<()> {
+    let response = tokio::time::timeout_at(
+        deadline,
+        client.pull_request(repository, number, Freshness::Revalidate),
+    )
+    .await
+    .map_err(|_| hey_gh::Error::Deadline)??;
+    let status = super::pr_status(&response.data, repository, number);
+    if !fresh(response.validated_at_ms) || !matches!(status, Some("merged" | "closed")) {
+        return Err(hey_gh::Error::Invalid(
+            "Pull request changed while confirming its closure; refreshing again".into(),
+        ));
+    }
+    let mut store = Store::open(&ctx.path).map_err(storage)?;
+    store
+        .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)
+        .map_err(storage)?;
+    if status == Some("merged") {
+        if let Some(id) = response.data["user"]["id"].as_i64() {
+            store.record_pr_author(url, id).map_err(storage)?;
+        }
+        store
+            .record_pr_merge_details(
+                url,
+                response.data["title"].as_str().unwrap_or(""),
+                response.data["merged_at"].as_str(),
+                timestamp(response.validated_at_ms)?,
+            )
+            .map_err(storage)?;
+    }
+    let mut actor = ctx
+        .actor()
+        .map_err(|error| hey_gh::Error::Invalid(error.to_string()))?;
+    actor.id = "human:pr-monitor".into();
+    store.close_merged_pull_requests(&actor).map_err(storage)?;
+    store
+        .reconcile_github_assignments(&actor)
+        .map_err(storage)?;
+    Ok(())
 }
 
 async fn poll_details(

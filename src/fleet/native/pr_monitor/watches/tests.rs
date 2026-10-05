@@ -234,6 +234,32 @@ enum Scenario {
     Closed,
     Merged,
     KeepMergedOpen,
+    PolicyErrorClosed,
+    PolicyErrorMerged,
+    PolicyErrorOpen,
+    PolicyErrorStale,
+    PolicyErrorDenied,
+    PolicyErrorWrongIdentity,
+}
+
+#[test]
+fn policy_error_still_records_confirmed_merge_and_authorship() {
+    scenario(Scenario::PolicyErrorMerged);
+}
+#[test]
+fn policy_error_still_records_confirmed_closure() {
+    scenario(Scenario::PolicyErrorClosed);
+}
+#[test]
+fn policy_error_never_completes_work_without_fresh_terminal_identity() {
+    for case in [
+        Scenario::PolicyErrorOpen,
+        Scenario::PolicyErrorStale,
+        Scenario::PolicyErrorDenied,
+        Scenario::PolicyErrorWrongIdentity,
+    ] {
+        scenario(case);
+    }
 }
 
 #[test]
@@ -250,6 +276,20 @@ fn disabling_automatic_completion_returns_merged_work_to_boss() {
 }
 
 fn scenario(scenario: Scenario) {
+    let policy_error = matches!(
+        scenario,
+        Scenario::PolicyErrorClosed
+            | Scenario::PolicyErrorMerged
+            | Scenario::PolicyErrorOpen
+            | Scenario::PolicyErrorStale
+            | Scenario::PolicyErrorDenied
+            | Scenario::PolicyErrorWrongIdentity
+    );
+    let unconfirmed = policy_error
+        && !matches!(
+            scenario,
+            Scenario::PolicyErrorClosed | Scenario::PolicyErrorMerged
+        );
     let pending = matches!(scenario, Scenario::Pending | Scenario::NativeStack);
     let stale = matches!(scenario, Scenario::Stale);
     let invalid_time = matches!(scenario, Scenario::InvalidTime);
@@ -258,9 +298,16 @@ fn scenario(scenario: Scenario) {
     let review_head_changed = matches!(scenario, Scenario::ReviewHeadChanged);
     let terminal = matches!(
         scenario,
-        Scenario::Closed | Scenario::Merged | Scenario::KeepMergedOpen
+        Scenario::Closed
+            | Scenario::Merged
+            | Scenario::KeepMergedOpen
+            | Scenario::PolicyErrorClosed
+            | Scenario::PolicyErrorMerged
     );
-    let merged = matches!(scenario, Scenario::Merged | Scenario::KeepMergedOpen);
+    let merged = matches!(
+        scenario,
+        Scenario::Merged | Scenario::KeepMergedOpen | Scenario::PolicyErrorMerged
+    );
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
         version: 1,
@@ -314,6 +361,22 @@ fn scenario(scenario: Scenario) {
         metadata["data"]["state"] = json!("closed");
         metadata["data"]["merged"] = json!(merged);
     }
+    if policy_error {
+        metadata["data"]["user"] = json!({"id":42});
+        metadata["data"]["title"] = json!("Merged change");
+        metadata["data"]["merged_at"] = json!("2026-10-05T21:04:49Z");
+        if unconfirmed && !matches!(scenario, Scenario::PolicyErrorOpen) {
+            metadata["data"]["state"] = json!("closed");
+            metadata["data"]["merged"] = json!(true);
+        }
+        if matches!(scenario, Scenario::PolicyErrorStale) {
+            metadata["validated_at_ms"] = json!(crate::issues::worker::now() - 300_000);
+        }
+        if matches!(scenario, Scenario::PolicyErrorWrongIdentity) {
+            metadata["data"]["number"] = json!(2);
+        }
+    }
+    let policy_failure = json!({"error":"PR advertises incomplete native stack metadata"});
     let mut changed_report = json!({"data":{"repository":"o/r","number":1,"pull_request":metadata["data"],"conflicts":"clean",
         "comments":[],"review_comments":[],"reviews":[],"timeline":[],"review_events":[],"review_threads":[],
         "review_status":{"requested_reviewers":[],"requested_teams":[],"latest_reviews":[],"approved_by":[],"changes_requested_by":[],"dismissed_reviews":[],"resolved_threads":0,"unresolved_threads":0,"outdated_threads":0},
@@ -325,7 +388,7 @@ fn scenario(scenario: Scenario) {
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
     let database = ctx.path.clone();
     let serving = std::thread::spawn(move || {
-        let expected = if terminal {
+        let expected = if terminal || policy_error {
             2
         } else if stale || invalid_time {
             1
@@ -360,8 +423,16 @@ fn scenario(scenario: Scenario) {
                         (&ci, 200)
                     }
                 }
+                "/v1/prs/o/r/1/required-checks" if policy_error => (&policy_failure, 422),
                 "/v1/prs/o/r/1/required-checks" => (&policy, 200),
-                "/v1/prs/o/r/1/metadata" => (&metadata, 200),
+                "/v1/prs/o/r/1/metadata" => {
+                    assert!(!policy_error || request.url().ends_with("?refresh=true"));
+                    if matches!(scenario, Scenario::PolicyErrorDenied) {
+                        (&Value::Null, 403)
+                    } else {
+                        (&metadata, 200)
+                    }
+                }
                 "/v1/prs/o/r/1" => {
                     let db = Store::open_connection(&database).unwrap();
                     let assignee: Option<String> = db
@@ -410,10 +481,10 @@ fn scenario(scenario: Scenario) {
     let view = store
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
-    if terminal && !matches!(scenario, Scenario::Merged) {
+    if terminal && !matches!(scenario, Scenario::Merged | Scenario::PolicyErrorMerged) {
         assert_eq!(view["issue"]["assignee"], "human:boss");
         assert_eq!(view["issue"]["state"], "open");
-    } else if stale || invalid_time {
+    } else if stale || invalid_time || unconfirmed {
         assert_eq!(view["issue"]["assignee"], "watcher:github");
     } else {
         assert!(view["issue"]["assignee"].is_null());
@@ -422,7 +493,7 @@ fn scenario(scenario: Scenario) {
     if !terminal && (stale || invalid_time || !pending) {
         assert!(status["error"].is_string(), "{view}");
     }
-    if !stale && !invalid_time && !terminal {
+    if !stale && !invalid_time && !terminal && !policy_error {
         assert_eq!(status["evidence"]["required"][0]["state"], "failure");
     }
     if matches!(scenario, Scenario::NativeStack) {
@@ -448,9 +519,30 @@ fn scenario(scenario: Scenario) {
             view["issue"]["pull_requests"][0]["status"],
             if merged { "merged" } else { "closed" }
         );
-        if matches!(scenario, Scenario::Merged) {
+        if matches!(scenario, Scenario::Merged | Scenario::PolicyErrorMerged) {
             assert_eq!(view["issue"]["state"], "closed");
         }
+    }
+    if matches!(scenario, Scenario::PolicyErrorMerged) {
+        store.record_github_user(42).unwrap();
+        let history = store
+            .execute(&request(
+                json!({"action":"merged_pull_requests","limit":100,"offset":0}),
+            ))
+            .unwrap();
+        assert_eq!(history["pull_requests"][0]["title"], "Merged change");
+        assert_eq!(history["pull_requests"][0]["merged_at"], 1791234289000_i64);
+    }
+    if unconfirmed {
+        assert_eq!(view["issue"]["state"], "open");
+        assert_ne!(view["issue"]["pull_requests"][0]["status"], "merged");
+        assert!(status["evidence"].is_null());
+        assert!(
+            status["error"]
+                .as_str()
+                .unwrap()
+                .contains("incomplete native stack metadata")
+        );
     }
     // A due-time checkpoint prevents immediate duplicate network reads, including
     // after process recovery. No server remains for this cycle.
