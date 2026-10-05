@@ -3,6 +3,7 @@
 use super::{Command, PrAction, policy, resolve_pr, run_pr};
 use hey_gh::{ApiClient, Freshness};
 use serde_json::{Value, json};
+use std::future::Future;
 use tokio::time::Instant;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -23,6 +24,28 @@ pub(super) fn validate(command: Option<&Command>, cursor: Option<&str>) -> Resul
         return Err("--timeout applies to single PR view/checks, ci, and required-checks reads; --wait controls cursor long polling".into());
     }
     Ok(())
+}
+
+// The fallback is optional evidence, not a prerequisite for a live read.
+// Keep both inside the caller's deadline and prefer a ready live response.
+async fn with_fallback(
+    cached: &mut Option<Value>,
+    capture: impl Future<Output = Result<(Value, bool)>>,
+    live: impl Future<Output = Result<(Value, bool)>>,
+) -> Result<(Value, bool)> {
+    tokio::pin!(capture, live);
+    tokio::select! {
+        biased;
+        result = &mut live => result,
+        result = &mut capture => {
+            if let Ok((value, _)) = result
+                && value["available"] != false
+            {
+                *cached = Some(value);
+            }
+            live.await
+        }
+    }
 }
 
 pub(super) async fn read(
@@ -63,17 +86,18 @@ pub(super) async fn read(
                 } else {
                     identity["repository"].as_str().map(str::to_owned)
                 };
+                if options.cached_only {
+                    return run_pr(api, options, selected_repo, None).await;
+                }
                 let mut cache_options = options.clone();
                 cache_options.refresh = false;
                 cache_options.cached_only = true;
-                let cached_result = run_pr(api, cache_options, selected_repo.clone(), None).await?;
-                if options.cached_only {
-                    return Ok(cached_result);
-                }
-                if cached_result.0["available"] != false {
-                    cached = Some(cached_result.0);
-                }
-                run_pr(api, options, selected_repo, None).await
+                with_fallback(
+                    &mut cached,
+                    run_pr(api, cache_options, selected_repo.clone(), None),
+                    run_pr(api, options, selected_repo, None),
+                )
+                .await
             }
             Command::Ci {
                 repository,
@@ -82,30 +106,32 @@ pub(super) async fn read(
                 cached_only,
             } => {
                 identity = json!({"repository":repository,"number":number});
-                match api
-                    .ci_for_pr(&repository, number, Freshness::CachedOnly)
-                    .await
-                {
-                    Ok(report) => {
-                        let complete = report.complete;
-                        let value = serde_json::to_value(report)?;
-                        if cached_only {
-                            return Ok((value, complete));
+                let capture = async {
+                    match api
+                        .ci_for_pr(&repository, number, Freshness::CachedOnly)
+                        .await
+                    {
+                        Ok(report) => {
+                            let complete = report.complete;
+                            Ok((serde_json::to_value(report)?, complete))
                         }
-                        cached = Some(value);
-                    }
-                    Err(hey_gh::Error::CacheMiss) => {
-                        if cached_only {
-                            return Ok((super::unavailable_cached_pr(&repository, number), false));
+                        Err(hey_gh::Error::CacheMiss) => {
+                            Ok((super::unavailable_cached_pr(&repository, number), false))
                         }
+                        Err(error) => Err(error.into()),
                     }
-                    Err(error) => return Err(error.into()),
+                };
+                if cached_only {
+                    return capture.await;
                 }
-                let report = api
-                    .ci_for_pr(&repository, number, policy(refresh, false))
-                    .await?;
-                let complete = report.complete;
-                Ok((serde_json::to_value(report)?, complete))
+                with_fallback(&mut cached, capture, async {
+                    let report = api
+                        .ci_for_pr(&repository, number, policy(refresh, false))
+                        .await?;
+                    let complete = report.complete;
+                    Ok((serde_json::to_value(report)?, complete))
+                })
+                .await
             }
             Command::RequiredChecks {
                 repository,
