@@ -36,19 +36,8 @@ pub(crate) enum SharedResult {
     Active,
     Complete(Result<Arc<Response>>),
 }
-pub(crate) type Inflight = Arc<
-    Mutex<
-        HashMap<
-            String,
-            (
-                watch::Receiver<SharedResult>,
-                Arc<AtomicBool>,
-                Arc<Mutex<Instant>>,
-                Arc<AtomicBool>,
-            ),
-        >,
-    >,
->;
+mod inflight;
+pub(crate) use inflight::Inflight;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RateLimit {
@@ -1480,18 +1469,22 @@ impl Scheduler {
             Ok(Source::Cache) => "cache",
             Err(_) => "error",
         };
+        let key_fingerprint = crate::digest(&job.key);
         tracing::info!(request_id=%job.request_id,endpoint=job.endpoint,resource=%job.resource,attempts=job.attempts+job.auth_attempts,succeeded=result.is_ok(),http_status=job.http_status,source,error_code=result.as_ref().err().map(Error::diagnostic_code),elapsed_ms=job.queued_at.elapsed().as_millis() as u64,
-            request_key=%crate::digest(&job.key),
+            request_key=%key_fingerprint,
             auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope },
             foreground=job.interactive(),
             completion_validation=job.completion_validation.load(Ordering::Relaxed),
             deadline_context,
             "GitHub request finished");
         let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
+        if result.is_ok() {
+            inflight.record_success(key_fingerprint);
+        }
         drop(job._permit);
         job.notify
             .send_replace(SharedResult::Complete(result.map(Arc::new)));
-        inflight.remove(&job.key);
+        inflight.active.remove(&job.key);
     }
 }
 
