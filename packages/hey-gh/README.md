@@ -9,12 +9,13 @@ A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared req
 
 ## Optional GitHub App installation
 
-CI checks, commit statuses, workflow runs, and workflow jobs can use a selected
-repository installation's separate primary quota. Register/install a GitHub App
-with read access to Actions, Checks, and Commit statuses (Metadata is automatic).
+CI checks, commit statuses, workflow runs, workflow jobs, and the fixed CI-selector
+GraphQL query can use a selected repository installation's separate primary quota.
+Register/install a GitHub App with read access to Actions, Checks, Commit statuses,
+Contents, and Pull requests (Metadata is automatic).
 Installation tokens request only these permissions, even if the App has broader
 grants. Keep the existing `gh` login: all other activity uses the user identity,
-including PR metadata, discovery, GraphQL, comments, reviews, repository metadata,
+including full PR metadata, discovery, generic GraphQL, comments, reviews, repository metadata,
 and required-check policy. Uncovered repositories also keep user authentication.
 Installation errors remain explicit;
 they do not silently retry with user credentials. Secondary backoff and socket
@@ -35,7 +36,7 @@ The scheduler renews tokens before expiry. Cached-only reads never mint tokens.
 App identity and repository selection partition the cache; enabling/changing an
 installation requires a fresh bootstrap and watch registration. Hourly renewal
 and private-key rotation preserve that scope. `status.rate_limits` distinguishes
-`installation/core` from the user's `core` allowance. GitHub registration may
+`installation/core` and `installation/graphql` from the user's allowances. GitHub registration may
 require interactive passkey confirmation and organization permission.
 
 ## Start
@@ -91,7 +92,7 @@ stall budget; admission advances the durable rotation before work starts.
 Small embedded queues remain sequential. Request concurrency, queue capacity,
 quota pacing, freshness, and foreground reservations still use the shared scheduler.
 
-`pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without issuing GraphQL or comment requests. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
+`pr` includes PR metadata, merge conflicts, conversation comments, inline comments, reviews, current review requests and decisions, review thread resolution and replies, paginated review-request/removal history, timeline events, and CI. `prs --state all` lists every author’s open, closed, and merged PRs without GitHub Search’s 1,000-result ceiling. `ci` fetches CI and merge metadata without comment requests. `--refresh` revalidates all its sources; `--cached-only` makes no GitHub requests. Default reads allow cached responses up to 30 seconds old. Incomplete reports include source errors and make the CLI exit unsuccessfully after printing JSON.
 
 CI reads can reuse recent account-discovery selectors when the PR identity, head,
 base, and validated test-merge commit match cached REST metadata. Freshness uses
@@ -105,6 +106,15 @@ REST. The original page validation time remains the freshness boundary.
 Missing, stale, or inconsistent selectors fall back to REST. Explicit refresh and
 cached-only behavior are unchanged, and CI still confirms selectors after
 collecting checks.
+
+When discovery cannot validate stale REST metadata, a fixed GraphQL query can
+confirm matching CI selectors. Configured installations own that query and its
+cache/in-flight identity; identical queries through the generic interface still
+use personal authentication. Installation failures remain explicit under the
+normal caller deadline. Personal selector queries retain a two-second optional
+shortcut before REST fallback. Cache-only status evidence follows the same
+provider route, without minting or requesting additional data. Changed selectors
+still require full REST metadata using the personal account.
 
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 
@@ -189,7 +199,7 @@ hey-gh pr list                    # Same account list
 hey-gh pr status                  # Same status view
 hey-gh pr list -R OWNER/REPO      # Restrict output to one repository
 hey-gh pr view 123 -R OWNER/REPO  # Full PR report, with gh-style JSON field names
-hey-gh pr checks 123 -R OWNER/REPO # Detailed CI without GraphQL/comments
+hey-gh pr checks 123 -R OWNER/REPO # Detailed CI without comments
 hey-gh pr view https://github.com/OWNER/REPO/pull/123
 hey-gh pr view BRANCH -R OWNER/REPO
 hey-gh pr view                    # Infer repository and current branch from git

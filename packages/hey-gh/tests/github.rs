@@ -23,6 +23,9 @@ const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
 
+#[path = "github/ci_app_selectors.rs"]
+mod ci_app_selectors;
+
 #[path = "github/ci_discovery_status.rs"]
 mod ci_discovery_status;
 
@@ -714,7 +717,34 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             &[("retry-after", "60")],
         );
     }
+    if path == "/app/installations/42/access_tokens" {
+        if mode == "ci-point-mint-denied" {
+            return reply(403, json!({"message":"denied"}), &[]);
+        }
+        return reply(
+            201,
+            json!({"token":"synthetic-app-token","expires_at":"2099-01-01T00:00:00Z"}),
+            &[],
+        );
+    }
     if path == "/graphql" {
+        let app_token = headers["authorization"] == "Bearer synthetic-app-token";
+        if (mode == "ci-point-personal-quota" && !app_token)
+            || (mode == "ci-point-app-quota" && app_token)
+        {
+            return reply(
+                403,
+                json!({"message":"API rate limit exceeded"}),
+                &[
+                    ("x-ratelimit-resource", "graphql"),
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "4070908800"),
+                ],
+            );
+        }
+        if mode == "ci-point-renew" && app_token && call_number == 1 {
+            return reply(401, json!({"message":"expired installation token"}), &[]);
+        }
         if mode.starts_with("ci-point-")
             && body["query"]
                 .as_str()
@@ -727,6 +757,23 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     json!({"errors":[{"type":"FORBIDDEN","message":"access denied"}]}),
                     &[],
                 );
+            }
+            if mode == "ci-point-error" {
+                return reply(
+                    200,
+                    json!({"errors":[{"type":"INTERNAL","message":"unavailable"}]}),
+                    &[],
+                );
+            }
+            if mode == "ci-point-limited" {
+                return reply(
+                    200,
+                    json!({"errors":[{"type":"RATE_LIMITED","message":"rate limited"}]}),
+                    &[("retry-after", "30")],
+                );
+            }
+            if mode == "ci-point-slow" {
+                tokio::time::sleep(Duration::from_millis(2200)).await;
             }
             if mode == "ci-point-stalled" {
                 mock.release.notified().await;
