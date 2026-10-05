@@ -11,6 +11,9 @@ use std::{
 };
 #[cfg(test)]
 mod bootstrap_tests;
+mod discovery_progress;
+#[cfg(test)]
+mod discovery_progress_tests;
 mod hydration;
 pub(crate) mod partial;
 mod schedule;
@@ -315,6 +318,13 @@ impl Client {
         Ok(self.discover_my_open_pull_requests(freshness).await?.pulls)
     }
 
+    pub(crate) async fn refresh_background_discovery(
+        &self,
+        freshness: Freshness,
+    ) -> Result<Vec<Value>> {
+        discovery_progress::background(self.all_my_open_pull_requests(freshness)).await
+    }
+
     async fn discover_my_open_pull_requests(&self, freshness: Freshness) -> Result<Discovery> {
         let deadline = tokio::time::Instant::now() + self.report_timeout();
         let lock = self.report_lock(DISCOVERY_CACHE);
@@ -377,9 +387,12 @@ impl Client {
         let result = if tokio::time::Instant::now() >= deadline {
             Err(Error::Deadline)
         } else {
-            tokio::time::timeout_at(deadline, self.scan_my_open_pull_requests(freshness))
-                .await
-                .unwrap_or(Err(Error::Deadline))
+            discovery_progress::scan(
+                deadline,
+                self.report_timeout(),
+                self.scan_my_open_pull_requests(freshness),
+            )
+            .await
         };
         let collection = result.as_ref().ok().map(|scan| {
             json!({
@@ -428,6 +441,7 @@ impl Client {
             .and_then(|node| node["id"].as_str())
             .filter(|id| !id.is_empty() && total > 0 && nodes.len() == 1)
             .ok_or_else(|| Error::Invalid("invalid PR discovery boundary".into()))?;
+        discovery_progress::page_validated();
         let mut after = Value::Null;
         let mut cursors = BTreeSet::new();
         let mut pulls = BTreeMap::new();
@@ -573,6 +587,7 @@ impl Client {
                     "PR discovery boundary disappeared; retry".into(),
                 ));
             }
+            discovery_progress::page_validated();
         }
         Err(Error::Invalid("PR discovery exceeds 1000 pages".into()))
     }

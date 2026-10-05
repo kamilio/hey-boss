@@ -238,7 +238,7 @@ async fn account_discovery_loop(client: Client, watch: Watch, state: Arc<Mutex<W
         interval.tick().await;
         state.lock().await.discovery_last_poll_at_ms = Some(now_ms());
         let result = client
-            .all_my_open_pull_requests(Freshness::MaxAge(Duration::from_secs(30)))
+            .refresh_background_discovery(Freshness::MaxAge(Duration::from_secs(30)))
             .await;
         let health = client.discovery_health().await;
         {
