@@ -3,6 +3,8 @@ use crate::{Client, Error, Freshness, Response, Result, Source, now_ms};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+pub(super) mod discovery;
+
 const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
@@ -13,6 +15,29 @@ const CI_SELECTORS: &str = r#"query CiSelectors($owner: String!, $repo: String!,
     }
   }
 }"#;
+
+fn status_empty(pr: &Value, sha: &str) -> Option<bool> {
+    let status = |commit: &Value| {
+        if commit["oid"] != sha {
+            return None;
+        }
+        match commit.get("status")? {
+            Value::Null => Some(true),
+            value if value["id"].as_str().is_some_and(|id| !id.is_empty()) => Some(false),
+            _ => None,
+        }
+    };
+    let head = pr["commits"]["nodes"]
+        .as_array()
+        .filter(|nodes| nodes.len() == 1 && pr["headRefOid"] == sha)
+        .and_then(|nodes| status(&nodes[0]["commit"]));
+    let merge = status(&pr["potentialMergeCommit"]);
+    match (head, merge) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        _ => None,
+    }
+}
 
 fn recent(response: &Response, age: Duration) -> bool {
     now_ms()
@@ -80,80 +105,130 @@ impl CiMetadata {
 }
 
 impl Client {
-    pub(super) async fn empty_commit_statuses(
+    pub(super) async fn commit_statuses_from_metadata(
         &self,
         repository: &str,
         sha: &str,
         rest_path: &str,
         freshness: Freshness,
-    ) -> Result<bool> {
-        if matches!(freshness, Freshness::Revalidate)
-            || matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
+    ) -> Result<Vec<Value>> {
+        if !matches!(freshness, Freshness::Revalidate)
+            && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
+            && let Some((empty, at, resource)) = self
+                .cached_status_evidence(repository, sha, freshness)
+                .await?
         {
-            return Ok(false);
+            let rest = match self.peek_get(rest_path).await {
+                Ok(rest) => Some(rest),
+                Err(Error::CacheMiss) => None,
+                Err(error) => return Err(error),
+            };
+            // A later REST response can observe newly posted statuses.
+            if rest.as_ref().is_none_or(|rest| rest.validated_at_ms < at) {
+                if empty {
+                    let _ = super::VALIDATIONS.try_with(|records| {
+                        records.borrow_mut().push(super::ResourceValidation {
+                            resource,
+                            validated_at_ms: at,
+                            source: Source::Cache,
+                        })
+                    });
+                    return Ok(Vec::new());
+                }
+                if rest
+                    .as_ref()
+                    .is_none_or(|rest| rest.data["statuses"].as_array().is_some_and(Vec::is_empty))
+                {
+                    // Newer metadata contradicts the old empty list. Offline
+                    // reads cannot invent the missing full REST payload.
+                    if matches!(freshness, Freshness::CachedOnly) {
+                        return Err(Error::CacheMiss);
+                    }
+                    let statuses = self
+                        .pages(rest_path, Some("statuses"), Freshness::Revalidate)
+                        .await?;
+                    if statuses.is_empty() {
+                        return Err(Error::Invalid(
+                            "commit statuses disagree with newer CI metadata".into(),
+                        ));
+                    }
+                    return Ok(statuses);
+                }
+            }
         }
+        self.pages(rest_path, Some("statuses"), freshness).await
+    }
+
+    async fn cached_status_evidence(
+        &self,
+        repository: &str,
+        sha: &str,
+        freshness: Freshness,
+    ) -> Result<Option<(bool, u64, String)>> {
         let Some(owner) = crate::entity::current().filter(|owner| {
             owner.repository.eq_ignore_ascii_case(repository) && owner.node_id.is_some()
         }) else {
-            return Ok(false);
+            return Ok(None);
         };
         let (repo_owner, repo) = repository.split_once('/').expect("validated repository");
-        // Only reuse a query already made for metadata. Do not add a network
-        // request, wait for another collector, or relabel a rollup as full CI.
-        let response = match self
+        // These are cache peeks only. CI never dispatches account discovery or
+        // an extra point query to obtain this optional status evidence.
+        let mut candidates = Vec::new();
+        match self
             .peek_graphql(
                 CI_SELECTORS,
                 json!({"owner":repo_owner,"repo":repo,"number":owner.number}),
             )
             .await
         {
-            Ok(response) => response,
-            Err(Error::CacheMiss) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        if response.validated_at_ms == 0
-            || response.validated_at_ms > now_ms()
-            || matches!(freshness, Freshness::MaxAge(age) if !recent(&response, age))
-        {
-            return Ok(false);
-        }
-        let pr = &response.data["data"]["repository"]["pullRequest"];
-        if pr["id"].as_str() != owner.node_id.as_deref()
-            || pr["number"] != owner.number
-            || !pr["repository"]["nameWithOwner"]
-                .as_str()
-                .is_some_and(|name| name.eq_ignore_ascii_case(repository))
-        {
-            return Ok(false);
-        }
-        // Commit.status is null only when no legacy statuses exist. Missing
-        // fields, null commits, and nonempty statuses are not empty evidence.
-        // Nonempty statuses retain REST's numeric IDs and complete payloads.
-        let empty =
-            |commit: &Value| commit["oid"] == sha && commit.get("status") == Some(&Value::Null);
-        let head_empty = pr["headRefOid"] == sha
-            && pr["commits"]["nodes"]
-                .as_array()
-                .is_some_and(|nodes| nodes.len() == 1 && empty(&nodes[0]["commit"]));
-        if !head_empty && !empty(&pr["potentialMergeCommit"]) {
-            return Ok(false);
-        }
-        match self.peek_get(rest_path).await {
-            // A later REST read can observe a newly posted status. Never let
-            // older empty evidence hide it, including during offline reads.
-            Ok(rest) if rest.validated_at_ms >= response.validated_at_ms => return Ok(false),
-            Ok(_) | Err(Error::CacheMiss) => {}
+            Ok(response) => candidates.push((
+                response.data["data"]["repository"]["pullRequest"].clone(),
+                response.validated_at_ms,
+                "graphql",
+            )),
+            Err(Error::CacheMiss) => {}
             Err(error) => return Err(error),
         }
-        super::record_validation(
-            &format!(
-                "graphql://{}/{repository}/pulls/{}#commit-statuses:{sha}",
-                self.hostname(),
-                owner.number
-            ),
-            &response,
-        );
-        Ok(true)
+        if let Some((node, at)) = discovery::read(self, repository, owner.number).await {
+            candidates.push((node, at, "my-open-prs"));
+        }
+        let mut latest = None;
+        for (node, at, source) in candidates {
+            let Some(elapsed) = now_ms().checked_sub(at).filter(|_| at > 0) else {
+                continue;
+            };
+            if matches!(freshness, Freshness::MaxAge(age) if elapsed as u128 >= age.as_millis())
+                || node["id"].as_str() != owner.node_id.as_deref()
+                || node["number"] != owner.number
+                || !node["repository"]["nameWithOwner"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+            {
+                continue;
+            }
+            let Some(empty) = status_empty(&node, sha) else {
+                continue;
+            };
+            // A newer nonempty observation must defeat an older empty one.
+            // Conflicting observations at the same clock also retain REST.
+            if latest.as_ref().is_none_or(|&(_, old_at, _)| at >= old_at) {
+                if matches!(latest, Some((false, old_at, _)) if old_at == at) {
+                    continue;
+                }
+                latest = Some((empty, at, source));
+            }
+        }
+        Ok(latest.map(|(empty, at, source)| {
+            (
+                empty,
+                at,
+                format!(
+                    "{source}://{}/{repository}/pulls/{}#commit-statuses:{sha}",
+                    self.hostname(),
+                    owner.number
+                ),
+            )
+        }))
     }
 
     pub(super) async fn initial_ci_metadata(
@@ -286,86 +361,9 @@ impl Client {
         age: std::time::Duration,
         cached: &Response,
     ) -> Result<Option<CiMetadata>> {
-        let scan = match self.peek_derived(crate::dashboard::DISCOVERY_CACHE).await {
-            Ok(Some(scan)) => scan,
-            Ok(None) => return Ok(None),
-            Err(error) => {
-                // This optional account memo must not prevent an independent,
-                // fully validated REST CI read from recovering.
-                tracing::warn!(
-                    error_code = error.diagnostic_code(),
-                    "CI discovery memo unavailable; validating REST metadata"
-                );
-                return Ok(None);
-            }
-        };
-        let Some(nodes) = scan.data["pulls"].as_array() else {
+        let Some((node, validated_at)) = discovery::read(self, repository, number).await else {
             return Ok(None);
         };
-        let Some(node) = nodes.iter().find(|node| {
-            node["number"] == number
-                && node["repository"]["nameWithOwner"]
-                    .as_str()
-                    .is_some_and(|repo| repo.eq_ignore_ascii_case(repository))
-        }) else {
-            return Ok(None);
-        };
-        let key = format!("{repository}/{number}");
-        let Some(mut validated_at) = scan.data["validatedAtByPr"]
-            .as_object()
-            .and_then(|clocks| {
-                clocks
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(&key))
-            })
-            .and_then(|(_, clock)| clock.as_u64())
-        else {
-            return Ok(None);
-        };
-        let mut node = node.clone();
-        let page_after = scan.data["pageAfterByPr"].as_object().and_then(|pages| {
-            pages
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&key))
-                .map(|(_, after)| after)
-        });
-        if let Some(after) = page_after
-            .filter(|after| after.is_null() || after.as_str().is_some_and(|s| !s.is_empty()))
-        {
-            match self.cached_discovery_page(after.clone()).await {
-                Ok(page) if page.validated_at_ms > validated_at => {
-                    // A point observation does not need a complete account scan.
-                    // The old cursor is only a hint: membership can move between
-                    // pages, so require exactly one matching identity again.
-                    let mut matches = page.data["data"]["viewer"]["pullRequests"]["nodes"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|candidate| {
-                            candidate["number"] == number
-                                && candidate["repository"]["nameWithOwner"]
-                                    .as_str()
-                                    .is_some_and(|repo| repo.eq_ignore_ascii_case(repository))
-                        });
-                    let Some(candidate) = matches.next() else {
-                        return Ok(None);
-                    };
-                    if matches.next().is_some() {
-                        return Ok(None);
-                    }
-                    node = candidate.clone();
-                    validated_at = page.validated_at_ms;
-                }
-                Ok(_) | Err(Error::CacheMiss) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        error_code = error.diagnostic_code(),
-                        "CI discovery page unavailable; validating REST metadata"
-                    );
-                    return Ok(None);
-                }
-            }
-        }
         if validated_at == 0
             || validated_at < cached.validated_at_ms
             || now_ms()

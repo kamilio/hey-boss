@@ -165,14 +165,18 @@ impl Client {
                 self.policy_priority(repository, number),
                 crate::report::VALIDATIONS.scope(
                     std::cell::RefCell::new(Vec::new()),
-                    crate::entity::scope(async {
-                        tokio::time::timeout(
-                            self.report_timeout(),
-                            self.collect_required_checks(repository, number, freshness),
-                        )
-                        .await
-                        .map_err(|_| Error::Deadline)?
-                    }),
+                    crate::report::ci_discovery_scope(
+                        repository,
+                        number,
+                        crate::entity::scope(async {
+                            tokio::time::timeout(
+                                self.report_timeout(),
+                                self.collect_required_checks(repository, number, freshness),
+                            )
+                            .await
+                            .map_err(|_| Error::Deadline)?
+                        }),
+                    ),
                 ),
             )
             .await

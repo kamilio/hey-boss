@@ -11,6 +11,7 @@ use std::{
 
 mod ci_collection;
 mod ci_metadata;
+pub(crate) use ci_metadata::discovery::scope as ci_discovery_scope;
 mod review_events;
 
 // Cancelled jobs can appear after the parent stops; reuse empty pages only
@@ -492,9 +493,13 @@ impl Client {
         crate::client::INTERACTIVE_READ
             .scope(
                 priority,
-                crate::entity::scope(Box::pin(
-                    self.ci_for_pr_inner(repository, number, freshness),
-                )),
+                ci_discovery_scope(
+                    repository,
+                    number,
+                    crate::entity::scope(Box::pin(
+                        self.ci_for_pr_inner(repository, number, freshness),
+                    )),
+                ),
             )
             .await
     }
@@ -1026,12 +1031,10 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
         self.collect_ci_source(repository, sha, source, async {
-            if source == "commit_statuses"
-                && self
-                    .empty_commit_statuses(repository, sha, path, freshness)
-                    .await?
-            {
-                return Ok(Vec::new());
+            if source == "commit_statuses" {
+                return self
+                    .commit_statuses_from_metadata(repository, sha, path, freshness)
+                    .await;
             }
             self.pages(path, Some(field), freshness).await
         })
