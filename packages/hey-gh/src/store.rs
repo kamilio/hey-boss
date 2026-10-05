@@ -9,6 +9,8 @@ use std::{
 
 #[cfg(test)]
 mod decode_tests;
+#[cfg(test)]
+mod writer_tests;
 
 // Keep the partial index and bootstrap selection identical. Malformed PR JSON
 // remains a candidate so reads report corruption instead of silently hiding it.
@@ -193,6 +195,7 @@ fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, 
 #[derive(Clone)]
 pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
+    writer_admission: Arc<tokio::sync::Semaphore>,
     readers: Option<Readers>,
     payload_decoders: Arc<tokio::sync::Semaphore>,
     retention: std::time::Duration,
@@ -426,6 +429,7 @@ impl Store {
             .transpose()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
+            writer_admission: Arc::new(tokio::sync::Semaphore::new(1)),
             readers,
             payload_decoders: Arc::new(tokio::sync::Semaphore::new(4)),
             retention,
@@ -439,9 +443,20 @@ impl Store {
         f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let conn = self.connection.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = conn.lock().map_err(storage)?;
-            f(&mut conn)
+        let admission = self.writer_admission.clone();
+        // Wait in FIFO order without occupying blocking threads needed by
+        // independent WAL reads and decoders. Drive admission independently:
+        // a paused/cancelled caller must not reserve and stall the writer turn.
+        tokio::spawn(async move {
+            let permit = admission.acquire_owned().await.map_err(storage)?;
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                // Retain poisoning semantics if a writer panics.
+                let mut conn = conn.lock().map_err(storage)?;
+                f(&mut conn)
+            })
+            .await
+            .map_err(storage)?
         })
         .await
         .map_err(storage)?
