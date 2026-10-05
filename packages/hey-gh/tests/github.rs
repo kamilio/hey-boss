@@ -903,6 +903,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     node["headRefOid"] = json!(NEW_HEAD);
                     node["commits"]["nodes"][0]["commit"]["oid"] = json!(NEW_HEAD);
                 }
+                if mode == "account-priority-ci" && repository == "acme/other" {
+                    node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] =
+                        json!(if phase >= 3 { "SUCCESS" } else { "PENDING" });
+                }
                 if mode == "account-repository-case-change" && phase >= 1 {
                     node["repository"]["nameWithOwner"] = json!(repository.to_ascii_uppercase());
                 }
@@ -7960,6 +7964,11 @@ async fn account_new_pr_gets_ci_before_the_older_rotation_after_discovery_and_re
     account_priority_after_discovery_and_restart("account-priority-new", HEAD).await;
 }
 
+#[tokio::test]
+async fn account_finished_ci_gets_refreshed_before_old_rotation_without_a_new_commit() {
+    account_priority_after_discovery_and_restart("account-priority-ci", HEAD).await;
+}
+
 async fn account_priority_after_discovery_and_restart(mode: &str, expected_head: &str) {
     let h = Harness::new().await;
     h.mode(mode);
@@ -7992,7 +8001,7 @@ async fn account_priority_after_discovery_and_restart(mode: &str, expected_head:
         .unwrap();
     assert_eq!(
         first.path, "/repos/acme/other/pulls/7",
-        "new or changed heads must precede the old rotation"
+        "new heads or changed CI must precede the old rotation"
     );
     let page = c
         .pr_status_page(None, None, 1000, Duration::ZERO)

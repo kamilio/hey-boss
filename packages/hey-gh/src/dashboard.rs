@@ -630,7 +630,7 @@ impl Client {
         // owned only by its hydration lane. Discovery cannot erase an unseen
         // head change by publishing newer nodes before that lane gets a turn.
         let mut schedule = if seed_only {
-            schedule::Schedule::baseline(&pending, None)
+            schedule::Schedule::baseline(&pending, None, ci_only)
         } else if let Some(stored) = self.derived(&schedule_key).await? {
             stored.decode::<schedule::Schedule>()?
         } else {
@@ -641,14 +641,14 @@ impl Client {
                 .transpose()?
                 .flatten()
                 .map(|(repo, number)| (repo.to_ascii_lowercase(), number));
-            schedule::Schedule::baseline(&pending, next)
+            schedule::Schedule::baseline(&pending, next, ci_only)
         };
         for node in previous.as_array().into_iter().flatten() {
             pending.insert(key(node)?, node.clone());
         }
         pending.extend(current.clone());
         if !seed_only {
-            schedule.reconcile(&pending);
+            schedule.reconcile(&pending, ci_only);
             self.save_derived(
                 &schedule_key,
                 serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
