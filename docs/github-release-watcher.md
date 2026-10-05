@@ -63,7 +63,11 @@ Completed entries remain available for rerun detection until explicitly removed.
 
 History is paginated and dense date windows are split below GitHub's 1,000
 result search cap. Missing pages, changing counts, limits, permission errors,
-and deadlines never establish success. A complete small branch comparison uses
+and deadlines never establish success. Branch comparisons follow up to 100
+immutable pages within the collection byte budget. Only complete, consistent
+rosters support run filtering and parent-link proofs; truncated or malformed
+rosters retain individual ancestry checks. Parent traversal visits edges once,
+including when commits arrive out of order. A complete small comparison uses
 per-commit workflow history directly, avoiding unrelated days. Date-based
 discovery can reuse closed-day pages after a complete branch comparison; each
 relevant commit's history still uses the requested freshness before evaluation.

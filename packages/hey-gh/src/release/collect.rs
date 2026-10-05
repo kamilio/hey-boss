@@ -2,7 +2,7 @@ use super::*;
 use crate::{Client, Freshness, repository::segment};
 use serde_json::json;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     time::Duration,
 };
 
@@ -140,69 +140,106 @@ impl Collector<'_> {
         if base == head {
             return Ok((true, Some(HashSet::from([base.to_owned()]))));
         }
-        let response = self
-            .client
-            .get(
-                &format!(
-                    "repos/{}/compare/{base}...{head}?per_page=100",
-                    self.project.repository
-                ),
-                if matches!(self.freshness, Freshness::CachedOnly) {
-                    self.freshness
-                } else {
-                    Freshness::MaxAge(Duration::from_secs(86400))
-                },
-            )
-            .await?;
+        let path = format!(
+            "repos/{}/compare/{base}...{head}?per_page=100",
+            self.project.repository
+        );
+        let freshness = if matches!(self.freshness, Freshness::CachedOnly) {
+            self.freshness
+        } else {
+            Freshness::MaxAge(Duration::from_secs(86400))
+        };
+        let mut response = self.client.get(&path, freshness).await?;
         if !contains(base, head, &response.data) {
             return Ok((false, None));
         }
-        let Some(commits) = response.data["commits"].as_array() else {
+        let Some(total) = response.data["total_commits"]
+            .as_u64()
+            .filter(|total| (1..=10_000).contains(total))
+        else {
             return Ok((true, None));
         };
         // Only a complete immutable comparison can exclude other run SHAs.
-        // Long histories, omitted rows, or malformed identities fall back to
-        // individual comparisons instead of trusting a truncated roster.
-        let complete = response.data["total_commits"].as_u64() == Some(commits.len() as u64)
-            && commits.len() <= 100
-            && commits.last().is_some_and(|c| c["sha"] == head);
+        // Bound work to 100 pages and the normal collection byte budget. Cached
+        // immutable pages retain progress when the caller's deadline expires.
+        let mut commits = Vec::new();
         let mut roster = HashSet::from([base.to_owned()]);
-        for commit in commits {
-            let Some(sha) = commit["sha"]
-                .as_str()
-                .filter(|s| crate::repository::valid_sha(s))
-            else {
+        let mut bytes = 0usize;
+        for page in 1..=100 {
+            if page > 1 {
+                response = self
+                    .client
+                    .get(&format!("{path}&page={page}"), freshness)
+                    .await?;
+                if !contains(base, head, &response.data)
+                    || response.data["total_commits"].as_u64() != Some(total)
+                {
+                    return Err(Error::Invalid(
+                        "branch comparison changed during pagination".into(),
+                    ));
+                }
+            }
+            bytes = bytes.saturating_add(response.data.to_string().len());
+            if bytes > self.client.collection_limit() {
+                return Err(Error::Invalid(
+                    "branch comparison exceeds configured collection byte limit".into(),
+                ));
+            }
+            let Some(rows) = response.data["commits"].as_array() else {
                 return Ok((true, None));
             };
-            if !roster.insert(sha.to_owned()) {
+            if rows.is_empty() || rows.len() > 100 || commits.len() + rows.len() > total as usize {
+                return Ok((true, None));
+            }
+            for commit in rows {
+                let Some(sha) = commit["sha"]
+                    .as_str()
+                    .filter(|s| crate::repository::valid_sha(s))
+                else {
+                    return Ok((true, None));
+                };
+                if !roster.insert(sha.to_owned()) {
+                    return Ok((true, None));
+                }
+                commits.push(commit.clone());
+            }
+            if commits.len() == total as usize {
+                break;
+            }
+            if rows.len() < 100 {
                 return Ok((true, None));
             }
         }
-        if complete {
-            // A merged side branch belongs to the tip without containing the
-            // target. Parent links prove only positive target-to-run paths.
-            let mut proven = HashSet::from([base.to_owned()]);
-            loop {
-                let before = proven.len();
-                for commit in commits {
-                    if commit["parents"].as_array().is_some_and(|parents| {
-                        parents.iter().any(|parent| {
-                            parent["sha"]
-                                .as_str()
-                                .is_some_and(|sha| proven.contains(sha))
-                        })
-                    }) {
-                        proven.insert(commit["sha"].as_str().unwrap().to_owned());
-                    }
-                }
-                if proven.len() == before {
-                    break;
+        if commits.len() != total as usize || commits.last().is_none_or(|c| c["sha"] != head) {
+            return Ok((true, None));
+        }
+        // A merged side branch belongs to the tip without containing the target.
+        // Traverse parent edges once; reverse-ordered pages must not turn long
+        // histories into repeated full-roster scans.
+        let mut descendants = HashMap::<&str, Vec<&str>>::new();
+        for commit in &commits {
+            let sha = commit["sha"].as_str().unwrap();
+            for parent in commit["parents"].as_array().into_iter().flatten() {
+                if let Some(parent) = parent["sha"].as_str() {
+                    descendants.entry(parent).or_default().push(sha);
                 }
             }
-            self.ancestry
-                .extend(proven.into_iter().map(|head| (base.to_owned(), head)));
         }
-        Ok((true, complete.then_some(roster)))
+        let mut proven = HashSet::from([base]);
+        let mut pending = VecDeque::from([base]);
+        while let Some(parent) = pending.pop_front() {
+            for child in descendants.get(parent).into_iter().flatten() {
+                if proven.insert(*child) {
+                    pending.push_back(*child);
+                }
+            }
+        }
+        self.ancestry.extend(
+            proven
+                .into_iter()
+                .map(|head| (base.to_owned(), head.to_owned())),
+        );
+        Ok((true, Some(roster)))
     }
     async fn ancestor(&self, base: &str, head: &str) -> Result<bool> {
         if base == head || self.ancestry.contains(&(base.to_owned(), head.to_owned())) {
