@@ -46,8 +46,8 @@ const MY_PRS: &str = r#"query MyOpenPullRequests($after: String) {
     orderBy: {field: CREATED_AT, direction: ASC}) {
     totalCount nodes { id number title url state isDraft createdAt updatedAt
       headRefName headRefOid baseRefName baseRefOid mergeable mergeStateStatus reviewDecision
-      potentialMergeCommit { oid parents(first: 2) { totalCount nodes { oid } } }
-      commits(last: 1) { nodes { commit { oid statusCheckRollup {
+      potentialMergeCommit { oid status { id } parents(first: 2) { totalCount nodes { oid } } }
+      commits(last: 1) { nodes { commit { oid status { id } statusCheckRollup {
         state
       } } } }
       author { login } repository { nameWithOwner } }

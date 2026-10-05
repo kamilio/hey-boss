@@ -23,6 +23,9 @@ const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
 
+#[path = "github/ci_discovery_status.rs"]
+mod ci_discovery_status;
+
 #[path = "github/detail_continuation.rs"]
 mod detail_continuation;
 
@@ -830,8 +833,16 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 if mode == "account-repository-case-change" && phase >= 1 {
                     node["repository"]["nameWithOwner"] = json!(repository.to_ascii_uppercase());
                 }
-                if mode == "account-ci-selectors" {
+                if mode.starts_with("account-ci-selectors") {
                     node["potentialMergeCommit"] = json!({"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":BASE},{"oid":HEAD}]}});
+                }
+                if mode == "account-ci-selectors-empty" {
+                    node["commits"]["nodes"][0]["commit"]["status"] = Value::Null;
+                    node["potentialMergeCommit"]["status"] = Value::Null;
+                }
+                if mode == "account-ci-selectors-nonempty" {
+                    node["commits"]["nodes"][0]["commit"]["status"] = json!({"id":"S_head"});
+                    node["potentialMergeCommit"]["status"] = json!({"id":"S_merge"});
                 }
                 node
             };
@@ -1225,7 +1236,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             });
         }
     }
-    if mode == "account-ci-selectors" || mode.starts_with("ci-point-") {
+    if mode.starts_with("account-ci-selectors") || mode.starts_with("ci-point-") {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
         } else if normalized.contains(MERGE) && normalized.ends_with("/check-runs") {
@@ -1234,7 +1245,11 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             value = json!({"workflow_runs":[]});
         }
     }
-    if mode == "ci-point-empty-status" && normalized.ends_with("/status") {
+    if matches!(
+        mode.as_str(),
+        "ci-point-empty-status" | "account-ci-selectors-empty"
+    ) && normalized.ends_with("/status")
+    {
         value = json!({"state":"pending","total_count":0,"statuses":[]});
     }
     if mode.starts_with("account-multi-source") {
