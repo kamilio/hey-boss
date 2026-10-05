@@ -932,14 +932,16 @@ impl Client {
         prefix: &str,
         repository: Option<&str>,
         fields: Option<&[&str]>,
-    ) -> Result<crate::SnapshotPage> {
+        cursor: Option<&str>,
+    ) -> Result<crate::store::PrBootstrapPage> {
         self.0
             .store
-            .bootstrap_open_prs(
+            .pr_bootstrap_page(
                 &self.0.scope,
                 prefix,
                 repository,
                 fields.map(|fields| fields.iter().map(|field| (*field).to_owned()).collect()),
+                cursor,
             )
             .await
     }

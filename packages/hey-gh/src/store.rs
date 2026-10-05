@@ -239,6 +239,50 @@ pub struct SnapshotPage {
     pub cursor: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct PrBootstrapPage {
+    pub snapshots: Vec<Snapshot>,
+    pub cursor: String,
+    pub has_more: bool,
+}
+
+/// Resume a roster scan, then replay changes from its initial watermark.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PrBootstrapCursor {
+    pub boundary: String,
+    pub after: String,
+}
+
+impl PrBootstrapCursor {
+    pub fn encode(&self) -> String {
+        format!(
+            "pb1:{}",
+            serde_json::to_string(self).expect("string cursor")
+        )
+    }
+
+    pub fn decode(cursor: &str, prefix: &str) -> Result<Option<Self>> {
+        let Some(value) = cursor.strip_prefix("pb1:") else {
+            return Ok(None);
+        };
+        let invalid = || Error::Invalid("invalid PR bootstrap cursor".into());
+        if value.len() > 4096 {
+            return Err(invalid());
+        }
+        let cursor: Self = serde_json::from_str(value).map_err(|_| invalid())?;
+        if cursor.after.len() <= prefix.len()
+            || !cursor
+                .after
+                .as_bytes()
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+        {
+            return Err(invalid());
+        }
+        Ok(Some(cursor))
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Watch {
     pub id: String,
@@ -1053,19 +1097,39 @@ impl Store {
 
     /// Bootstrap only the current open roster. Terminal rows remain in the
     /// snapshot/change feed, but cannot consume an open list's byte budget.
-    pub(crate) async fn bootstrap_open_prs(
+    #[cfg(test)]
+    async fn bootstrap_open_prs(
         &self,
         scope: &str,
         prefix: &str,
         repository: Option<&str>,
         fields: Option<Vec<String>>,
-    ) -> Result<SnapshotPage> {
+    ) -> Result<PrBootstrapPage> {
+        self.pr_bootstrap_page(scope, prefix, repository, fields, None)
+            .await
+    }
+
+    pub(crate) async fn pr_bootstrap_page(
+        &self,
+        scope: &str,
+        prefix: &str,
+        repository: Option<&str>,
+        fields: Option<Vec<String>>,
+        cursor: Option<&str>,
+    ) -> Result<PrBootstrapPage> {
         let scope = scope.to_owned();
         let repository = repository.map(str::to_owned);
         let prefix = repository
             .as_ref()
             .map_or_else(|| prefix.to_owned(), |repo| format!("{prefix}{repo}/"));
         let upper = format!("{prefix}\u{10ffff}");
+        let position = cursor
+            .map(|raw| {
+                PrBootstrapCursor::decode(raw, &prefix).and_then(|position| {
+                    position.ok_or_else(|| Error::Invalid("expected PR bootstrap cursor".into()))
+                })
+            })
+            .transpose()?;
         let max_bytes = self.max_snapshot_bytes;
         let compact = crate::pr_fields::can_read_compact(fields.as_deref());
         let read = move |conn: &Connection| {
@@ -1077,6 +1141,12 @@ impl Store {
                 .map_err(storage)?
                 .unwrap_or(0);
             let cursor = format!("{}.{}", feed_prefix(conn, &scope)?, head);
+            let (boundary, after) = if let Some(position) = &position {
+                cursor_position(conn, &scope, Some(&position.boundary))?;
+                (position.boundary.clone(), position.after.as_str())
+            } else {
+                (cursor.clone(), "")
+            };
             // Lifecycle and original byte counts come from the partial index;
             // closed/removed bodies are not scanned to select the open roster.
             // Require that index: without statistics SQLite can prefer the
@@ -1091,9 +1161,10 @@ impl Store {
                 WHERE scope=?1 AND resource>=?2 COLLATE NOCASE AND resource<?3 COLLATE NOCASE
                 AND ({OPEN_PR_SELECTION})
                 AND (?4 IS NULL OR json_extract(({payload}),'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
-                ORDER BY resource")).map_err(storage)?;
+                AND resource>?5
+                ORDER BY resource LIMIT 1001")).map_err(storage)?;
             let rows = stmt
-                .query_map(params![scope, prefix, upper, repository], |r| {
+                .query_map(params![scope, prefix, upper, repository, after], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, usize>(1)?,
@@ -1116,10 +1187,17 @@ impl Store {
             let mut body = conn.prepare(&body_sql).map_err(storage)?;
             let mut snapshots = Vec::new();
             let mut bytes = 0usize;
+            let mut more_snapshots = false;
+            let mut last = after.to_owned();
             for row in rows {
                 let (resource, data_bytes, observed_at_ms) = row.map_err(storage)?;
-                bytes = bytes.saturating_add(data_bytes);
-                if bytes > max_bytes {
+                if !snapshots.is_empty()
+                    && (snapshots.len() == 1000 || bytes.saturating_add(data_bytes) > max_bytes)
+                {
+                    more_snapshots = true;
+                    break;
+                }
+                if data_bytes > max_bytes {
                     return Err(Error::Invalid(
                         "bootstrap exceeds configured snapshot byte limit".into(),
                     ));
@@ -1127,6 +1205,8 @@ impl Store {
                 let data: String = body
                     .query_row(params![scope, resource], |r| r.get(0))
                     .map_err(storage)?;
+                bytes = bytes.saturating_add(data_bytes);
+                last = resource.clone();
                 snapshots.push(Snapshot {
                     resource,
                     data: crate::pr_fields::decode_stored(&data, fields.as_deref())
@@ -1134,7 +1214,21 @@ impl Store {
                     observed_at_ms,
                 });
             }
-            Ok(SnapshotPage { snapshots, cursor })
+            let has_more = more_snapshots || cursor != boundary;
+            let cursor = if more_snapshots {
+                PrBootstrapCursor {
+                    boundary,
+                    after: last,
+                }
+                .encode()
+            } else {
+                boundary
+            };
+            Ok(PrBootstrapPage {
+                snapshots,
+                cursor,
+                has_more,
+            })
         };
         if compact {
             self.read(read).await
