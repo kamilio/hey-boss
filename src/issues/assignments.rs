@@ -257,7 +257,10 @@ pub(super) fn assign(
             if reviewed_evidence.is_some()
                 && let Some(id) = steering_id(&run, &status)
             {
-                db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES(?1,?2,'session','','delivered',?3) ON CONFLICT(request_id) DO UPDATE SET state='delivered'",params![id,run,now])?;
+                // Steering receipts reference local attempts. A companion run
+                // exists only in fleet_state here; its receipt travels in the
+                // replicated github_handoff event below instead.
+                db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) SELECT ?1,id,'session','','delivered',?3 FROM worker_runs WHERE id=?2 ON CONFLICT(request_id) DO UPDATE SET state='delivered'",params![id,run,now])?;
             }
             data["github_handoff"] = json!({"run":run,"event":status["event"]});
             if reviewed_evidence.is_some() {
