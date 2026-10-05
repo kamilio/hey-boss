@@ -27,7 +27,8 @@ function noticeAgentURL(task, steer = false) {
 function noticeSender(task) {
   const origin = task.origin, agent = origin?.agent, href = noticeAgentURL(task);
   const fields = [["Agent", agent?.id], ["Model", agent?.model], ["Session", agent?.session_id], ["Machine", agent?.host], ["Worker run", agent?.creation_run?.id], ["Identity source", agent?.source], ["Invocation", agent?.invocation?.call_id], ["Directory", origin?.cwd], ["Executable", origin?.executable], ["Process", origin?.pid], ["Branch", origin?.git?.branch], ["Revision", origin?.git?.revision]];
-  return `<div class="side-section" id="notice-sender"><h2 class="side-heading">Sender</h2>${agent ? `<p>${esc(agent.model || agent.kind)} · ${esc(agent.host)}</p><div class="assignee-actions">${href ? `<a class="button small" href="${esc(href)}">Open agent</a><a class="button small" href="${esc(noticeAgentURL(task, true))}">Steer agent</a>` : ""}<button class="button small" data-notice-mute>${task.senderMuted ? "Unmute agent" : "Mute agent"}</button></div><p>${task.senderMuted ? "Muted. Notices stay in Inbox without banners or push notifications." : "Mute this agent on this machine. History and unanswered questions are kept."}</p>` : "<p>Agent identity was not recorded for this notice. The saved process trace is shown below.</p>"}<details><summary>Sender trace</summary><dl>${fields.filter(([,value]) => value != null).map(([name,value]) => `<dt>${esc(name)}</dt><dd style="overflow-wrap:anywhere">${esc(value)}</dd>`).join("")}${(origin?.launchers || []).map(item => `<dt>Parent process ${esc(item.pid)}</dt><dd style="overflow-wrap:anywhere">${esc(item.executable)}</dd>`).join("")}</dl></details></div>`;
+  const actions = agent ? `<details class="issue-overflow notice-agent-menu"><summary class="icon-button" aria-label="Agent actions" title="Agent actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-notice-mute>${task.senderMuted ? "Unmute agent" : "Mute agent"}</button>${href ? `<a href="${esc(href)}">Open agent</a><a href="${esc(noticeAgentURL(task, true))}">Steer agent</a>` : ""}</div></details>` : "";
+  return `<div class="side-section" id="notice-sender"><div class="notice-sender-heading"><h2 class="side-heading">Sender</h2>${actions}</div>${agent ? `<p class="notice-sender-identity"><strong>${esc(agent.model || "Model not recorded")}</strong><br><code>${esc(agent.id)}</code><br>${esc(agent.host)}</p>${task.senderMuted ? "<p>Muted. Notices stay in Inbox without banners or push notifications.</p>" : ""}` : "<p>Agent identity was not recorded for this notice. The saved process trace is shown below.</p>"}<details><summary>Sender trace</summary><dl>${fields.filter(([,value]) => value != null).map(([name,value]) => `<dt>${esc(name)}</dt><dd style="overflow-wrap:anywhere">${esc(value)}</dd>`).join("")}${(origin?.launchers || []).map(item => `<dt>Parent process ${esc(item.pid)}</dt><dd style="overflow-wrap:anywhere">${esc(item.executable)}</dd>`).join("")}</dl></details></div>`;
 }
 const noticeReview = (task) => task.kind === "update" && !!task.commentsEnabled;
 // Match Record.defaultSymbol and IconBadge in the native notification UI.
@@ -342,6 +343,8 @@ function renderNotice(task) {
   if (mute) mute.onclick = () => noticeAction({action: "mute_agent", muted: !task.senderMuted});
   if (new URLSearchParams(location.hash.slice(1)).get("sender") === "mute") {
     $("#notice-sender")?.scrollIntoView({block: "nearest"});
+    const menu = $(".notice-agent-menu");
+    if (menu) menu.open = true;
     mute?.focus({preventScroll: true});
   }
   for (const [selector, type] of [

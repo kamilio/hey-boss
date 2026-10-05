@@ -1380,6 +1380,11 @@ func launchDetails(_ row: Record) -> NSAttributedString {
     }
     entry("Source", row.isLocalSource || row.sourceHost == nil ? row.sourceLabel : "Server · \(row.sourceLabel)")
     if let origin = row.origin {
+        if let agent = origin.agent {
+            entry("Agent ID", agent.id)
+            entry("Model", agent.model ?? "Model not recorded")
+            entry("Machine", agent.host)
+        }
         let chain = launcherChain(origin.launchers)
         if !chain.isEmpty { entry("Launched from", chain) }
         entry("Directory", (origin.cwd as NSString).abbreviatingWithTildeInPath)
@@ -1422,16 +1427,41 @@ func infoView(_ row: Record) -> NSViewController {
 
 final class InfoButton: ActionButton {
     let row: Record
+    let openURL: (URL) -> Void
     var popover: NSPopover?
-    init(_ row: Record, frame: NSRect) {
+    init(_ row: Record, frame: NSRect, openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.row = row
+        self.openURL = openURL
         super.init("", frame: frame, style: .quiet, action: {})
-        image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Launch details")
-        toolTip = "Launch details"
-        setAccessibilityLabel("Launch details")
-        invoke = { [weak self] in self?.showInfo() }
+        image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Notification actions")
+        toolTip = row.origin?.agent.map { "\($0.id) · \($0.model ?? "Model not recorded")" } ?? "Notification actions"
+        setAccessibilityLabel("Notification actions")
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if let agent = row.origin?.agent {
+            for title in [agent.id, agent.model ?? "Model not recorded"] {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+        for (index, title) in ["Mute agent", "Open agent", "Steer agent", "Sender trace…"].enumerated() {
+            let item = NSMenuItem(title: title, action: #selector(selectAction(_:)), keyEquivalent: "")
+            item.tag = index; item.target = self
+            menu.addItem(item)
+        }
+        self.menu = menu
+        invoke = { [weak self] in
+            guard let self, let menu = self.menu else { return }
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: self.bounds.minY), in: self)
+        }
     }
     required init?(coder: NSCoder) { return nil }
+    @objc func selectAction(_ item: NSMenuItem) {
+        if item.tag == 3 { showInfo(); return }
+        openURL(item.tag == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL(steer: item.tag == 2) ?? notificationSenderURL(row)))
+    }
     func showInfo() {
         let popover = NSPopover()
         popover.behavior = .transient
@@ -2557,19 +2587,6 @@ final class NotificationClick: NSObject, NSGestureRecognizerDelegate {
     }
 }
 
-func addNotificationAgentButtons(_ row: Record, to view: NSView, openURL: @escaping (URL) -> Void) {
-    for (index, title) in ["Mute agent", "Open agent", "Steer agent"].enumerated() {
-        let button = ActionButton(title, frame: NSRect(x: 12 + CGFloat(index) * ((view.bounds.width - 24) / 3), y: 7, width: (view.bounds.width - 24) / 3 - 2, height: 24), style: .quiet) {
-            let destination = index == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL(steer: index == 2) ?? notificationSenderURL(row))
-            openURL(destination)
-        }
-        button.font = .systemFont(ofSize: 11)
-        button.toolTip = row.origin?.agent?.id ?? "Sender identity was not recorded. Open available trace details."
-        button.setAccessibilityLabel(title + " in web")
-        view.addSubview(button)
-    }
-}
-
 final class Card {
     let row: Record
     let view: Surface
@@ -2602,8 +2619,7 @@ final class Card {
         let hasAction = row.kind == "update" || row.linkURL != nil
         let actionTitle = row.kind == "update" ? "Read update" : (row.linkLabel ?? "")
         let actionWidth: CGFloat = min(260, max(126, ceil((actionTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]).width) + 32))
-        let senderSpace: CGFloat = 30
-        let actionSpace: CGFloat = (hasAction ? 34 : 0) + senderSpace
+        let actionSpace: CGFloat = hasAction ? 34 : 0
         headerRight = 280
         let height = body.frame.height + 72 + actionSpace
         view = effect(NSRect(x: 0, y: 0, width: 344, height: height))
@@ -2616,7 +2632,7 @@ final class Card {
         source.textColor = .tertiaryLabelColor
         source.lineBreakMode = .byTruncatingTail
         source.frame = NSRect(x: 30, y: 12 + actionSpace, width: 298, height: 14)
-        source.toolTip = row.isLocalSource || row.sourceHost == nil ? row.sourceLabel : "Sent from server: \(row.sourceLabel)"
+        source.toolTip = row.origin?.agent.map { "\($0.id) · \($0.model ?? "Model not recorded") · \(row.sourceLabel)" } ?? (row.isLocalSource || row.sourceHost == nil ? row.sourceLabel : "Sent from server: \(row.sourceLabel)")
         source.setAccessibilityLabel(source.toolTip!)
         view.content.addSubview(source)
         let sourceIcon = NSImageView(frame: NSRect(x: 16, y: 13 + actionSpace, width: 10, height: 10))
@@ -2646,21 +2662,20 @@ final class Card {
         close.image?.size = NSSize(width: 9, height: 9)
         close.setAccessibilityLabel("Dismiss \((row.project ?? "Notifications")) notification: \((row.title ?? "Untitled"))")
         view.content.addSubview(close)
-        info = InfoButton(row, frame: NSRect(x: 284, y: height - 36, width: 24, height: 24))
+        info = InfoButton(row, frame: NSRect(x: 284, y: height - 36, width: 24, height: 24), openURL: openURL)
         view.content.addSubview(info)
         let activate = {
             if row.kind == "update" || row.linkURL == nil { open() }
             else if let link = row.linkURL, let url = URL(string: link) { openURL(url) }
             if row.commentsEnabled != true { complete(row.taskID, nil) }
         }
-        addNotificationAgentButtons(row, to: view.content, openURL: openURL)
         contentClick = NotificationClick(view: view, action: activate)
         body.isSelectable = false
         if hasAction {
-            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10 + senderSpace, width: actionWidth, height: 28), style: .secondary, action: activate)
+            let button = ActionButton(actionTitle, frame: NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: 28), style: .secondary, action: activate)
             button.font = .systemFont(ofSize: 12, weight: .medium)
             button.controlSize = .regular
-            button.frame = NSRect(x: 328 - actionWidth, y: 10 + senderSpace, width: actionWidth, height: button.intrinsicContentSize.height)
+            button.frame = NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: button.intrinsicContentSize.height)
             button.alignment = .center
             button.cell!.lineBreakMode = .byTruncatingTail
             button.toolTip = row.kind == "update" ? "Read update" : (row.linkLabel ?? "Open")
@@ -3089,17 +3104,16 @@ final class Interface {
         let inputHeight: CGFloat = row.kind == "prompt" ? 120 : inlineOptions ? 48 : optionHeights.reduce(CGFloat(0)) { $0 + $1 + 8 }
         let natural = 68 + title.frame.height + description.frame.height + inputHeight
         let screen = question.visibleArea
-        let height = min(natural + 30, screen.height - 80)
+        let height = min(natural, screen.height - 80)
         let view = effect(NSRect(x: 0, y: 0, width: 480, height: height))
         let body = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: natural))
-        let bodyScroll = NSScrollView(frame: NSRect(x: 0, y: 30, width: 480, height: height - 30))
+        let bodyScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: height))
         bodyScroll.drawsBackground = false
         bodyScroll.hasVerticalScroller = true
         bodyScroll.scrollerStyle = .overlay
         bodyScroll.autohidesScrollers = true
         bodyScroll.documentView = body
         view.content.addSubview(bodyScroll)
-        addNotificationAgentButtons(row, to: view.content, openURL: { [weak self] in self?.openURL($0) })
         let header = DragHeader(labelWithString: row.heading)
         header.toolTip = row.heading
         header.lineBreakMode = .byTruncatingTail
@@ -3109,7 +3123,7 @@ final class Interface {
         header.setAccessibilityLabel("\(row.visualLabel): \(row.heading)")
         body.addSubview(header)
         body.addSubview(IconBadge(row, frame: NSRect(x: 24, y: natural - 29, width: 22, height: 22)))
-        body.addSubview(InfoButton(row, frame: NSRect(x: 430, y: natural - 30, width: 26, height: 24)))
+        body.addSubview(InfoButton(row, frame: NSRect(x: 430, y: natural - 30, width: 26, height: 24), openURL: { [weak self] in self?.openURL($0) }))
         title.setFrameOrigin(NSPoint(x: 24, y: natural - 36 - title.frame.height))
         body.addSubview(title)
         description.setFrameOrigin(NSPoint(x: 24, y: title.frame.minY - 6 - description.frame.height))
@@ -3127,10 +3141,10 @@ final class Interface {
                 guard abs(delta) > 0.5 else { return }
                 input.frame.size.height = height; body.frame.size.height += delta
                 for child in body.subviews where child !== input && child !== submit { child.frame.origin.y += delta }
-                let nextHeight = min(body.frame.height + 30, screen.height - 80)
+                let nextHeight = min(body.frame.height, screen.height - 80)
                 var rect = self.question.frame; rect.origin.y -= (nextHeight - rect.height) / 2; rect.size.height = nextHeight
                 self.question.place(rect, display: self.present)
-                bodyScroll.frame.size.height = nextHeight - 30
+                bodyScroll.frame.size.height = nextHeight
                 input.resizeEditor()
             }
             input.stringValue = questionDrafts[row.taskID] ?? ""
@@ -3158,9 +3172,9 @@ final class Interface {
                 x += optionWidths[index] + 8
             }
         }
-        let finalHeight = min(body.frame.height + 30, screen.height - 80)
+        let finalHeight = min(body.frame.height, screen.height - 80)
         view.frame.size.height = finalHeight
-        bodyScroll.frame = NSRect(x: 0, y: 30, width: 480, height: finalHeight - 30)
+        bodyScroll.frame = NSRect(x: 0, y: 0, width: 480, height: finalHeight)
         question.contentView = view
         question.place(NSRect(x: screen.midX - 240, y: screen.midY - finalHeight / 2, width: 480, height: finalHeight), display: present)
         bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, body.frame.height - bodyScroll.frame.height)))

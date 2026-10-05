@@ -1,7 +1,7 @@
 import React,{useState,useEffect,useCallback,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Theme,Button,TextArea,TextField,Spinner,Dialog} from '@radix-ui/themes';
-import {Inbox,History,Settings,Bell,MessageCircle,Check,CheckCheck,TriangleAlert,CircleAlert,Info,ArrowUpRight,ChevronRight,X,Monitor,Server,RefreshCw,ListTodo} from 'lucide-react';
+import {Theme,Button,TextArea,TextField,Spinner,Dialog,DropdownMenu} from '@radix-ui/themes';
+import {Inbox,History,Settings,Bell,MessageCircle,Check,CheckCheck,TriangleAlert,CircleAlert,Info,ArrowUpRight,ChevronRight,X,Monitor,Server,RefreshCw,ListTodo,Ellipsis} from 'lucide-react';
 import Markdown from './Markdown';
 import usePullRefresh from './usePullRefresh';
 import LiquidGlass from 'liquid-glass-react';
@@ -141,11 +141,11 @@ function App(){
    <div className="clear-inbox-dialog-actions"><Dialog.Close><Button variant="soft" color="gray" disabled={clearing}>Keep unread</Button></Dialog.Close><Button color="red" disabled={clearing} onClick={clearInbox}>{clearing?'Clearing…':'Clear all'}</Button></div>
   </Dialog.Content></Dialog.Root>
   <Dialog.Root open={selectedID!==null} onOpenChange={open=>{if(!open)closeReader();}}><Dialog.Content className="reader-dialog" aria-describedby={undefined} onOpenAutoFocus={event=>{event.preventDefault();document.getElementById('reader-heading')?.focus();}}>
-   <div className="reader-top"><span className="reader-context">{selected?.project||'Update'}</span><Dialog.Close><button className="icon-button" aria-label="Close reader"><X size={20}/></button></Dialog.Close></div>
+   <div className="reader-top"><span className="reader-context">{selected?.project||'Update'}</span><div className="reader-controls">{selected&&<DropdownMenu.Root><DropdownMenu.Trigger><button className="icon-button" aria-label="Agent actions"><Ellipsis size={20}/></button></DropdownMenu.Trigger><DropdownMenu.Content align="end">{['Mute agent','Open agent','Steer agent'].map((label,index)=>{const agent=selected.origin?.agent;const params=new URLSearchParams(index&&agent?.session_id?{host:agent.host,run:agent.creation_run?.id||'session:'+agent.session_id,project:agent.creation_run?.project_id||selected.issue?.project||'',...(agent.invocation?.offset!=null?{at:String(agent.invocation.offset)}:{}),...(index===2?{steer:'1'}:{})}:{view:'inbox',notice:selected.taskID,sender:'mute'});return <DropdownMenu.Item key={label} asChild><a href={(index&&agent?.session_id?'/agents/session#':'/issues#')+params}>{label}</a></DropdownMenu.Item>;})}</DropdownMenu.Content></DropdownMenu.Root>}<Dialog.Close><button className="icon-button" aria-label="Close reader"><X size={20}/></button></Dialog.Close></div></div>
    <Dialog.Title id="reader-heading" tabIndex={-1}>{selected?.title||state?.tasks.find(t=>t.taskID===selectedID)?.title||'Loading update…'}</Dialog.Title>
    {detailLoading?<div className="reader-loading"><Spinner size="3"/></div>:detailError?<p role="alert">{detailError} <Button variant="soft" onClick={()=>loadDetail(selectedID)}>Retry</Button></p>:selected&&<>
     <div className="reader-meta"><TaskIcon task={selected} size={16}/><span>{selected.sourceHost||'Mac'}</span>{!decision(selected)&&<span className="read-state"><Check size={13}/>{selected.status==='pending'?'Syncing read receipt':'Read'}</span>}</div>
-    <div className="reader-actions">{['Mute agent','Open agent','Steer agent'].map((label,index)=>{const agent=selected.origin?.agent;const params=new URLSearchParams(index&&agent?.session_id?{host:agent.host,run:agent.creation_run?.id||'session:'+agent.session_id,project:agent.creation_run?.project_id||selected.issue?.project||'',...(agent.invocation?.offset!=null?{at:String(agent.invocation.offset)}:{}),...(index===2?{steer:'1'}:{})}:{view:'inbox',notice:selected.taskID,sender:'mute'});return <a key={label} className="action-link" href={(index&&agent?.session_id?'/agents/session#':'/issues#')+params}>{label}</a>;})}</div>
+    {selected.origin?.agent&&<p className="reader-sender"><strong>{selected.origin.agent.model||'Model not recorded'}</strong><br/><code>{selected.origin.agent.id}</code></p>}
     {selected.kind==='update'?<>{selected.description&&<Markdown>{selected.description}</Markdown>}{selected.question&&selected.question!==selected.description&&<Markdown>{selected.question}</Markdown>}</>:<>{selected.question&&<Markdown>{selected.question}</Markdown>}{selected.description&&selected.description!==selected.question&&<Markdown>{selected.description}</Markdown>}</>}
     {decision(selected)?<>{decisionLink(selected)}{responses(selected)}</>:<div className="reader-actions">{link(selected)}</div>}
    </>}

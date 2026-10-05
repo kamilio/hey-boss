@@ -131,3 +131,32 @@ test('sender controls target the captured session and retain unknown historical 
   assert.match(f.run('noticeSender({origin:{cwd:"old-checkout",pid:44}})'), /not recorded/);
   assert.match(f.run('noticeSender({origin:{cwd:"old-checkout",pid:44}})'), /old-checkout/);
 });
+
+test('sender shows the exact ID and model outside trace, with actions in a closed dropdown', () => {
+  const f = fixture();
+  f.context.URLSearchParams = URLSearchParams;
+  f.context.task = {origin:{agent:{id:'codex:exact-session',kind:'codex',host:'devbox',model:'gpt-6-astra',session_id:'exact-session'}}};
+  const html = f.run('noticeSender(task)');
+  const summary = html.split('<summary>Sender trace</summary>')[0];
+  assert.match(summary, /codex:exact-session/);
+  assert.match(summary, /gpt-6-astra/);
+  assert.match(html, /<details class="issue-overflow notice-agent-menu">/);
+  assert.match(html, /aria-label="Agent actions"/);
+  assert.doesNotMatch(html, /assignee-actions/);
+  assert.match(f.run('noticeSender({origin:{agent:{id:"codex:older",kind:"codex",host:"devbox"}}})'), /Model not recorded/);
+});
+
+test('native mute destination opens the sender menu and focuses the exact notice mute action', () => {
+  const f = fixture();
+  Object.assign(f.context, {URLSearchParams, location:{hash:'#view=inbox&notice=exact-notice&sender=mute'}, secureLinks(){}, date(){return '';}});
+  f.elements.set('#notice-sender', {scrollIntoView(){}});
+  let focused = false;
+  f.elements.set('[data-notice-mute]', {focus(){focused=true;}});
+  f.run('renderNotice({taskID:"exact-notice",kind:"update",status:"pending",origin:{agent:{id:"codex:exact",model:"gpt-6-astra",host:"devbox"}}})');
+  assert.equal(f.elements.get('.notice-agent-menu').open, true);
+  assert.equal(focused, true);
+  f.run('noticeAction = action => { capturedAction = action; }');
+  f.elements.get('[data-notice-mute]').onclick();
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(capturedAction)')), {action:'mute_agent',muted:true});
+  assert.equal(f.run('inboxDetail.taskID'), 'exact-notice');
+});

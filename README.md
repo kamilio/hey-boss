@@ -391,11 +391,12 @@ Click a notification’s title or body to open it; click a collapsed project sum
 displayed on the Mac. Repeating it preserves the stored terminal status and answer.
 
 Notifications capture their sending agent, session, worker run, invocation, and
-process trace. **Open agent** and **Steer agent** open that session on the web;
+process trace. The **•••** menu contains **Open agent** and **Steer agent**, which open that session on the web;
 **Mute agent** opens its Inbox sender controls. Muting persists across restarts,
 silences desktop and phone delivery from that agent on that machine, and keeps
 history and unanswered questions. Unmuting does not replay suppressed notices.
 Older notices without a recorded agent show their available process trace.
+Sender shows the exact agent ID and recorded model; missing models are labeled explicitly.
 
 Creation commands (`alert`, `update`, `ask`, `prompt`, and `approval`) accept optional appearance flags:
 
