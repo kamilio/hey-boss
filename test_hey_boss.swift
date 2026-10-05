@@ -3107,7 +3107,7 @@ func auditNotificationAgents() {
         return try! JSONSerialization.jsonObject(with: FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()) as! [String: Any]
     }
     func send(_ agent: String, _ machine: String = "mac", _ command: String = "alert") -> Record {
-        let origin: [String: Any] = ["cwd":"/tmp/project", "pid":123, "executable":"/bin/hey-boss", "launchers":[], "agent":["id":agent, "kind":"codex", "machine":machine, "host":"mac.local", "session_id":agent, "source":"CODEX_THREAD_ID", "creation_run":["id":"run-1", "project_id":"named:Trace", "number":1, "started_at":1], "invocation":["offset":42,"call_id":"call-1"]]]
+        let origin: [String: Any] = ["cwd":"/tmp/project", "pid":123, "executable":"/bin/hey-boss", "launchers":[], "agent":["id":agent, "kind":"codex", "model":"gpt-6-astra", "machine":machine, "host":"mac.local", "session_id":agent, "source":"CODEX_THREAD_ID", "creation_run":["id":"run-1", "project_id":"named:Trace", "number":1, "started_at":1], "invocation":["offset":42,"call_id":"call-1"]]]
         let reply = call(["command":command,"project":"Trace","title":"Synthetic","question":"Synthetic","description":"Synthetic","origin":origin])
         return try! store.database.get(reply["task_id"] as! String)
     }
@@ -3117,6 +3117,8 @@ func auditNotificationAgents() {
     precondition(mute["status"] as? String == "ok")
     let suppressed = send("agent-1")
     precondition(shown == [first.taskID,second.taskID], "Muted sender must not show new banners")
+    let sameModel = send("agent-2")
+    precondition(shown.last == sameModel.taskID && sameModel.agentMuted != true, "Mute must not silence another session of the same model on the same machine")
     precondition(suppressed.status == "pending" && suppressed.agentMuted == true, "Muting keeps history and never answers")
     let question = send("agent-1", "mac", "ask")
     precondition(question.status == "pending" && question.agentMuted == true)
@@ -3130,25 +3132,30 @@ func auditNotificationAgents() {
     precondition(try! store.database.get(suppressed.taskID).agentMuted == true, "Unmute does not replay suppressed notices")
     var links = [URL]()
     let card = Card(first, open: {}, openURL: { links.append($0) }, complete: { _,_ in preconditionFailure("Sender actions must not dismiss") })
+    let menu = card.info.menu!
+    precondition(menu.items.contains { $0.title.contains("agent-1") })
+    precondition(menu.items.contains { $0.title.contains("gpt-6-astra") })
     for title in ["Mute agent", "Open agent", "Steer agent"] {
-        let button = card.view.content.subviews.compactMap { $0 as? ActionButton }.first { $0.title == title }!
-        button.performClick(nil)
+        let item = menu.items.first { $0.title == title }!
+        NSApp.sendAction(item.action!, to: item.target, from: item)
     }
     precondition(links.count == 3 && links.allSatisfy { $0.host == "hey-boss.test" })
     precondition(links[1].fragment!.contains("run=run-1") && links[1].fragment!.contains("at=42"))
     precondition(links[2].fragment!.contains("steer=1"))
     card.configure(grouped: false)
     let senderButtons = card.view.content.subviews.compactMap { $0 as? ActionButton }.filter { $0.title.hasSuffix("agent") }
-    precondition(senderButtons.count == 3)
-    for button in senderButtons {
-        precondition(card.view.bounds.contains(button.frame))
-        precondition(!button.frame.intersects(card.body.frame))
-        if let link = card.link { precondition(!button.frame.intersects(link.frame)) }
-    }
+    precondition(senderButtons.isEmpty, "Agent actions must not consume a footer row")
+    precondition(card.view.frame.height == card.body.frame.height + 72 + 34)
+    precondition(card.view.bounds.contains(card.info.frame) && !card.info.frame.intersects(card.header.frame))
+    precondition(launchDetails(first).string.contains("agent-1") && launchDetails(first).string.contains("gpt-6-astra"))
     let ui = Interface(present: false); var questionLinks = [URL]()
     ui.openURL = { questionLinks.append($0) }; ui.add(question)
-    let questionButtons = (ui.question.contentView as! Surface).content.subviews.compactMap { $0 as? ActionButton }.filter { $0.title.hasSuffix("agent") }
-    precondition(questionButtons.count == 3)
-    questionButtons[2].performClick(nil); precondition(questionLinks.count == 1 && ui.current?.taskID == question.taskID)
+    let content = (ui.question.contentView as! Surface).content
+    let scroll = content.subviews.compactMap { $0 as? NSScrollView }.first!
+    precondition(scroll.frame.minY == 0 && scroll.frame.height == content.bounds.height, "Question has no reserved action footer")
+    let info = scroll.documentView!.subviews.compactMap { $0 as? InfoButton }.first!
+    let steer = info.menu!.items.first { $0.title == "Steer agent" }!
+    NSApp.sendAction(steer.action!, to: steer.target, from: steer)
+    precondition(questionLinks.count == 1 && ui.current?.taskID == question.taskID)
     print("PASS sender trace, native web actions, persistent scoped mute, pending questions, unmute without replay")
 }

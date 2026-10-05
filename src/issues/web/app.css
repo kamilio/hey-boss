@@ -613,9 +613,12 @@ dialog::backdrop {
 .issue-overflow summary::-webkit-details-marker { display: none; }
 .issue-overflow summary span { font-size: 15px; letter-spacing: 2px; }
 .issue-overflow-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; min-width: 210px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--solid); box-shadow: 0 8px 24px #0002; }
-.issue-overflow-menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
-.issue-overflow-menu button:hover { background: var(--hover); }
+.issue-overflow-menu button, .issue-overflow-menu a { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; text-decoration: none; }
+.issue-overflow-menu button:hover, .issue-overflow-menu a:hover { background: var(--hover); }
 .issue-overflow-menu svg { width: 16px; height: 16px; }
+.notice-sender-heading { display: flex; align-items: center; gap: 8px; }
+.notice-sender-heading .side-heading { margin: 0; }
+.notice-sender-identity { overflow-wrap: anywhere; }
 #transfer-dialog { max-width: 520px; }
 #transfer-description { margin: 0 0 24px; color: var(--muted); line-height: 1.7; }
 #transfer-project { width: 100%; }
