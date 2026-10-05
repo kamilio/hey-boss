@@ -17,11 +17,18 @@ use tokio::sync::{Semaphore, mpsc, watch};
 use tracing::instrument::WithSubscriber;
 use url::Url;
 
+#[cfg(test)]
+mod cache_admission_tests;
 mod ci_pull_request;
 mod ci_selectors;
 #[cfg(test)]
 mod confirmation_tests;
 mod policy_ci;
+
+#[cfg(test)]
+tokio::task_local! {
+    static CACHE_LOOKUP_GATE: std::cell::RefCell<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+}
 
 // Admission probes apply ordinary freshness/version rules without dispatching,
 // minting credentials or joining an in-flight request when evidence is missing.
@@ -311,7 +318,7 @@ impl Client {
             config.max_collection_bytes.saturating_mul(4),
         )?;
         let metrics = Arc::new(Metrics::default());
-        let inflight = Arc::new(Mutex::new(HashMap::new()));
+        let inflight = Arc::new(Mutex::new(Default::default()));
         let permits = Arc::new(Semaphore::new(config.queue_capacity));
         let (queue, rx) = mpsc::channel(config.queue_capacity);
         let queue_changed = Arc::new(tokio::sync::Notify::new());
@@ -659,56 +666,81 @@ impl Client {
         repository_prefix: Option<String>,
         installation: bool,
     ) -> Result<Response> {
-        let cached = self
-            .0
-            .store
-            .get_repository_alias(&self.0.scope, &key, repository_prefix.as_deref())
-            .await?;
-        if let Some(mut response) = cached.clone() {
-            let fresh = match freshness {
-                Freshness::CachedOnly => true,
-                Freshness::Revalidate => false,
-                Freshness::MaxAge(age) => {
-                    now_ms().saturating_sub(response.validated_at_ms) < age.as_millis() as u64
-                }
-            };
-            if fresh {
-                response.source = Source::Cache;
-                self.0.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(response);
-            }
-        }
-        if matches!(freshness, Freshness::CachedOnly) || CACHE_PROBE.try_with(|_| ()).is_ok() {
-            return Err(Error::CacheMiss);
-        }
-        let now = tokio::time::Instant::now();
-        let caller_deadline = if interactive_read() {
-            now + self.0.config.queue_timeout
-        } else {
-            REQUEST_DEADLINE
-                .try_with(|deadline| *deadline)
+        let completion_fingerprint = (matches!(freshness, Freshness::MaxAge(age) if !age.is_zero())
+            && CACHE_PROBE.try_with(|_| ()).is_err())
+        .then(|| digest(&key));
+        let mut queue_clock = None;
+        let receiver = loop {
+            let observed_sequence = completion_fingerprint.as_ref().map(|_| {
+                self.0
+                    .inflight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .sequence()
+            });
+            let cached = self
+                .0
+                .store
+                .get_repository_alias(&self.0.scope, &key, repository_prefix.as_deref())
+                .await?;
+            #[cfg(test)]
+            if let Some((entered, resume)) = CACHE_LOOKUP_GATE
+                .try_with(|gate| gate.borrow_mut().take())
                 .ok()
                 .flatten()
-                .map_or(now + self.0.config.queue_timeout, |deadline| {
-                    deadline.min(now + self.0.config.queue_timeout)
-                })
-        };
-        let caller_deadline = READ_DEADLINE
-            .try_with(|deadline| caller_deadline.min(*deadline))
-            .unwrap_or(caller_deadline);
-        let selector_validation = (body.is_none()
-            && matches!(
-                endpoint_class(&url, false, &self.0.config.rest_url),
-                "pull_request" | "branch"
-            ))
-            || installation;
-        // The final selector scope also contains personal GraphQL confirmations.
-        // Give those the same completion turns as REST, including coalesced work.
-        let completion_validation = (selector_validation || body.is_some())
-            && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
-        let receiver = {
+            {
+                entered.notify_one();
+                resume.notified().await;
+            }
+            if let Some(mut response) = cached.clone() {
+                let fresh = match freshness {
+                    Freshness::CachedOnly => true,
+                    Freshness::Revalidate => false,
+                    Freshness::MaxAge(age) => {
+                        now_ms().saturating_sub(response.validated_at_ms) < age.as_millis() as u64
+                    }
+                };
+                if fresh {
+                    response.source = Source::Cache;
+                    self.0.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(response);
+                }
+            }
+            if matches!(freshness, Freshness::CachedOnly) || CACHE_PROBE.try_with(|_| ()).is_ok() {
+                return Err(Error::CacheMiss);
+            }
+            let (now, caller_deadline) = *queue_clock.get_or_insert_with(|| {
+                let now = tokio::time::Instant::now();
+                let caller_deadline = if interactive_read() {
+                    now + self.0.config.queue_timeout
+                } else {
+                    REQUEST_DEADLINE
+                        .try_with(|deadline| *deadline)
+                        .ok()
+                        .flatten()
+                        .map_or(now + self.0.config.queue_timeout, |deadline| {
+                            deadline.min(now + self.0.config.queue_timeout)
+                        })
+                };
+                let caller_deadline = READ_DEADLINE
+                    .try_with(|deadline| caller_deadline.min(*deadline))
+                    .unwrap_or(caller_deadline);
+                (now, caller_deadline)
+            });
+            let selector_validation = (body.is_none()
+                && matches!(
+                    endpoint_class(&url, false, &self.0.config.rest_url),
+                    "pull_request" | "branch"
+                ))
+                || installation;
+            // The final selector scope also contains personal GraphQL confirmations.
+            // Give those the same completion turns as REST, including coalesced work.
+            let completion_validation = (selector_validation || body.is_some())
+                && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
+            if let Some((receiver, interactive, shared_deadline, completion)) =
+                inflight.active.get(&key)
+            {
                 if interactive_read() {
                     interactive.store(true, Ordering::Relaxed);
                 }
@@ -727,8 +759,23 @@ impl Client {
                 // the scheduler to reconsider promoted priority/deadlines now.
                 self.0.queue_changed.notify_one();
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
-                receiver.clone()
+                break receiver.clone();
             } else {
+                if completion_fingerprint
+                    .as_ref()
+                    .zip(observed_sequence)
+                    .is_some_and(|(fingerprint, sequence)| {
+                        inflight.completed_since(fingerprint, sequence)
+                    })
+                {
+                    if tokio::time::Instant::now() >= caller_deadline {
+                        return Err(Error::Deadline);
+                    }
+                    // The peer persisted its response after our cache snapshot
+                    // and left the active map. Retry outside this mutex before
+                    // consuming a permit or another GitHub quota point.
+                    continue;
+                }
                 // Coalescing above must remain possible at either admission
                 // boundary. Serialize this check with all distinct admissions;
                 // scheduler completions can only release more capacity.
@@ -802,8 +849,10 @@ impl Client {
                     mpsc::error::TrySendError::Closed(_) => Error::Stopped,
                     mpsc::error::TrySendError::Full(_) => self.queue_full(),
                 })?;
-                inflight.insert(key, (receiver.clone(), interactive, deadline, completion));
-                receiver
+                inflight
+                    .active
+                    .insert(key, (receiver.clone(), interactive, deadline, completion));
+                break receiver;
             }
         };
         let mut waiter = RequestWaiter {
@@ -1733,6 +1782,7 @@ mod priority_tests {
                 .inflight
                 .lock()
                 .unwrap()
+                .active
                 .values()
                 .all(|(_, priority, _, _)| priority.load(Ordering::Relaxed)),
             "the shared request itself must retain foreground priority"
@@ -1868,12 +1918,16 @@ mod priority_tests {
                         }
                     });
                     let key = format!("{url}repos/acme/demo/pulls/7");
-                    let promoted =
-                        || {
-                            client.0.inflight.lock().unwrap().get(&key).is_some_and(
-                                |(_, _, _, completing)| completing.load(Ordering::Relaxed),
-                            )
-                        };
+                    let promoted = || {
+                        client
+                            .0
+                            .inflight
+                            .lock()
+                            .unwrap()
+                            .active
+                            .get(&key)
+                            .is_some_and(|(_, _, _, completing)| completing.load(Ordering::Relaxed))
+                    };
                     if cached_ci {
                         // Only metadata remains. The gate makes dispatch order
                         // deterministic while the collection promotes its read.
@@ -3235,6 +3289,7 @@ mod priority_tests {
                 .inflight
                 .lock()
                 .unwrap()
+                .active
                 .values()
                 .any(|(_, priority, _, _)| priority.load(Ordering::Relaxed))
         );
