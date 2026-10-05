@@ -35,25 +35,37 @@ const HeyBossMergedPRs = (() => {
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||'Could not load merged PRs');
       return value;
     }
-    async function load(reset=false) {
+    function scheduleRefresh(delay) {
+      clearTimeout(timer);
+      if(!document.hidden&&context?.project)timer=setTimeout(()=>load(true,true),delay);
+    }
+    async function load(reset=false, preserve=false) {
       if(busy&&!reset)return;
       clearTimeout(timer);
-      const seq=++generation, current={...context}; busy=true;error('');
+      const seq=++generation, current={...context}, pages=reset&&preserve?Math.max(1,Math.ceil(rows.length/100)):1;
+      let refreshDelay=30000;
+      busy=true;error('');
       $('#merged-more').disabled=true;$('#merged-refresh').disabled=true;
       $('#merged-status').textContent='Loading merged PRs…';
       try {
-        const value=await request({action:'merged_pull_requests',limit:100,offset:reset?0:next},current.project,current.host);
-        if(seq!==generation)return;
-        rows=reset?value.pull_requests:[...new Map([...rows,...value.pull_requests].map(pr=>[pr.url,pr])).values()];next=value.next_offset;
+        let offset=reset?0:next, collected=[], pending=false;
+        for(let page=0;page<pages;page++){
+          const value=await request({action:'merged_pull_requests',limit:100,offset},current.project,current.host);
+          if(seq!==generation)return;
+          collected.push(...value.pull_requests);pending||=value.authorship_pending;offset=value.next_offset;
+          if(offset===null)break;
+        }
+        rows=[...new Map([...(reset?[]:rows),...collected].map(pr=>[pr.url,pr])).values()];next=offset;
         $('#merged-list').innerHTML=render(rows,current);
         HeyBossUI.icons($('#merged-list'));
-        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:value.authorship_pending?'Checking GitHub authors before showing your merged PRs…':'No merged fix PRs authored by your GitHub account yet.';
+        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:pending?'Checking GitHub authors before showing your merged PRs…':'No merged fix PRs authored by your GitHub account yet.';
         $('#merged-more').hidden=next===null;
-        if(value.authorship_pending){if(rows.length)$('#merged-status').textContent+=' · Checking remaining PR authors…';timer=setTimeout(()=>load(true),3000);}
+        if(pending){if(rows.length)$('#merged-status').textContent+=' · Checking remaining PR authors…';refreshDelay=3000;}
       } catch(e) {if(seq===generation){error(e.message);$('#merged-status').textContent='';}}
-      finally {if(seq===generation){busy=false;$('#merged-more').disabled=false;$('#merged-refresh').disabled=false;}}
+      finally {if(seq===generation){busy=false;$('#merged-more').disabled=false;$('#merged-refresh').disabled=false;scheduleRefresh(refreshDelay);}}
     }
     async function navigate() {
+      clearTimeout(timer);generation++;busy=false;
       const params=new URLSearchParams(location.hash.slice(1));
       const project=HeyBossUI.projectId(boot.project?.id||boot.projects[0]?.id);
       context={project,host:mobile?null:params.get('host')||boot.backend_host||null};
@@ -71,8 +83,9 @@ const HeyBossMergedPRs = (() => {
         await navigate();
       }catch(e){error(e.message);$('#merged-status').textContent='';$('#merged-refresh').disabled=false;}
     }
-    $('#merged-more').onclick=()=>load();$('#merged-refresh').onclick=()=>boot?.ok?load(true):bootstrap();
+    $('#merged-more').onclick=()=>load();$('#merged-refresh').onclick=()=>boot?.ok?load(true,true):bootstrap();
     window.addEventListener('hashchange',()=>{if(boot?.ok)navigate();});
+    document.addEventListener('visibilitychange',()=>{clearTimeout(timer);if(!document.hidden&&context?.project&&!busy)load(true,true);});
     await bootstrap();
   }
   return {groups,render,start};
