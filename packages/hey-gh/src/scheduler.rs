@@ -31,6 +31,8 @@ pub(crate) fn max_active_buckets(config: &Config) -> usize {
 #[derive(Clone)]
 pub(crate) enum SharedResult {
     Queued,
+    /// Known pacing/backoff lower bound; not a dispatch promise or new deadline.
+    QueuedUntil(Instant),
     Active,
     Complete(Result<Arc<Response>>),
 }
@@ -675,6 +677,25 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary.until);
+            // Optional GraphQL selectors have a short REST-fallback budget.
+            // Tell waiters when known pacing alone exceeds that budget instead
+            // of making them wait out a shortcut that cannot dispatch in time.
+            // Ordinary/coalesced callers still wait; no quota or turn changes.
+            for job in pending.iter().filter(|job| job.body.is_some()) {
+                let until = ready(job, &budgets, global);
+                if until > now {
+                    job.notify.send_if_modified(|state| {
+                        if matches!(state, SharedResult::Queued)
+                            || matches!(state, SharedResult::QueuedUntil(previous) if *previous != until)
+                        {
+                            *state = SharedResult::QueuedUntil(until);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                }
+            }
             // Choose each quota's turn before considering pacing. A charged
             // conditional probe must not keep moving an older turn forever.
             // Keep foreground/background and completion/ordinary alternation;

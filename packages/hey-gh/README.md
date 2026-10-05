@@ -125,7 +125,9 @@ confirm matching CI selectors. Configured installations own that query and its
 cache/in-flight identity; identical queries through the generic interface still
 use personal authentication. Installation failures remain explicit under the
 normal caller deadline. Personal selector queries retain a two-second optional
-shortcut before REST fallback. Cache-only status evidence follows the same
+shortcut before REST fallback. Personal CI and policy selectors fall back earlier
+when known queue pacing cannot dispatch them within that budget. Required callers
+sharing the query retain their turn; short waits still use GraphQL. Cache-only status evidence follows the same
 provider route, without minting or requesting additional data. Changed selectors
 still require full REST metadata. CI uses the configured installation for cold,
 changed, ambiguous, and explicitly refreshed metadata; generic metadata reads keep

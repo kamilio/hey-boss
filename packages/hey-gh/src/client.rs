@@ -26,6 +26,20 @@ tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Ins
 // A bounded HTTP read keeps its own limit even at foreground priority. Other
 // consumers can still extend the lifetime of a coalesced shared request.
 tokio::task_local! { pub(crate) static READ_DEADLINE: tokio::time::Instant; }
+tokio::task_local! { static OPTIONAL_SELECTOR_DEADLINE: tokio::time::Instant; }
+
+pub(crate) async fn optional_selector_read<T>(
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    OPTIONAL_SELECTOR_DEADLINE
+        .scope(deadline, async {
+            tokio::time::timeout_at(deadline, read)
+                .await
+                .unwrap_or(Err(Error::Deadline))
+        })
+        .await
+}
 tokio::task_local! { pub(crate) static INTERACTIVE_READ: Arc<AtomicBool>; }
 tokio::task_local! { pub(crate) static BACKGROUND_READ: (); }
 // One final selector read can complete an otherwise collected PR report.
@@ -794,9 +808,21 @@ impl Client {
                     }
                     return result.map(|r| (*r).clone());
                 }
+                SharedResult::QueuedUntil(until)
+                    if OPTIONAL_SELECTOR_DEADLINE
+                        .try_with(|deadline| until >= *deadline)
+                        .unwrap_or(false) =>
+                {
+                    // Only this optional waiter falls back. A required caller
+                    // sharing the same request keeps its deadline and queue turn.
+                    return Err(Error::Deadline);
+                }
                 state => {
                     if let Some(wait) = &mut wait {
-                        wait.update(matches!(state, SharedResult::Queued));
+                        wait.update(matches!(
+                            state,
+                            SharedResult::Queued | SharedResult::QueuedUntil(_)
+                        ));
                     }
                 }
             }
@@ -2847,6 +2873,96 @@ mod priority_tests {
             position <= 4,
             "oldest background detail was starved behind {position} core calls: {calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn optional_queue_fallback_preserves_a_coalesced_required_graphql_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move |uri: axum::http::Uri| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    use axum::response::IntoResponse;
+                    let mut response =
+                        axum::Json(serde_json::json!({"data":{"ok":true}})).into_response();
+                    if uri.path() == "/seed" {
+                        let headers = response.headers_mut();
+                        headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "1000".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-reset",
+                            (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
+                        );
+                    }
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                queue_capacity: 1,
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(10),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let required = tokio::spawn({
+            let client = client.clone();
+            async move {
+                client
+                    .graphql(
+                        "query { viewer { login } }",
+                        serde_json::json!({}),
+                        Freshness::Revalidate,
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.status().outstanding_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let optional = tokio::time::timeout(
+            Duration::from_secs(1),
+            optional_selector_read(client.graphql(
+                "query { viewer { login } }",
+                serde_json::json!({}),
+                Freshness::Revalidate,
+            )),
+        )
+        .await
+        .expect("optional caller waited despite a known pacing lower bound");
+        assert!(matches!(optional, Err(Error::Deadline)));
+        assert!(!required.is_finished());
+        assert_eq!(client.status().outstanding_requests, 1);
+        assert_eq!(client.status().coalesced_requests, 1);
+        let response = tokio::time::timeout(Duration::from_secs(6), required)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.data["data"]["ok"], true);
+        assert!(
+            started.elapsed() >= Duration::from_secs(3),
+            "shared request bypassed pacing"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        server.abort();
     }
 
     #[tokio::test]
