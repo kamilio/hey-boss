@@ -27,7 +27,9 @@ async fn wait_cycle(sdk: &hey_gh::ApiClient, after: u64) -> hey_gh::api::WatchSt
             if status
                 .policy_last_cycle
                 .as_ref()
-                .is_some_and(|cycle| cycle.finished_at_ms > after)
+                // Startup may finish a cache-only deferral before account CI
+                // records its completion. Wait for the woken policy work.
+                .is_some_and(|cycle| cycle.finished_at_ms > after && cycle.attempted > 0)
                 && status.ci_last_cycle.is_some()
                 && (status.policy_last_success_at_ms.is_some()
                     || status.policy_last_error.is_some())

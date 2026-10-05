@@ -845,12 +845,6 @@ impl Client {
                 }
                 if !seed_only {
                     let continuing = schedule.started(&item);
-                    self.save_derived(
-                        &schedule_key,
-                        serde_json::to_value(&schedule)
-                            .map_err(|e| Error::Storage(e.to_string()))?,
-                    )
-                    .await?;
                     if continuing {
                         tracing::info!(repository=%item.key.0,number=item.key.1,mode,"PR collection continuation started");
                     }
@@ -867,6 +861,17 @@ impl Client {
                     waiting_for_ci += 1;
                     retry.insert(item.key, item.node);
                     continue;
+                }
+                if !seed_only {
+                    // Checkpoint before admitted I/O, including any preceding
+                    // cache-only deferrals. A crash may replay cheap admission
+                    // checks, but cannot pin upstream work to the same PR.
+                    self.save_derived(
+                        &schedule_key,
+                        serde_json::to_value(&schedule)
+                            .map_err(|e| Error::Storage(e.to_string()))?,
+                    )
+                    .await?;
                 }
                 let disappeared = !current.contains_key(&item.key);
                 attempted += 1;
@@ -986,6 +991,15 @@ impl Client {
                     retry.insert((repo, number), node);
                 }
             }
+        }
+        if policy_only {
+            // Persist remaining deferrals once, rather than rewriting the
+            // entire account schedule for every ineligible candidate.
+            self.save_derived(
+                &schedule_key,
+                serde_json::to_value(&schedule).map_err(|e| Error::Storage(e.to_string()))?,
+            )
+            .await?;
         }
         self.save_derived(&tracking_key, json!(retry.values().collect::<Vec<_>>()))
             .await?;
