@@ -199,6 +199,11 @@ Unknown labels are replaced with `unknown`; arbitrary log text is never emitted.
 nearest-rank p50/p95/max milliseconds for completed jobs, including failures.
 These timings include queuing and retries; they are not individual HTTP latency.
 Missing or invalid timings stay unavailable rather than becoming zero.
+`deadline_contexts` counts whether a deadline result still had waiters and whether
+its shared request deadline had expired when finalized. `unobserved_before_expiry`
+identifies abandoned work; `expired_with_waiters` identifies a still-observed
+request reaching its deadline. Other combinations and legacy `unknown` remain
+explicit. These are job observations, not counts or causes of CLI timeouts.
 The output reports retained time bounds, archive gaps, oversized files, and
 partial records. `retention_covers_start=false` means the requested window is
 not fully covered. Reads are non-atomic and can race with rotation. Attempt counts
@@ -800,6 +805,9 @@ coalesce before either check and interactive waiters promote existing work.
 The reserve adds neither sockets nor waiting tasks and does not bypass quotas,
 deadlines, or the scheduler's background fairness rule. It is admission headroom,
 not a guarantee that every concurrent report will finish.
+Dropping a pending caller wakes the scheduler after releasing its reference.
+Queued work with no remaining caller releases admission promptly, including
+during pacing/backoff waits; coalesced callers and active responses remain shared.
 
 `status` reports `interactive_reserved_slots` and process-lifetime
 `queue_full_rejections`; rejected admissions made no network attempt and are not

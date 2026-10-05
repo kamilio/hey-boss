@@ -149,6 +149,25 @@ struct Inner {
     policy_ready: tokio::sync::Notify,
 }
 
+struct RequestWaiter {
+    receiver: Option<tokio::sync::watch::Receiver<SharedResult>>,
+    changed: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for RequestWaiter {
+    fn drop(&mut self) {
+        if let Some(receiver) = self.receiver.take() {
+            let pending = !matches!(&*receiver.borrow(), SharedResult::Complete(_));
+            // Drop before waking: the scheduler may run on another thread and
+            // must see the departing waiter when checking shared ownership.
+            drop(receiver);
+            if pending {
+                self.changed.notify_one();
+            }
+        }
+    }
+}
+
 impl Client {
     pub(crate) fn notify_policy_ready(&self) {
         self.0.policy_ready.notify_one();
@@ -664,7 +683,7 @@ impl Client {
             || installation;
         let completion_validation =
             selector_validation && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
-        let mut receiver = {
+        let receiver = {
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion)) = inflight.get(&key) {
                 if interactive_read() {
@@ -759,6 +778,11 @@ impl Client {
                 receiver
             }
         };
+        let mut waiter = RequestWaiter {
+            receiver: Some(receiver),
+            changed: self.0.queue_changed.clone(),
+        };
+        let receiver = waiter.receiver.as_mut().expect("live request waiter");
         let mut wait = crate::collection_budget::Wait::current(true);
         loop {
             match receiver.borrow_and_update().clone() {
@@ -2823,6 +2847,87 @@ mod priority_tests {
             position <= 4,
             "oldest background detail was starved behind {position} core calls: {calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_last_queued_waiter_releases_admission_without_another_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { axum::Json(serde_json::json!({"ok": true})) }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                queue_capacity: 1,
+                min_spacing: Duration::from_secs(30),
+                queue_timeout: Duration::from_secs(60),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        client.get("seed", Freshness::Revalidate).await.unwrap();
+        let first = tokio::spawn({
+            let client = client.clone();
+            async move { client.get("queued", Freshness::Revalidate).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().outstanding_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            client.get("overflow", Freshness::Revalidate).await,
+            Err(Error::QueueFull)
+        ));
+        let second = tokio::spawn({
+            let client = client.clone();
+            async move {
+                INTERACTIVE_READ
+                    .scope(
+                        foreground_priority(),
+                        client.get("queued", Freshness::Revalidate),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().coalesced_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        // Let the admission/promotion wake settle before dropping the last caller.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(client.status().outstanding_requests, 1);
+        assert!(!second.is_finished());
+        second.abort();
+        assert!(second.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.status().outstanding_requests != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abandoned admission must be reclaimed before the 30-second pacing wake");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(client.status().network_requests, 1);
+        server.abort();
     }
 
     #[tokio::test]
