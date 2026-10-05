@@ -2323,6 +2323,7 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
     assert!(expired.contains("foreground=true"));
     assert!(expired.contains("completion_validation=false"));
     assert!(expired.contains("error_code=\"deadline\""));
+    assert!(expired.contains("deadline_context=\"expired_with_waiters\""));
     assert!(!expired.contains("http_status="));
     let url = format!("{}repos/private-owner/private-repository/pulls/123", h.url);
     use sha2::Digest;
@@ -2333,6 +2334,62 @@ async fn retry_logs_correlate_the_actual_result_without_exposing_request_data() 
             .lines()
             .any(|line| line.contains("GitHub request dispatched") && id(line) == id(expired))
     );
+
+    // A dropped caller is not a caller that waited until its request deadline.
+    let mut config = h.config();
+    config.queue_timeout = Duration::from_secs(30);
+    let cancelled = Client::with_token(config, "private-cancelled-token".into()).unwrap();
+    cancelled
+        .get("paced-shared", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let task = tokio::spawn({
+        let cancelled = cancelled.clone();
+        async move {
+            cancelled
+                .get("private-cancelled-path", Freshness::Revalidate)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while cancelled.status().outstanding_requests != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let wake = tokio::spawn({
+        let cancelled = cancelled.clone();
+        async move {
+            cancelled
+                .get("private-wake-path", Freshness::Revalidate)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            if text.contains("deadline_context=\"unobserved_before_expiry\"") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    wake.abort();
+    assert!(wake.await.unwrap_err().is_cancelled());
+    assert_eq!(cancelled.status().network_requests, 1);
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    for private in [
+        "private-cancelled-token",
+        "private-cancelled-path",
+        "private-wake-path",
+    ] {
+        assert!(!text.contains(private));
+    }
 
     // Expose the actual pacing window used by a subsequently dispatched read.
     let mut config = h.config();

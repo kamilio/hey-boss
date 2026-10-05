@@ -1386,6 +1386,20 @@ impl Scheduler {
     }
 
     fn finish(&self, job: Job, result: Result<Response>) {
+        // A collection can drop its last waiter before the shared request's
+        // deadline. Keep that observation distinct from a waiting caller's
+        // expiry; neither the sticky foreground flag nor elapsed time proves it.
+        let deadline_context = matches!(&result, Err(Error::Deadline)).then(|| {
+            match (
+                job.deadline() <= Instant::now(),
+                self.abandoned_request(&job),
+            ) {
+                (true, false) => "expired_with_waiters",
+                (true, true) => "expired_unobserved",
+                (false, true) => "unobserved_before_expiry",
+                (false, false) => "observed_before_expiry",
+            }
+        });
         let source = match result.as_ref().map(|response| &response.source) {
             Ok(Source::Network) => "network",
             Ok(Source::Revalidated) => "revalidated",
@@ -1397,6 +1411,7 @@ impl Scheduler {
             auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope },
             foreground=job.interactive.load(Ordering::Relaxed),
             completion_validation=job.completion_validation.load(Ordering::Relaxed),
+            deadline_context,
             "GitHub request finished");
         let mut inflight = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
         drop(job._permit);

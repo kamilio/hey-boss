@@ -54,6 +54,9 @@ pub struct Summary {
     pub completions_by_http_status: BTreeMap<String, usize>,
     pub completions_by_source: BTreeMap<String, usize>,
     pub failures_by_code: BTreeMap<String, usize>,
+    /// Deadline job state at completion, not proof of a CLI timeout or its cause.
+    /// Legacy/unknown labels remain unknown; totals are a subset of failures.
+    pub deadline_contexts: BTreeMap<String, usize>,
     /// Distinct retained warning records, not requests, attempts or unique PRs.
     /// Exact copies from rotations deduplicate; labels exclude repo/PR contents.
     pub source_refresh_failure_records: SourceFailureRecords,
@@ -150,6 +153,7 @@ struct Completion {
     http_status: String,
     source: String,
     error_code: String,
+    deadline_context: String,
     elapsed_ms: Option<u64>,
 }
 
@@ -384,6 +388,15 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
                     &["network", "cache", "revalidated", "error"],
                 ),
                 error_code: allowed(field(&line, "error_code"), ERROR_CODES),
+                deadline_context: allowed(
+                    field(&line, "deadline_context"),
+                    &[
+                        "expired_with_waiters",
+                        "expired_unobserved",
+                        "unobserved_before_expiry",
+                        "observed_before_expiry",
+                    ],
+                ),
             };
             // Rotation during a read can expose the same final twice. Never
             // double-count it, or correlate a retry to another request's success.
@@ -459,6 +472,9 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
         } else {
             summary.failed_requests += 1;
             summary.completed_retries_failed += usize::from(completion.attempts > 1);
+            if completion.error_code == "deadline" {
+                increment(&mut summary.deadline_contexts, completion.deadline_context);
+            }
             increment(&mut summary.failures_by_code, completion.error_code);
         }
     }
@@ -560,6 +576,36 @@ mod tests {
                 .unwrap()
                 .contains("private-token-and-comment")
         );
+    }
+
+    #[test]
+    fn deadline_contexts_preserve_legacy_unknown_and_deduplicate_only_deadline_finals() {
+        let root = tempfile::tempdir().unwrap();
+        let contexts = [
+            "expired_with_waiters",
+            "expired_unobserved",
+            "unobserved_before_expiry",
+            "observed_before_expiry",
+            "private-token",
+            "",
+        ];
+        let mut lines = contexts.iter().enumerate().map(|(id, context)| {
+            format!("2026-09-21T06:24:00Z INFO hey_gh: GitHub request finished request_id={id:032x} endpoint=pull_request attempts=0 succeeded=false error_code=deadline deadline_context={context}\n")
+        }).collect::<String>();
+        lines.push_str("2026-09-21T06:24:00Z INFO hey_gh: GitHub request finished request_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa endpoint=graphql attempts=1 succeeded=false error_code=transport deadline_context=expired_with_waiters\n");
+        fs::write(root.path().join("hey-gh.log"), &lines).unwrap();
+        fs::write(root.path().join("hey-gh.log.1"), &lines).unwrap();
+        let summary = read(root.path(), 120, NOW).unwrap();
+        let value = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            value["deadline_contexts"],
+            serde_json::json!({
+                "expired_with_waiters":1,"expired_unobserved":1,
+                "unobserved_before_expiry":1,"observed_before_expiry":1,"unknown":2
+            })
+        );
+        assert_eq!(summary.failures_by_code["deadline"], 6);
+        assert!(!value.to_string().contains("private-token"));
     }
 
     #[test]
