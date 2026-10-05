@@ -18,6 +18,8 @@ const MERGE: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 #[path = "policy_selectors/branches.rs"]
 mod branches;
+#[path = "policy_selectors/rules.rs"]
+mod rules;
 
 fn metadata() -> Value {
     json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
@@ -44,6 +46,7 @@ struct Data {
     stall_branch: bool,
     rules: Value,
     deny_rules: bool,
+    stall_rules: bool,
     stall_checks: bool,
     merge_base: &'static str,
     deny_rest: bool,
@@ -113,7 +116,7 @@ async fn handler(
         } else if path.ends_with("/status") {
             (json!({"statuses":[]}), false, s.stall_checks)
         } else if path.contains("/rules/branches/") {
-            (s.rules.clone(), s.deny_rules, false)
+            (s.rules.clone(), s.deny_rules, s.stall_rules)
         } else if path.contains("/compare/") {
             (
                 json!({"merge_base_commit":{"sha":s.merge_base}}),
@@ -224,6 +227,7 @@ impl Fixture {
             stall_branch: false,
             rules: json!([{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[{"context":"tests","integration_id":1}]}}]),
             deny_rules: false,
+            stall_rules: false,
             stall_checks: false,
             merge_base: BASE,
             deny_rest: false,

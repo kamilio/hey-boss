@@ -4,44 +4,72 @@ use crate::{Client, Error, Freshness, Response, Result, now_ms, repository::segm
 use serde_json::{Value, json};
 use std::time::Duration;
 
-const BRANCH: &str = r#"query RequiredPolicyBranch($owner: String!, $repo: String!, $ref: String!) {
+pub(super) const BRANCH: &str = r#"query RequiredPolicyBranch($owner: String!, $repo: String!, $ref: String!) {
   repository(owner: $owner, name: $repo) {
     id nameWithOwner
     ref(qualifiedName: $ref) {
       id name prefix target { __typename oid }
       branchProtectionRule { id }
       refUpdateRule { pattern }
-      rules(first: 1) { totalCount nodes { id } }
+      rules(first: 100) {
+        totalCount pageInfo { hasNextPage }
+        nodes {
+          id type
+          repositoryRuleset {
+            id databaseId
+            source { __typename ... on Repository { nameWithOwner } ... on Organization { login } }
+          }
+          parameters {
+            __typename
+            ... on RequiredStatusChecksParameters {
+              doNotEnforceOnCreate strictRequiredStatusChecksPolicy
+              requiredStatusChecks { context integrationId }
+            }
+          }
+        }
+      }
     }
   }
 }"#;
 
-fn recent(response: &Response, age: Duration) -> bool {
+pub(super) fn recent(response: &Response, age: Duration) -> bool {
     now_ms()
         .checked_sub(response.validated_at_ms)
         .is_some_and(|elapsed| (elapsed as u128) < age.as_millis())
 }
 
-fn projection(data: &Value, repository: &str, branch: &str) -> Option<Value> {
+pub(super) fn reference<'a>(data: &'a Value, repository: &str, branch: &str) -> Option<&'a Value> {
     let repo = &data["data"]["repository"];
     let reference = &repo["ref"];
     let nonempty = |value: &Value| value.as_str().is_some_and(|s| !s.is_empty());
     if !nonempty(&repo["id"])
-        || !repo["nameWithOwner"].as_str().is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        || !repo["nameWithOwner"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
         || !nonempty(&reference["id"])
         || reference["prefix"] != "refs/heads/"
         || reference["name"] != branch
         || reference["target"]["__typename"] != "Commit"
-        || !reference["target"]["oid"].as_str().is_some_and(crate::repository::valid_sha)
-        // Check both the classic object and the view available to non-admins.
-        // Missing/redacted fields are not proof that classic protection is off.
-        || reference.get("branchProtectionRule") != Some(&Value::Null)
+        || !reference["target"]["oid"]
+            .as_str()
+            .is_some_and(crate::repository::valid_sha)
+    {
+        return None;
+    }
+    Some(reference)
+}
+
+fn projection(data: &Value, repository: &str, branch: &str) -> Option<Value> {
+    let reference = reference(data, repository, branch)?;
+    // Check both the classic object and the view available to non-admins.
+    // Missing/redacted fields are not proof that classic protection is off.
+    if reference.get("branchProtectionRule") != Some(&Value::Null)
         || reference.get("refUpdateRule") != Some(&Value::Null)
         // Ref.rules contains active repository/organization rules that apply
         // to this ref. One actual rule proves protected=true; zero is ambiguous.
-        // This existence proof does not replace the separately paginated rules.
+        // This existence proof alone does not validate rule parameters.
         || !reference["rules"]["totalCount"].as_u64().is_some_and(|n| n > 0)
-        || !reference["rules"]["nodes"].as_array().is_some_and(|nodes| nodes.len() == 1 && nonempty(&nodes[0]["id"]))
+        || !reference["rules"]["nodes"].as_array().is_some_and(|nodes| !nodes.is_empty() && nodes.len() <= 100 && nodes.iter().all(|node| node["id"].as_str().is_some_and(|id| !id.is_empty())))
     {
         return None;
     }

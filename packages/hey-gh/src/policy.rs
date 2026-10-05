@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 mod branch;
+mod rules;
 mod selectors;
 mod timings;
 use timings::{Phase, Timings};
@@ -468,7 +469,7 @@ impl Client {
                     };
                     (branch, protection)
                 },
-                self.policy_get(&rules_path, freshness),
+                Box::pin(self.policy_rules(repository, &identity.branch, freshness)),
             );
             let mut errors = Vec::new();
             let direct_branch = if identity.branch == base {

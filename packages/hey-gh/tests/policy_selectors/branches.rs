@@ -12,7 +12,7 @@ async fn until(mut ready: impl FnMut() -> bool) {
     .unwrap();
 }
 
-fn branch_graph() -> Value {
+pub(super) fn branch_graph() -> Value {
     json!({"data":{"repository":{"id":"R_demo","nameWithOwner":"acme/demo","ref":{
         "id":"REF_main","name":"main","prefix":"refs/heads/",
         "target":{"__typename":"Commit","oid":BASE},"branchProtectionRule":null,"refUpdateRule":null,
@@ -21,7 +21,7 @@ fn branch_graph() -> Value {
 }
 
 impl Fixture {
-    async fn seed_branch(&self) -> u64 {
+    pub(super) async fn seed_branch(&self) -> u64 {
         {
             let mut data = self.data.lock().unwrap();
             data.branch["protected"] = json!(true);
