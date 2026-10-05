@@ -8,6 +8,10 @@ use std::{
     time::Duration,
 };
 mod selectors;
+mod timings;
+use timings::{Phase, Timings};
+#[cfg(test)]
+mod timing_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredCheck {
@@ -312,7 +316,8 @@ impl Client {
         freshness: Freshness,
     ) -> Result<RequiredChecksReport> {
         crate::client::validate_repository(repository)?;
-        crate::client::INTERACTIVE_READ
+        let mut timings = Timings::new(repository, number);
+        let result = crate::client::INTERACTIVE_READ
             .scope(
                 self.policy_priority(repository, number),
                 crate::report::VALIDATIONS.scope(
@@ -323,7 +328,12 @@ impl Client {
                         crate::entity::scope(async {
                             tokio::time::timeout(
                                 self.report_timeout(),
-                                self.collect_required_checks(repository, number, freshness),
+                                self.collect_required_checks(
+                                    repository,
+                                    number,
+                                    freshness,
+                                    &mut timings,
+                                ),
                             )
                             .await
                             .map_err(|_| Error::Deadline)?
@@ -331,7 +341,9 @@ impl Client {
                     ),
                 ),
             )
-            .await
+            .await;
+        timings.finish(&result);
+        result
     }
     // These are private error records, never successful REST responses. The
     // credential-scoped cache prevents N PRs sharing a base from repeating the
@@ -390,6 +402,7 @@ impl Client {
         repository: &str,
         number: u64,
         freshness: Freshness,
+        timings: &mut Timings,
     ) -> Result<RequiredChecksReport> {
         let lock = self.report_lock(&format!(
             "required-checks:{}#{number}",
@@ -397,9 +410,11 @@ impl Client {
         ));
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let repository = repository_spelling.as_str();
+        timings.enter(Phase::Lock);
         let _guard = lock.lock().await;
         let mut retry_seed = None;
         for attempt in 0..2 {
+            timings.enter(Phase::Seed);
             let freshness = if attempt == 0 {
                 freshness
             } else {
@@ -434,6 +449,7 @@ impl Client {
                 "repos/{repository}/rules/branches/{}",
                 segment(&identity.branch)
             );
+            timings.enter(Phase::Policy);
             let ((branch, protection_res), rules_first_res) = tokio::join!(
                 async {
                     let branch = self.get(&policy_path, freshness).await;
@@ -591,6 +607,7 @@ impl Client {
             // A definitive empty policy does not depend on CI. In particular,
             // unavailable optional checks must not delay a not_required result.
             // Uncertain policy still collects and retains its source errors.
+            timings.enter(Phase::Ci);
             let checks = if requirements.is_empty() && errors.is_empty() {
                 Vec::new()
             } else {
@@ -600,6 +617,7 @@ impl Client {
                 errors.extend(ci.errors.iter().cloned());
                 evaluate(&ci, &requirements)
             };
+            timings.enter(Phase::Ancestry);
             let up_to_date = if strict
                 && let Some(base_sha) = branch
                     .as_ref()
@@ -652,6 +670,7 @@ impl Client {
             } else {
                 "satisfied"
             };
+            timings.enter(Phase::Confirmation);
             let (final_rest_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
                 (None, None)
             } else {
@@ -725,6 +744,7 @@ impl Client {
                     }
                 }
             }
+            timings.enter(Phase::Publication);
             let state = if errors.is_empty() { state } else { "unknown" };
             let validations = crate::report::VALIDATIONS.with(|records| records.borrow().clone());
             let observed_at_ms = crate::now_ms();
