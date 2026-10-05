@@ -20,6 +20,10 @@ use url::Url;
 mod ci_pull_request;
 mod ci_selectors;
 
+// Admission probes apply ordinary freshness/version rules without dispatching,
+// minting credentials or joining an in-flight request when evidence is missing.
+tokio::task_local! { pub(crate) static CACHE_PROBE: (); }
+
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
 // abandoned socket can occupy its lane long after hydration has moved on.
 tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Instant>; }
@@ -671,7 +675,7 @@ impl Client {
                 return Ok(response);
             }
         }
-        if matches!(freshness, Freshness::CachedOnly) {
+        if matches!(freshness, Freshness::CachedOnly) || CACHE_PROBE.try_with(|_| ()).is_ok() {
             return Err(Error::CacheMiss);
         }
         let now = tokio::time::Instant::now();

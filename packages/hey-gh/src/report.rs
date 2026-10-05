@@ -1083,6 +1083,10 @@ impl Client {
         source: &str,
         collection: impl std::future::Future<Output = Result<Vec<Value>>>,
     ) -> Result<Vec<Value>> {
+        if crate::client::CACHE_PROBE.try_with(|_| ()).is_ok() {
+            // A missing admission proof is a deferral, not a source refresh.
+            return collection.await;
+        }
         let started = tokio::time::Instant::now();
         tracing::info!(repository, sha, source, "CI source refresh started");
         let result = collection.await;
