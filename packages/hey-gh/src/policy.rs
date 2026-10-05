@@ -331,6 +331,7 @@ impl Client {
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let repository = repository_spelling.as_str();
         let _guard = lock.lock().await;
+        let mut retry_seed = None;
         for attempt in 0..2 {
             let freshness = if attempt == 0 {
                 freshness
@@ -338,9 +339,13 @@ impl Client {
                 Freshness::Revalidate
             };
             crate::entity::clear();
-            let pr = self
-                .initial_policy_pr(repository, number, freshness)
-                .await?;
+            let pr = match retry_seed.take() {
+                Some(confirmed) => confirmed,
+                None => {
+                    self.initial_policy_pr(repository, number, freshness)
+                        .await?
+                }
+            };
             crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
             let base = pr.data["base"]["ref"]
                 .as_str()
@@ -613,6 +618,11 @@ impl Client {
                 || pr.data["merge_commit_sha"] != final_pr.data["merge_commit_sha"]
                 || identity != policy_identity(&final_pr.data)?
             {
+                // This confirmation already supplies the new selectors. Use
+                // its full REST body to seed the retry instead of immediately
+                // fetching it again. CI/policy and final confirmation still
+                // revalidate under the new entity identity on the next pass.
+                retry_seed = final_rest_pr;
                 continue;
             }
             if let Some(confirmed) = confirmed_opt {
