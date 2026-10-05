@@ -1,6 +1,6 @@
 use super::*;
 
-fn app_config(h: &Harness) -> Config {
+pub(super) fn app_config(h: &Harness) -> Config {
     Config {
         installation: Some(
             hey_gh::AppInstallation::new(
@@ -16,9 +16,9 @@ fn app_config(h: &Harness) -> Config {
     }
 }
 
-fn expire_metadata(h: &Harness) {
+pub(super) fn expire_metadata(h: &Harness) {
     rusqlite::Connection::open(h.config().cache_path).unwrap().execute(
-        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'", [],
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7' OR key LIKE '%/pulls/7#%'", [],
     ).unwrap();
 }
 
@@ -98,7 +98,7 @@ async fn app_ci_selectors_keep_generic_identical_queries_and_caches_personal() {
         h.calls()
             .iter()
             .filter(|v| v.path.ends_with("/pulls/7"))
-            .all(|v| v.token == "Bearer synthetic-token")
+            .all(|v| v.token == "Bearer synthetic-app-token")
     );
 }
 

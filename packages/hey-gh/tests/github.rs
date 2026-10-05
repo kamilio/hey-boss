@@ -26,6 +26,9 @@ mod ci_selectors;
 #[path = "github/ci_app_selectors.rs"]
 mod ci_app_selectors;
 
+#[path = "github/ci_app_metadata.rs"]
+mod ci_app_metadata;
+
 #[path = "github/ci_discovery_status.rs"]
 mod ci_discovery_status;
 
@@ -727,6 +730,29 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             &[],
         );
     }
+    if mode.starts_with("ci-rest-") && path.ends_with("/pulls/7") {
+        let app = headers["authorization"] == "Bearer synthetic-app-token";
+        if (mode == "ci-rest-personal-quota" && !app) || (mode == "ci-rest-app-quota" && app) {
+            return reply(
+                403,
+                json!({"message":"API rate limit exceeded"}),
+                &[
+                    ("x-ratelimit-resource", "core"),
+                    ("x-ratelimit-remaining", "0"),
+                    ("x-ratelimit-reset", "4070908800"),
+                ],
+            );
+        }
+        if mode == "ci-rest-denied" && app {
+            return reply(403, json!({"message":"denied"}), &[]);
+        }
+        if mode == "ci-rest-renew" && app && call_number == 1 {
+            return reply(401, json!({"message":"expired installation token"}), &[]);
+        }
+        if mode == "ci-rest-stalled" {
+            mock.release.notified().await;
+        }
+    }
     if path == "/graphql" {
         let app_token = headers["authorization"] == "Bearer synthetic-app-token";
         if (mode == "ci-point-personal-quota" && !app_token)
@@ -1283,7 +1309,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             });
         }
     }
-    if mode.starts_with("account-ci-selectors") || mode.starts_with("ci-point-") {
+    if mode.starts_with("account-ci-selectors")
+        || mode.starts_with("ci-point-")
+        || mode.starts_with("ci-rest-")
+    {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
         } else if normalized.contains(MERGE) && normalized.ends_with("/check-runs") {

@@ -94,6 +94,21 @@ impl CiMetadata {
 }
 
 impl Client {
+    pub(super) async fn cached_ci_pr_seed(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<Option<Response>> {
+        if number > 0 && matches!(freshness, Freshness::MaxAge(age) if !age.is_zero()) {
+            return Ok(self
+                .peek_ci_pull_request(repository, number)
+                .await?
+                .filter(|cached| super::usable_pr_seed(&cached.data, number)));
+        }
+        Ok(None)
+    }
+
     pub(super) async fn commit_statuses_from_metadata(
         &self,
         repository: &str,
@@ -245,7 +260,9 @@ impl Client {
     ) -> Result<CiMetadata> {
         if let Freshness::MaxAge(age) = freshness
             && !age.is_zero()
-            && let Some(cached) = self.cached_pr_seed(repository, number, freshness).await?
+            && let Some(cached) = self
+                .cached_ci_pr_seed(repository, number, freshness)
+                .await?
             && !recent(&cached, age)
         {
             if let Some(metadata) = self
@@ -329,13 +346,13 @@ impl Client {
                 }
                 // Changed or ambiguous selectors must not certify the seed.
                 return Ok(CiMetadata::Rest(
-                    self.pull_request(repository, number, Freshness::Revalidate)
+                    self.ci_pull_request(repository, number, Freshness::Revalidate)
                         .await?,
                 ));
             }
         }
         Ok(CiMetadata::Rest(
-            self.pull_request(repository, number, freshness).await?,
+            self.ci_pull_request(repository, number, freshness).await?,
         ))
     }
 

@@ -9,13 +9,14 @@ A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared req
 
 ## Optional GitHub App installation
 
-CI checks, commit statuses, workflow runs, workflow jobs, and the fixed CI-selector
-GraphQL query can use a selected repository installation's separate primary quota.
+CI checks, commit statuses, workflow runs, workflow jobs, CI-only REST PR metadata,
+and the fixed CI-selector GraphQL query can use a selected repository installation's
+separate primary quota.
 Register/install a GitHub App with read access to Actions, Checks, Commit statuses,
 Contents, and Pull requests (Metadata is automatic).
 Installation tokens request only these permissions, even if the App has broader
 grants. Keep the existing `gh` login: all other activity uses the user identity,
-including full PR metadata, discovery, generic GraphQL, comments, reviews, repository metadata,
+including generic PR metadata, discovery, generic GraphQL, comments, reviews, repository metadata,
 and required-check policy. Uncovered repositories also keep user authentication.
 Installation errors remain explicit;
 they do not silently retry with user credentials. Secondary backoff and socket
@@ -114,7 +115,16 @@ use personal authentication. Installation failures remain explicit under the
 normal caller deadline. Personal selector queries retain a two-second optional
 shortcut before REST fallback. Cache-only status evidence follows the same
 provider route, without minting or requesting additional data. Changed selectors
-still require full REST metadata using the personal account.
+still require full REST metadata. CI uses the configured installation for cold,
+changed, ambiguous, and explicitly refreshed metadata; generic metadata reads keep
+the personal account. These routes have separate cache and in-flight identities.
+CI can reuse the newest full cached payload from either provider within the caller's
+freshness policy, including closed PRs. Cached reads never turn an installation
+failure into a personal network request. CI lifecycle publication retains the full
+REST payload and its validation time.
+Newer contradictory CI metadata invalidates a personal collection seed or cache
+read. A generic reader then revalidates through the personal account; cached-only
+reads report a cache miss rather than restoring an older lifecycle or selector.
 
 The daemon binds to `127.0.0.1:8787` by default. Use `serve --listen 127.0.0.1:PORT` and `--server http://127.0.0.1:PORT` on client commands for another port. Only loopback addresses are supported. Browser requests and nonlocal Host headers are rejected. The daemon creates a private local API credential automatically; the CLI and `ApiClient` load it without another login or token entry.
 
