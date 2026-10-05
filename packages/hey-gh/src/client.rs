@@ -747,9 +747,13 @@ impl Client {
                     "core"
                 };
                 let endpoint = endpoint_class(&url, body.is_some(), &self.0.config.rest_url);
-                let interactive = INTERACTIVE_READ
+                let report_priority = INTERACTIVE_READ
                     .try_with(Arc::clone)
                     .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
+                // A coalesced waiter promotes this request only. Mutating the
+                // report flag would also promote unrelated work owned by the
+                // background report that happened to enqueue a shared source.
+                let interactive = Arc::new(AtomicBool::new(false));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
                 let completion = Arc::new(AtomicBool::new(completion_validation));
                 if selector_validation {
@@ -767,6 +771,7 @@ impl Client {
                     auth_attempts: 0,
                     auth_generation: 0,
                     interactive: interactive.clone(),
+                    report_priority,
                     collection_slice: crate::collection_budget::CURRENT.try_with(|_| ()).is_ok(),
                     detail_lane: matches!(
                         endpoint,
@@ -1654,6 +1659,89 @@ fn validate_query(query: &str) -> Result<()> {
 mod priority_tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
+
+    #[tokio::test]
+    async fn coalescing_a_shared_request_does_not_promote_its_background_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let router = axum::Router::new().fallback(|| async {
+            std::future::pending::<()>().await;
+            axum::Json(serde_json::json!({}))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let background = client.report_priority("policy", "acme/demo", 7, false);
+        let owner = tokio::spawn({
+            let client = client.clone();
+            let background = background.clone();
+            async move {
+                INTERACTIVE_READ
+                    .scope(
+                        background,
+                        client.get("repos/acme/demo/branches/main", Freshness::Revalidate),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().outstanding_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let joined = tokio::spawn({
+            let client = client.clone();
+            async move {
+                INTERACTIVE_READ
+                    .scope(
+                        foreground_priority(),
+                        client.get("repos/acme/demo/branches/main", Freshness::Revalidate),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.status().coalesced_requests != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        owner.abort();
+        joined.abort();
+        server.abort();
+        assert_eq!(client.status().coalesced_requests, 1);
+        assert!(
+            client
+                .0
+                .inflight
+                .lock()
+                .unwrap()
+                .values()
+                .all(|(_, priority, _, _)| priority.load(Ordering::Relaxed)),
+            "the shared request itself must retain foreground priority"
+        );
+        assert!(
+            !background.load(Ordering::Relaxed),
+            "joining a shared branch must not promote unrelated PR collection"
+        );
+        let next = client.report_priority("policy", "acme/demo", 7, false);
+        assert!(!next.load(Ordering::Relaxed));
+        let same_report = client.report_priority("policy", "acme/demo", 7, true);
+        assert!(Arc::ptr_eq(&background, &same_report));
+        assert!(background.load(Ordering::Relaxed));
+    }
 
     #[tokio::test]
     async fn collected_ci_promotes_its_pending_metadata_without_an_extra_request() {
