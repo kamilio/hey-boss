@@ -28,6 +28,8 @@ mod ci_discovery_checks;
 mod ci_discovery_versions;
 #[path = "github/ci_empty_checks.rs"]
 mod ci_empty_checks;
+#[path = "github/ci_late_metadata.rs"]
+mod ci_late_metadata;
 #[path = "github/ci_selectors.rs"]
 mod ci_selectors;
 #[path = "github/ci_status_versions.rs"]
@@ -87,6 +89,7 @@ struct MockData {
 struct Mock {
     data: Arc<Mutex<MockData>>,
     release: Arc<Notify>,
+    selectors_release: Arc<Notify>,
 }
 struct Harness {
     mock: Mock,
@@ -821,6 +824,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 .unwrap_or("")
                 .contains("query CiSelectors")
         {
+            if mode == "ci-point-status-versions-late" {
+                mock.selectors_release.notified().await;
+            }
             if mode == "ci-point-denied" {
                 return reply(
                     200,
@@ -862,7 +868,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 node["potentialMergeCommit"]["statusCheckRollup"] =
                     json!({"contexts":{"checkRunCount":0}});
             }
-            if mode == "ci-point-status-versions" {
+            if mode.starts_with("ci-point-status-versions") {
                 let state = if phase >= 3 { "FAILURE" } else { "SUCCESS" };
                 let version = if phase >= 3 { 2 } else { 1 };
                 let at = if phase >= 3 {
@@ -1477,7 +1483,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     }
     if matches!(
         mode.as_str(),
-        "ci-point-status-versions" | "account-ci-selectors-status-versions"
+        "ci-point-status-versions"
+            | "ci-point-status-versions-late"
+            | "account-ci-selectors-status-versions"
     ) && normalized.ends_with("/status")
     {
         let merge = normalized.contains(MERGE);
