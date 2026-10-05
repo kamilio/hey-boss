@@ -96,7 +96,28 @@ async fn handler(State(state): State<Arc<Mutex<Data>>>, uri: Uri, body: Bytes) -
         )
             .into_response();
     }
-    axum::Json(value).into_response()
+    let mut response = axum::Json(value).into_response();
+    if uri.path().starts_with("/pace-graphql") {
+        let headers = response.headers_mut();
+        headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
+        headers.insert(
+            "x-ratelimit-remaining",
+            if uri.path().ends_with("-short") {
+                "10000"
+            } else {
+                "1000"
+            }
+            .parse()
+            .unwrap(),
+        );
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+    }
+    response
 }
 
 struct Fixture {
@@ -468,6 +489,96 @@ async fn selector_cache_obeys_both_the_completion_bound_and_a_stricter_caller_ag
             "stale selectors were reused"
         );
     }
+}
+
+#[tokio::test]
+async fn paced_optional_graphql_falls_back_without_consuming_its_timeout() {
+    for denied in [false, true] {
+        let f = Fixture::new().await;
+        let old = f.seed().await;
+        f.client
+            .get("pace-graphql", Freshness::Revalidate)
+            .await
+            .unwrap();
+        f.data.lock().unwrap().deny_rest = denied;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            f.client.required_checks_for_pr(
+                "acme/demo",
+                7,
+                Freshness::MaxAge(Duration::from_secs(30)),
+            ),
+        )
+        .await
+        .expect("known GraphQL pacing must not consume the optional two-second wait");
+        if denied {
+            assert!(matches!(
+                result,
+                Err(hey_gh::Error::GitHub { status: 403, .. })
+            ));
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.state, "satisfied");
+            assert!(
+                report
+                    .validations
+                    .iter()
+                    .any(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms > old)
+            );
+            assert!(
+                report
+                    .validations
+                    .iter()
+                    .all(|v| !v.resource.ends_with("/graphql"))
+            );
+        }
+        let calls = f.data.lock().unwrap().calls.clone();
+        assert!(!calls.iter().any(|(path, _)| path == "/graphql"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(path, _)| path.ends_with("/pulls/7"))
+                .count(),
+            1
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while f.client.status().outstanding_requests != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn short_graphql_pacing_still_uses_selectors_without_spending_rest_quota() {
+    let f = Fixture::new().await;
+    let old = f.seed().await;
+    f.client
+        .get("pace-graphql-short", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let report = f
+        .client
+        .required_checks_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/graphql") && v.validated_at_ms > old)
+    );
+    assert!(
+        !f.data
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(path, _)| path.ends_with("/pulls/7"))
+    );
 }
 
 #[tokio::test]

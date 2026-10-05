@@ -434,9 +434,7 @@ impl Client {
                         let result = if installation {
                             query.await
                         } else {
-                            tokio::time::timeout(Duration::from_secs(2), query)
-                                .await
-                                .unwrap_or(Err(Error::Deadline))
+                            crate::client::optional_selector_read(query).await
                         };
                         (
                             result,

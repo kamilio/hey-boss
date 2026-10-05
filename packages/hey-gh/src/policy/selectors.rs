@@ -95,24 +95,21 @@ impl Client {
                 let (owner, repo) = repository.split_once('/').expect("validated repository");
                 // This optional route must leave time for REST when GraphQL is
                 // stalled or paced. It shares the existing main-account scope.
-                let result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    self.graphql(
-                        SELECTORS,
-                        json!({"owner":owner,"repo":repo,"number":number}),
-                        freshness,
-                    ),
-                )
+                let result = crate::client::optional_selector_read(self.graphql(
+                    SELECTORS,
+                    json!({"owner":owner,"repo":repo,"number":number}),
+                    freshness,
+                ))
                 .await;
                 match result {
-                    Ok(Ok(response))
+                    Ok(response)
                         if response.validated_at_ms >= seed.validated_at_ms
                             && recent(&response, age)
                             && matches(&seed.data, &response.data) =>
                     {
                         return Ok(None);
                     }
-                    Ok(Err(
+                    Err(
                         error @ (Error::Auth(_)
                         | Error::LocalAuth(_)
                         | Error::Storage(_)
@@ -124,7 +121,7 @@ impl Client {
                         | Error::GitHub {
                             status: 401 | 403, ..
                         }),
-                    )) => return Err(error),
+                    ) => return Err(error),
                     _ => {}
                 }
                 // A changed, unavailable or ambiguous selector cannot lend its

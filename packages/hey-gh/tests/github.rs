@@ -800,6 +800,23 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
             mock.release.notified().await;
         }
     }
+    if path == "/pace-optional-graphql" {
+        let reset = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600)
+            .to_string();
+        return reply(
+            200,
+            json!({}),
+            &[
+                ("x-ratelimit-resource", "graphql"),
+                ("x-ratelimit-remaining", "1000"),
+                ("x-ratelimit-reset", &reset),
+            ],
+        );
+    }
     if path == "/graphql" {
         let app_token = headers["authorization"] == "Bearer synthetic-app-token";
         if (mode == "ci-point-personal-quota" && !app_token)

@@ -425,6 +425,39 @@ async fn point_selectors_preserve_access_denials() {
 }
 
 #[tokio::test]
+async fn point_selectors_skip_a_known_pacing_wait_and_keep_fresh_rest_evidence() {
+    let (h, c) = seeded().await;
+    h.mode("ci-point-valid");
+    c.get("pace-optional-graphql", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let before = h.calls().len();
+    let report = tokio::time::timeout(
+        Duration::from_secs(1),
+        c.ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+    )
+    .await
+    .expect("paced optional selectors delayed REST fallback")
+    .unwrap();
+    assert!(report.complete);
+    let reads = h.calls()[before..].to_vec();
+    assert!(!reads.iter().any(|call| call.path == "/graphql"));
+    assert_eq!(
+        reads
+            .iter()
+            .filter(|call| call.path.ends_with("/pulls/7"))
+            .count(),
+        1
+    );
+    assert!(
+        report
+            .validations
+            .iter()
+            .all(|v| !v.resource.ends_with("/graphql"))
+    );
+}
+
+#[tokio::test]
 async fn point_selectors_timeout_leaves_rest_fallback_available() {
     let (h, c) = seeded().await;
     h.mode("ci-point-stalled");
