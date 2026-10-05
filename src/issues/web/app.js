@@ -401,23 +401,116 @@ function traceLinkForOrigin(origin, number, fallbackActor) {
   return null;
 }
 function listAssignment(issue) {
-  const a=IssueAssignments.current(issue);
-  if(a.kind==='unassigned') {
-    const fallbackActor = issue.closed_by || (issue.commits && issue.commits.length ? issue.commits[issue.commits.length - 1].added_by : null);
-    const trace = traceLinkForOrigin(issue.commits?.length ? issue.commits[issue.commits.length - 1].origin : null, issue.number, fallbackActor);
-    if (!trace) return '';
-    return `<span class="list-assignee"><a class="list-agent-trace" href="${esc(trace)}" title="Open agent trace for issue #${issue.number}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
-  }
-  const description=IssueAssignments.describe(issue,{actorName,bossName:model.boss.name});
-  const owner=a.kind==='github'?'watcher:github':a.kind==='machine'?'machine:'+a.machine:a.actor||issue.assignee||'human:boss';
-  const filter=`<a class="list-assignment" href="${esc(routeHash({...model.route,issue:null,owner}))}" title="${esc(description.label + " · " + description.detail)}" aria-label="Filter by assignment ${esc(description.label)}">${icon(description.icon)}<span>${esc(description.label)}</span></a>`;
-  const actor=a.actor||issue.assignee;
-  if(a.kind==='github') return `<span class="list-assignee">${filter}<button type="button" class="list-agent-trace list-watcher-open" data-open-watcher="${issue.number}" title="Open GitHub PR watcher" aria-label="Open GitHub PR watcher for issue #${issue.number}">${icon('arrow-right')}</button></span>`;
-  if(!actor || actor.startsWith('human:') || actor==='watcher:github') return filter;
-  const trace='/agents/session#'+new URLSearchParams({project:model.project.id,issue:issue.number,agent:actor});
-  return `<span class="list-assignee">${filter}<a class="list-agent-trace" href="${esc(trace)}" aria-label="Open agent conversation for issue #${issue.number}">${icon('arrow-right')}</a></span>`;
+  const a = IssueAssignments.current(issue);
+  const actor = a.actor || issue.assignee;
+  const historical = a.kind === 'unassigned';
+  const lastCommit = issue.commits?.at(-1);
+  const trace = historical
+    ? traceLinkForOrigin(lastCommit?.origin, issue.number, issue.closed_by || lastCommit?.added_by)
+    : actor && !actor.startsWith('human:') && actor !== 'watcher:github'
+      ? '/agents/session#' + new URLSearchParams({project:model.project.id, issue:issue.number, agent:actor}) : null;
+  if (historical && !trace) return '';
+  const description = historical ? {label:'Agent conversation', detail:'Last recorded work on this issue.'}
+    : IssueAssignments.describe(issue, {actorName, bossName:model.boss.name});
+  const owner = a.kind === 'github' ? 'watcher:github' : a.kind === 'machine' ? 'machine:' + a.machine : actor || 'human:boss';
+  const href = routeHash({...model.route, issue:null, owner});
+  const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request'
+    : actor?.startsWith('claude:') ? 'spark' : actor?.startsWith('codex:') ? 'codex' : 'code';
+  const id = 'assignment-card-' + issue.number;
+  const attrs = 'class="assignment-badge" data-assignment-card="' + id + '" aria-controls="' + id + '" aria-expanded="false" aria-haspopup="dialog" aria-keyshortcuts="ArrowDown"';
+  const badge = '<span class="assignment-avatar" data-assignment-icon="' + symbol + '">' + icon(symbol) + '</span>';
+  const trigger = historical ? '<button type="button" ' + attrs + ' aria-label="Agent conversation details">' + badge + '</button>'
+    : '<a ' + attrs + ' href="' + esc(href) + '" aria-label="Filter by ' + esc(description.label) + '; show assignment details">' + badge + '</a>';
+  return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(description.detail) + '</span>'
+    + (historical ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
+    + (trace ? '<a class="assignment-card-action" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
+    + (a.kind === 'github' ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')
+    + '</span></span>';
 }
-
+let assignmentCardContext = null, assignmentCardTimer, assignmentPointerType = '', restoringAssignmentFocus = false;
+function closeAssignmentCard(restoreFocus = false) {
+  clearTimeout(assignmentCardTimer);
+  if (!assignmentCardContext) return;
+  const {trigger, card} = assignmentCardContext;
+  assignmentCardContext = null;
+  card.hidePopover();
+  trigger.setAttribute('aria-expanded', 'false');
+  if (restoreFocus && trigger.isConnected) {
+    restoringAssignmentFocus = true;
+    trigger.focus({preventScroll:true});
+    restoringAssignmentFocus = false;
+  }
+}
+function openAssignmentCard(trigger) {
+  clearTimeout(assignmentCardTimer);
+  if (assignmentCardContext?.trigger === trigger) return;
+  closeAssignmentCard();
+  const card = document.getElementById(trigger.dataset.assignmentCard);
+  assignmentCardContext = {trigger, card};
+  trigger.setAttribute('aria-expanded', 'true');
+  card.showPopover();
+  const anchor = trigger.getBoundingClientRect(), bounds = card.getBoundingClientRect();
+  const beside = anchor.left >= bounds.width + 16;
+  card.style.left = Math.max(8, Math.min(beside ? anchor.left - bounds.width - 8 : anchor.right - bounds.width, innerWidth - bounds.width - 8)) + 'px';
+  const top = beside ? anchor.top : anchor.bottom + bounds.height + 4 <= innerHeight - 8 ? anchor.bottom + 4 : anchor.top - bounds.height - 4;
+  card.style.top = Math.max(8, Math.min(top, innerHeight - bounds.height - 8)) + 'px';
+}
+function assignmentContains(target) {
+  return target instanceof Node && assignmentCardContext && (assignmentCardContext.trigger.contains(target) || assignmentCardContext.card.contains(target));
+}
+const assignmentList = $('#issue-list');
+assignmentList.addEventListener('pointerover', event => {
+  if (event.pointerType !== 'mouse') return;
+  const trigger = event.target.closest('[data-assignment-card]');
+  if (trigger) openAssignmentCard(trigger);
+  if (assignmentContains(event.target)) clearTimeout(assignmentCardTimer);
+});
+assignmentList.addEventListener('pointerout', event => {
+  if (event.pointerType === 'mouse' && assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) {
+    assignmentCardTimer = setTimeout(() => {
+      if (!assignmentContains(document.activeElement)) closeAssignmentCard();
+    }, 180);
+  }
+});
+assignmentList.addEventListener('focusin', event => {
+  const trigger = event.target.closest('[data-assignment-card]');
+  if (trigger && !restoringAssignmentFocus) openAssignmentCard(trigger);
+});
+assignmentList.addEventListener('focusout', event => {
+  if (assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) closeAssignmentCard();
+});
+assignmentList.addEventListener('click', event => {
+  const trigger = event.target.closest('[data-assignment-card]');
+  if (trigger && (trigger.tagName === 'BUTTON' || event.detail > 0 && (assignmentPointerType === 'touch' || assignmentPointerType === 'pen' || matchMedia('(pointer: coarse)').matches))) {
+    if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault();
+      openAssignmentCard(trigger);
+    }
+  }
+  if (event.target.closest('.assignment-card-action')) closeAssignmentCard();
+});
+assignmentList.addEventListener('keydown', event => {
+  const trigger = event.target.closest('[data-assignment-card]');
+  if (event.key === 'ArrowDown' && trigger) {
+    event.preventDefault();
+    openAssignmentCard(trigger);
+    assignmentCardContext.card.querySelector('a, button')?.focus();
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && assignmentCardContext) {
+    event.preventDefault();
+    closeAssignmentCard(true);
+  }
+});
+document.addEventListener('pointerdown', event => {
+  assignmentPointerType = event.pointerType;
+  if (!assignmentContains(event.target)) closeAssignmentCard();
+});
+window.addEventListener('resize', () => closeAssignmentCard(true));
+window.addEventListener('scroll', event => {
+  if (assignmentCardContext && !assignmentCardContext.card.contains(event.target)) closeAssignmentCard(true);
+}, true);
 
 function renderLabelFilter() {
   const selected = model.route.label;
@@ -554,6 +647,7 @@ function listCommits(issue, prsEnabled) {
 }
 function renderList(result) {
   if (model.orderDragging) return;
+  closeAssignmentCard();
   const creation = model.creation;
   const createdHere =
     creation &&
@@ -705,6 +799,7 @@ async function refreshProjects(project = model.project.id) {
   if (!$("#project-menu").hidden) projectOptions();
 }
 async function renderRoute() {
+  closeAssignmentCard();
   closeIssueTagPicker();
   const sequence = ++model.sequence;
   const previous = model.project?.id;
@@ -812,6 +907,7 @@ async function refresh(quiet = true) {
   if (
     model.orderDragging ||
     model.orderSaving ||
+    assignmentCardContext ||
     model.polling ||
     !model.csrf ||
     document.hidden ||
@@ -836,7 +932,7 @@ async function refresh(quiet = true) {
         project,
       ),
     ]);
-    if (sequence !== model.sequence || model.orderDragging || model.orderSaving)
+    if (sequence !== model.sequence || model.orderDragging || model.orderSaving || assignmentCardContext)
       return;
     $$("time[datetime]:not([data-absolute])").forEach((time) => {
       const text = relative(Date.parse(time.dateTime));

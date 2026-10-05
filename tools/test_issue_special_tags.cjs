@@ -10,6 +10,7 @@ const element = selector => {
 };
 const context = vm.createContext({
   model:{actor:{id:'human:boss'},project:{id:'qa'},route:{host:null},labels:['ready'],detail:{issue:{number:1,version:1,labels:[]}}},
+  routeHash:route=>"#"+new URLSearchParams(Object.entries(route).filter(([,v])=>v!=null)),
   esc:String, icon:name=>`<svg data-icon="${name}"></svg>`,
   $:element, $$:()=>[], document:{addEventListener(){}},
   CSS:{escape:String},
@@ -17,6 +18,7 @@ const context = vm.createContext({
   mutate:async()=>{throw Error('Tests must install a mutation stub before changing tags');},
 });
 vm.runInContext(app.slice(app.indexOf('const specialIssueTags ='), app.indexOf('function toast(')), context);
+vm.runInContext(app.slice(app.indexOf("function listLabel("), app.indexOf("function traceLinkForOrigin(")), context);
 vm.runInContext(tags, context);
 (async () => {
   const sidebar = context.renderTagSidebar(context.model.detail.issue);
@@ -42,6 +44,7 @@ vm.runInContext(tags, context);
   assert.equal(writes[1].operation.if_version, 2, 'Subsequent changes use the new revision');
   context.model.detail.issue.labels = ['yolo'];
   assert.ok(context.renderIssueTagChips(context.model.detail.issue).includes('data-remove-issue-tag="yolo"'), 'Boss removes YOLO with the usual chip control');
+  assert.match(context.renderIssueTagChips(context.model.detail.issue), /href="#label=yolo"/, 'Tags link to filtered lists');
   context.model.actor.id = 'codex:test';
   context.renderIssueTagOptions();
   assert.match(element('#issue-tag-options').innerHTML, /data-issue-tag="yolo"[^>]*disabled/, 'Agents cannot change special permissions');

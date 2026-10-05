@@ -132,6 +132,8 @@ const paths = {
   x: '<path d="m6 6 12 12M6 18 18 6"/>',
   tag: '<path d="M3 4h8l10 10-7 7L3 10V4Z"/><circle cx="7" cy="8" r="1"/>',
   user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+  hat: '<path d="m6 15 2-10h8l2 10M3 15c0 4 18 4 18 0ZM7 12h10"/>',
+  codex: '<rect x="3" y="4" width="18" height="16" rx="4"/><path d="m7 9 3 3-3 3m6 0h4"/>',
   monitor: '<rect x="3" y="3" width="18" height="13" rx="2"/><path d="M12 16v5M8 21h8"/>',
   refresh: '<path d="M20 8a8 8 0 1 0 .3 7M20 3v5h-5"/>',
   sync: '<path d="M20 8a8 8 0 0 0-14-3L3 8m0 0V3m0 5h5M4 16a8 8 0 0 0 14 3l3-3m0 0v5m0-5h-5"/>',

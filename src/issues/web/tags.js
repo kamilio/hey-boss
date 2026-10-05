@@ -149,7 +149,7 @@ function renderIssueTagChips(issue) {
     ? issue.labels
         .map(
           (tag) =>
-            `<span class="tag-chip">${label(tag)}${issue.deleted_at || (specialIssueTags.has(tag) && model.actor.id !== "human:boss") ? "" : `<button type="button" data-remove-issue-tag="${esc(tag)}" aria-label="Remove ${esc(tag)} tag">${icon("x")}</button>`}</span>`,
+            `<span class="tag-chip">${listLabel(tag)}${issue.deleted_at || (specialIssueTags.has(tag) && model.actor.id !== "human:boss") ? "" : `<button type="button" data-remove-issue-tag="${esc(tag)}" aria-label="Remove ${esc(tag)} tag">${icon("x")}</button>`}</span>`,
         )
         .join("")
     : '<span class="muted-text">None</span>';

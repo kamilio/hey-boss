@@ -18,7 +18,7 @@ jobs:
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
       - run: node --test tools/test_merged_prs.cjs
       - run: node tools/test_issue_blocked_types.cjs
-      - run: node --test tools/test_issue_assignments.cjs
+      - run: node --test tools/test_issue_assignments.cjs tools/test_assignment_badges.cjs
       - run: node tools/test_issue_transfer_controls.cjs
       - run: node tools/test_issue_navigation_exit.cjs
       - run: node tools/test_local_http_crypto.cjs

@@ -163,7 +163,7 @@
       clearTimeout(ctx.timer);
       if (dialog.open) dialog.close();
       const trigger = ctx.trigger.isConnected ? ctx.trigger : list.querySelector(`[data-open-watcher="${ctx.number}"]`);
-      trigger?.focus();
+      (trigger?.closest(".list-assignee")?.querySelector("[data-assignment-card]") || trigger)?.focus();
     }
     dialog.querySelector("[data-close]").onclick = close;
     dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
