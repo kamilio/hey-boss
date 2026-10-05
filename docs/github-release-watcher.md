@@ -74,8 +74,14 @@ rosters support run filtering and parent-link proofs; truncated or malformed
 rosters retain individual ancestry checks. Parent traversal visits edges once,
 including when commits arrive out of order. A complete small comparison uses
 per-commit workflow history directly, avoiding unrelated days. Date-based
-discovery can reuse closed-day pages after a complete branch comparison; each
-relevant commit's history still uses the requested freshness before evaluation.
+discovery can reuse closed-day pages after a complete branch comparison. Large
+archives with usable node IDs refresh known workflow metadata in GraphQL batches
+of at most 100, using the requested freshness and shared collection byte budget.
+Current-day REST discovery retains new dispatches on those same commits; rerun
+attempts and job/step evidence still use REST. Missing or mismatched nodes and
+API errors remain unknown. Nullable branches or unsynchronized suite metadata
+retain REST history reads. App-backed repositories, explicit refreshes, and
+cached-only reads keep their existing REST path.
 A page observed before that day closed must be revalidated, or remains incomplete
 for cached-only reads. Current-day discovery keeps its normal freshness.
 Date-based history older than a year or requiring

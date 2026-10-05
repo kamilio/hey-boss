@@ -714,11 +714,12 @@ impl Collector<'_> {
         let mut bytes = 0;
         let mut requests = 0;
         let mut archived_heads = HashSet::new();
+        let mut archived_runs = Vec::new();
         'windows: while let Some((start, end)) = windows.pop() {
             // GitHub assigns run creation times. Closed windows can discover
             // candidate heads without repeatedly validating unrelated history.
-            // They never supply verdicts: relevant heads get current complete
-            // histories below, including reruns and newly dispatched runs.
+            // They never supply verdicts: known runs or complete head histories
+            // get refreshed below. Today's window discovers new dispatches.
             let discovery_only = candidates.is_some() && end < today;
             let at = |s| {
                 chrono::DateTime::from_timestamp(s, 0)
@@ -811,6 +812,7 @@ impl Collector<'_> {
                             }
                             if candidates.is_some_and(|heads| heads.contains(&head)) {
                                 archived_heads.insert(head);
+                                archived_runs.push(run.clone());
                             }
                         } else {
                             runs.push(run.clone());
@@ -829,9 +831,34 @@ impl Collector<'_> {
             }
         }
         if archived_heads.len() > DIRECT_HEAD_LIMIT {
-            // A large relevant archive is cheaper to validate by pages than by
-            // commit. Reuse this poll's cached pages with the original policy.
-            return Box::pin(self.runs(workflow, since, None)).await;
+            let refreshed = if complete
+                && matches!(self.freshness, Freshness::MaxAge(_))
+                && !self.client.ci_uses_installation(&self.project.repository)
+            {
+                super::workflow_metadata::refresh(
+                    self.client,
+                    &archived_runs,
+                    self.freshness,
+                    &mut bytes,
+                )
+                .await?
+            } else {
+                None
+            };
+            let Some(refreshed) = refreshed else {
+                // App routing, explicit freshness, incomplete discovery, or an
+                // unrepresentable node retains the existing paged REST path.
+                return Box::pin(self.runs(workflow, since, None)).await;
+            };
+            let ids: HashSet<_> = refreshed
+                .iter()
+                .filter_map(|run| run["id"].as_u64())
+                .collect();
+            // A newly dispatched run can share an archived head. Replace only
+            // known IDs so that today's newer runs still supersede old success.
+            runs.retain(|run| run["id"].as_u64().is_none_or(|id| !ids.contains(&id)));
+            runs.extend(refreshed);
+            archived_heads.clear();
         }
         if !archived_heads.is_empty() {
             // Replace every copy of these heads, including today's listing, so

@@ -670,13 +670,7 @@ impl Client {
                         // The installation quota is only for CI status reads.
                         // All other activity retains the user's authentication.
                         && matches!(endpoint, "check_runs" | "commit_statuses" | "workflow_runs" | "workflow_jobs")
-                        && self.request_repository(&url).is_some_and(|repo| {
-                            self.0
-                                .config
-                                .installation
-                                .as_ref()
-                                .is_some_and(|app| app.covers(&repo))
-                        }),
+                        && self.request_repository(&url).is_some_and(|repo| self.ci_uses_installation(&repo)),
                     minting: false,
                     auth_attempts: 0,
                     auth_generation: 0,
@@ -1297,6 +1291,14 @@ impl Client {
     pub(crate) fn report_timeout(&self) -> Duration {
         self.0.config.report_timeout
     }
+    pub(crate) fn ci_uses_installation(&self, repository: &str) -> bool {
+        self.0
+            .config
+            .installation
+            .as_ref()
+            .is_some_and(|app| app.covers(repository))
+    }
+
     pub(crate) fn collection_limit(&self) -> usize {
         self.0.config.max_collection_bytes
     }
