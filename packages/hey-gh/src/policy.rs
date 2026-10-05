@@ -274,6 +274,25 @@ impl Client {
                             .pull_request(repository, number, Freshness::Revalidate)
                             .await;
                     }
+                    if cached.data["stack"].is_null()
+                        && cached.data["mergeable"].as_bool() != Some(true)
+                        && cached.data["merge_commit_sha"]
+                            .as_str()
+                            .is_some_and(crate::repository::valid_sha)
+                    {
+                        // An uncertain merge can retain an obsolete merge SHA
+                        // and cannot use GraphQL confirmation. Refresh before
+                        // collecting that merge, under the final freshness bound.
+                        // Clean/head-only seeds can still collect while peers
+                        // refresh metadata; native stacks keep their final check.
+                        return self
+                            .pull_request(
+                                repository,
+                                number,
+                                Freshness::MaxAge(age.min(Duration::from_secs(15))),
+                            )
+                            .await;
+                    }
                     // This is only a collection seed, never fresh evidence.
                     // Final PR validation still enforces the caller's age and
                     // retries if node, head, base, merge or stack changed.
