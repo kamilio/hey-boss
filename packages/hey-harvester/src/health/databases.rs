@@ -73,7 +73,7 @@ fn remove_until(path: &Path, deadline: Instant) -> io::Result<()> {
         .any(|p| p.file_name().is_some_and(|n| n == "node_modules"))
     {
         return Err(super::preserved(
-            "Dependencies require explicit release through remove-dependencies; preserved",
+            "Dependencies require ownership and content checks through remove-dependencies; preserved",
         ));
     }
     if Instant::now() >= deadline {
@@ -118,7 +118,7 @@ mod tests {
     static SERIAL: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn recursive_cache_removal_cannot_bypass_dependency_release() {
+    fn recursive_cache_removal_cannot_bypass_dependency_checks() {
         let root = fixture();
         fs::create_dir_all(root.join("node_modules/.bin")).unwrap();
         fs::write(root.join("node_modules/.bin/tsc"), "retained validator").unwrap();
@@ -126,7 +126,7 @@ mod tests {
             remove_tree(&root)
                 .unwrap_err()
                 .to_string()
-                .contains("explicit release")
+                .contains("ownership and content checks")
         );
         assert!(root.join("node_modules/.bin/tsc").is_file());
         fs::remove_dir_all(root).unwrap();

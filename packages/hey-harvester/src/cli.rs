@@ -41,27 +41,13 @@ pub enum Action {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect the current cleanup release and ownership; never deletes the target.
+    /// Inspect current cleanup safety and age checks; never deletes the target.
     CleanupCheck {
         path: PathBuf,
         #[arg(long)]
         json: bool,
     },
-    /// Record that the owner has finished all use of this exact checkout or node_modules.
-    ReleaseCleanup {
-        path: PathBuf,
-        #[arg(long)]
-        owner: String,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Withdraw a cleanup release before resuming work or queuing validation.
-    RetainCleanup {
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove explicitly released node_modules after fresh ownership and content checks.
+    /// Remove disposable node_modules after fresh ownership and content checks.
     RemoveDependencies {
         path: PathBuf,
         #[arg(long)]
@@ -93,7 +79,7 @@ pub enum Action {
         /// Limit managed worker diagnostics to 128 MiB, retaining the latest 64 MiB.
         #[arg(long, action = clap::ArgAction::Set)]
         logs: Option<bool>,
-        /// Expire released idle worktrees, caches and orphan developer processes; preserve ownership and SQLite.
+        /// Expire idle worktrees, caches and orphan developer processes; preserve ownership and SQLite.
         #[arg(long, action = clap::ArgAction::Set)]
         aggressive: Option<bool>,
     },
@@ -119,14 +105,10 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
         }
         Action::RemoveWorktree { path, json }
         | Action::CleanupCheck { path, json }
-        | Action::ReleaseCleanup { path, json, .. }
-        | Action::RetainCleanup { path, json }
         | Action::RemoveDependencies { path, json } => {
             let mut args = vec![
                 match action {
                     Action::CleanupCheck { .. } => "cleanup-check",
-                    Action::ReleaseCleanup { .. } => "release-cleanup",
-                    Action::RetainCleanup { .. } => "retain-cleanup",
                     Action::RemoveDependencies { .. } => "remove-dependencies",
                     _ => "remove-worktree",
                 }
@@ -135,9 +117,6 @@ pub fn run_remote(host: &str, action: &Action) -> io::Result<()> {
                     .ok_or_else(|| io::Error::other("Path must be UTF-8"))?
                     .into(),
             ];
-            if let Action::ReleaseCleanup { owner, .. } = action {
-                args.extend(["--owner".into(), owner.clone()]);
-            }
             if *json {
                 args.push("--json".into());
             }
@@ -368,17 +347,12 @@ pub fn run(action: &Action) -> io::Result<()> {
             }
             Ok(())
         }
-        Action::CleanupCheck { path, json }
-        | Action::ReleaseCleanup { path, json, .. }
-        | Action::RetainCleanup { path, json }
-        | Action::RemoveDependencies { path, json } => {
-            let (name, owner) = match action {
-                Action::CleanupCheck { .. } => ("check", None),
-                Action::ReleaseCleanup { owner, .. } => ("release", Some(owner.as_str())),
-                Action::RetainCleanup { .. } => ("retain", None),
-                _ => ("remove-dependencies", None),
+        Action::CleanupCheck { path, json } | Action::RemoveDependencies { path, json } => {
+            let name = match action {
+                Action::CleanupCheck { .. } => "check",
+                _ => "remove-dependencies",
             };
-            let receipt = crate::health::cleanup::run(&store, path, name, owner)?;
+            let receipt = crate::health::cleanup::run(&store, path, name)?;
             if *json {
                 println!("{}", serde_json::to_string(&receipt)?);
             } else {

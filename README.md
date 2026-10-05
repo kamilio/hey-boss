@@ -1049,20 +1049,20 @@ process identity before each TERM/KILL batch. Unavailable or incomplete service
 inspection preserves candidates; domain environment and service arguments are
 never included in diagnostics.
 
-With `configure --aggressive true`, explicitly released clean linked worktrees become eligible after
+With `configure --aggressive true`, clean linked worktrees become eligible after
 4 hours without tracked-source or Git activity. Tracked edits, unpushed commits,
-locks and active processes prevent removal. Untracked/ignored output neither blocks
-cleanup nor resets idle time. Unpublished SQLite files and filesystem protections
+locks, non-ignored untracked files and active processes prevent removal. Ignored
+build output does not reset idle time. Unpublished SQLite files and filesystem protections
 still prevent removal; unchanged, published database fixtures are removable.
 Clean sparse checkouts are supported. Primary checkouts and missing-checkout metadata
 stay intact. Removal retains branches and never overrides ownership locks. Discovery includes nested Codex
 slots, configured workspaces, `/private/tmp`, `/tmp` and `/Users/Shared`.
 See [ownership and recovery](docs/worktree-ownership.md).
-Every worktree removal requires an exact-target cleanup release and fresh ownership
-checks. Use `health release-cleanup PATH --owner SESSION` only after the owner
-confirms completion; `health retain-cleanup PATH` withdraws it before reuse.
+Every in-scope worktree reaches automatic evaluation without owner release metadata.
+Removal repeats ownership and safety checks; `health cleanup-check PATH --json`
+reports current safety and age checks without deleting.
 For dependencies, use `health remove-dependencies /absolute/path/node_modules`.
-See [cleanup releases and receipts](docs/cleanup-protection.md).
+See [cleanup safety and receipts](docs/cleanup-protection.md).
 
 Aggressive cache cleanup expires individual files after 24 hours across OS temp,
 npm/Bun/Yarn/Python caches and `~/.cache`. New siblings do not protect old

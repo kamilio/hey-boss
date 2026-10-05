@@ -9,10 +9,12 @@ import {renderTerminalPng} from '../worker-tui/node_modules/terminal-png/dist/in
 const binary = resolve(process.argv[2]);
 const root = await realpath(await mkdtemp('/tmp/harvester-cleanup-ui-'));
 const output = process.argv[3] ? resolve(process.argv[3]) : join(root, 'screenshots');
-const env = {...process.env, HEY_BOSS_HEALTH_DIR: join(root, 'health')};
+const env = {...process.env, HOME: root, HEY_BOSS_HEALTH_DIR: join(root, 'health')};
 let pilot;
 try {
   await mkdir(output, {recursive: true});
+  await mkdir(env.HEY_BOSS_HEALTH_DIR, {recursive: true});
+  await writeFile(join(env.HEY_BOSS_HEALTH_DIR, 'config.json'), JSON.stringify({workspace_roots: [root]}));
   const repository = join(root, 'repository');
   await mkdir(repository);
   const git = (...args) => {
@@ -46,7 +48,7 @@ try {
     reporting_build: build, scan_build: build, observed_at: 1, phase: 'Finished',
     metrics: {disk_path: root, memory_pressure: 'Normal'}, config: {},
     processes: [], caches: [], worktrees: [
-      inspect(clean, /No readable explicit cleanup release/),
+      inspect(clean, /Recently created or changed|Commits not verified/),
       inspect(locked, /Locked worktree; preserved — parent validation/),
     ], errors: [], harvested_processes: 0, removed_worktrees: 0,
   };
@@ -72,12 +74,12 @@ try {
   await wait('clean-worktree');
   assert.doesNotMatch(await capture('preserved-worktrees'), /failed/);
   await session.press('Enter');
-  await wait(/cleanup\s+release/);
-  await capture('release-gate-wide');
+  await wait(/Recently created|Commits not verified/);
+  await capture('ordinary-checks-wide');
   await session.resize(48, 20);
   await wait('1 Home');
-  await wait(/cleanup\s+release/);
-  await capture('release-gate-narrow');
+  await wait(/Recently created|Commits not verified/);
+  await capture('ordinary-checks-narrow');
   await session.press('Escape');
   await session.press('ArrowDown');
   await session.press('Enter');
@@ -99,7 +101,7 @@ try {
   await session.type('q');
   assert.equal(await session.waitForExit({timeout: 5000}), 0);
   assert.equal(await readFile(join(root, 'corrupt-ancestor', '.git', 'HEAD'), 'utf8'), 'corrupt');
-  console.log('Passed: actual release/lock/error receipts, preserved versus failed rows, zero/one error counts, 110/48-column details, clean exit.');
+  console.log('Passed: actual safety/lock/error receipts, preserved versus failed rows, zero/one error counts, 110/48-column details, clean exit.');
 } finally {
   if (pilot) await pilot.close();
   await rm(root, {recursive: true, force: true});

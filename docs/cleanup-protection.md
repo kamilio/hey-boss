@@ -1,55 +1,41 @@
-# Cleanup releases
+# Automatic cleanup safety
 
 Use `hey-boss health` (or `hey-harvester`) for checkout and dependency cleanup.
-An old candidate list, a quiet process, a shared application PID, an unlocked
-checkout, and ignored files do not establish that work is disposable.
-
-After the owning session confirms completion, release the **exact** target:
+Every in-scope candidate reaches automatic safety checks without an owner release.
+Age or a prior successful check alone never authorizes deletion.
 
 ```sh
-hey-boss health release-cleanup /absolute/worktree/node_modules --owner codex:SESSION
-hey-boss health cleanup-check /absolute/worktree/node_modules --json
+hey-boss health cleanup-check /absolute/worktree --json
+hey-boss health remove-worktree /absolute/worktree --json
 hey-boss health remove-dependencies /absolute/worktree/node_modules --json
 ```
 
-For an entire linked checkout, release its root and use `remove-worktree`.
-Only the owner should unlock an ownership lock. Publication, tracked-file,
-process, database, filesystem and primary-checkout protections still apply.
-A release records the caller's owner attestation; the label does not impersonate
-an agent or release an issue claim. Do not derive it from a PID or candidate list.
+Worktree cleanup preserves active or queued work, locks, staged/unstaged changes,
+non-ignored untracked files, unpublished commits, primary checkouts, uncertain
+ownership and persistent data. Scheduled cleanup also applies its age and quiet
+observation policy. Explicit removal bypasses age only. Only the owner should
+unlock an ownership lock after finishing all use, including queued validation.
 
-Before resuming work or queuing validation, withdraw the release with
-`retain-cleanup PATH`. A Git worktree lock also blocks removal. Releases have no
-age expiry. They bind the exact path, directory identity, HEAD and index state;
-replacement or changed source invalidates them. Removal consumes the release,
-so rebuilding dependencies does not authorize a second removal. After a rejected
-or interrupted operation, inspect the reason and target before releasing again.
+Dependency removal checks an exact `node_modules` directory and repeats ownership
+checks immediately before removal. Tracked dependencies, databases (including
+SQLite-format package assets), repository metadata and filesystem protections
+prevent removal. Generic cache sweeping excludes `node_modules`; ordinary caches
+keep their existing age, activity, ownership and persistent-data checks.
 
-All manual and scheduled worktree removal passes the same final release and
-ownership gate. Dependency removal is limited to an exact `node_modules`
-directory, checks its contents, then repeats the gate immediately before removal.
-Generic cache sweeping excludes every `node_modules`, including saved cursors.
-It cannot be used as an alternative dependency-removal path.
+Ownership inventory includes each session independently, unfinished claims,
+queued worker runs, fleet reservations and retained attempts. Missing or ambiguous
+inventory fails closed. Older issue services require inventory version 2. A
+standalone harvester without an issue service still checks Git ownership, locks
+and active files/processes. No release records are created, consumed or migrated.
 
-The issue ownership inventory includes each session independently, unfinished
-claims regardless of PID presence, queued worker runs, fleet reservations and
-retained attempts. Missing or ambiguous inventory fails closed. Older issue
-services must be upgraded to inventory version 2 before cleanup proceeds.
-Git locks and active files/processes remain additional exclusions. A standalone
-harvester without an issue service still requires an explicit owner release.
+`cleanup-check` reports current safety and worktree age checks without deleting.
+It does not replace scheduled quiet observations or the final removal checks.
+`--json` returns an accepted/rejected receipt with a concrete reason; rejection
+exits nonzero. Requests and receipts remain in bounded health activity history
+(`health logs --json`); scheduled decisions appear in the Worktrees view.
 
-`--json` returns an accepted/rejected receipt and a reason. Rejection exits
-nonzero. Requests and receipts are saved in the bounded Machine Health activity
-history (`health logs --json`); scheduled worktree decisions also appear in the
-Worktrees view. Export receipts externally if longer retention is needed.
-A successful check is informational: removal always rereads the current state.
-
-Ad-hoc filesystem removers are outside this cooperative boundary. Replace their
-destructive calls with `remove-dependencies` or `remove-worktree`; do not run
-`rm` based on a prior successful check. No tool can stop an unrelated same-user
-script from ignoring these guards. Never edit a running remover's manifest as a
-substitute for acknowledged exclusions. Before any real sweep, confirm every
-active or retained root with its owner. Regression checks use disposable fixtures.
+Use the guarded removal commands instead of acting on a stale candidate list.
+Regression checks use disposable fixtures, never production cleanup candidates.
 
 ## Recovering a full companion disk
 
