@@ -540,12 +540,13 @@ impl Collector<'_> {
         Ok(())
     }
     async fn validate_branch(&self, reports: &mut [Report]) -> Result<()> {
-        // Partial records are historical evidence in an unknown report. Only
-        // finished gates or confirmations need a final branch proof.
+        // Skip only interrupted, unknown reports with no completed gate or
+        // confirmation. A watching/failed report still needs branch validation
+        // even when its workflow listing was truncated.
         if !reports.iter().any(|r| {
             r.gates
                 .iter()
-                .any(|g| g.history_complete || g.confirmation.is_some())
+                .any(|g| r.state != "unknown" || g.history_complete || g.confirmation.is_some())
         }) {
             return Ok(());
         }
