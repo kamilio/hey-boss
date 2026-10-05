@@ -29,6 +29,9 @@ mod detail_continuation;
 #[path = "github/detail_seed.rs"]
 mod detail_seed;
 
+#[path = "github/cancelled_jobs.rs"]
+mod cancelled_jobs;
+
 #[derive(Clone, Debug)]
 struct Call {
     at: std::time::Instant,
@@ -1174,6 +1177,41 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         }
         _ => json!({"answer":phase}),
     };
+    if mode.starts_with("cancelled-empty") && phase < 7 {
+        if normalized.ends_with("/actions/runs") {
+            let run = value["workflow_runs"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap();
+            run["status"] = json!("completed");
+            run["conclusion"] = json!(if mode == "cancelled-empty-success" {
+                "success"
+            } else {
+                "cancelled"
+            });
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            run["updated_at"] = match mode.as_str() {
+                "cancelled-empty-recent" => json!(
+                    chrono::DateTime::from_timestamp(now, 0)
+                        .unwrap()
+                        .to_rfc3339()
+                ),
+                "cancelled-empty-future" => json!(
+                    chrono::DateTime::from_timestamp(now + 3600, 0)
+                        .unwrap()
+                        .to_rfc3339()
+                ),
+                "cancelled-empty-invalid" => json!("not-a-timestamp"),
+                _ => json!("2026-01-01T00:00:00Z"),
+            };
+        } else if normalized.ends_with("/jobs") {
+            value = json!({"total_count":0,"jobs":[]});
+        }
+    }
     if mode.starts_with("completed-job-pages") && normalized.ends_with("/actions/runs") {
         for run in value["workflow_runs"].as_array_mut().unwrap() {
             run["updated_at"] = json!(if phase >= 4 {
