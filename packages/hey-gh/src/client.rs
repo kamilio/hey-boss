@@ -143,9 +143,17 @@ struct Inner {
     report_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     metrics: Arc<Metrics>,
     changes_notify: tokio::sync::Notify,
+    policy_ready: tokio::sync::Notify,
 }
 
 impl Client {
+    pub(crate) fn notify_policy_ready(&self) {
+        self.0.policy_ready.notify_one();
+    }
+
+    pub(crate) async fn policy_ready(&self) {
+        self.0.policy_ready.notified().await;
+    }
     // Leave room for one interactive CI batch without expanding total work.
     // Tiny embedded queues keep at least three quarters for ordinary reads.
     fn interactive_reserved_slots(&self) -> usize {
@@ -295,6 +303,7 @@ impl Client {
             report_locks: Mutex::new(HashMap::new()),
             metrics,
             changes_notify: tokio::sync::Notify::new(),
+            policy_ready: tokio::sync::Notify::new(),
         })))
     }
 

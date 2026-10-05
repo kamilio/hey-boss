@@ -101,6 +101,7 @@ pub struct Cycle {
     pub failed: u64,
     pub interrupted: u64,
     pub deferred: u64,
+    pub waiting_for_ci: u64,
     pub cycle_budget_exhausted: bool,
 }
 
@@ -115,6 +116,10 @@ fn cycle(line: &str, at_ms: u64) -> Option<Cycle> {
         failed: count("failed")?,
         interrupted: count("interrupted")?,
         deferred: count("deferred")?,
+        waiting_for_ci: match field(line, "waiting_for_ci") {
+            Some(value) => value.parse().ok()?,
+            None => 0,
+        },
         cycle_budget_exhausted: match field(line, "cycle_budget_exhausted")? {
             "true" => true,
             "false" => false,
@@ -129,9 +134,10 @@ fn cycle(line: &str, at_ms: u64) -> Option<Cycle> {
             .checked_add(cycle.interrupted)?
             == cycle.attempted
         && cycle.attempted.checked_add(cycle.deferred)? == cycle.total
-        // A per-PR interruption can leave enough time to visit the whole
-        // roster; only deferred work necessarily exhausts the whole cycle.
-        && (cycle.deferred == 0 || cycle.cycle_budget_exhausted)
+        && cycle.waiting_for_ci <= cycle.deferred
+        && (cycle.waiting_for_ci == 0 || field(line, "mode") == Some("policy"))
+        // Awaiting cached CI is a dependency deferral, not budget exhaustion.
+        && (cycle.deferred == cycle.waiting_for_ci || cycle.cycle_budget_exhausted)
         && (!cycle.cycle_budget_exhausted || cycle.interrupted > 0 || cycle.deferred > 0))
         .then_some(cycle)
 }
@@ -321,7 +327,8 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
                 if field(&line, "seed_only") == Some("true") {
                     continue;
                 }
-                let mode = field(&line, "mode").filter(|mode| matches!(*mode, "ci" | "details"));
+                let mode = field(&line, "mode")
+                    .filter(|mode| matches!(*mode, "ci" | "details" | "policy"));
                 if field(&line, "seed_only") == Some("false")
                     && let Some((mode, cycle)) = mode.zip(cycle(&line, at_ms))
                 {
@@ -628,6 +635,19 @@ mod tests {
         assert_eq!(ci.completed_cycles, 1);
         assert_eq!(ci.local_budget_interruptions, 1);
         assert_eq!(ci.budget_exhausted_cycles, 0);
+        assert_eq!(summary.uncorrelated_refresh_cycle_lines, 0);
+    }
+
+    #[test]
+    fn policy_deferral_is_distinct_from_cycle_budget_exhaustion() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("hey-gh.log"), "2026-09-21T06:24:00Z INFO hey_gh: account refresh cycle finished mode=policy seed_only=false started_at_ms=1789971830000 finished_at_ms=1789971840000 total=5 attempted=2 succeeded=1 failed=1 interrupted=0 deferred=3 waiting_for_ci=3 cycle_budget_exhausted=false\n").unwrap();
+        let summary = read(root.path(), 120, NOW).unwrap();
+        let policy = &summary.account_refresh_cycles["policy"];
+        assert_eq!(policy.completed_cycles, 1);
+        assert_eq!(policy.deferred_across_cycles, 3);
+        assert_eq!(policy.failed, 1);
+        assert_eq!(policy.budget_exhausted_cycles, 0);
         assert_eq!(summary.uncorrelated_refresh_cycle_lines, 0);
     }
 

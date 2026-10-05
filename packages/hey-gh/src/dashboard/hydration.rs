@@ -1,5 +1,5 @@
 //! Keep account hydration moving while another PR waits in the shared queue.
-use super::schedule::Work;
+use super::{Refresh, schedule::Work};
 use crate::{Client, Error, Freshness, Result};
 use serde_json::json;
 use std::{
@@ -14,9 +14,7 @@ use tokio::time::Instant;
 pub(super) struct Cycle<'a> {
     pub client: &'a Client,
     pub freshness: Freshness,
-    pub ci_only: bool,
-    pub seed_only: bool,
-    pub details_only: bool,
+    pub refresh: Refresh,
     pub background: bool,
     pub authoritative_roster: bool,
     pub deadline: Instant,
@@ -51,13 +49,14 @@ impl Cycle<'_> {
         let Self {
             client,
             freshness,
-            ci_only,
-            seed_only,
-            details_only,
+            refresh: mode,
             background,
             authoritative_roster,
             deadline,
         } = *self;
+        let ci_only = mode == Refresh::Ci;
+        let seed_only = mode == Refresh::Discovery;
+        let details_only = mode == Refresh::Details;
         let repo = &item.key.0;
         let number = item.key.1;
         let node = &item.node;
@@ -111,6 +110,24 @@ impl Cycle<'_> {
                 .unwrap_or(Err(Error::Deadline))
             } else if seed_only {
                 Ok(())
+            } else if mode == Refresh::Policy {
+                tokio::time::timeout_at(deadline, async {
+                    let report = client
+                        .required_checks_for_pr(repo, number, freshness)
+                        .await?;
+                    if !report.errors.is_empty() {
+                        return Err(Error::Invalid(format!(
+                            "incomplete policy: {}",
+                            json!(report.errors)
+                        )));
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    cycle_interrupted = true;
+                    Err(Error::Deadline)
+                })
             } else if ci_only {
                 let result = tokio::time::timeout_at(deadline, async {
                     let report = client.ci_for_pr(repo, number, freshness).await?;
@@ -127,7 +144,7 @@ impl Cycle<'_> {
                     cycle_interrupted = true;
                     Err(Error::Deadline)
                 });
-                if result.is_ok() && tokio::time::Instant::now() < deadline {
+                if !background && result.is_ok() && tokio::time::Instant::now() < deadline {
                     // Policy is best effort in the CI loop. A slow policy read
                     // must not turn already observed CI into a timeout failure.
                     let policy_deadline =
