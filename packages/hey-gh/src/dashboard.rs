@@ -17,6 +17,8 @@ mod discovery_progress_tests;
 mod hydration;
 pub(crate) mod partial;
 #[cfg(test)]
+mod policy_concurrency_tests;
+#[cfg(test)]
 mod policy_retirement_tests;
 mod schedule;
 
@@ -868,12 +870,11 @@ impl Client {
         // Let cached neighbors progress while one PR waits for quota or a
         // socket. The scheduler still owns every request and its concurrency.
         // Tiny embedded queues and explicit/discovery reads remain sequential.
-        let width =
-            if background && !seed_only && !policy_only && self.status().queue_capacity >= 32 {
-                2
-            } else {
-                1
-            };
+        let width = if background && !seed_only && self.status().queue_capacity >= 32 {
+            2
+        } else {
+            1
+        };
         let mut active: Vec<hydration::Read<'_>> = Vec::new();
         while work.len() > 0 || !active.is_empty() {
             while active.len() < width {
