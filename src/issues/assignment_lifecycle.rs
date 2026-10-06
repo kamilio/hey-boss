@@ -1,4 +1,4 @@
-//! A watcher without an open supported PR cannot do useful work.
+//! A watcher closes its task when no open supported PR remains.
 use super::*;
 
 fn has_open_pr(links: &[Value]) -> bool {
@@ -62,33 +62,41 @@ pub(super) fn reconcile_issue(
         return Ok(());
     }
     let now = crate::issues::worker::now();
-    let active = issue
-        .assignee
-        .as_deref()
-        .filter(|id| *id != WATCHER && *id != "human:boss");
-    // Blocked tasks cannot have an assignee. Stopping an empty watch must not
-    // lift their dependency/manual hold or abort reconciliation for other PRs.
-    let assignee = active.or_else(|| (issue.state != "blocked").then_some("human:boss"));
-    if assignee == Some("human:boss") {
-        ready::register_boss(db, actor, now)?;
-    }
-    db.execute("UPDATE issues SET assignment_target=NULL,assignee=?3,version=version+1,updated_at=max(updated_at,?4) WHERE project_id=?1 AND number=?2",params![project,number,assignee,now])?;
-    if active.is_none() {
-        db.execute(
-            "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
-            params![project, number],
-        )?;
-    }
+    let mut watcher = actor.clone();
+    watcher.id = WATCHER.into();
+    let task_project = Project {
+        id: project.into(),
+        name: db.query_row("SELECT name FROM projects WHERE id=?1", [project], |r| {
+            r.get(0)
+        })?,
+    };
+    mutate(
+        db,
+        &task_project,
+        &watcher,
+        &Operation::Close {
+            number,
+            comment: None,
+            force: true,
+            guard: None,
+            allow_long_comment: false,
+        },
+        now,
+    )?;
+    db.execute(
+        "UPDATE issues SET assignment_target=NULL WHERE project_id=?1 AND number=?2",
+        params![project, number],
+    )?;
+    db.execute(
+        "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",
+        params![project, number],
+    )?;
     status["stopped_reason"] = json!("no_open_pull_requests");
     db.execute("INSERT INTO issue_github_watches(project_id,issue_number,status) VALUES(?1,?2,?3) ON CONFLICT(project_id,issue_number) DO UPDATE SET status=excluded.status", params![project,number,status.to_string()])?;
-    event(
-        db,
-        project,
-        number,
-        WATCHER,
-        "assigned",
-        now,
-        &json!({"target":if active.is_some() {"agent"} else if assignee.is_some() {"boss"} else {"unassigned"},"assignee":assignee,"previous_assignee":issue.assignee,"reason":"no_open_pull_requests"}),
+    crate::issues::blockers::reconcile(db, project, Some(WATCHER), now)?;
+    db.execute(
+        "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
+        params![project, now],
     )?;
     Ok(())
 }
