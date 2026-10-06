@@ -4,6 +4,8 @@ use crate::issues::Store;
 use hey_gh::{ApiClient, Freshness};
 use std::time::Duration;
 mod cached_merges;
+#[cfg(test)]
+mod read_deadlines;
 mod schedule;
 mod watches;
 
@@ -87,12 +89,14 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
             async {
                 loop {
                     let started = tokio::time::Instant::now();
-                    match tokio::time::timeout(Duration::from_secs(40), async {
+                    let deadline = started + Duration::from_secs(40);
+                    let metadata_client = client.clone().with_read_deadline(deadline);
+                    match tokio::time::timeout_at(deadline, async {
                         // Lifecycle already learned by the shared daemon must
                         // not wait behind this watcher's expensive CI queue.
                         match tokio::time::timeout(
                             Duration::from_secs(10),
-                            cached_merges::poll(ctx, client),
+                            cached_merges::poll(ctx, &metadata_client),
                         )
                         .await
                         {
@@ -100,7 +104,7 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
                             Ok(Err(error)) => eprintln!("PR monitor: cached merges: {error}"),
                             Err(_) => eprintln!("PR monitor: cached merge batch deadline reached"),
                         }
-                        poll_once(ctx, client).await
+                        poll_once(ctx, &metadata_client).await
                     })
                     .await
                     {
@@ -157,9 +161,11 @@ fn poll(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) ->
 }
 
 async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
-    let viewer = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.viewer(Freshness::MaxAge(Duration::from_secs(3600))),
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let viewer_client = client.clone().with_read_deadline(deadline);
+    let viewer = tokio::time::timeout_at(
+        deadline,
+        viewer_client.viewer(Freshness::MaxAge(Duration::from_secs(3600))),
     )
     .await;
     let mut store = Store::open(&ctx.path)?;
@@ -301,7 +307,9 @@ async fn tokio_read(
     number: u64,
     backfill: bool,
 ) -> hey_gh::Result<hey_gh::Response> {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let client = client.clone().with_read_deadline(deadline);
+    tokio::time::timeout_at(deadline, async {
         // Authorship and merge dates of confirmed merges can be backfilled
         // from old metadata without revalidating every historical PR.
         if backfill {
@@ -330,6 +338,23 @@ async fn tokio_read(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    pub(super) fn read_budget(request: &tiny_http::Request, maximum: u64) -> u64 {
+        let budget = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("x-hey-gh-read-timeout-ms"))
+            .expect("Polling deadlines must reach the daemon, not just stop the local wait")
+            .value
+            .as_str()
+            .parse::<u64>()
+            .unwrap();
+        assert!(
+            (1..=maximum).contains(&budget),
+            "Unexpected read budget: {budget}"
+        );
+        budget
+    }
 
     #[test]
     fn daemon_startup_reports_manager_failure_and_retries_without_retaining_a_child() {
@@ -472,11 +497,13 @@ mod tests {
                 .unwrap()
                 .expect("Viewer request");
             assert_eq!(viewer.url(), "/v1/viewer?max_age_seconds=3600");
+            read_budget(&viewer, 5_000);
             viewer.respond(tiny_http::Response::from_string(json!({"data":{"id":42,"login":"me"},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
             let request = server
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap()
                 .expect("Metadata request");
+            read_budget(&request, 20_000);
             assert_eq!(
                 request.url(),
                 if backfill {

@@ -403,6 +403,14 @@ fn scenario(scenario: Scenario) {
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .expect("Watcher request");
+            crate::fleet::native::pr_monitor::tests::read_budget(
+                &request,
+                if terminal || policy_error {
+                    120_000
+                } else {
+                    60_000
+                },
+            );
             requests.insert(request.url().to_owned());
             let path = request.url().split('?').next().unwrap();
             let (body, code) = match path {

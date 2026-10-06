@@ -63,6 +63,17 @@ fn checkless_pr_waits_for_feedback_and_repeated_reviews_do_not_repeat_work() {
                     .unwrap()
                     .expect("Checkless PR must collect review sources");
                 let path = incoming.url().split('?').next().unwrap();
+                let policy_read = path.ends_with("required-checks");
+                let budget = crate::fleet::native::pr_monitor::tests::read_budget(
+                    &incoming,
+                    if policy_read { 10_000 } else { 60_000 },
+                );
+                if !policy_read {
+                    assert!(
+                        budget > 50_000,
+                        "Later stages must retain their own read lifetime"
+                    );
+                }
                 assert!(paths.insert(path.to_owned()));
                 let value = match path {
                     "/v1/prs/o/r/1/required-checks" => &policy,

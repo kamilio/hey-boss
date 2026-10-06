@@ -3,6 +3,9 @@ use super::*;
 // Cached metadata is identity/generation fenced by the daemon. Read it with
 // bounded concurrency; never revalidate or bypass the regular queue's backoff.
 pub(super) async fn poll(ctx: &Context, client: &ApiClient) -> Result<()> {
+    let client = client
+        .clone()
+        .with_read_deadline(tokio::time::Instant::now() + Duration::from_secs(10));
     let mut urls = Store::open(&ctx.path)?.github_watch_urls()?.into_iter();
     let mut running = tokio::task::JoinSet::new();
     loop {
