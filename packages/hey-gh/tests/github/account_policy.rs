@@ -73,6 +73,11 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
     // This budget also covers the healthy CI rotation. The policy request is
     // gated indefinitely, so a subsecond budget only adds a host-load race.
     let c = seed(&h, Duration::from_secs(2)).await;
+    // The mock transport has one REST slot. Give the healthy neighbor cached
+    // policy so it can progress while the first PR holds that socket.
+    c.required_checks_for_pr("acme/other", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
     let (api, sdk, server) = start(&c).await;
     // Either CI row can become ready first. The healthy neighbor may complete
     // a policy turn while the stalled target still awaits its CI completion.
@@ -96,13 +101,14 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
     .await
     .expect("stalled policy target never interrupted its rotation");
     let cycle = status.policy_last_cycle.unwrap();
-    assert_eq!(cycle.attempted, 1);
+    assert_eq!(cycle.attempted + cycle.waiting_for_ci, 2, "{cycle:?}");
+    assert_eq!(cycle.succeeded + 1, cycle.attempted, "{cycle:?}");
     assert_eq!(
         cycle.interrupted, 1,
         "{cycle:?}; {:?}",
         status.policy_last_error
     );
-    assert_eq!(cycle.deferred, 1);
+    assert_eq!(cycle.deferred, cycle.waiting_for_ci);
     assert!(cycle.cycle_budget_exhausted);
     assert!(status.policy_last_error.is_some());
     assert!(
@@ -122,7 +128,7 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
         .unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&next).unwrap()["data"],
-        json!(["acme/other", 7])
+        json!(["acme/demo", 7])
     );
     let published: usize = db
         .query_row(
@@ -173,6 +179,8 @@ async fn interrupted_policy_rotation_keeps_ci_health_and_resumes_the_next_pr_aft
     let c = Client::with_token(
         Config {
             report_timeout: Duration::from_secs(6),
+            // Two cold policy reads share the mock's single REST slot.
+            queue_timeout: Duration::from_secs(5),
             ..h.config()
         },
         "synthetic-token".into(),

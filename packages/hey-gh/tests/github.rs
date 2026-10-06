@@ -7125,6 +7125,9 @@ async fn account_policy_rotation_finishes_slow_rules_without_blocking_ci() {
     let c = Client::with_token(
         Config {
             report_timeout: Duration::from_secs(10),
+            // The local test server has one REST slot. Both admitted policy
+            // reads must fit their serial 1.4-second responses in this budget.
+            queue_timeout: Duration::from_secs(5),
             ..h.config()
         },
         "synthetic-token".into(),
