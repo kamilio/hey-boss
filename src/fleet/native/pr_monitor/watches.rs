@@ -85,9 +85,10 @@ async fn poll_required(
 ) -> hey_gh::Result<Option<RequiredEvidence>> {
     let freshness = fetch_freshness(force);
     let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(60));
+    let read_client = client.clone().with_read_deadline(deadline);
     let policy = tokio::time::timeout_at(
         deadline,
-        client.required_checks_for_pr(repository, number, freshness),
+        read_client.required_checks_for_pr(repository, number, freshness),
     )
     .await
     .unwrap_or(Err(hey_gh::Error::Deadline));
@@ -155,9 +156,10 @@ async fn confirm_terminal(
     number: u64,
     deadline: tokio::time::Instant,
 ) -> hey_gh::Result<()> {
+    let read_client = client.clone().with_read_deadline(deadline);
     let response = tokio::time::timeout_at(
         deadline,
-        client.pull_request(repository, number, Freshness::Revalidate),
+        read_client.pull_request(repository, number, Freshness::Revalidate),
     )
     .await
     .map_err(|_| hey_gh::Error::Deadline)??;
@@ -221,16 +223,15 @@ async fn poll_details(
     } = required;
     let _ = batch_deadline;
     let freshness = fetch_freshness(force);
-    let result = tokio::time::timeout_at(
-        tokio::time::Instant::now() + Duration::from_secs(60),
-        async {
-            let (ci, metadata) = tokio::join!(
-                client.ci_for_pr(repository, number, freshness),
-                client.pull_request(repository, number, freshness)
-            );
-            Ok::<_, hey_gh::Error>((ci?, metadata?))
-        },
-    )
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let read_client = client.clone().with_read_deadline(deadline);
+    let result = tokio::time::timeout_at(deadline, async {
+        let (ci, metadata) = tokio::join!(
+            read_client.ci_for_pr(repository, number, freshness),
+            read_client.pull_request(repository, number, freshness)
+        );
+        Ok::<_, hey_gh::Error>((ci?, metadata?))
+    })
     .await
     .unwrap_or(Err(hey_gh::Error::Deadline));
     let (ci, metadata) = match result {
@@ -287,9 +288,11 @@ async fn poll_details(
 
     // Review failures cannot undo an already published required failure or slow
     // the next CI attempt. The daemon still owns source-specific quota backoff.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let read_client = client.clone().with_read_deadline(deadline);
     let result = tokio::time::timeout_at(
-        tokio::time::Instant::now() + Duration::from_secs(60),
-        client.pr_report(repository, number, freshness),
+        deadline,
+        read_client.pr_report(repository, number, freshness),
     )
     .await
     .unwrap_or(Err(hey_gh::Error::Deadline));
