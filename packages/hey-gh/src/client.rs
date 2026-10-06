@@ -2690,6 +2690,34 @@ mod priority_tests {
         Held,
         ChangedWithCompletions,
         LastSlot,
+        UnchangedAfterCompletion,
+        ChangedAfterCompletion,
+    }
+
+    #[tokio::test]
+    async fn completion_validators_progress_while_an_ordinary_turn_owns_the_paced_wait() {
+        queued_probe_turn_with_warmup(
+            true,
+            false,
+            true,
+            true,
+            ProbeReplies::UnchangedAfterCompletion,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn changed_completion_validator_preserves_the_owed_ordinary_slot() {
+        queued_probe_turn_with_warmup(
+            true,
+            false,
+            true,
+            true,
+            ProbeReplies::ChangedAfterCompletion,
+            1,
+        )
+        .await;
     }
 
     async fn queued_probe_turn(
@@ -2723,6 +2751,11 @@ mod priority_tests {
             ProbeReplies::Changed
                 | ProbeReplies::ChangedWithCompletions
                 | ProbeReplies::ChangedAfterBurst
+                | ProbeReplies::ChangedAfterCompletion
+        );
+        let after_completion = matches!(
+            replies,
+            ProbeReplies::UnchangedAfterCompletion | ProbeReplies::ChangedAfterCompletion
         );
         let foreground_burst = matches!(
             replies,
@@ -2761,6 +2794,7 @@ mod priority_tests {
                         *completion_at.lock().unwrap() = Some(tokio::time::Instant::now());
                     }
                     if uri.path() == "/gate"
+                        || uri.path() == "/repos/acme/demo/pulls/100"
                         || (held
                             && live.load(Ordering::Relaxed)
                             && uri.path().ends_with("/comments"))
@@ -2837,12 +2871,22 @@ mod priority_tests {
         let mut tasks = vec![tokio::spawn({
             let c = client.clone();
             async move {
-                INTERACTIVE_READ
-                    .scope(
-                        Arc::new(AtomicBool::new(foreground_burst)),
-                        c.get("gate", Freshness::Revalidate),
-                    )
-                    .await
+                let read = INTERACTIVE_READ.scope(
+                    Arc::new(AtomicBool::new(foreground_burst || after_completion)),
+                    c.get(
+                        if after_completion {
+                            "repos/acme/demo/pulls/100"
+                        } else {
+                            "gate"
+                        },
+                        Freshness::Revalidate,
+                    ),
+                );
+                if after_completion {
+                    COMPLETION_VALIDATION.scope((), read).await
+                } else {
+                    read.await
+                }
             }
         })];
         tokio::time::timeout(Duration::from_secs(3), async {
@@ -2963,15 +3007,15 @@ mod priority_tests {
                 owed <= 2,
                 "a stream of changed probes postponed the owed turn: {calls:?}"
             );
-        } else if interactive && probe_interactive && completion && !probe_completion {
+        } else if interactive && probe_interactive && completion != probe_completion {
             assert_eq!(
                 owed, 2,
-                "only one charged validator may borrow a protected completion slot: {calls:?}"
+                "only one charged validator may borrow a protected opposite-class slot: {calls:?}"
             );
             assert!(
                 completion_at.lock().unwrap().unwrap() - released_at
                     < original_spacing.mul_f64(1.5),
-                "the changed validator charged its pacing delay before the protected completion"
+                "the changed validator charged its pacing delay before the protected turn"
             );
         } else {
             assert_eq!(
