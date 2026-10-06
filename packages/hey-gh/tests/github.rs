@@ -1278,7 +1278,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 &[],
             );
         }
-        let data = if body["query"]
+        let mut data = if body["query"]
             .as_str()
             .unwrap_or("")
             .contains("query ReviewEvents")
@@ -1295,6 +1295,14 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         } else {
             json!({"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"T1","isResolved":phase>=4,"isOutdated":false,"path":"src/file.rs","comments":{"nodes":[{"id":"C1","body":"please fix"}],"pageInfo":{"hasNextPage":true,"endCursor":"C-next"}}}],"pageInfo":{"hasNextPage":true,"endCursor":"T-next"}}}}}})
         };
+        if body["query"]
+            .as_str()
+            .unwrap_or("")
+            .contains("query ReviewActivity")
+        {
+            data["data"]["repository"]["pullRequest"]["timelineItems"] =
+                json!({"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}});
+        }
         return reply(200, data, &[]);
     }
     if (mode == "account-slow-one" || mode.starts_with("account-priority-") && phase >= 3)
@@ -7220,6 +7228,59 @@ async fn account_monitor_covers_owned_pr_watches_but_not_other_authors() {
     );
     api.stop().await;
     task.abort();
+}
+
+#[tokio::test]
+async fn account_background_review_sources_share_their_first_graphql_page() {
+    let h = Harness::new().await;
+    h.mode("account");
+    h.phase(1);
+    let c = h.client();
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+    api.watch_account(60).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = c
+                .pr_status_page(None, None, 1000, Duration::ZERO)
+                .await
+                .unwrap();
+            if page.pull_requests.len() == 2
+                && page
+                    .pull_requests
+                    .iter()
+                    .all(|row| row["reviewThreads"].is_array() && row["reviewStatus"].is_object())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    api.stop().await;
+    let calls = h.calls();
+    let reviews: Vec<_> = calls
+        .iter()
+        .filter(|call| {
+            call.body["query"]
+                .as_str()
+                .unwrap_or("")
+                .contains("query ReviewActivity")
+        })
+        .collect();
+    assert_eq!(reviews.len(), 2, "each PR needs one shared first page");
+    assert!(
+        reviews
+            .iter()
+            .all(|call| call.token == "Bearer synthetic-token")
+    );
+    assert!(!calls.iter().any(|call| {
+        call.body["query"]
+            .as_str()
+            .unwrap_or("")
+            .contains("query ReviewEvents")
+    }));
 }
 
 #[tokio::test]
