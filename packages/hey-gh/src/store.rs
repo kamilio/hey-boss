@@ -12,6 +12,7 @@ mod checkpoint;
 mod checkpoint_tests;
 #[cfg(test)]
 mod decode_tests;
+mod terminal;
 #[cfg(test)]
 mod writer_tests;
 
