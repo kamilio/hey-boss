@@ -2,21 +2,63 @@
 
 Maintained as `packages/hey-gh` in the hey-boss workspace. Imported from sibling
 hey-gh revision `e47688b37f90be76afb0eafa2d45e78077e90f0b`, including the existing
-local report-read reliability changes. The `hey-gh` executable and CLI remain
-unchanged. Run the commands below from this package directory.
+local report-read reliability changes. Native commands delegate to the installed `gh` executable. Run the commands below from this package directory.
 
-A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared request queue, and a durable incremental feed. Authentication uses your existing `gh` login.
+A Rust GitHub SDK, CLI, and local HTTP API with persistent caching, a shared request queue, and a durable incremental feed. Native commands use your existing `gh` login; comments default to GitHub App authentication.
 
-## Optional GitHub App installation
+## Native gh commands and authentication
+
+Use the same arguments, stdin, output formats, interactive prompts, and exit codes
+as `gh`. Native commands run without the cache daemon. `pr list`, `pr view`,
+`pr checks`, `pr status`, `repo`, `release`, and `status` retain gh's behavior.
+
+```sh
+hey-gh pr list --state closed --json number,title --jq '.[].number'
+hey-gh pr merge 123 --auto --squash
+hey-gh pr comment 123 -R OWNER/REPO --body-file comment.md
+hey-gh --auth app api repos/OWNER/REPO/issues/123/comments -f body='Fixed.'
+hey-gh --auth user pr comment 123 -R OWNER/REPO --body 'Posted as me.'
+hey-gh cached pr view 123 -R OWNER/REPO
+hey-gh cached status
+```
+
+Put `--auth auto|app|user` before the command. `auto` uses the App for issue/PR
+comments, comment reviews, REST comment/review writes, and recognized GraphQL
+comment/review mutations. Other native commands inherit gh authentication.
+Ordinary aliases are inspected for the same policy, but gh executes them unchanged.
+Shell aliases and GraphQL queries supplied through stdin require an explicit auth
+choice. Extensions are opaque native programs; use `--auth app` when they post
+comments. Browser comments require `--auth user` because browser identity cannot
+be selected with an installation token. Installation permissions and gh's support
+for App identities still apply, including author-dependent edit/delete operations.
+
+App commands mint a separate installation token with the App's granted permissions
+and configured repository selection. Personal credentials are never a fallback
+when minting fails. CI can supply a pre-minted installation token through
+`HEY_GH_APP_TOKEN`; it is only used for commands routed to the App. Credentials
+stay out of argv and wrapper diagnostics. Writes are never retried by the wrapper.
+Native comments retain gh's full body/file/editor/edit/delete options and do not
+trim text or impose the old 300-character limit.
+
+`cached` exposes the existing extended JSON/cache API. Bare `hey-gh pr`, legacy
+`pr OWNER/REPO NUMBER`, `pr changes`, `repo OWNER/REPO`, release-watcher actions,
+and the unique service/watch commands remain available. Explicit PR read flags
+such as `--cached-only`, `--refresh`, `--cursor`, `--timeout`, or `--server` also
+select cached reads. Their envelopes, monitoring, conditional requests, and quota
+optimizations are unchanged. Use `hey-gh cached --help` for these extensions;
+`hey-gh COMMAND --help` shows native gh help.
+
+## GitHub App installation
 
 CI checks, commit statuses, workflow runs, workflow jobs, CI-only REST PR metadata,
 and the fixed CI-selector GraphQL query can use a selected repository installation's
 separate primary quota.
 Register/install a GitHub App with read access to Actions, Checks, Commit statuses,
-Contents, and Pull requests (Metadata is automatic).
-Installation tokens request only these permissions, even if the App has broader
-grants. Keep the existing `gh` login: all other activity uses the user identity,
-including generic PR metadata, discovery, generic GraphQL, comments, reviews, repository metadata,
+and Contents, plus write access to Issues and Pull requests for comments. Metadata
+is automatic. Daemon tokens request only read permissions; native App commands
+mint separate tokens with the granted permissions. Keep the existing `gh` login:
+other daemon activity uses the user identity,
+including generic PR metadata, discovery, generic GraphQL reads, comment/review reads, repository metadata,
 and required-check policy. Uncovered repositories also keep user authentication.
 Installation errors remain explicit;
 they do not silently retry with user credentials. Secondary backoff and socket
@@ -82,7 +124,7 @@ hey-gh watch poe-internal/poe2
 # Or monitor a specific PR.
 hey-gh watch poe-internal/poe2 15064 --interval 30
 hey-gh watches
-hey-gh status
+hey-gh cached status
 ```
 
 PR numbers above are examples. `watch` registrations and discovery state survive restarts. A repository watch discovers new PRs and refreshes a previously tracked PR once after it closes or merges; unsuccessful refreshes remain tracked for retry. CI polling runs independently of the full comment/review scan. Background account hydration allows five seconds without source progress, excluding deliberate scheduler queue waits; each cycle remains bounded and unfinished work stays queued. `/v1/watches` reports each loop's last successful refresh and errors. Covered individual watches report stale or pending evidence when their lane's conservative validation clock is unknown or older than two watch intervals (at least 60 seconds), even if cached data is complete.
@@ -182,7 +224,7 @@ hey-gh logs --tail 200             # Recent events across retained archives
 hey-gh logs --summary --since 900  # Safe JSON aggregates for the last 15 minutes
 hey-gh logs --path                 # Print the directory; no daemon needed
 hey-gh watches                    # Current polling/source errors
-hey-gh status                     # Queue and observed rate limits
+hey-gh cached status                     # Queue and observed rate limits
 ```
 
 The default location is the platform cache directory under
@@ -233,17 +275,17 @@ and cycle progress does not measure GitHub traffic or evidence freshness.
 
 ```sh
 hey-gh pr                         # All your authored open PRs across repositories
-hey-gh pr list                    # Same account list
-hey-gh pr status                  # Same status view
-hey-gh pr list -R OWNER/REPO      # Restrict output to one repository
-hey-gh pr view 123 -R OWNER/REPO  # Full PR report, with gh-style JSON field names
-hey-gh pr checks 123 -R OWNER/REPO # Detailed CI without comments
-hey-gh pr view https://github.com/OWNER/REPO/pull/123
-hey-gh pr view BRANCH -R OWNER/REPO
-hey-gh pr view                    # Infer repository and current branch from git
+hey-gh cached pr list                    # Same account list
+hey-gh cached pr status                  # Same status view
+hey-gh cached pr list -R OWNER/REPO      # Restrict output to one repository
+hey-gh cached pr view 123 -R OWNER/REPO  # Full PR report, with gh-style JSON field names
+hey-gh cached pr checks 123 -R OWNER/REPO # Detailed CI without comments
+hey-gh cached pr view https://github.com/OWNER/REPO/pull/123
+hey-gh cached pr view BRANCH -R OWNER/REPO
+hey-gh cached pr view                    # Infer repository and current branch from git
 
 hey-gh pr --json number,title,url,headCiState,conflicts
-hey-gh pr view 123 -R OWNER/REPO --json number,title,ci,comments
+hey-gh cached pr view 123 -R OWNER/REPO --json number,title,ci,comments
 hey-gh pr --refresh               # Wait for bounded detailed-source hydration
 hey-gh pr --cached-only           # Last-known data; zero GitHub requests
 ```
@@ -464,8 +506,7 @@ An expired cursor returns `cursor_expired` (HTTP 410): run `hey-gh pr` without a
 cursor, replace local state, and adopt its new cursor. Source-feed cursors from
 `hey-gh snapshot` are a different API and cannot be used as PR cursors.
 
-This is a subset of the `gh pr` command surface, not a full drop-in
-replacement. It supports `-R/--repo`, `--json` projections, `-L/--limit`,
+The `cached pr` extension supports a subset of native PR read options. It supports `-R/--repo`, `--json` projections, `-L/--limit`,
 `--state open`, and `--author @me` for the account list. JSON retains an extended
 cursor envelope instead of gh's bare array. Rich GitHub subcollections retain
 raw fields. Single-PR view/checks resolve a numeric ID, URL, or unique open head
@@ -476,16 +517,11 @@ null there. `pr checks` returns the full CI report; use `pr view --json ci` for
 field selection. The legacy `hey-gh pr OWNER/REPO NUMBER` syntax still works.
 Use `hey-gh prs OWNER/REPO --state all` for every author's historical PRs.
 
-Post comments with `hey-gh pr comment 123 -R OWNER/REPO --body-file comment.md`
-or `hey-gh issue comment 123 -R OWNER/REPO --body 'Fixed the retry.'`.
-`--body-file -` reads stdin. PR comments also accept a URL or branch and default
-to the current branch; issue comments require a number or URL. Comments must
-contain text and stay within 2 lines and 300 Unicode characters after trimming.
-The CLI uses the shared comment guidance and rejects invalid text before running
-`gh`. Posting uses the existing `gh` login directly, without a daemon, cache,
-automatic retry, or length override. Read options are rejected for comments.
+Native comment commands use GitHub App authentication and gh's own options.
 After an uncertain failure, check GitHub before retrying. Cached comment reads
-converge through the existing background monitoring.
+converge through the existing background monitoring. The legacy
+`cached pr comment`/`cached issue comment` extension retains its short-comment
+validation and uses the same App authentication policy.
 
 `pr list --limit N` truncates the initial display with `totalCount` and
 `truncated=true`; it is not a complete consumer bootstrap. Omit it when building
