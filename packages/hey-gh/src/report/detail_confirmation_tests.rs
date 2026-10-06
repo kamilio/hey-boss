@@ -56,6 +56,20 @@ async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     if path.ends_with("/actions/runs") {
         return Json(json!({"total_count":0,"workflow_runs":[]})).into_response();
     }
+    if path.ends_with("/comments") {
+        let count = if path.contains("/issues/") {
+            "comments"
+        } else {
+            "review_comments"
+        };
+        if mock.metadata.lock().unwrap()[count]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+        {
+            return Json(json!([{"id":1,"body":"New comment","user":{"login":"reviewer"}}]))
+                .into_response();
+        }
+    }
     Json(json!([])).into_response()
 }
 struct Fixture {
@@ -245,6 +259,11 @@ async fn full_report_confirms_metadata_while_its_last_source_is_pending() {
 #[tokio::test]
 async fn full_report_overlap_denial_cannot_publish_old_metadata() {
     let f = Fixture::new().await;
+    {
+        let mut metadata = f.mock.metadata.lock().unwrap();
+        metadata["comments"] = json!(0);
+        metadata["review_comments"] = json!(0);
+    }
     let task = pending_full_report(&f).await;
     let before = f.metadata_calls();
     let old = f.age_metadata(60_000);
@@ -317,6 +336,188 @@ async fn cancelling_full_report_overlap_preserves_a_shared_metadata_reader() {
     assert!(shared.await.unwrap().is_ok());
     assert_eq!(f.metadata_calls(), before + 1);
     f.mock.release.notify_one();
+}
+
+#[tokio::test]
+async fn full_report_uses_fresh_personal_zero_counts_for_empty_comment_sources() {
+    for warm in [false, true] {
+        let f = Fixture::new().await;
+        {
+            let mut metadata = f.mock.metadata.lock().unwrap();
+            metadata["comments"] = json!(0);
+            metadata["review_comments"] = json!(0);
+        }
+        if warm {
+            f.warm_metadata().await;
+            f.age_metadata(5_000);
+        }
+        let report = f
+            .client
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap();
+        assert!(report.complete);
+        assert!(report.data.comments.is_empty());
+        assert!(report.data.review_comments.is_empty());
+        assert!(
+            !f.mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path.ends_with("/comments")),
+            "Fresh zero counts already prove these comment lists empty"
+        );
+        assert!(
+            report
+                .validations
+                .iter()
+                .any(|v| v.resource.ends_with("/pulls/7"))
+        );
+        let before = f.mock.calls.lock().unwrap().len();
+        let old = f.age_metadata(60_000);
+        let cached = f
+            .client
+            .pr_report("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap();
+        assert!(
+            cached.complete,
+            "Derived empty lists must remain available offline"
+        );
+        assert!(
+            cached.oldest_validation_at_ms <= old,
+            "Offline proof must retain its old clock"
+        );
+        assert_eq!(f.mock.calls.lock().unwrap().len(), before);
+    }
+}
+
+#[tokio::test]
+async fn full_report_unknown_or_stale_comment_counts_keep_source_reads() {
+    for case in [
+        "missing",
+        "positive",
+        "negative",
+        "string",
+        "stale",
+        "caller_age",
+        "future",
+        "cached",
+        "revalidate",
+    ] {
+        let f = Fixture::new().await;
+        let value = match case {
+            "missing" => Value::Null,
+            "positive" | "cached" => json!(1),
+            "negative" => json!(-1),
+            "string" => json!("0"),
+            _ => json!(0),
+        };
+        {
+            let mut metadata = f.mock.metadata.lock().unwrap();
+            metadata["comments"] = value.clone();
+            metadata["review_comments"] = value;
+        }
+        f.warm_metadata().await;
+        if case == "stale" {
+            f.age_metadata(16_000);
+        }
+        if case == "caller_age" {
+            f.age_metadata(5_000);
+        }
+        if case == "future" {
+            rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap().execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1) WHERE key LIKE '%/pulls/7'",[now_ms()+60_000]).unwrap();
+        }
+        let freshness = match case {
+            "cached" => Freshness::CachedOnly,
+            "revalidate" => Freshness::Revalidate,
+            "caller_age" => Freshness::MaxAge(Duration::from_secs(1)),
+            _ => Freshness::MaxAge(Duration::from_secs(30)),
+        };
+        let report = f.client.pr_report("acme/demo", 7, freshness).await.unwrap();
+        if case == "cached" {
+            assert!(!report.complete, "Missing source caches must stay explicit");
+            assert!(report.data.errors.iter().any(|e| e.source == "comments"));
+        } else {
+            assert!(report.complete, "{case}: {:?}", report.data.errors);
+            assert_eq!(
+                f.mock
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|path| path.ends_with("/comments"))
+                    .count(),
+                2,
+                "{case}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_report_zero_counts_cannot_erase_known_comments() {
+    let f = Fixture::new().await;
+    {
+        let mut metadata = f.mock.metadata.lock().unwrap();
+        metadata["comments"] = json!(1);
+        metadata["review_comments"] = json!(1);
+    }
+    assert!(
+        f.client
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    {
+        let mut metadata = f.mock.metadata.lock().unwrap();
+        metadata["comments"] = json!(0);
+        metadata["review_comments"] = json!(0);
+    }
+    f.warm_metadata().await;
+    f.age_metadata(5_000);
+    let report = f
+        .client
+        .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(report.complete);
+    assert_eq!(report.data.comments.len(), 1);
+    assert_eq!(report.data.review_comments.len(), 1);
+}
+
+#[tokio::test]
+async fn full_report_recollects_comments_added_after_zero_count_proof() {
+    for field in ["comments", "review_comments"] {
+        let f = Fixture::new().await;
+        {
+            let mut metadata = f.mock.metadata.lock().unwrap();
+            metadata["comments"] = json!(0);
+            metadata["review_comments"] = json!(0);
+        }
+        let task = pending_full_report(&f).await;
+        f.age_metadata(60_000);
+        f.mock.metadata.lock().unwrap()[field] = json!(1);
+        f.mock.pause_reviews.store(false, Ordering::Relaxed);
+        f.mock.pause_graph.store(false, Ordering::Relaxed);
+        f.mock.reviews_release.notify_one();
+        f.mock.release.notify_one();
+        let report = task.await.unwrap().unwrap();
+        assert!(report.complete, "{:?}", report.data.errors);
+        let comments = if field == "comments" {
+            &report.data.comments
+        } else {
+            &report.data.review_comments
+        };
+        assert_eq!(
+            comments.len(),
+            1,
+            "New {field} must not disappear behind an earlier zero count"
+        );
+        assert_eq!(comments[0]["body"], "New comment");
+    }
 }
 
 #[tokio::test]

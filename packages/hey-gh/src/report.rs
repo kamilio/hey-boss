@@ -934,6 +934,84 @@ impl Client {
         Ok(None)
     }
 
+    async fn cached_empty_pr_comments(
+        &self,
+        repository: &str,
+        number: u64,
+        seed: &Value,
+        freshness: Freshness,
+    ) -> Result<(bool, bool)> {
+        let max_age = match freshness {
+            Freshness::MaxAge(age) if !age.is_zero() => Some(age.as_millis().min(15_000)),
+            Freshness::CachedOnly => None,
+            _ => return Ok((false, false)),
+        };
+        if !["comments", "review_comments"]
+            .iter()
+            .any(|field| seed[field].as_u64() == Some(0))
+        {
+            return Ok((false, false));
+        }
+        // A collection seed cannot certify a source. Independently validate
+        // the personal cache through the ordinary identity/supersession fence,
+        // without making a request merely to avoid an empty comment-list read.
+        let (proof, validations) = VALIDATIONS
+            .scope(std::cell::RefCell::new(Vec::new()), async {
+                let proof = self
+                    .pull_request(repository, number, Freshness::CachedOnly)
+                    .await;
+                (proof, VALIDATIONS.with(|records| records.take()))
+            })
+            .await;
+        let proof = match proof {
+            Ok(proof) => proof,
+            Err(Error::CacheMiss) => return Ok((false, false)),
+            Err(error) => return Err(error),
+        };
+        let current = proof.validated_at_ms > 0
+            && now_ms()
+                .checked_sub(proof.validated_at_ms)
+                .is_some_and(|elapsed| max_age.is_none_or(|age| u128::from(elapsed) <= age))
+            && proof.data["node_id"] == seed["node_id"]
+            && ["comments", "review_comments"]
+                .iter()
+                .any(|field| proof.data[field].as_u64() == Some(0));
+        if !current {
+            return Ok((false, false));
+        }
+        let mut empty = [false; 2];
+        for (index, (field, path)) in [
+            (
+                "comments",
+                format!("repos/{repository}/issues/{number}/comments?per_page=100"),
+            ),
+            (
+                "review_comments",
+                format!("repos/{repository}/pulls/{number}/comments?per_page=100"),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if proof.data[field].as_u64() != Some(0) {
+                continue;
+            }
+            // Counts can lag a separately validated list. Do not erase known
+            // comments or bypass pagination/shape errors with a zero counter.
+            empty[index] = match self.peek_get(&path).await {
+                Ok(cached) => {
+                    cached.data.as_array().is_some_and(Vec::is_empty) && cached.link.is_none()
+                }
+                Err(Error::CacheMiss) => true,
+                Err(error) => return Err(error),
+            };
+        }
+        if empty.iter().any(|empty| *empty) {
+            VALIDATIONS.with(|records| records.borrow_mut().extend(validations));
+        }
+        Ok((empty[0], empty[1]))
+    }
+
     async fn build_report(
         &self,
         repository: &str,
@@ -977,6 +1055,9 @@ impl Client {
             let review_comments_path = format!("{prefix}/pulls/{number}/comments?per_page=100");
             let reviews_path = format!("{prefix}/pulls/{number}/reviews?per_page=100");
             let timeline_path = format!("{prefix}/issues/{number}/timeline?per_page=100");
+            let (comments_empty, review_comments_empty) = self
+                .cached_empty_pr_comments(repository, number, &pr.data, freshness)
+                .await?;
             timings.enter(Phase::Collection);
             let first_page = review_activity::FirstPage::new(self, repository, number, freshness);
             let tail = ReportTail {
@@ -1022,8 +1103,20 @@ impl Client {
                     Box::pin(async {
                         let sources = tokio::join!(
                             tail.collect(self.ci_for_pr(repository, number, freshness)),
-                            tail.collect(self.pages(&comments_path, None, freshness)),
-                            tail.collect(self.pages(&review_comments_path, None, freshness)),
+                            tail.collect(async {
+                                if comments_empty {
+                                    Ok(Vec::new())
+                                } else {
+                                    self.pages(&comments_path, None, freshness).await
+                                }
+                            }),
+                            tail.collect(async {
+                                if review_comments_empty {
+                                    Ok(Vec::new())
+                                } else {
+                                    self.pages(&review_comments_path, None, freshness).await
+                                }
+                            }),
                             tail.collect(self.pages(&reviews_path, None, freshness)),
                             tail.collect(async {
                                 let timeline = self.pages(&timeline_path, None, freshness).await;
@@ -1110,6 +1203,8 @@ impl Client {
                     .as_str()
                     .filter(|s| valid_sha(s))
                     != merge.as_deref()
+                || (comments_empty && final_pr.data["comments"].as_u64() != Some(0))
+                || (review_comments_empty && final_pr.data["review_comments"].as_u64() != Some(0))
             {
                 retry_seed = Some(final_pr);
                 continue;
@@ -1216,7 +1311,7 @@ impl Client {
             });
         }
         Err(Error::Invalid(
-            "PR head/base changed repeatedly while collecting status; retry the report".into(),
+            "PR metadata changed repeatedly while collecting status; retry the report".into(),
         ))
     }
 
