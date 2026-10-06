@@ -714,6 +714,34 @@ impl Store {
             .await
     }
 
+    // Scheduling hint only: row presence does not establish valid or fresh
+    // evidence. Read the current generation and indexed keys in one snapshot,
+    // without loading payloads, validators, or advancing any validation clock.
+    pub(crate) async fn cache_presence(
+        &self,
+        scope: &str,
+        repository: &str,
+        prefix: &str,
+        keys: Vec<String>,
+    ) -> Result<Vec<bool>> {
+        let (scope, repository, prefix) = (
+            scope.to_owned(),
+            repository.to_ascii_lowercase(),
+            prefix.to_owned(),
+        );
+        self.read(move |conn| {
+            let generation = repository_generation(conn, &scope, &repository)?;
+            let mut query = conn.prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM cache WHERE scope=?1 AND key=?2 COLLATE NOCASE AND substr(key,?3)=?4 COLLATE BINARY)",
+            ).map_err(storage)?;
+            keys.into_iter().map(|key| {
+                let key = if generation == 0 { key } else { format!("{key}#repository-generation={generation}") };
+                let Some(suffix) = key.strip_prefix(&prefix) else { return Ok(false); };
+                query.query_row(params![scope,key,prefix.chars().count()+1,suffix], |row| row.get(0)).map_err(storage)
+            }).collect()
+        }).await
+    }
+
     pub async fn pr_identity(
         &self,
         scope: &str,
@@ -3432,6 +3460,70 @@ mod tests {
                 "bootstrap read {pages} SQLite pages for one tiny open row; terminal bodies must not be scanned"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn presence_hints_use_current_scoped_keys_without_reading_response_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            4096,
+        )
+        .unwrap();
+        store.run(|conn| {
+            for (scope, key) in [
+                ("scope", "https://api.github.com/repos/Acme/Demo/commits/HEAD/status"),
+                ("scope", "https://api.github.com/repos/ACME/DEMO/commits/MERGE/status#repository-generation=3"),
+                ("other", "https://api.github.com/repos/acme/demo/commits/OTHER/status#repository-generation=3"),
+            ] {
+                // Deliberately not a valid Response. A presence hint must not
+                // decode it, and the large body must not reach the reader.
+                conn.execute("INSERT INTO cache(scope,key,response) VALUES(?1,?2,zeroblob(8388608))",params![scope,key]).map_err(storage)?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let prefix = "https://api.github.com/repos/acme/demo/";
+        let keys = ["HEAD", "head", "MERGE", "OTHER"]
+            .map(|sha| format!("{prefix}commits/{sha}/status"))
+            .to_vec();
+        assert_eq!(
+            store
+                .cache_presence("scope", "ACME/DEMO", prefix, keys.clone())
+                .await
+                .unwrap(),
+            [true, false, false, false]
+        );
+        store.run(|conn| {
+            conn.execute("INSERT INTO repository_generation(scope,repository,generation) VALUES('scope','acme/demo',3)", []).map_err(storage)?;
+            Ok(())
+        }).await.unwrap();
+        store
+            .read(|conn| {
+                conn.execute_batch(
+                    "PRAGMA mmap_size=0; PRAGMA cache_size=16; PRAGMA shrink_memory",
+                )
+                .map_err(storage)?;
+                Ok(cache_misses(conn, true))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .cache_presence("scope", "acme/demo", prefix, keys)
+                .await
+                .unwrap(),
+            [false, false, true, false]
+        );
+        let pages = store
+            .read(|conn| Ok(cache_misses(conn, false)))
+            .await
+            .unwrap();
+        assert!(
+            pages > 0 && pages < 32,
+            "presence lookup read response pages: {pages}"
+        );
     }
 
     fn cache_misses(conn: &Connection, reset: bool) -> i32 {

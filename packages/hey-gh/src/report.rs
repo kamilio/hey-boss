@@ -18,6 +18,8 @@ mod review_events;
 mod timings;
 use timings::{Phase, Timings};
 #[cfg(test)]
+mod ci_collection_tests;
+#[cfg(test)]
 mod detail_confirmation_tests;
 #[cfg(test)]
 mod timing_tests;
