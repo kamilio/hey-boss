@@ -29,9 +29,19 @@ const HeyBossMergedPRs = (() => {
     let boot, context, generation=0, rows=[], next=null, busy=false, timer;
     const picker = new HeyBossUI.ProjectPicker({onSelect:project=>{location.hash=new URLSearchParams({project,...(context.host?{host:context.host}:{})});}});
     const error = message => {$('#merged-error').textContent=message;$('#merged-error').hidden=!message;};
-    async function request(operation, project, host) {
-      const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json',...(!mobile?{'X-Hey-Boss-CSRF':boot.csrf}:{})},body:JSON.stringify({project,operation,...(host?{host}:{})}),signal:AbortSignal.timeout(30000)});
+    async function request(operation, project, host, reconnect=true) {
+      const sentToken=boot.csrf;
+      const response=await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json',...(!mobile?{'X-Hey-Boss-CSRF':sentToken}:{})},body:JSON.stringify({project,operation,...(host?{host}:{})}),signal:AbortSignal.timeout(30000)});
       const value=await response.json();
+      if(response.status===403&&!mobile&&reconnect){
+        try{
+          const response=await fetch('/api/bootstrap',{signal:AbortSignal.timeout(10000)}),fresh=await response.json();
+          if(response.ok&&fresh.ok&&typeof fresh.csrf==='string'&&fresh.csrf&&fresh.csrf!==sentToken&&fresh.actor?.id&&fresh.actor.id===boot.actor?.id){
+            boot.csrf=fresh.csrf;
+            return request(operation,project,host,false);
+          }
+        }catch{/* Preserve the original error and the currently displayed rows. */}
+      }
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||'Could not load merged PRs');
       return value;
     }
