@@ -192,6 +192,148 @@ fn pending_optional_checks_do_not_require_review_collection() {
 }
 
 #[test]
+fn conflict_releases_the_existing_item_before_optional_ci_returns() {
+    let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    let request = |operation| crate::issues::Request {
+        version: 1,
+        project: crate::issues::Project {
+            id: "named:test".into(),
+            name: "test".into(),
+        },
+        project_override: None,
+        actor: Some(ctx.actor().unwrap()),
+        operation: serde_json::from_value(operation).unwrap(),
+        request_id: None,
+    };
+    let url = "https://github.com/o/r/pull/1";
+    store
+        .execute(&request(
+            json!({"action":"create","title":"Task","body":"","labels":[]}),
+        ))
+        .unwrap();
+    store
+        .execute(&request(
+            json!({"action":"add_pull_request","number":1,"url":url,"purpose":"fix"}),
+        ))
+        .unwrap();
+    let view = store
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    store.execute(&request(json!({"action":"assign","number":1,"target":"github","if_version":view["issue"]["version"]}))).unwrap();
+    drop(store);
+    let (_, mut policy, mut metadata) = evidence(true, false);
+    Store::open_connection(&ctx.path)
+        .unwrap()
+        .execute("UPDATE issues SET state='ready' WHERE number=1", [])
+        .unwrap();
+    policy["state"] = json!("satisfied");
+    policy["checks"][0]["state"] = json!("success");
+    policy["checks"][0]["failure_key"] = Value::Null;
+    metadata["data"]["mergeable"] = json!(false);
+    metadata["data"]["base"]["ref"] = json!("main");
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let client =
+        ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
+    let database = ctx.path.clone();
+    let serving = std::thread::spawn(move || {
+        let mut held_ci = None;
+        for _ in 0..3 {
+            let incoming = server
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .expect("watcher request");
+            let path = incoming.url().split('?').next().unwrap();
+            let value = if path.ends_with("required-checks") {
+                &policy
+            } else if path.ends_with("metadata") {
+                &metadata
+            } else if path.ends_with("ci") {
+                held_ci = Some(incoming);
+                continue;
+            } else {
+                panic!("Unexpected request: {path}");
+            };
+            incoming
+                .respond(
+                    tiny_http::Response::from_string(value.to_string()).with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        let db = Store::open_connection(&database).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let assignee: Option<String> = db
+                .query_row("SELECT assignee FROM issues WHERE number=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            if assignee.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Conflict must release work while optional CI is still blocked"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        held_ci
+            .unwrap()
+            .respond(
+                tiny_http::Response::from_string("{\"error\":\"optional source unavailable\"}")
+                    .with_status_code(503),
+            )
+            .unwrap();
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let required = poll_required(&ctx, &client, url, "o/r", 1, deadline, false)
+            .await
+            .unwrap()
+            .unwrap();
+        poll_details(&ctx, &client, url, "o/r", 1, deadline, required)
+            .await
+            .unwrap();
+    });
+    serving.join().unwrap();
+    let mut store = Store::open(&ctx.path).unwrap();
+    let view = store
+        .execute(&request(json!({"action":"view","number":1})))
+        .unwrap();
+    assert!(view["issue"]["assignee"].is_null());
+    assert_eq!(view["issue"]["state"], "open");
+    assert_eq!(
+        view["issue"]["github_status"]["prs"][url]["evidence"]["conflicts"],
+        "conflicting"
+    );
+    assert!(
+        view["issue"]["github_status"]["trigger"]["blocking"]
+            .as_bool()
+            .unwrap()
+    );
+    let db = Store::open_connection(&ctx.path).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM worker_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_stack_trunk_policy_survives_monitor_storage_with_a_different_diff_base() {
     scenario(Scenario::NativeStack);
 }
