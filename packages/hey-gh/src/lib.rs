@@ -64,7 +64,7 @@ pub enum Error {
         access_denied: bool,
     },
     #[error(
-        "request queue is full; retry after 1 second within a bounded deadline; inspect hey-gh status and hey-gh watches if saturation persists"
+        "request queue is full; retry after 1 second within a bounded deadline; inspect hey-gh cached status and hey-gh watches if saturation persists"
     )]
     QueueFull,
     #[error("request deadline exceeded")]

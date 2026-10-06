@@ -55,21 +55,22 @@ pub async fn post(kind: &str, args: &CommentArgs, repo: Option<&str>) -> Result<
     if body.is_empty() || hey_gh::comments::too_long(body) {
         return Err(rejection().into());
     }
-    // Mutations bypass the read cache and retry queue. gh owns authentication
-    // and target resolution; stdin preserves literal Markdown without a shell.
-    let mut command = tokio::process::Command::new("gh");
-    command.args([kind, "comment"]);
+    // Legacy cached syntax retains its validation, but shares native auth.
+    let mut argv: Vec<std::ffi::OsString> = vec![kind.into(), "comment".into()];
     if let Some(selector) = &args.selector {
-        command.arg(selector);
+        argv.push(selector.into());
     }
     if let Some(repo) = repo {
-        command.args(["--repo", repo]);
+        argv.extend(["--repo".into(), repo.into()]);
     }
-    let mut child = command
-        .args(["--body-file", "-"])
-        .stdin(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+    argv.extend(["--body-file".into(), "-".into()]);
+    let invocation = crate::cli_route::Invocation::parse(argv)?;
+    let native = tokio::task::spawn_blocking(move || {
+        crate::cli_auth::command(&invocation).map_err(|error| error.to_string())
+    })
+    .await??;
+    let mut command = tokio::process::Command::from(native);
+    let mut child = command.stdin(Stdio::piped()).kill_on_drop(true).spawn()?;
     let write = child
         .stdin
         .take()

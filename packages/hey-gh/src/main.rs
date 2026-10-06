@@ -3,6 +3,9 @@ use hey_gh::{ApiClient, Client, Config, Freshness};
 use serde_json::Value;
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
+mod cli_alias;
+mod cli_auth;
+mod cli_route;
 mod comment_cli;
 mod log_summary;
 mod logging;
@@ -38,7 +41,7 @@ enum Command {
         #[command(subcommand)]
         action: release_cli::Action,
     },
-    /// Configure a read-only GitHub App installation for CI status reads.
+    /// Configure a GitHub App for native commands and separate read-only CI tokens.
     App {
         #[arg(long, default_value = "github.com")]
         hostname: String,
@@ -228,8 +231,38 @@ enum IssueAction {
     Comment(comment_cli::CommentArgs),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let invocation = match cli_route::Invocation::parse(std::env::args_os().skip(1).collect()) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            eprintln!("hey-gh: {error}");
+            std::process::exit(2);
+        }
+    };
+    if !invocation.cached {
+        let result = cli_auth::command(&invocation).and_then(|mut command| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                Err(command.exec().into())
+            }
+            #[cfg(not(unix))]
+            {
+                std::process::exit(command.status()?.code().unwrap_or(1));
+            }
+        });
+        if let Err(error) = result as Result<(), Box<dyn std::error::Error>> {
+            eprintln!("hey-gh: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(cached_main(invocation.args));
+}
+
+async fn cached_main(argv: Vec<std::ffi::OsString>) {
     // Global read flags remain parseable so misuse gets an explicit rejection,
     // but are not advertised as options for a write command.
     let mut command = Args::command();
@@ -259,7 +292,11 @@ async fn main() {
             })
         });
     }
-    let args = Args::from_arg_matches(&command.get_matches()).unwrap_or_else(|error| error.exit());
+    let args =
+        Args::from_arg_matches(&command.get_matches_from(
+            std::iter::once(std::ffi::OsString::from("hey-gh cached")).chain(argv),
+        ))
+        .unwrap_or_else(|error| error.exit());
     let log_directory = match &args.command {
         Some(Command::Serve {
             listen, log_dir, ..
