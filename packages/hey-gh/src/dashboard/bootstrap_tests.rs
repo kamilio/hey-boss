@@ -287,3 +287,175 @@ async fn paged_pr_bootstrap_bounds_row_count_even_when_bodies_fit() {
         .collect();
     assert_eq!(numbers.len(), 1001);
 }
+
+#[tokio::test]
+async fn requested_bootstrap_limit_survives_restart_and_concurrent_changes() {
+    for fields in [None, Some(&["number", "state", "title", "removed"][..])] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::Config {
+            cache_path: dir.path().join("cache.sqlite"),
+            ..Default::default()
+        };
+        let client = Client::with_token(config.clone(), "synthetic".into()).unwrap();
+        for number in [2, 4, 6, 8] {
+            observe(&client, number, "before", true).await;
+        }
+        let first = client
+            .pr_status_page_projected(None, None, 2, Duration::ZERO, fields)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.pull_requests.len(),
+            2,
+            "caller limit must bound the bootstrap too"
+        );
+        assert!(first.has_more);
+        let mut mirror: BTreeMap<u64, Value> = first
+            .pull_requests
+            .into_iter()
+            .map(|r| (r["number"].as_u64().unwrap(), r))
+            .collect();
+        observe(&client, 2, "closed during scan", false).await;
+        observe(&client, 1, "inserted before scan position", true).await;
+        observe(&client, 6, "changed during scan", true).await;
+        drop(client);
+        let client = Client::with_token(config, "synthetic".into()).unwrap();
+        let mut cursor = first.cursor;
+        let mut drained = false;
+        for _ in 0..20 {
+            let page = client
+                .pr_status_page_projected(None, Some(&cursor), 2, Duration::ZERO, fields)
+                .await
+                .unwrap();
+            assert!(page.pull_requests.is_empty());
+            assert!(page.changes.len() <= 2);
+            for change in page.changes {
+                let n = change.pull_request["number"].as_u64().unwrap();
+                if change.pull_request["removed"] == true {
+                    mirror.remove(&n);
+                } else {
+                    mirror.insert(n, change.pull_request);
+                }
+            }
+            cursor = page.cursor;
+            if !page.has_more {
+                drained = true;
+                break;
+            }
+        }
+        assert!(drained);
+        assert_eq!(mirror.keys().copied().collect::<Vec<_>>(), [1, 4, 6, 8]);
+        assert_eq!(mirror[&6]["title"], "changed during scan");
+    }
+}
+
+#[tokio::test]
+async fn full_detail_pages_stay_small_without_slowing_compact_status_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = Client::with_token(
+        crate::Config {
+            cache_path: dir.path().join("cache.sqlite"),
+            ..Default::default()
+        },
+        "synthetic".into(),
+    )
+    .unwrap();
+    let mut expected = BTreeMap::new();
+    for number in 1..=4 {
+        let mut data = row(number, "large detail", true);
+        data["pullRequest"]["body"] = json!("x".repeat(if number == 4 {
+            3 * 1024 * 1024
+        } else {
+            768 * 1024
+        }));
+        if number == 3 {
+            data["pullRequest"]["complete"] = json!(false);
+            data["pullRequest"]["sourceErrors"] = json!({"ci":"synthetic incomplete CI"});
+        }
+        expected.insert(number, data["pullRequest"].clone());
+        client
+            .observe(&format!("pr-status://github.com/Acme/Demo/{number}"), &data)
+            .await
+            .unwrap();
+    }
+    let compact = client
+        .pr_status_page_projected(None, None, 1000, Duration::ZERO, Some(&["number", "state"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        compact.pull_requests.len(),
+        4,
+        "small projections retain efficient indexed reads"
+    );
+    assert!(!compact.has_more);
+    let mut cursor = None;
+    let mut collected = BTreeMap::new();
+    let mut pages = Vec::new();
+    for _ in 0..10 {
+        let page = client
+            .pr_status_page(None, cursor.as_deref(), 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        let rows: Vec<_> = page
+            .pull_requests
+            .iter()
+            .chain(page.changes.iter().map(|c| &c.pull_request))
+            .collect();
+        pages.push(rows.len());
+        if rows.len() > 1 {
+            assert!(serde_json::to_vec(&page).unwrap().len() < 2 * 1024 * 1024);
+        }
+        for row in rows {
+            collected.insert(row["number"].as_u64().unwrap(), row.clone());
+        }
+        cursor = Some(page.cursor);
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(
+        pages,
+        [2, 1, 1],
+        "one larger indivisible row must still make progress"
+    );
+    assert_eq!(
+        collected, expected,
+        "pagination must retain complete records and source errors"
+    );
+
+    // Subsequent changes use the same small-page budget and must not skip the
+    // boundary record when one update is too large to share a page.
+    for number in 1..=4 {
+        let mut value = expected[&number].clone();
+        value["title"] = json!("updated");
+        expected.insert(number, value.clone());
+        client
+            .observe(
+                &format!("pr-status://github.com/Acme/Demo/{number}"),
+                &json!({"pullRequest":value}),
+            )
+            .await
+            .unwrap();
+    }
+    pages.clear();
+    for _ in 0..10 {
+        let page = client
+            .pr_status_page(None, cursor.as_deref(), 1000, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(page.pull_requests.is_empty());
+        pages.push(page.changes.len());
+        for change in page.changes {
+            collected.insert(
+                change.pull_request["number"].as_u64().unwrap(),
+                change.pull_request,
+            );
+        }
+        cursor = Some(page.cursor);
+        if !page.has_more {
+            break;
+        }
+    }
+    assert_eq!(pages, [2, 1, 1]);
+    assert_eq!(collected, expected);
+}

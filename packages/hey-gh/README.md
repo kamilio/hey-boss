@@ -489,16 +489,18 @@ converge through the existing background monitoring.
 
 `pr list --limit N` truncates the initial display with `totalCount` and
 `truncated=true`; it is not a complete consumer bootstrap. Omit it when building
-local state. Large open rosters page within the bootstrap byte limit (256 MiB
-by default), at most 1,000 rows at a time. The first page uses `pullRequests`;
+local state. HTTP/SDK `limit` bounds bootstrap rows as well as scanned events,
+at most 1,000 at a time. Full-detail PR pages normally use a 2 MiB stored-data
+budget; one indivisible larger row can still use the configured snapshot ceiling
+(256 MiB by default). The first page uses `pullRequests`;
 continuations use `changes` with `kind=baseline`, then replay updates from the
 scan's starting watermark. Persist each page and its cursor together and drain
 `hasMore`, including after the initial response. Restarts preserve scan progress;
 an expired cursor requires a new bootstrap. CLI `totalCount` is null while the
 initial roster is paginated. On ordinary cursor reads the limit bounds scanned
-events. Incremental pages also use a byte budget: normally the configured
-collection limit (64 MiB by default), with one indivisible larger observation
-allowed up to the bootstrap limit (256 MiB by default). A page can contain fewer
+events. Full-detail incremental PR pages use the same 2 MiB budget, bounded by
+the configured collection limit. Compact status projections retain the original
+bootstrap/collection budgets and can return more rows per page. A page can contain fewer
 events than requested; preserve its cursor and drain `hasMore`. PR cursor reads
 select source and repository before decoding bodies, so unrelated source data
 does not consume the page budget. Larger selected observations fail explicitly
@@ -513,15 +515,16 @@ local transfer and caller JSON decoding. HTTP accepts `fields=number,state`;
 Rust uses `ApiClient::pr_status_selected(PrStatusSelection { fields: Some(&["number", "state"]), ..Default::default() }, ...)`;
 Node uses `api.prStatus({ fields: ['number', 'state'], cursor, read })` with types
 that reflect selected fields. HTTP/SDK projections always retain `complete` and
-`sourceErrors`; CLI stdout keeps its exact requested fields. Cursor boundaries,
+`sourceErrors`; CLI stdout keeps its exact requested fields. Cursor scope,
 activity, lifecycle kinds, changed fields, and envelope health remain unchanged.
 Use the same selection for bootstrap and deltas. Omitted fields are unknown;
 projected rows replace only selected local state. Small-field open-list bootstraps
 read an atomically maintained compact SQLite index. Selections containing body,
 CI, comments, reviews, review status, required checks, or check rollups fall back
 to the original payload, as do incremental reads. Those projected reads validate
-raw JSON spans and skip decoding omitted row collections. The byte budget still counts original stored bodies, so projection
-preserves page/cursor boundaries and oversized-event failures. Scope/lifecycle
+raw JSON spans and skip decoding omitted row collections. Stored-byte budgets and
+single-row ceilings still apply before projection; compact and full-detail pages
+can end at different cursor positions. Scope/lifecycle
 fields needed for internal filtering remain available; the HTTP response removes
 those fields unless selected. Activity remains intact and may contain comment
 bodies. This is not a new total wire-size bound. Unknown/empty fields fail before

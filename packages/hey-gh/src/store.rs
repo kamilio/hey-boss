@@ -24,6 +24,11 @@ const OPEN_PR_SELECTION: &str = "resource GLOB 'pr-status://*' AND
         AND json_type(data,'$.pullRequest.removed') IS NOT 'true'
     ELSE 1 END";
 
+// Collection/storage ceilings are too large for interactive full-detail pages.
+// Compact indexed projections retain the original raw-byte ceiling; one larger
+// indivisible row can still make progress up to the existing snapshot ceiling.
+const PR_DETAIL_PAGE_BYTES: usize = 2 * 1024 * 1024;
+
 #[derive(Clone, Debug)]
 pub(crate) struct PrOwner {
     pub repository: String,
@@ -1114,7 +1119,12 @@ impl Store {
         // A normal page shares the configured collection budget. A single
         // indivisible larger observation can use the bootstrap budget, ensuring
         // forward progress without permitting arbitrarily large allocations.
-        let max_bytes = (self.max_snapshot_bytes / 4).max(1);
+        let mut max_bytes = (self.max_snapshot_bytes / 4).max(1);
+        if resource_prefix.starts_with("pr-status://")
+            && !crate::pr_fields::can_read_compact(fields.as_deref())
+        {
+            max_bytes = max_bytes.min(PR_DETAIL_PAGE_BYTES);
+        }
         let max_event_bytes = self.max_snapshot_bytes;
         self.read_bulk(move |conn| {
             let (prefix, sequence, head) = cursor_position(conn, &scope, cursor.as_deref())?;
@@ -1219,7 +1229,7 @@ impl Store {
         repository: Option<&str>,
         fields: Option<Vec<String>>,
     ) -> Result<PrBootstrapPage> {
-        self.pr_bootstrap_page(scope, prefix, repository, fields, None)
+        self.pr_bootstrap_page(scope, prefix, repository, fields, None, 1000)
             .await
     }
 
@@ -1230,7 +1240,11 @@ impl Store {
         repository: Option<&str>,
         fields: Option<Vec<String>>,
         cursor: Option<&str>,
+        limit: usize,
     ) -> Result<PrBootstrapPage> {
+        if !(1..=1000).contains(&limit) {
+            return Err(Error::Invalid("limit must be 1..1000".into()));
+        }
         let scope = scope.to_owned();
         let repository = repository.map(str::to_owned);
         let prefix = repository
@@ -1246,6 +1260,11 @@ impl Store {
             .transpose()?;
         let max_bytes = self.max_snapshot_bytes;
         let compact = crate::pr_fields::can_read_compact(fields.as_deref());
+        let page_bytes = if compact {
+            max_bytes
+        } else {
+            max_bytes.min(PR_DETAIL_PAGE_BYTES)
+        };
         let read = move |conn: &Connection| {
             let head: u64 = conn
                 .query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| {
@@ -1276,15 +1295,18 @@ impl Store {
                 AND ({OPEN_PR_SELECTION})
                 AND (?4 IS NULL OR json_extract(({payload}),'$.pullRequest.repository.nameWithOwner')=?4 COLLATE NOCASE)
                 AND resource>?5
-                ORDER BY resource LIMIT 1001")).map_err(storage)?;
+                ORDER BY resource LIMIT ?6")).map_err(storage)?;
             let rows = stmt
-                .query_map(params![scope, prefix, upper, repository, after], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, usize>(1)?,
-                        r.get::<_, u64>(2)?,
-                    ))
-                })
+                .query_map(
+                    params![scope, prefix, upper, repository, after, limit + 1],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, usize>(1)?,
+                            r.get::<_, u64>(2)?,
+                        ))
+                    },
+                )
                 .map_err(storage)?;
             // Sort only small metadata, and reject oversized selections before
             // allocating their bodies. Full JSON must not enter SQLite's sorter.
@@ -1306,7 +1328,7 @@ impl Store {
             for row in rows {
                 let (resource, data_bytes, observed_at_ms) = row.map_err(storage)?;
                 if !snapshots.is_empty()
-                    && (snapshots.len() == 1000 || bytes.saturating_add(data_bytes) > max_bytes)
+                    && (snapshots.len() == limit || bytes.saturating_add(data_bytes) > page_bytes)
                 {
                     more_snapshots = true;
                     break;

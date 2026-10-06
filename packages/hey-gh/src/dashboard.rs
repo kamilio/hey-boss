@@ -1673,8 +1673,11 @@ impl Client {
     }
 
     /// Repository selection is part of the cursor's scope; changing it requires
-    /// a new bootstrap. Limit bounds scanned events, so empty hasMore pages are
-    /// valid when unrelated source/branch observations occupy the shared feed.
+    /// a new bootstrap. Limit bounds bootstrap rows and scanned events, so empty
+    /// hasMore pages are valid when unrelated observations occupy the feed.
+    /// Full-detail pages also have a small byte budget, with one indivisible
+    /// larger row allowed up to the storage ceiling. Compact status projections
+    /// keep their indexed fast path and can return more rows per byte-limited page.
     pub async fn pr_status_page(
         &self,
         repository: Option<&str>,
@@ -1777,7 +1780,7 @@ impl Client {
             }
         }
         let page = self
-            .bootstrap_open_prs(&prefix, repository, fields, raw_cursor)
+            .bootstrap_open_prs(&prefix, repository, fields, raw_cursor, limit)
             .await?;
         let mut pulls = Vec::new();
         let mut changes = Vec::new();
