@@ -1,5 +1,8 @@
 use super::*;
-use crate::{polling::Coverage, shared_read::Identity};
+use crate::{
+    polling::{Coverage, DemandScope},
+    shared_read::Identity,
+};
 
 impl Api {
     async fn polling_coverage(&self) -> Result<Coverage> {
@@ -128,6 +131,49 @@ pub(super) async fn coverage(State(api): State<Api>) -> ApiResult<Json<Coverage>
     Ok(Json(api.polling_coverage().await?))
 }
 
+fn demand_scope(request: &axum::extract::Request) -> DemandScope {
+    if request.method() != axum::http::Method::GET {
+        return DemandScope::Global;
+    }
+    let path = request.uri().path();
+    let repository = |value: String| {
+        (value.len() <= 512 && crate::client::validate_repository(&value).is_ok())
+            .then(|| value.to_ascii_lowercase())
+    };
+    if path == "/v1/pr-status" {
+        let mut selectors =
+            url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                .filter(|(key, _)| key == "repository");
+        if let Some((_, value)) = selectors.next()
+            && selectors.next().is_none()
+            && let Some(repo) = repository(value.into_owned())
+        {
+            return DemandScope::Repository(repo);
+        }
+        return DemandScope::Global;
+    }
+    let parts: Vec<_> = path.split('/').collect();
+    match parts.as_slice() {
+        ["", "v1", kind @ ("prs" | "repos"), owner, repo, tail @ ..] => {
+            let Some(repo) = repository(format!("{owner}/{repo}")) else {
+                return DemandScope::Global;
+            };
+            match (*kind, tail) {
+                (_, []) | ("repos", ["prs" | "pr-lifecycles"]) => DemandScope::Repository(repo),
+                ("prs", [number] | [number, "ci" | "metadata" | "required-checks"]) => number
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map_or(DemandScope::Global, |n| {
+                        DemandScope::PullRequest(format!("{repo}/{n}"))
+                    }),
+                _ => DemandScope::Global,
+            }
+        }
+        _ => DemandScope::Global,
+    }
+}
+
 pub(super) async fn local_demand(
     State(api): State<Api>,
     request: axum::extract::Request,
@@ -158,7 +204,12 @@ pub(super) async fn local_demand(
             _ if path.starts_with("/v1/repos/") => "repository",
             _ => "other",
         };
-        api.0.client.polling().demand(source);
+        let scope = demand_scope(&request);
+        if scope == DemandScope::Global {
+            api.0.client.polling().demand(source);
+        } else {
+            api.0.client.polling().demand_scoped(source, scope);
+        }
     }
     next.run(request).await
 }
@@ -166,6 +217,100 @@ pub(super) async fn local_demand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_demand_is_scoped_only_when_the_selector_is_unambiguous() {
+        for (path, local_node, local_sibling, local_other) in [
+            ("/v1/prs/acme/repo/7?cached_only=true", true, false, false),
+            (
+                "/v1/prs/acme/repo/7/ci?cached_only=true",
+                true,
+                false,
+                false,
+            ),
+            (
+                "/v1/prs/acme/repo/7/metadata?cached_only=true",
+                true,
+                false,
+                false,
+            ),
+            (
+                "/v1/prs/acme/repo/7/required-checks?cached_only=true",
+                true,
+                false,
+                false,
+            ),
+            ("/v1/prs/acme/repo?cached_only=true", true, true, false),
+            ("/v1/repos/acme/repo?cached_only=true", true, true, false),
+            (
+                "/v1/pr-status?repository=ACME%2Frepo&cached_only=true",
+                true,
+                true,
+                false,
+            ),
+            (
+                "/v1/pr-status?repository=acme%2Frepo&repository=acme%2Fother&cached_only=true",
+                true,
+                true,
+                true,
+            ),
+            (
+                "/v1/pr-status?repository=acme%2Frepo&%72epository=acme%2Frepo&cached_only=true",
+                true,
+                true,
+                true,
+            ),
+            (
+                "/v1/pr-status?repository=acme%2&cached_only=true",
+                true,
+                true,
+                true,
+            ),
+            ("/v1/pr-status?cached_only=true", true, true, true),
+            ("/v1/prs/acme/repo/0?cached_only=true", true, true, true),
+            ("/v1/snapshot", true, true, true),
+        ] {
+            let (_dir, api, _, node) = fixture().await;
+            let local = api.polling_coverage().await.unwrap().identity;
+            let mut proof = api.polling_coverage().await.unwrap();
+            proof.identity.instance = "b".repeat(32);
+            let mut sibling = node.clone();
+            sibling["number"] = json!(8);
+            let mut other = node.clone();
+            other["repository"]["nameWithOwner"] = json!("acme/other");
+            proof.rows.extend([
+                crate::polling::row(&sibling).unwrap(),
+                crate::polling::row(&other).unwrap(),
+            ]);
+            assert!(
+                api.0
+                    .client
+                    .polling()
+                    .renew(&local, 60, tokio::time::Instant::now(), proof)
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let router = api.router();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            reqwest::Client::new()
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            for (node, local) in [
+                (&node, local_node),
+                (&sibling, local_sibling),
+                (&other, local_other),
+            ] {
+                assert_eq!(
+                    api.0.client.polling().covers("ci", node),
+                    !local,
+                    "{path}: {node}"
+                );
+            }
+            server.abort();
+        }
+    }
 
     async fn fixture() -> (tempfile::TempDir, Api, String, Value) {
         let dir = tempfile::tempdir().unwrap();
