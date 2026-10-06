@@ -165,15 +165,17 @@ struct Active {
 
 // Providers/resources have independent allowances but share dispatch spacing
 // and sockets. Completion priority within one must not monopolize the others.
+// Details use separate sockets: serving them cannot spend their provider's
+// turn at the lifecycle/CI socket while that socket is occupied by a peer.
 #[derive(Default)]
-struct QuotaOrder(VecDeque<String>);
+struct QuotaOrder(VecDeque<(String, bool)>);
 
 impl QuotaOrder {
-    fn choose(&self, quotas: impl Iterator<Item = String>) -> Option<String> {
+    fn choose(&self, quotas: impl Iterator<Item = (String, bool)>) -> Option<(String, bool)> {
         quotas.min_by_key(|quota| self.0.iter().position(|recent| recent == quota))
     }
 
-    fn dispatched(&mut self, quota: String, capacity: usize) {
+    fn dispatched(&mut self, quota: (String, bool), capacity: usize) {
         self.0.retain(|recent| recent != &quota);
         if self.0.len() >= capacity {
             self.0.pop_front();
@@ -976,11 +978,12 @@ impl Scheduler {
                         .iter()
                         .enumerate()
                         .filter(|(index, job)| eligible(*index, job))
-                        .map(|(_, job)| job.quota()),
+                        .map(|(_, job)| (job.quota(), job.detail_lane)),
                 );
                 let eligible = |index: usize, job: &Job| {
-                    quota.as_ref().is_some_and(|quota| *quota == job.quota())
-                        && eligible(index, job)
+                    quota.as_ref().is_some_and(|(quota, detail)| {
+                        *quota == job.quota() && *detail == job.detail_lane
+                    }) && eligible(index, job)
                 };
                 // Prefer interactive policy, but owe the background a turn
                 // after three foreground turns in the same quota. Validators
@@ -1217,7 +1220,7 @@ impl Scheduler {
                     attempt.future = Box::pin(async move { outcome });
                 }
                 global_next = Instant::now() + self.config.min_spacing;
-                quota_order.dispatched(quota, self.config.queue_capacity);
+                quota_order.dispatched((quota, attempt.detail_lane), self.config.queue_capacity);
                 active.push(attempt);
                 continue;
             }
@@ -1948,15 +1951,17 @@ mod tests {
             "installation/graphql",
         ];
         for expected in quotas.into_iter().cycle().take(20) {
-            let selected = order.choose(quotas.into_iter().map(str::to_owned)).unwrap();
-            assert_eq!(selected, expected);
+            let selected = order
+                .choose(quotas.into_iter().map(|quota| (quota.to_owned(), false)))
+                .unwrap();
+            assert_eq!(selected, (expected.to_owned(), false));
             order.dispatched(selected, 256);
         }
         // Eligibility is decided by the real scheduler's quota/socket gates.
         // A bucket absent from that set must not reserve a dispatch turn.
         assert_eq!(
-            order.choose(["graphql".into()].into_iter()).as_deref(),
-            Some("graphql")
+            order.choose([("graphql".into(), false)].into_iter()),
+            Some(("graphql".into(), false))
         );
         assert!(order.choose(std::iter::empty()).is_none());
     }
@@ -1965,13 +1970,13 @@ mod tests {
     fn quota_rotation_history_is_bounded_and_repeated_dispatch_moves_only_that_bucket() {
         let mut order = QuotaOrder::default();
         for index in 0..1000 {
-            order.dispatched(format!("resource-{index}"), 8);
+            order.dispatched((format!("resource-{index}"), false), 8);
             assert!(order.0.len() <= 8);
         }
-        assert_eq!(order.0.front().unwrap(), "resource-992");
-        order.dispatched("resource-992".into(), 8);
-        assert_eq!(order.0.front().unwrap(), "resource-993");
-        assert_eq!(order.0.back().unwrap(), "resource-992");
+        assert_eq!(order.0.front().unwrap().0, "resource-992");
+        order.dispatched(("resource-992".into(), false), 8);
+        assert_eq!(order.0.front().unwrap().0, "resource-993");
+        assert_eq!(order.0.back().unwrap().0, "resource-992");
         assert_eq!(order.0.len(), 8);
     }
 
