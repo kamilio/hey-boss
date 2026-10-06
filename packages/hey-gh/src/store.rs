@@ -442,6 +442,9 @@ impl Store {
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        let started = std::time::Instant::now();
+        // This static closure type identifies the method, never captured data.
+        let operation = std::any::type_name_of_val(&f);
         let conn = self.connection.clone();
         let admission = self.writer_admission.clone();
         // Wait in FIFO order without occupying blocking threads needed by
@@ -449,11 +452,32 @@ impl Store {
         // a paused/cancelled caller must not reserve and stall the writer turn.
         tokio::spawn(async move {
             let permit = admission.acquire_owned().await.map_err(storage)?;
+            let admitted = std::time::Instant::now();
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 // Retain poisoning semantics if a writer panics.
                 let mut conn = conn.lock().map_err(storage)?;
-                f(&mut conn)
+                let working = std::time::Instant::now();
+                let result = f(&mut conn);
+                let finished = std::time::Instant::now();
+                // Diagnostics must not extend ownership of the writer turn.
+                drop(conn);
+                drop(_permit);
+                if finished.duration_since(started) >= std::time::Duration::from_millis(250) {
+                    // Emit from the independently driven write, even when its
+                    // original caller stopped waiting. No keys or raw errors.
+                    tracing::info!(
+                        operation,
+                        succeeded = result.is_ok(),
+                        error_code = result.as_ref().err().map_or("none", Error::diagnostic_code),
+                        elapsed_ms = finished.duration_since(started).as_millis() as u64,
+                        queue_ms = admitted.duration_since(started).as_millis() as u64,
+                        dispatch_ms = working.duration_since(admitted).as_millis() as u64,
+                        work_ms = finished.duration_since(working).as_millis() as u64,
+                        "Cache writer operation finished"
+                    );
+                }
+                result
             })
             .await
             .map_err(storage)?
@@ -983,9 +1007,11 @@ impl Store {
             let resource=resolve_pr_resource(&tx,&scope,&resource)?;
             let data=serde_json::to_string(&value).map_err(storage)?;
             let hash=digest(&data);
-            let old:Option<(String,String)>=tx.query_row("SELECT hash,data FROM snapshots WHERE scope=?1 AND resource=?2",params![scope,resource],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+            // Matching hashes need neither the old body nor its overflow pages.
+            // Keep the comparison and changed-body read in the same transaction.
+            let old:Option<(String,Option<String>)>=tx.query_row("SELECT hash,CASE WHEN hash=?3 THEN NULL ELSE data END FROM snapshots WHERE scope=?1 AND resource=?2",params![scope,resource,hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
             if old.as_ref().map(|(h,_)|h.as_str())!=Some(&hash) {
-                let previous:Option<Value>=old.map(|(_,data)|serde_json::from_str(&data).map_err(storage)).transpose()?;
+                let previous:Option<Value>=old.and_then(|(_,data)|data).map(|data|serde_json::from_str(&data).map_err(storage)).transpose()?;
                 if resource.starts_with("pr-status://") && previous.as_ref().and_then(|v|v["pullRequest"]["id"].as_str()).zip(value["pullRequest"]["id"].as_str()).is_some_and(|(old,new)|old!=new) {
                     tx.execute("DELETE FROM snapshot_validation WHERE scope=?1 AND resource IN (?2,?3)",params![scope,resource,format!("{resource}#discovery")]).map_err(storage)?;
                 }
@@ -1513,6 +1539,119 @@ fn feed_prefix(conn: &Connection, scope: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unchanged_observation_skips_old_payload_allocation_but_keeps_validation_and_ownership()
+    {
+        // SQLite's largest-allocation counter is global. Isolate it from
+        // unrelated tests instead of using wall-clock or pager-cache counts
+        // (direct overflow reads can bypass SQLite's page cache).
+        const CHILD: &str = "HEY_GH_UNCHANGED_PAYLOAD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "store::tests::unchanged_observation_skips_old_payload_allocation_but_keeps_validation_and_ownership", "--test-threads=1", "--nocapture"])
+                .env(CHILD, "1").output().await.unwrap();
+            let logs = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{logs}");
+            eprintln!("{logs}");
+            return;
+        }
+        fn largest_sqlite_allocation(reset: bool) -> i64 {
+            let (mut current, mut peak) = (0, 0);
+            // SQLite writes these counters and retains neither pointer.
+            let result = unsafe {
+                rusqlite::ffi::sqlite3_status64(
+                    rusqlite::ffi::SQLITE_STATUS_MALLOC_SIZE,
+                    &mut current,
+                    &mut peak,
+                    i32::from(reset),
+                )
+            };
+            assert_eq!(result, rusqlite::ffi::SQLITE_OK);
+            peak
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            &dir.path().join("cache.sqlite"),
+            std::time::Duration::from_secs(3600),
+            100,
+            16 * 1024 * 1024,
+        )
+        .unwrap();
+        let resource = "ci://github.com/acme/demo/7";
+        let alias = "ci://github.com/ACME/DEMO/7";
+        let owner = PrOwner {
+            repository: "acme/demo".into(),
+            number: 7,
+            node_id: Some("PR_7".into()),
+            generation: 0,
+        };
+        let value =
+            serde_json::json!({"head_sha":"head", "jobs":[{"output":"x".repeat(4 * 1024 * 1024)}]});
+        let cursor = store
+            .observe_owned("scope", &[(resource.into(), value.clone())], &owner)
+            .await
+            .unwrap();
+        store.run(|conn| {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA mmap_size=0; PRAGMA cache_size=32; PRAGMA shrink_memory;") .map_err(storage)?;
+            Ok(largest_sqlite_allocation(true))
+        }).await.unwrap();
+        let repeated = store
+            .observe_validated_owned(
+                "scope",
+                &[(alias.into(), value.clone())],
+                &[(alias.into(), 42)],
+                &owner,
+            )
+            .await
+            .unwrap();
+        let allocation = store
+            .run(|_| Ok(largest_sqlite_allocation(false)))
+            .await
+            .unwrap();
+        eprintln!("unchanged observation: {allocation} bytes in largest SQLite allocation");
+        assert_eq!(repeated, cursor);
+        assert_eq!(store.validation_clock("scope", resource).await.unwrap(), 42);
+        assert!(
+            store
+                .changes("scope", Some(&cursor), 100)
+                .await
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        let stored_owner = store.read(|conn| conn.query_row("SELECT node_id,generation FROM source_owner WHERE scope='scope' AND resource='ci://github.com/acme/demo/7'", [], |r| Ok((r.get::<_,String>(0)?, r.get::<_,u64>(1)?))).map_err(storage)).await.unwrap();
+        assert_eq!(stored_owner, ("PR_7".into(), 0));
+        assert!(
+            allocation > 0 && allocation < 1024 * 1024,
+            "unchanged publication allocated {allocation} bytes in SQLite; the old body must stay off the writer connection"
+        );
+
+        let mut changed = value;
+        changed["head_sha"] = serde_json::json!("new-head");
+        let next = store
+            .observe_validated_owned(
+                "scope",
+                &[(alias.into(), changed.clone())],
+                &[(resource.into(), 41)],
+                &owner,
+            )
+            .await
+            .unwrap();
+        assert_ne!(next, cursor);
+        assert_eq!(store.validation_clock("scope", resource).await.unwrap(), 42);
+        let events = store.changes("scope", Some(&cursor), 100).await.unwrap();
+        assert_eq!(events.changes.len(), 1);
+        assert_eq!(events.changes[0].changed_fields, ["head_sha"]);
+        assert_eq!(
+            store.snapshot("scope", resource).await.unwrap(),
+            Some(changed)
+        );
+    }
 
     #[tokio::test]
     async fn repository_alias_misses_do_not_scan_other_cached_urls() {
