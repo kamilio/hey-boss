@@ -35,6 +35,12 @@ pub(super) fn merged_seed(pr: &Value, repository: &str, number: u64) -> bool {
     lifecycle(pr) == Some("MERGED") && eligible(pr, repository, number)
 }
 
+fn conflicting_seed(pr: &Value) -> bool {
+    lifecycle(pr) == Some("OPEN")
+        && pr["mergeable"] == false
+        && pr.get("merge_commit_sha") == Some(&Value::Null)
+}
+
 fn eligible(pr: &Value, repository: &str, number: u64) -> bool {
     let nonempty = |v: &Value| v.as_str().is_some_and(|s| !s.is_empty());
     let sha = |v: &Value| v.as_str().is_some_and(crate::repository::valid_sha);
@@ -43,11 +49,12 @@ fn eligible(pr: &Value, repository: &str, number: u64) -> bool {
         && lifecycle(pr).is_some()
         // A merged PR's merge SHA is its actual merge/squash commit, not an
         // uncertain test merge. Its current mergeability is no longer relevant.
-        && (pr["merged"] == true || pr["mergeable"] == true)
+        && (((pr["merged"] == true || pr["mergeable"] == true)
+            && sha(&pr["merge_commit_sha"]))
+            || conflicting_seed(pr))
         && pr["stack"].is_null()
         && sha(&pr["head"]["sha"])
         && sha(&pr["base"]["sha"])
-        && sha(&pr["merge_commit_sha"])
         && pr["base"]["ref"]
             .as_str()
             .is_some_and(|s| crate::repository::validate_branch(s).is_ok())
@@ -79,6 +86,14 @@ fn identity_matches(pr: &Value, response: &Value) -> bool {
 
 fn matches(pr: &Value, response: &Value) -> bool {
     let node = &response["data"]["repository"]["pullRequest"];
+    if conflicting_seed(pr) {
+        // Explicit current conflicts can confirm a head-only collection. A
+        // missing/unknown test merge cannot confirm this seed, and a retained
+        // merge ref is never evidence that the conflict remains unchanged.
+        return identity_matches(pr, response)
+            && node["mergeable"] == "CONFLICTING"
+            && node.get("potentialMergeCommit") == Some(&Value::Null);
+    }
     let merge_matches = if pr["merged"] == true {
         node["mergeCommit"]["oid"] == pr["merge_commit_sha"]
     } else {
@@ -145,6 +160,7 @@ impl Client {
                     }
                     let node = &response.data["data"]["repository"]["pullRequest"];
                     if lifecycle(&seed.data) != Some("OPEN")
+                        || seed.data["mergeable"] != true
                         || !identity_matches(&seed.data, &response.data)
                         || node["mergeable"] != "UNKNOWN"
                         || node.get("potentialMergeCommit") != Some(&Value::Null)
