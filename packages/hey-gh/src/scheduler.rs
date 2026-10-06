@@ -43,6 +43,8 @@ pub(crate) enum SharedResult {
 }
 mod inflight;
 pub(crate) use inflight::Inflight;
+mod waiters;
+pub(crate) use waiters::{WaitingDeadline, WaitingDeadlines};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RateLimit {
@@ -118,6 +120,7 @@ pub(crate) struct Job {
     pub cached: Option<Response>,
     pub notify: watch::Sender<SharedResult>,
     pub deadline: Arc<Mutex<Instant>>,
+    pub waiting_deadlines: Arc<WaitingDeadlines>,
     pub ready_at: Instant,
     // A lower-priority validator borrowed this completion's paced wait. Its
     // charged response keeps the exact job's slot and repays debt afterwards.
@@ -166,6 +169,12 @@ impl Job {
     }
     pub(crate) fn deadline(&self) -> Instant {
         *self.deadline.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn scheduling_deadline(&self) -> Instant {
+        self.waiting_deadlines
+            .earliest()
+            .unwrap_or_else(|| self.deadline())
     }
 }
 
@@ -799,6 +808,7 @@ impl Scheduler {
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
+        let mut deadline_yields = std::collections::HashSet::<(String, bool, bool)>::new();
         let mut quota_order = QuotaOrder::default();
         let mut blocked_probes = ProbeBlocks::default();
         let mut budgets = Budgets::default();
@@ -905,9 +915,11 @@ impl Scheduler {
             // Choose each quota's turn before considering pacing. A charged
             // conditional probe must not keep moving an older turn forever.
             // Keep foreground/background and completion/ordinary alternation;
-            // ties retain queue order. Busy lanes and retry backoffs do not
+            // Within a class, a shorter deadline can overtake FIFO once, then
+            // owes that class a FIFO turn. Busy lanes and retry backoffs do not
             // reserve a turn, so unrelated work can still use its own capacity.
             let mut turns = HashMap::new();
+            let mut fifo_turns = HashMap::new();
             for (index, job) in pending.iter().enumerate() {
                 if job.ready_at > now
                     || waits_for_required(job)
@@ -923,9 +935,19 @@ impl Scheduler {
                     interactive != (interactive_streaks.get(&quota).copied().unwrap_or(0) < 3),
                     completing == completion_yields.contains(&(quota.clone(), interactive)),
                 );
+                let fifo = fifo_turns.entry(quota.clone()).or_insert((priority, index));
+                if priority < fifo.0 {
+                    *fifo = (priority, index);
+                }
+                let yielding = deadline_yields.contains(&(quota.clone(), interactive, completing));
                 let turn = turns.entry(quota).or_insert((priority, index));
                 if priority < turn.0 {
                     *turn = (priority, index);
+                } else if priority == turn.0
+                    && !yielding
+                    && job.scheduling_deadline() < pending[turn.1].scheduling_deadline()
+                {
+                    turn.1 = index;
                 }
             }
             let probing_quotas: std::collections::HashSet<_> = active
@@ -1138,6 +1160,9 @@ impl Scheduler {
                         protect_turn,
                     }
                 });
+                let overtook = fifo_turns
+                    .get(&pending[index].quota())
+                    .is_some_and(|(_, fifo)| *fifo != index);
                 let mut job = pending.remove(index).expect("existing queue entry");
                 let token = if job.installation {
                     match self
@@ -1181,6 +1206,16 @@ impl Scheduler {
                     };
                 }
                 if !job.minting && consumes_turn {
+                    let deadline_class = (
+                        job.quota(),
+                        job.interactive(),
+                        job.completion_validation.load(Ordering::Relaxed),
+                    );
+                    if overtook {
+                        deadline_yields.insert(deadline_class);
+                    } else {
+                        deadline_yields.remove(&deadline_class);
+                    }
                     let class = (job.quota(), job.interactive());
                     if job.completion_validation.load(Ordering::Relaxed) {
                         completion_yields.insert(class);
@@ -1206,6 +1241,7 @@ impl Scheduler {
                     endpoint=if job.minting { "app_token" } else { job.endpoint }, resource=if job.minting { "app_auth" } else { job.resource.as_str() },
                     foreground=job.interactive(),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
+                    deadline_overtake=overtook && consumes_turn && !job.minting,
                     pacing_probe=probe.is_some(),
                     selected_probe=probe.as_ref().is_some_and(|turn| turn.owns_turn),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
@@ -2133,6 +2169,7 @@ mod tests {
             cached: None,
             notify: watch::channel(SharedResult::Queued).0,
             deadline: Arc::new(Mutex::new(Instant::now() + Duration::from_secs(60))),
+            waiting_deadlines: Arc::new(WaitingDeadlines::default()),
             ready_at: Instant::now(),
             protected_pacing: Vec::new(),
             attempts: 0,
