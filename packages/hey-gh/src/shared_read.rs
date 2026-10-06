@@ -2,9 +2,18 @@
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub mod wire;
 
+pub const MAX_REQUEST_BYTES: usize = 32 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_TIMEOUT_MS: u64 = 3_600_000;
+
+/// Owner-private endpoint published only by a connected fleet companion.
+pub fn socket_path() -> Result<std::path::PathBuf> {
+    dirs::cache_dir()
+        .map(|root| root.join("hey-gh/fleet/socket"))
+        .ok_or_else(|| Error::Invalid("GitHub relay cache directory is unavailable".into()))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,7 +139,9 @@ pub(crate) fn supported_path(path: &str) -> bool {
         // Raw source feeds include local explicit watches. Until their source
         // coverage is negotiated, only the account PR feed can be shared.
         ["", "v1", "pr-status"] => true,
-        ["", "v1", "prs" | "repos", owner, repo] => repository(owner, repo),
+        // Repository reports implicitly include refs from local PR watches,
+        // even when the caller supplies an explicit branch selection.
+        ["", "v1", "prs", owner, repo] => repository(owner, repo),
         ["", "v1", "prs", owner, repo, n] => repository(owner, repo) && number(n),
         [
             "",
@@ -203,7 +214,6 @@ mod tests {
             "/v1/prs/acme/demo/7/ci",
             "/v1/prs/acme/demo/7/metadata",
             "/v1/prs/acme/demo/7/required-checks",
-            "/v1/repos/acme/demo",
             "/v1/repos/acme/demo/prs",
             "/v1/repos/acme/demo/pr-lifecycles",
         ] {
@@ -214,6 +224,8 @@ mod tests {
             // handshake does not prove that the supervisor covers them.
             "/v1/snapshot",
             "/v1/changes",
+            // Repository reports also include refs from locally registered PR watches.
+            "/v1/repos/acme/demo",
             "https://example.com/v1/pr-status",
             "//example.com/v1/pr-status",
             "/v1/identity",
