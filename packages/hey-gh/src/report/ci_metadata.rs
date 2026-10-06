@@ -3,6 +3,7 @@ use crate::{Client, Error, Freshness, Response, Result, Source, now_ms};
 use serde_json::Value;
 use std::time::Duration;
 
+pub(super) mod commit_summaries;
 pub(super) mod discovery;
 mod late;
 mod status_versions;
@@ -173,7 +174,7 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Vec<Value>> {
         match self
-            .cached_commit_list(repository, sha, rest_path, list, freshness)
+            .reusable_commit_list(repository, sha, rest_path, list, freshness)
             .await?
         {
             CachedList::Ready(values) => Ok(values),
@@ -198,7 +199,7 @@ impl Client {
         }
     }
 
-    async fn cached_commit_list(
+    async fn reusable_commit_list(
         &self,
         repository: &str,
         sha: &str,
@@ -206,16 +207,25 @@ impl Client {
         list: CommitList,
         freshness: Freshness,
     ) -> Result<CachedList> {
-        if !matches!(freshness, Freshness::Revalidate)
-            && !matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
-            && let Some(ListEvidence {
-                empty,
-                at,
-                resource,
-                versions,
-            }) = self
-                .cached_list_evidence(repository, sha, list, freshness)
-                .await?
+        if matches!(freshness, Freshness::Revalidate)
+            || matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
+        {
+            return Ok(CachedList::Unavailable);
+        }
+        let mut evidence = self
+            .cached_list_evidence(repository, sha, list, freshness)
+            .await?;
+        if evidence.is_none() {
+            evidence =
+                commit_summaries::evidence(self, repository, sha, rest_path, list, freshness)
+                    .await?;
+        }
+        if let Some(ListEvidence {
+            empty,
+            at,
+            resource,
+            versions,
+        }) = evidence
         {
             let rest = match self.peek_get(rest_path).await {
                 Ok(rest) => Some(rest),

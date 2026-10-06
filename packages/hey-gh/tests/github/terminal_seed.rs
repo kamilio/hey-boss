@@ -61,6 +61,20 @@ async fn terminal_ci_starts_sources_while_metadata_is_waiting() {
                 !read.is_finished(),
                 "a stale terminal seed cannot certify CI"
             );
+            tokio::time::timeout(Duration::from_millis(500), async {
+                loop {
+                    if h.calls()[before..].iter().any(|call| {
+                        call.body["query"]
+                            .as_str()
+                            .is_some_and(|q| q.starts_with("query CommitLists"))
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("immutable commit summaries waited for terminal REST metadata");
             h.mock.release.notify_one();
             let report = read.await.unwrap().unwrap();
             assert!(report.complete);
@@ -77,8 +91,11 @@ async fn terminal_ci_starts_sources_while_metadata_is_waiting() {
             assert!(
                 h.calls()[before..]
                     .iter()
-                    .all(|call| call.path != "/graphql"),
-                "merged or unknown terminal seeds must not request a selector proof"
+                    .all(|call| call.path != "/graphql"
+                        || call.body["query"]
+                            .as_str()
+                            .is_some_and(|q| q.starts_with("query CommitLists"))),
+                "terminal metadata must use REST; only immutable commit-list proofs may use GraphQL"
             );
         }
     }
@@ -97,10 +114,18 @@ async fn merged_terminal_ci_does_not_request_a_test_merge_selector_proof() {
             .unwrap()
             .complete
     );
-    assert!(
+    assert!(h.calls()[before..].iter().all(|call| {
+        call.path != "/graphql"
+            || call.body["query"]
+                .as_str()
+                .is_some_and(|q| q.starts_with("query CommitLists"))
+    }));
+    assert_eq!(
         h.calls()[before..]
             .iter()
-            .all(|call| call.path != "/graphql")
+            .filter(|call| call.path.ends_with("/pulls/7"))
+            .count(),
+        1
     );
 }
 

@@ -21,6 +21,7 @@ use url::Url;
 mod cache_admission_tests;
 mod ci_pull_request;
 mod ci_selectors;
+mod commit_summaries;
 #[cfg(test)]
 mod confirmation_tests;
 pub(crate) mod lifecycle;

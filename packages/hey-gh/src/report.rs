@@ -639,14 +639,12 @@ impl Client {
                     timings.enter(Phase::Collection);
                     let (pr, data) = if let Some(seed) = seed {
                         crate::entity::set(self.pr_owner(repository, number, &seed.data).await?);
-                        let head = sha(&seed.data, "head")?;
-                        let merge = seed.data["merge_commit_sha"].as_str();
                         // Immutable commit sources can load while current PR
                         // metadata validates. Give metadata its own ownership
                         // scope so lifecycle publication never uses the seed.
                         let (pr, data) = self.collect_with_ci_metadata(
                             Box::pin(crate::entity::scope(self.initial_ci_metadata(repository, number, policy))),
-                            Box::pin(self.ci_report(repository, &head, merge, policy)),
+                            Box::pin(self.ci_report_from_metadata(repository, &seed.data, policy)),
                         ).await;
                         let pr = pr?;
                         let data = if seed.data["node_id"] != pr.data()["node_id"]
@@ -658,18 +656,14 @@ impl Client {
                             // just obtained; the final check below still bounds
                             // freshness and catches pushes during collection.
                             crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
-                            let head = sha(pr.data(), "head")?;
-                            let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
-                            self.ci_report(repository, &head, merge, policy).await?
+                            self.ci_report_from_metadata(repository, pr.data(), policy).await?
                         } else {
                             data?
                         };
                         (pr, data)
                     } else {
                         let pr = self.initial_ci_metadata(repository, number, policy).await?;
-                        let head = sha(pr.data(), "head")?;
-                        let merge = pr.data()["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
-                        let data = self.ci_report(repository, &head, merge, policy).await?;
+                        let data = self.ci_report_from_metadata(repository, pr.data(), policy).await?;
                         (pr, data)
                     };
                     crate::entity::set(self.pr_owner(repository, number, pr.data()).await?);
@@ -720,6 +714,27 @@ impl Client {
         timings.finish(result.as_ref().map(|report| report.complete));
         result
     }
+    async fn ci_report_from_metadata(
+        &self,
+        repository: &str,
+        pr: &Value,
+        freshness: Freshness,
+    ) -> Result<CiReport> {
+        let head = sha(pr, "head")?;
+        let merge = pr["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
+        let read = self.ci_report(repository, &head, merge, freshness);
+        // Closed PRs often lack potentialMergeCommit. Explicit immutable refs
+        // can prove empty lists without certifying current PR selectors.
+        if pr["state"] == "closed" {
+            let wait_for_selectors =
+                pr["merged"] == false && pr["mergeable"] == true && merge.is_some();
+            ci_metadata::commit_summaries::scope(repository, &head, merge, wait_for_selectors, read)
+                .await
+        } else {
+            read.await
+        }
+    }
+
     async fn final_pull_request(
         &self,
         repository: &str,
