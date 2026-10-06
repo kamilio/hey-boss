@@ -23,6 +23,7 @@ use tokio::{sync::Mutex, task::JoinHandle};
 pub struct Api(Arc<ApiInner>);
 struct ApiInner {
     client: Client,
+    instance: String,
     monitors: Mutex<BTreeMap<String, Monitor>>,
 }
 
@@ -77,8 +78,12 @@ pub struct WatchStatus {
 
 impl Api {
     pub async fn new(client: Client) -> Result<Self> {
+        let mut instance = [0_u8; 16];
+        getrandom::fill(&mut instance)
+            .map_err(|error| Error::Storage(format!("daemon identity entropy: {error}")))?;
         let api = Self(Arc::new(ApiInner {
             client,
+            instance: instance.iter().map(|b| format!("{b:02x}")).collect(),
             monitors: Mutex::new(BTreeMap::new()),
         }));
         for watch in api.0.client.watches().await? {
@@ -96,6 +101,7 @@ impl Api {
     pub fn router_with_auth(&self, token: Option<String>) -> Router {
         Router::new()
             .route("/v1/status", get(status))
+            .route("/v1/identity", get(shared_identity))
             .route("/v1/releases/observe", post(releases))
             .route("/v1/viewer", get(viewer))
             .route("/v1/pr-status", get(pr_status))
@@ -767,6 +773,19 @@ async fn pr(
             .await?,
     ))
 }
+async fn shared_identity(State(api): State<Api>) -> ApiResult<Json<crate::shared_read::Identity>> {
+    // Identity checks on the shared read path must never hydrate a cold cache.
+    // The client and its credential scope are immutable for this API instance.
+    let viewer = api.0.client.get("user", Freshness::CachedOnly).await?;
+    let identity = crate::shared_read::Identity {
+        hostname: api.0.client.hostname().to_owned(),
+        user_id: viewer.data["id"].as_u64().unwrap_or(0),
+        instance: api.0.instance.clone(),
+    };
+    identity.validate()?;
+    Ok(Json(identity))
+}
+
 async fn viewer(
     State(api): State<Api>,
     Query(query): Query<ReadQuery>,
@@ -1322,9 +1341,9 @@ impl From<Error> for ApiError {
         Self(e)
     }
 }
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let (status, retry) = match &self.0 {
+impl From<Error> for crate::shared_read::Reply {
+    fn from(error: Error) -> Self {
+        let (status, retry) = match &error {
             Error::Invalid(_) => (StatusCode::BAD_REQUEST, None),
             Error::LocalAuth(_) => (StatusCode::UNAUTHORIZED, None),
             Error::CursorExpired => (StatusCode::GONE, None),
@@ -1340,7 +1359,7 @@ impl IntoResponse for ApiError {
             }
             _ => (StatusCode::INTERNAL_SERVER_ERROR, None),
         };
-        let code = match &self.0 {
+        let code = match &error {
             Error::CursorExpired => "cursor_expired",
             Error::QueueFull => "queue_full",
             Error::RateLimited { .. } => "rate_limited",
@@ -1359,8 +1378,8 @@ impl IntoResponse for ApiError {
             Error::GraphQL { .. } => "graphql",
             _ => "upstream",
         };
-        let mut envelope = json!({"error":self.0.to_string(),"code":code});
-        match &self.0 {
+        let mut envelope = json!({"error":error.to_string(),"code":code});
+        match &error {
             Error::Storage(cause) | Error::Transport(cause) => {
                 envelope["cause"] = json!(cause);
             }
@@ -1369,20 +1388,34 @@ impl IntoResponse for ApiError {
             }
             _ => {}
         }
-        if let Error::GitHub { status, message } = &self.0 {
+        if let Error::GitHub { status, message } = &error {
             // The gateway status describes the local API result. Preserve the
             // actual upstream failure independently for SDK diagnostics.
             envelope["upstream_status"] = json!(status);
             envelope["upstream_message"] = json!(message);
         }
-        if matches!(self.0, Error::CacheMiss) {
+        if matches!(error, Error::CacheMiss) {
             envelope["complete"] = json!(false);
             envelope["available"] = json!(false);
             envelope["oldest_validation_at_ms"] = Value::Null;
             envelope["validations"] = json!([]);
         }
-        let mut response = (status, Json(envelope)).into_response();
-        if let Some(retry) = retry {
+        Self {
+            status: status.as_u16(),
+            retry_after_seconds: retry,
+            body: envelope,
+        }
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let reply = crate::shared_read::Reply::from(self.0);
+        let mut response = (
+            StatusCode::from_u16(reply.status).expect("API status"),
+            Json(reply.body),
+        )
+            .into_response();
+        if let Some(retry) = reply.retry_after_seconds {
             response.headers_mut().insert(
                 header::RETRY_AFTER,
                 retry.to_string().parse().expect("numeric header"),

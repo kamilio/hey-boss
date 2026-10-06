@@ -15,6 +15,7 @@ pub mod release;
 mod report;
 mod repository;
 mod scheduler;
+pub mod shared_read;
 mod store;
 pub mod watcher;
 

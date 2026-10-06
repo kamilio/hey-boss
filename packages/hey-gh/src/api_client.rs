@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
+mod shared;
 
 pub(crate) const READ_TIMEOUT_HEADER: &str = "x-hey-gh-read-timeout-ms";
 
@@ -477,6 +478,10 @@ async fn remote_error(response: reqwest::Response) -> Error {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
     let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    response_error(status.as_u16(), retry, &body)
+}
+
+pub(crate) fn response_error(status: u16, retry: Option<u64>, body: &Value) -> Error {
     let message = body["error"]
         .as_str()
         .unwrap_or("local API error")
@@ -544,7 +549,7 @@ async fn remote_error(response: reqwest::Response) -> Error {
             access_denied: body["code"] == "graphql_access_denied",
         },
         _ => Error::GitHub {
-            status: upstream_status.map_or(status.as_u16(), |value| value as u16),
+            status: upstream_status.map_or(status, |value| value as u16),
             message: if upstream_status.is_some() {
                 body["upstream_message"]
                     .as_str()
