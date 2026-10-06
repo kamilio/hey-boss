@@ -11,14 +11,21 @@ const now = Date.now();
 const rows = Array.from({length:104}, (_, i) => ({url:`https://github.com/example/runtime/pull/${1000+i}`,title:i===0?'Keep background requests responsive when a companion reconnects and a very long repository name crosses the phone screen':'Improve the runtime '+i,merged_at:now-i*3600000,issues:[{number:i+1,title:i===0?'A linked issue with a long title that should wrap naturally':'Runtime task '+i}]}));
 rows.push({url:'https://github.com/example/runtime/pull/999',title:'Earlier merge without a recorded date',merged_at:null,observed_at:now,issues:[]});
 let failing=false, delayed=false, pending=false, mergeRequests=0;
+let csrf='fixture', actorId='fixture:actor', forbidden=false, bootstrapRequests=0;
 const server=createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json');
-  if(req.url==='/api/bootstrap')return res.end(JSON.stringify({ok:true,csrf:'fixture',project:{id:project,name:'Runtime'},projects:[{id:project,name:'Runtime'},{id:'named:empty',name:'Empty project'}]}));
+  if(req.url==='/api/bootstrap'){
+    bootstrapRequests++;
+    return res.end(JSON.stringify({ok:true,csrf,actor:{id:actorId},project:{id:project,name:'Runtime'},projects:[{id:project,name:'Runtime'},{id:'named:empty',name:'Empty project'}]}));
+  }
   if(req.url==='/api/action'){
     let body='';for await(const part of req)body+=part;
     const value=JSON.parse(body);
     if(value.operation.action!=='merged_pull_requests')return res.end(JSON.stringify({ok:true,issues:[]}));
     mergeRequests++;
+    if(forbidden||(req.headers['x-hey-boss-csrf']&&req.headers['x-hey-boss-csrf']!==csrf)){
+      res.statusCode=403;return res.end(JSON.stringify({ok:false,error:{message:'Reload the page to reconnect to this server'}}));
+    }
     if(failing){res.statusCode=503;return res.end(JSON.stringify({ok:false,error:{message:'Connection interrupted. Retry.'}}));}
     if(delayed)await new Promise(done=>setTimeout(done,350));
     const data=value.project===project?rows:[],offset=value.operation.offset||0,limit=value.operation.limit;
@@ -109,6 +116,7 @@ try{
   await live.locator('#merged-more').click();
   await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===105);
   rows.unshift({url:'https://github.com/example/runtime/pull/2000',title:'New merge arrives',merged_at:now+1000,issues:[]});
+  csrf='fixture-after-restart';
   await live.clock.fastForward(30000);
   await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===106,{},{timeout:3000});
   assert.equal(await live.locator('.merge-title').first().textContent(),'New merge arrives','New merges appear without clicking refresh');
@@ -129,7 +137,20 @@ try{
   await live.evaluate(()=>{window.fixtureHidden=false;document.dispatchEvent(new Event('visibilitychange'));});
   await live.waitForFunction(()=>document.querySelectorAll('.merge-row').length===107);
   assert.equal(await live.locator('.merge-title').first().textContent(),'Merge while hidden','Returning to the page refreshes immediately');
+  forbidden=true;
+  const beforeForbidden=mergeRequests, beforeBootstrap=bootstrapRequests;
+  await live.clock.fastForward(30000);
+  await live.locator('#merged-error').waitFor({state:'visible'});
+  await live.waitForFunction(()=>!document.querySelector('#merged-refresh').disabled);
+  assert.equal(mergeRequests,beforeForbidden+1,'Same-token authorization failure is not retried');
+  assert.equal(bootstrapRequests,beforeBootstrap+1,'Reconnect makes one bootstrap request');
+  forbidden=false;csrf='fixture-new-actor';actorId='fixture:other-actor';
+  const beforeActorChange=mergeRequests;
+  await live.clock.fastForward(30000);
+  await live.waitForFunction(()=>!document.querySelector('#merged-refresh').disabled);
+  assert.equal(mergeRequests,beforeActorChange+1,'A changed actor cannot authorize an automatic retry');
+  assert.equal(await live.locator('.merge-row').count(),107,'Reconnect failures retain history');
   await live.close();
   assert.deepEqual(errors,[]);
-  console.log('Passed: day groups, pagination, desktop/tablet/phone light and dark layouts, links, project switching, stale responses, keyboard refresh, empty state, error recovery, automatic refresh, expanded history, hidden-tab suspension.');
+  console.log('Passed: day groups, pagination, desktop/tablet/phone light and dark layouts, links, project switching, stale responses, keyboard refresh, empty state, error recovery, automatic refresh after server restart, bounded same-actor reconnect, expanded history, hidden-tab suspension.');
 }finally{await browser?.close();await new Promise(done=>server.close(done));}
