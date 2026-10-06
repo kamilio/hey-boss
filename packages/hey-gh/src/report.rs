@@ -1084,11 +1084,26 @@ impl Client {
             let confirmation_age = std::time::Duration::from_secs(15);
             let overlap = self.status().queue_capacity >= 32
                 && matches!(freshness, Freshness::MaxAge(age) if age >= confirmation_age);
+            let early = crate::client::READ_DEADLINE
+                .try_with(|deadline| {
+                    let now = tokio::time::Instant::now();
+                    *deadline > now && *deadline <= now + confirmation_age
+                })
+                .unwrap_or(false)
+                && now_ms()
+                    .checked_sub(pr.validated_at_ms)
+                    .is_some_and(|age| u128::from(age) >= confirmation_age.as_millis());
             let prefetch = async {
                 if !overlap {
                     return Ok(None);
                 }
-                tail.ready.notified().await;
+                // Stale metadata already requires a request. For a short read,
+                // its new validation cannot expire before the caller deadline,
+                // so let it queue alongside all sources. Longer reads retain
+                // the tail overlap to avoid aging speculative confirmations.
+                if !early {
+                    tail.ready.notified().await;
+                }
                 let started = tokio::time::Instant::now();
                 // Speculation only warms the ordinary personal cache. The
                 // final read below still enforces freshness and all selectors;
@@ -1099,7 +1114,7 @@ impl Client {
                         self.pull_request(repository, number, Freshness::MaxAge(confirmation_age)),
                     )
                     .await?;
-                tracing::info!(repository, number, source=?response.source,
+                tracing::info!(repository, number, early, source=?response.source,
                     elapsed_ms=started.elapsed().as_millis() as u64,
                     "Full PR report metadata overlap finished");
                 Ok::<_, Error>(Some(response))
