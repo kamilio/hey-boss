@@ -115,7 +115,8 @@ impl Api {
                     Ok(Ok((local, cadence, proof))) => {
                         client.polling().renew(&local, cadence, started, proof);
                     }
-                    _ => client.polling().revoke(),
+                    Ok(Err(error)) => client.polling().probe_failed(error.diagnostic_code()),
+                    Err(_) => client.polling().probe_failed("deadline"),
                 }
             }
         }));
@@ -139,7 +140,25 @@ pub(super) async fn local_demand(
         "/v1/identity" | "/v1/status" | "/v1/polling-coverage" | "/v1/watches"
     ) || request.method() != axum::http::Method::GET
     {
-        api.0.client.polling().demand();
+        // Only fixed route categories enter diagnostics, never selectors,
+        // cursors, credentials, or arbitrary request text.
+        let path = request.uri().path();
+        let source = match path {
+            "/v1/snapshot" | "/v1/changes" => "source_feed",
+            "/v1/pr-status" => "pr_status",
+            "/v1/viewer" => "viewer",
+            "/v1/watches" => "watch_registration",
+            "/v1/releases/observe" => "release",
+            _ if path.starts_with("/v1/prs/") => match path.rsplit('/').next() {
+                Some("ci") => "ci",
+                Some("required-checks") => "policy",
+                Some("metadata") => "metadata",
+                _ => "pull_requests",
+            },
+            _ if path.starts_with("/v1/repos/") => "repository",
+            _ => "other",
+        };
+        api.0.client.polling().demand(source);
     }
     next.run(request).await
 }
@@ -269,6 +288,15 @@ mod tests {
                 .is_success()
         );
         assert!(!api.0.client.polling().active());
+        assert_eq!(
+            api.0
+                .client
+                .polling()
+                .health()
+                .local_demand_source
+                .as_deref(),
+            Some("source_feed")
+        );
         assert!(
             !api.0
                 .client
