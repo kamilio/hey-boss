@@ -1096,6 +1096,13 @@ impl Supervisor {
         let mut revision = super::projects::revision(&self.ctx.node, &workers, &projects);
         self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
+        let github = if hello["capabilities"]["github_reads_v1"] == true {
+            Some(super::github_reads::Backend::new(hey_gh::ApiClient::new(
+                "http://127.0.0.1:8787/".parse().unwrap(),
+            )?)?)
+        } else {
+            None
+        };
         send(
             &mut *input.lock().unwrap(),
             json!({"kind":"configure","project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
@@ -1110,6 +1117,14 @@ impl Supervisor {
             }
             while let Ok(request) = requests.try_recv() {
                 send(&mut *input.lock().unwrap(), request)?;
+            }
+            if let Some(github) = &github {
+                for done in github.drain() {
+                    send(
+                        &mut *input.lock().unwrap(),
+                        super::github_reads::frame(&done.id, &done.response)?,
+                    )?;
+                }
             }
             if last_message.elapsed() > Duration::from_secs(15) {
                 return Err("Companion heartbeat timed out".into());
@@ -1135,6 +1150,14 @@ impl Supervisor {
             last_message = Instant::now();
             self.update(host, json!({"heartbeat":now()}))?;
             match message["kind"].as_str() {
+                Some("github_read" | "github_cancel") => {
+                    let github = github
+                        .as_ref()
+                        .ok_or_else(|| invalid("GitHub relay capability was not negotiated"))?;
+                    if let Some(reply) = github.receive(&message)? {
+                        send(&mut *input.lock().unwrap(), reply)?;
+                    }
+                }
                 Some("authority_request") => {
                     send(
                         &mut *input.lock().unwrap(),
