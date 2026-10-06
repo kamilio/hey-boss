@@ -68,17 +68,14 @@ fn selected<'a>(rows: impl IntoIterator<Item = &'a Value>, fields: &[&str]) -> V
     values
 }
 
-fn ci_signals(
+fn metadata_matches(
     repository: &str,
     number: u64,
     pull_request: &Value,
-    ci: &crate::CiReport,
     policy: &RequiredChecksReport,
-) -> Observation {
-    let sources_match = !ci.head_sha.is_empty()
-        && pull_request["head"]["sha"] == ci.head_sha
-        && policy.head_sha == ci.head_sha
-        && policy.merge_sha == ci.merge_sha
+) -> bool {
+    !policy.head_sha.is_empty()
+        && pull_request["head"]["sha"] == policy.head_sha
         && policy.repository.eq_ignore_ascii_case(repository)
         && policy.pull_number == number
         && crate::policy::identity_matches(pull_request, policy.policy_identity.as_ref())
@@ -95,7 +92,27 @@ fn ci_signals(
             .pr_base_sha
             .as_deref()
             .zip(pull_request["base"]["sha"].as_str())
-            .is_none_or(|(required, observed)| required == observed);
+            .is_none_or(|(required, observed)| required == observed)
+}
+
+fn metadata_conflicts(pull_request: &Value) -> &'static str {
+    match pull_request["mergeable"].as_bool() {
+        Some(false) => "conflicting",
+        Some(true) => "clean",
+        None => "unknown",
+    }
+}
+
+fn ci_signals(
+    repository: &str,
+    number: u64,
+    pull_request: &Value,
+    ci: &crate::CiReport,
+    policy: &RequiredChecksReport,
+) -> Observation {
+    let sources_match = metadata_matches(repository, number, pull_request, policy)
+        && policy.head_sha == ci.head_sha
+        && policy.merge_sha == ci.merge_sha;
     let current = pull_request["state"] == "open"
         && sources_match
         && policy.errors.is_empty()
@@ -130,6 +147,9 @@ fn ci_signals(
         ],
     );
     let mut blocking = Vec::new();
+    if sources_match && pull_request["state"] == "open" && pull_request["mergeable"] == false {
+        blocking.push(format!("conflict:{}", fingerprint(&json!(ci.head_sha))));
+    }
     if current {
         blocking.extend(required_gaps(policy));
         for required in policy.checks.iter().filter(|c| c.state == "failure") {
@@ -222,7 +242,7 @@ fn ci_signals(
         feedback: Vec::new(),
         evidence: evidence::bounded(
             json!({"repository":repository,"number":number,"head":ci.head_sha,
-            "sources_match":sources_match,
+            "sources_match":sources_match,"conflicts":metadata_conflicts(pull_request),
             "source_heads":{"pull_request":pull_request["head"]["sha"],"ci":ci.head_sha,"required":policy.head_sha},
             "source_merges":{"ci":ci.merge_sha,"required":policy.merge_sha},
             "source_bases":{"pull_request":{"ref":pull_request["base"]["ref"],"sha":pull_request["base"]["sha"]},"required":{"ref":policy.base_branch,"sha":policy.pr_base_sha}},
@@ -431,6 +451,38 @@ pub fn observe_required(policy: &RequiredChecksReport) -> Observation {
     observation
 }
 
+/// Conflicts are metadata evidence; optional workflows and review access cannot
+/// delay them. The caller must validate timestamps before retaining this result.
+pub fn observe_metadata(
+    repository: &str,
+    number: u64,
+    pull_request: &Value,
+    policy: &RequiredChecksReport,
+) -> Observation {
+    let mut observation = observe_required(policy);
+    let sources_match = metadata_matches(repository, number, pull_request, policy)
+        && pull_request["number"].as_u64() == Some(number)
+        && pull_request["base"]["ref"] == policy.base_branch
+        && policy
+            .pr_base_sha
+            .as_deref()
+            .is_none_or(|sha| pull_request["base"]["sha"] == sha)
+        && pull_request["base"]["repo"]["full_name"]
+            .as_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case(repository));
+    observation.evidence["sources_match"] = json!(sources_match);
+    observation.evidence["conflicts"] = json!(metadata_conflicts(pull_request));
+    if !sources_match || pull_request["state"] != "open" {
+        observation.blocking.clear();
+    }
+    if sources_match && pull_request["state"] == "open" && pull_request["mergeable"] == false {
+        observation
+            .blocking
+            .push(format!("conflict:{}", fingerprint(&json!(policy.head_sha))));
+    }
+    observation
+}
+
 /// Detect required failures without collecting reviews. A completion signal is
 /// reserved for a full, current PR snapshot so the agent gets its review findings.
 pub fn observe_ci(
@@ -459,9 +511,10 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
         && pr.pull_request["state"] == "open"
         && pr.conflicts == "conflicting"
     {
-        observation
-            .blocking
-            .push(format!("conflict:{}", fingerprint(&json!(ci.head_sha))));
+        let key = format!("conflict:{}", fingerprint(&json!(ci.head_sha)));
+        if !observation.blocking.contains(&key) {
+            observation.blocking.push(key);
+        }
     }
     let complete =
         observation.evidence["ci_settled"] == true && report.complete && pr.errors.is_empty();
@@ -585,6 +638,67 @@ mod tests {
         })).unwrap();
         let policy = serde_json::from_value(json!({"repository":"o/r","pull_number":1,"head_sha":"head","base_branch":"main","state":"failure","strict":false,"up_to_date":true,"checks":[{"context":"test","app_id":1,"state":"failure","sha":"head","url":"https://github.com/o/r/actions/runs/1"}],"rules":[],"errors":[],"cursor":"unused"})).unwrap();
         (report, policy)
+    }
+    #[test]
+    fn metadata_conflicts_do_not_wait_for_optional_ci_or_reviews() {
+        let (mut report, mut policy) = fixture();
+        policy.pr_base_sha = Some("base-tip".into());
+        report.data.pull_request["mergeable"] = json!(false);
+        report.data.pull_request["number"] = json!(1);
+        report.data.pull_request["base"] =
+            json!({"ref":"main","sha":"base-tip","repo":{"full_name":"o/r"}});
+        let early = observe_metadata("o/r", 1, &report.data.pull_request, &policy);
+        assert!(
+            early
+                .blocking
+                .iter()
+                .any(|key| key.starts_with("conflict:"))
+        );
+        let ci = observe_ci(
+            "o/r",
+            1,
+            &report.data.pull_request,
+            &report.data.ci,
+            &policy,
+        );
+        assert_eq!(early.evidence["conflicts"], "conflicting");
+        assert!(ci.blocking.iter().any(|key| key.starts_with("conflict:")));
+        assert_eq!(ci.evidence["ci_settled"], false);
+        assert!(early.completed.is_none());
+        assert!(early.feedback.is_empty());
+        for field in [
+            "head",
+            "base",
+            "base_sha",
+            "missing_base",
+            "repository",
+            "number",
+            "missing_number",
+            "closed",
+            "unknown",
+        ] {
+            let mut changed = report.data.pull_request.clone();
+            match field {
+                "head" => changed["head"]["sha"] = json!("other"),
+                "base" => changed["base"]["ref"] = json!("release"),
+                "base_sha" => changed["base"]["sha"] = json!("new-tip"),
+                "missing_base" => changed["base"]["sha"] = Value::Null,
+                "repository" => changed["base"]["repo"]["full_name"] = json!("o/other"),
+                "number" => changed["number"] = json!(2),
+                "missing_number" => changed["number"] = Value::Null,
+                "closed" => changed["state"] = json!("closed"),
+                "unknown" => changed["mergeable"] = Value::Null,
+                _ => unreachable!(),
+            }
+            let observed = observe_metadata("o/r", 1, &changed, &policy);
+            assert!(
+                !observed
+                    .blocking
+                    .iter()
+                    .any(|key| key.starts_with("conflict:")),
+                "{field}"
+            );
+        }
     }
     #[test]
     fn policy_refresh_identity_ignores_validation_tips_and_rule_order() {

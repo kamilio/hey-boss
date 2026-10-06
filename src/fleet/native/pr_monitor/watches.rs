@@ -254,7 +254,33 @@ async fn poll_details(
     let result = tokio::time::timeout_at(deadline, async {
         let (ci, metadata) = tokio::join!(
             read_client.ci_for_pr(repository, number, freshness),
-            read_client.pull_request(repository, number, freshness)
+            async {
+                let metadata = read_client
+                    .pull_request(repository, number, freshness)
+                    .await?;
+                if fresh(metadata.validated_at_ms)
+                    && policy.oldest_validation_at_ms.is_some_and(fresh)
+                    && metadata.data["mergeable"] == false
+                {
+                    let observation = hey_gh::watcher::observe_metadata(
+                        repository,
+                        number,
+                        &metadata.data,
+                        &policy,
+                    );
+                    if observation.evidence["sources_match"] == true {
+                        Store::open(&ctx.path)
+                            .map_err(storage)?
+                            .record_github_observation(
+                                url,
+                                &observation,
+                                crate::issues::worker::now(),
+                            )
+                            .map_err(storage)?;
+                    }
+                }
+                Ok::<_, hey_gh::Error>(metadata)
+            }
         );
         Ok::<_, hey_gh::Error>((ci?, metadata?))
     })
