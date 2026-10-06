@@ -1703,6 +1703,9 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "client/selected_probe_tests.rs"]
+mod selected_probe_tests;
+#[cfg(test)]
 mod transport_tests;
 
 pub(crate) fn next_link(link: &str) -> Option<String> {

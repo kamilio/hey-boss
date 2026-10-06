@@ -174,6 +174,7 @@ struct PacingProbe {
 struct ProbeTurn {
     quota: String,
     owed: String,
+    owns_turn: bool,
     protect_completion: bool,
 }
 
@@ -183,6 +184,58 @@ impl ProbeTurn {
             && let Some(owed) = pending.iter_mut().find(|job| job.request_id == self.owed)
         {
             owed.protected_pacing.clone_from(&debt.windows);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProbeBlocks {
+    owed: HashMap<String, String>,
+    selected: HashMap<String, Vec<(u64, Instant)>>,
+}
+
+impl ProbeBlocks {
+    fn retain(&mut self, pending: &VecDeque<Job>, budgets: &Budgets, now: Instant) {
+        self.owed
+            .retain(|_, owed| pending.iter().any(|job| job.request_id == *owed));
+        // An early selected turn has already left the queue. Its charged debt
+        // must survive completion/cancellation until the borrowed slots pass.
+        self.selected.retain(|quota, slots| {
+            budgets.for_resource(quota).any(|budget| {
+                slots
+                    .iter()
+                    .any(|(reset, until)| *reset == budget.reset_at_seconds && *until > now)
+            })
+        });
+    }
+
+    fn contains(&self, quota: &str) -> bool {
+        self.owed.contains_key(quota) || self.selected.contains_key(quota)
+    }
+
+    fn wake(&self, now: Instant) -> Option<Instant> {
+        self.selected
+            .values()
+            .flatten()
+            .map(|(_, until)| *until)
+            .filter(|until| *until > now)
+            .min()
+    }
+
+    fn charge(
+        &mut self,
+        turn: &ProbeTurn,
+        debt: &PacingProbe,
+        budgets: &mut Budgets,
+        pending: &mut VecDeque<Job>,
+    ) {
+        budgets.charge_probe(debt);
+        turn.protect(debt, pending);
+        if turn.owns_turn {
+            self.selected
+                .insert(turn.quota.clone(), budgets.probe(&turn.quota).windows);
+        } else {
+            self.owed.insert(turn.quota.clone(), turn.owed.clone());
         }
     }
 }
@@ -663,7 +716,7 @@ impl Scheduler {
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
-        let mut blocked_probes = HashMap::<String, String>::new();
+        let mut blocked_probes = ProbeBlocks::default();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
         let mut global_next = Instant::now();
@@ -698,10 +751,9 @@ impl Scheduler {
                 }
             }
             let now = Instant::now();
-            // Only the exact borrowed turn can renew this allowance. A stream
-            // of completion checks must not keep lending the same older read's
-            // slot to changed probes. Cancellation/expiry also releases it.
-            blocked_probes.retain(|_, owed| pending.iter().any(|job| job.request_id == *owed));
+            // Another request's borrowed turn stays owned by that exact job.
+            // A selected request's early turn stays blocked until its debt is paid.
+            blocked_probes.retain(&pending, &budgets, now);
             let quota_blocked = |job: &Job| {
                 secondary.until > now
                     || budgets.for_resource(&job.quota()).any(|budget| {
@@ -829,8 +881,10 @@ impl Scheduler {
                     return false;
                 };
                 let turn = &pending[*selected];
-                index != *selected
-                    && !blocked_probes.contains_key(&quota)
+                // A selected foreground validator may test its own soft wait.
+                // Charged replies keep borrowing blocked after this job leaves.
+                (index != *selected || job.interactive())
+                    && !blocked_probes.contains(&quota)
                     && !probing_quotas.contains(&quota)
                     && ((job.interactive() == turn.interactive()
                         && job.completion_validation.load(Ordering::Relaxed) == turn.completion_validation.load(Ordering::Relaxed))
@@ -907,6 +961,7 @@ impl Scheduler {
                 let probe = can_probe(index, &pending[index]).then(|| {
                     let quota = pending[index].quota();
                     let owed = pending[turns[&quota].1].request_id.clone();
+                    let owns_turn = index == turns[&quota].1;
                     let protect_completion = pending[index].interactive()
                         && pending[turns[&quota].1].interactive()
                         && !pending[index].completion_validation.load(Ordering::Relaxed)
@@ -916,6 +971,7 @@ impl Scheduler {
                     ProbeTurn {
                         quota,
                         owed,
+                        owns_turn,
                         protect_completion,
                     }
                 });
@@ -950,10 +1006,10 @@ impl Scheduler {
                 // reserving it here too would charge that interval twice.
                 let reservation =
                     (!job.minting && probe.is_none()).then(|| budgets.reserve(&mut job));
-                // A borrowed wait is not a new scheduling turn. Advancing the
-                // priority counters here can replace its owed request and
-                // renew speculative borrowing before the debt is repaid.
-                if probe.is_none() {
+                // Borrowing another request's wait cannot advance its turn.
+                // A selected validator consumes its own turn even when early.
+                let consumes_turn = probe.as_ref().is_none_or(|turn| turn.owns_turn);
+                if consumes_turn {
                     let streak = interactive_streaks.entry(job.quota()).or_default();
                     *streak = if job.interactive() {
                         streak.saturating_add(1)
@@ -961,7 +1017,7 @@ impl Scheduler {
                         0
                     };
                 }
-                if !job.minting && probe.is_none() {
+                if !job.minting && consumes_turn {
                     let class = (job.quota(), job.interactive());
                     if job.completion_validation.load(Ordering::Relaxed) {
                         completion_yields.insert(class);
@@ -988,6 +1044,7 @@ impl Scheduler {
                     foreground=job.interactive(),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
                     pacing_probe=probe.is_some(),
+                    selected_probe=probe.as_ref().is_some_and(|turn| turn.owns_turn),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
                     auth_scope=%if job.installation { self.config.installation.as_ref().unwrap().scope() } else { &self.scope }, %instance, request_key=%crate::digest(&job.key),
                     // Total job age; on the first attempt this is queue time.
@@ -1086,6 +1143,7 @@ impl Scheduler {
                             .min(job.deadline())
                     }
                 })
+                .chain(blocked_probes.wake(now))
                 .min();
             let completed = tokio::select! {
                 biased;
@@ -1119,9 +1177,7 @@ impl Scheduler {
                         Ok(r) => r,
                         Err(e) => {
                             if let Some((debt, turn)) = &probe {
-                                budgets.charge_probe(debt);
-                                turn.protect(debt, &mut pending);
-                                blocked_probes.insert(turn.quota.clone(), turn.owed.clone());
+                                blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
                             }
                             if job.minting {
                                 minting = false;
@@ -1180,9 +1236,7 @@ impl Scheduler {
                     if let Some((debt, turn)) = &probe
                         && status != StatusCode::NOT_MODIFIED
                     {
-                        budgets.charge_probe(debt);
-                        turn.protect(debt, &mut pending);
-                        blocked_probes.insert(turn.quota.clone(), turn.owed.clone());
+                        blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
                     }
                     if status == StatusCode::NOT_MODIFIED && !job.minting {
                         if let Some(mut cached) = job.cached.take() {
@@ -2080,6 +2134,76 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn selected_probe_debt_survives_departure_and_keeps_each_auth_quota_separate() {
+        for quota in ["core", "installation/core"] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe(quota, 5000, reset, false, None);
+            let turn = ProbeTurn {
+                quota: quota.into(),
+                owed: "finished".into(),
+                owns_turn: true,
+                protect_completion: false,
+            };
+            let debt = budgets.probe(quota);
+            let mut blocks = ProbeBlocks::default();
+            let mut pending = VecDeque::new();
+            blocks.charge(&turn, &debt, &mut budgets, &mut pending);
+            let paid_at = blocks.wake(Instant::now()).unwrap();
+            blocks.retain(&pending, &budgets, Instant::now());
+            assert!(
+                blocks.contains(quota),
+                "A completed or canceled probe erased its debt"
+            );
+            assert!(!blocks.contains(if quota == "core" {
+                "installation/core"
+            } else {
+                "core"
+            }));
+            // Other reservations cannot erase the debt or postpone its own wake.
+            let mut later = core_job();
+            later.installation = quota.starts_with("installation/");
+            budgets.reserve(&mut later);
+            assert_eq!(blocks.wake(Instant::now()), Some(paid_at));
+            tokio::time::advance(paid_at - Instant::now()).await;
+            blocks.retain(&pending, &budgets, Instant::now());
+            assert!(!blocks.contains(quota));
+            assert!(blocks.wake(Instant::now()).is_none());
+            assert!(
+                ready(&later, &budgets, Instant::now()) > Instant::now(),
+                "Debt expiry erased a later reservation"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn selected_probe_keeps_other_live_windows_when_one_slot_expires() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, false, None);
+        budgets.observe("core", 1000, reset + 60, false, None);
+        let turn = ProbeTurn {
+            quota: "core".into(),
+            owed: "finished".into(),
+            owns_turn: true,
+            protect_completion: false,
+        };
+        let debt = budgets.probe("core");
+        let mut blocks = ProbeBlocks::default();
+        let mut pending = VecDeque::new();
+        blocks.charge(&turn, &debt, &mut budgets, &mut pending);
+        let first = blocks.wake(Instant::now()).unwrap();
+        tokio::time::advance(first - Instant::now()).await;
+        blocks.retain(&pending, &budgets, Instant::now());
+        assert!(blocks.contains("core"));
+        assert!(blocks.wake(Instant::now()).unwrap() > Instant::now());
+        // Pruning an expired quota window also releases its old borrow block.
+        budgets.0.get_mut("core").unwrap().remove(&(reset + 60));
+        blocks.retain(&pending, &budgets, Instant::now());
+        assert!(!blocks.contains("core"));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn protected_completion_keeps_its_slot_and_repays_borrowing_after_dispatch() {
         for charged_headers in [false, true] {
             let mut budgets = Budgets::default();
@@ -2096,6 +2220,7 @@ mod tests {
             ProbeTurn {
                 quota: "core".into(),
                 owed: "test".into(),
+                owns_turn: false,
                 protect_completion: true,
             }
             .protect(&debt, &mut pending);
@@ -2168,6 +2293,7 @@ mod tests {
         let turn = ProbeTurn {
             quota: "core".into(),
             owed: "test".into(),
+            owns_turn: false,
             protect_completion: true,
         };
         turn.protect(&debt, &mut pending);
