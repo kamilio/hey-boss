@@ -86,14 +86,20 @@ fn recent(response: &Response, age: Duration) -> bool {
 fn matches_selectors(pr: &Value, node: &Value, repository: &str, number: u64) -> bool {
     let merge = &node["potentialMergeCommit"];
     let valid_sha = crate::repository::valid_sha;
+    // Closed, unmerged PRs can retain an explicit test-merge commit. Match
+    // their lifecycle too; a null potentialMergeCommit does not establish that
+    // REST has no merge SHA, so the positive SHA/parent checks below still apply.
+    let lifecycle_matches = match (pr["state"].as_str(), node["state"].as_str()) {
+        (Some("open"), Some("OPEN")) => pr["merged"] != true,
+        (Some("closed"), Some("CLOSED")) => pr["merged"] == false && node["merged"] == false,
+        _ => false,
+    };
     node["number"] == number
         && node["repository"]["nameWithOwner"]
             .as_str()
             .is_some_and(|name| name.eq_ignore_ascii_case(repository))
-        && node["state"] == "OPEN"
+        && lifecycle_matches
         && node["mergeable"] == "MERGEABLE"
-        && pr["state"] == "open"
-        && pr["merged"] != true
         && node["id"].as_str().is_some_and(|id| !id.is_empty())
         && node["id"] == pr["node_id"]
         && node["headRefOid"].as_str().is_some_and(valid_sha)
@@ -416,7 +422,8 @@ impl Client {
                 });
                 return Ok(metadata);
             }
-            if cached.data["state"] == "open"
+            if (cached.data["state"] == "open"
+                || (cached.data["state"] == "closed" && cached.data["merged"] == false))
                 && cached.data["mergeable"] == true
                 && cached.data["merge_commit_sha"]
                     .as_str()

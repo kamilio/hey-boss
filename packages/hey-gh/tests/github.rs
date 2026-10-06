@@ -27,6 +27,8 @@ mod deadline_capture;
 
 #[path = "github/account_policy.rs"]
 mod account_policy;
+#[path = "github/ci_closed_selectors.rs"]
+mod ci_closed_selectors;
 #[path = "github/ci_discovery_checks.rs"]
 mod ci_discovery_checks;
 #[path = "github/ci_discovery_versions.rs"]
@@ -955,7 +957,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 "mergeable":"MERGEABLE","headRefOid":HEAD,"baseRefOid":BASE,
                 "repository":{"nameWithOwner":"acme/demo"},
                 "potentialMergeCommit":{"oid":MERGE,"parents":{"totalCount":2,"nodes":[{"oid":OTHER_BASE},{"oid":HEAD}]}}});
-            if mode == "ci-point-empty-status" {
+            if mode == "ci-point-empty-status" || mode == "ci-point-closed-empty-status" {
                 node["commits"] = json!({"nodes":[{"commit":{"oid":HEAD,"status":null}}]});
                 node["potentialMergeCommit"]["status"] = Value::Null;
             }
@@ -984,7 +986,13 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                 node["potentialMergeCommit"]["statusCheckRollup"] =
                     json!({"contexts":{"checkRunCount":1,"statusContextCount":1}});
             }
-            match mode.as_str() {
+            let selector_mode = if let Some(case) = mode.strip_prefix("ci-point-closed-") {
+                node["state"] = json!("CLOSED");
+                format!("ci-point-{case}")
+            } else {
+                mode.clone()
+            };
+            match selector_mode.as_str() {
                 "ci-point-head" => node["headRefOid"] = json!(NEW_HEAD),
                 "ci-point-base" => node["baseRefOid"] = json!(NEW_HEAD),
                 "ci-point-id" => node["id"] = json!("PR_replaced"),
@@ -996,6 +1004,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     node["potentialMergeCommit"]["parents"]["nodes"][1]["oid"] = json!(NEW_HEAD)
                 }
                 "ci-point-closed" => node["state"] = json!("CLOSED"),
+                "ci-point-reopened" => node["state"] = json!("OPEN"),
                 "ci-point-merged" => node["merged"] = json!(true),
                 "ci-point-unknown" => node["mergeable"] = json!("UNKNOWN"),
                 "ci-point-case" => node["repository"]["nameWithOwner"] = json!("ACME/Demo"),
@@ -1570,6 +1579,10 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     {
         if normalized.ends_with("/pulls/7") {
             value["merge_commit_sha"] = json!(MERGE);
+            if mode.starts_with("ci-point-closed-") {
+                value["state"] = json!("closed");
+                value["merged"] = json!(false);
+            }
             if mode.starts_with("ci-rest-terminal") {
                 value["state"] = json!("closed");
                 value["merged"] = json!(mode.ends_with("merged"));
@@ -1588,7 +1601,7 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     }
     if matches!(
         mode.as_str(),
-        "ci-point-empty-status" | "account-ci-selectors-empty"
+        "ci-point-empty-status" | "ci-point-closed-empty-status" | "account-ci-selectors-empty"
     ) && normalized.ends_with("/status")
     {
         value = json!({"state":"pending","total_count":0,"statuses":[]});
