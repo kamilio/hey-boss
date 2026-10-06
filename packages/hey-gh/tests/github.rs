@@ -10816,6 +10816,7 @@ async fn issue73_fast_success_cached_contention_and_option_validation() {
         vec!["ci", "--help"],
     ] {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hey-gh"))
+            .arg("cached")
             .args(command)
             .output()
             .await

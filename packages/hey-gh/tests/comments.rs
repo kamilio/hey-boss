@@ -1,5 +1,4 @@
 #![cfg(unix)]
-
 use std::{
     fs,
     io::Write,
@@ -8,197 +7,251 @@ use std::{
 };
 
 struct Fixture(tempfile::TempDir);
-
 impl Fixture {
-    fn new() -> Self {
+    fn new(host: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let gh = root.path().join("gh");
-        fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FIXTURE/args\"\ncat > \"$FIXTURE/body\"\nprintf '%s\\n' 'https://github.com/example/repo/pull/7#issuecomment-1'\nexit \"${GH_EXIT:-0}\"\n").unwrap();
+        fs::write(&gh, r##"#!/bin/sh
+if [ "$1" = alias ]; then
+  printf '%s\n' 'say: pr comment $1 --repo acme/demo --body-file -' 'shellsay: "!gh pr comment 7 --body hi"'
+  exit 0
+fi
+printf '%s\n' "$@" > "$FIXTURE/args"
+printf '%s' "${GH_TOKEN:-}" > "$FIXTURE/token"
+printf '%s' "${GH_ENTERPRISE_TOKEN:-}" > "$FIXTURE/enterprise-token"
+printf '%s' "${GITHUB_TOKEN:-}${GITHUB_ENTERPRISE_TOKEN:-}${HEY_GH_APP_PRIVATE_KEY:-}" > "$FIXTURE/other-tokens"
+cat > "$FIXTURE/body"
+printf 'https://github.com/acme/demo/pull/7#issuecomment-1\n'
+exit "${GH_EXIT:-0}"
+"##).unwrap();
         fs::set_permissions(gh, fs::Permissions::from_mode(0o700)).unwrap();
+        let data = if cfg!(target_os = "macos") {
+            root.path().join("Library/Application Support")
+        } else {
+            root.path().to_owned()
+        };
+        let apps = data.join("hey-gh/apps");
+        fs::create_dir_all(&apps).unwrap();
+        let credentials = apps.join(format!("{host}.json"));
+        fs::write(
+            &credentials,
+            serde_json::to_vec(&serde_json::json!({
+                "client_id":"test", "installation_id":42, "repositories":["acme/demo"],
+                "private_key":include_str!("fixtures/github-app-test-key.pem")
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(credentials, fs::Permissions::from_mode(0o600)).unwrap();
         Self(root)
     }
-
-    fn run(&self, args: &[&str], input: &str, exit: &str) -> Output {
+    fn run(&self, args: &[&str], input: &str, fail: bool) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_hey-gh"))
             .args(args)
+            .current_dir(self.0.path())
             .env("PATH", format!("{}:/usr/bin:/bin", self.0.path().display()))
             .env("FIXTURE", self.0.path())
-            .env("GH_EXIT", exit)
+            .env(
+                "HEY_GH_APP_TOKEN",
+                if fail {
+                    "invalid\ntoken"
+                } else {
+                    "synthetic-app-token"
+                },
+            )
+            .env("HOME", self.0.path())
+            .env("XDG_DATA_HOME", self.0.path())
+            .env("GH_TOKEN", "synthetic-personal")
+            .env("GH_ENTERPRISE_TOKEN", "synthetic-enterprise")
+            .env("GITHUB_TOKEN", "synthetic-other-personal")
+            .env("GITHUB_ENTERPRISE_TOKEN", "synthetic-other-enterprise")
+            .env("HEY_GH_APP_PRIVATE_KEY", "synthetic-env-key")
+            .env_remove("GH_HOST")
+            .env_remove("GH_REPO")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
+        let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
         child.wait_with_output().unwrap()
     }
-
-    fn assert_not_posted(&self) {
-        assert!(!self.0.path().join("args").exists());
+    fn read(&self, file: &str) -> String {
+        fs::read_to_string(self.0.path().join(file)).unwrap()
     }
 }
 
 #[test]
-fn comment_posts_exact_text_once_without_a_daemon() {
-    let f = Fixture::new();
-    let body = "Fixed the retry.\n`$HOME` and $(false) stay literal.";
-    let output = f.run(
-        &[
-            "--server",
-            "invalid",
+fn comments_select_app_auth_and_preserve_native_arguments_and_body() {
+    for args in [
+        vec!["pr", "comment", "7", "-R", "acme/demo", "--body-file", "-"],
+        vec![
+            "issue",
+            "comment",
+            "https://github.com/acme/demo/issues/7",
+            "--edit-last",
+            "--create-if-none",
+            "--body-file=-",
+        ],
+        vec![
+            "issue",
+            "comment",
+            "7",
+            "--repo=acme/demo",
+            "--delete-last",
+            "--yes",
+        ],
+        vec![
+            "pr",
+            "review",
+            "7",
+            "-Racme/demo",
+            "--comment",
+            "--body-file",
+            "-",
+        ],
+        vec![
+            "api",
+            "repos/acme/demo/issues/7/comments",
+            "-XPOST",
+            "--input",
+            "-",
+        ],
+        vec![
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/acme/demo/pulls/comments/8",
+            "-X",
+            "DELETE",
+        ],
+        vec![
+            "api",
+            "graphql",
+            "-f",
+            "query=mutation { posted: addComment(input: {subjectId: \"x\", body: \"text\"}) { clientMutationId } }",
+        ],
+        vec!["--auth", "app", "api", "graphql", "--input", "-"],
+        vec!["say", "7"],
+        vec![
             "pr",
             "comment",
             "7",
             "-R",
-            "example/repo",
+            "acme/demo",
+            "--help=false",
             "--body",
-            body,
+            "ok",
+        ],
+        vec![
+            "pr",
+            "comment",
+            "7",
+            "-R",
+            "acme/demo",
+            "-h=false",
+            "--web=false",
+            "--body",
+            "ok",
+        ],
+        vec![
+            "api",
+            "https://api.github.com/repos/acme/demo/issues/7/comments",
+            "-fbody=ok",
+        ],
+    ] {
+        let f = Fixture::new("github.com");
+        let body = format!("  {}\nline two\nline three\n", "é".repeat(400));
+        let result = f.run(&args, &body, false);
+        assert!(
+            result.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(f.read("token"), "synthetic-app-token");
+        assert_eq!(f.read("enterprise-token"), "");
+        assert_eq!(f.read("other-tokens"), "");
+        assert_eq!(f.read("body"), body);
+        let expected = if args[0] == "--auth" {
+            &args[2..]
+        } else {
+            &args[..]
+        };
+        assert_eq!(f.read("args"), format!("{}\n", expected.join("\n")));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("#issuecomment-1"));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("synthetic-app-token"));
+    }
+}
+
+#[test]
+fn enterprise_host_comes_from_selector_before_repo_and_never_from_body() {
+    let f = Fixture::new("git.example.com");
+    let result = f.run(
+        &[
+            "pr",
+            "comment",
+            "--body",
+            "https://wrong.example/body",
+            "https://git.example.com/acme/demo/pull/7",
+            "-R",
+            "github.com/acme/demo",
         ],
         "",
-        "0",
+        false,
     );
     assert!(
-        output.status.success(),
+        result.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(fs::read_to_string(f.0.path().join("body")).unwrap(), body);
-    assert_eq!(
-        fs::read_to_string(f.0.path().join("args")).unwrap(),
-        "pr\ncomment\n7\n--repo\nexample/repo\n--body-file\n-\n"
+    assert_eq!(f.read("token"), "");
+    assert_eq!(f.read("enterprise-token"), "synthetic-app-token");
+}
+
+#[test]
+fn invalid_supplied_app_token_never_posts_or_retries_as_user() {
+    let f = Fixture::new("github.com");
+    let result = f.run(
+        &["pr", "comment", "7", "-R", "acme/demo", "--body", "ok"],
+        "",
+        true,
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("#issuecomment-1"));
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("HEY_GH_APP_TOKEN"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("synthetic"));
+    assert!(!f.0.path().join("args").exists());
 }
 
 #[test]
-fn comment_limits_apply_before_any_github_call() {
-    for body in [
-        "x".repeat(301),
-        "é".repeat(301),
-        "a\nb\nc".into(),
-        "a\rb\rc".into(),
-        "a\u{2028}b\u{2029}c".into(),
-        "   ".into(),
-    ] {
-        let f = Fixture::new();
-        let output = f.run(&["pr", "comment", "7", "--body", &body], "", "0");
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("Do not sound like a robot."));
-        f.assert_not_posted();
-    }
-}
-
-#[test]
-fn comment_file_and_stdin_use_the_same_unicode_limit() {
-    for stdin in [false, true] {
-        let f = Fixture::new();
-        let body = "é".repeat(300);
-        let file = f.0.path().join("comment.md");
-        fs::write(&file, &body).unwrap();
-        let output = f.run(
-            &[
-                "issue",
-                "comment",
-                "https://github.com/example/repo/issues/7",
-                "--body-file",
-                if stdin { "-" } else { file.to_str().unwrap() },
-            ],
-            if stdin { &body } else { "" },
-            "0",
-        );
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(fs::read_to_string(f.0.path().join("body")).unwrap(), body);
-    }
-    for stdin in [false, true] {
-        let f = Fixture::new();
-        let body = "x".repeat(301);
-        let file = f.0.path().join("comment.md");
-        fs::write(&file, &body).unwrap();
-        let output = f.run(
-            &[
-                "pr",
-                "comment",
-                "7",
-                "--body-file",
-                if stdin { "-" } else { file.to_str().unwrap() },
-            ],
-            if stdin { &body } else { "" },
-            "0",
-        );
-        assert!(!output.status.success());
-        f.assert_not_posted();
-    }
-}
-
-#[test]
-fn invalid_comment_options_never_post() {
-    for args in [
-        vec!["pr", "comment", "7"],
-        vec!["pr", "comment", "7", "--body", "ok", "--body-file", "-"],
-        vec!["pr", "comment", "7", "--body", "ok", "--cached-only"],
-        vec!["pr", "comment", "7", "--body", "ok", "--refresh"],
-        vec!["pr", "comment", "7", "--body", "ok", "--json", "number"],
-        vec!["pr", "comment", "7", "--body", "ok", "--cursor", "cursor"],
-        vec!["pr", "comment", "7", "--body", "ok", "--wait", "1"],
-        vec!["pr", "comment", "7", "--body", "ok", "--timeout", "1"],
-        vec!["pr", "comment", "7", "--body-file", "/missing/comment.md"],
-        vec!["issue", "comment", "--body", "ok"],
-    ] {
-        let f = Fixture::new();
-        assert!(!f.run(&args, "", "0").status.success(), "{args:?}");
-        f.assert_not_posted();
-    }
-}
-
-#[test]
-fn failed_posts_are_never_retried() {
-    let f = Fixture::new();
-    let output = f.run(&["pr", "comment", "7", "--body", "Fixed."], "", "1");
-    assert!(!output.status.success());
-    assert_eq!(
-        fs::read_to_string(f.0.path().join("args"))
-            .unwrap()
-            .matches("comment\n")
-            .count(),
-        1
+fn browser_comments_cannot_silently_use_personal_identity() {
+    let f = Fixture::new("github.com");
+    let result = f.run(
+        &["pr", "comment", "7", "--repo", "acme/demo", "--web"],
+        "",
+        false,
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not retried"));
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("browser"));
+    assert!(!f.0.path().join("mint-args").exists());
 }
 
 #[test]
-fn comment_help_shows_only_write_options_and_shared_guidance() {
-    for kind in ["pr", "issue"] {
-        let f = Fixture::new();
-        let output = f.run(&[kind, "comment", "--help"], "", "0");
-        assert!(output.status.success());
-        let help = String::from_utf8(output.stdout).unwrap();
-        assert!(help.contains("--body-file") && help.contains("--repo"));
-        assert!(help.contains("Do not sound like a robot."));
-        for flag in [
-            "--server",
-            "--cursor",
-            "--timeout",
-            "--refresh",
-            "--cached-only",
-            "--json",
-            "--wait",
-        ] {
-            assert!(!help.contains(flag), "{help}");
-        }
-        f.assert_not_posted();
-    }
-    let f = Fixture::new();
-    let output = f.run(&["pr", "view", "--help"], "", "0");
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("--refresh") && help.contains("--cached-only"));
+fn opaque_graphql_input_requires_explicit_auth_without_consuming_stdin() {
+    let f = Fixture::new("github.com");
+    let result = f.run(&["api", "graphql", "--input", "-"], "{}", false);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("explicit --auth"));
+    assert!(!f.0.path().join("mint-args").exists());
+}
+
+#[test]
+fn shell_aliases_require_auth_and_explicit_user_keeps_native_execution() {
+    let f = Fixture::new("github.com");
+    let result = f.run(&["shellsay"], "", false);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("shell aliases require explicit"));
+    let result = f.run(&["--auth", "user", "shellsay"], "", false);
+    assert!(result.status.success());
+    assert_eq!(f.read("token"), "synthetic-personal");
 }
