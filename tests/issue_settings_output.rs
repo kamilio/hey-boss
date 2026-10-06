@@ -50,6 +50,31 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn claims_show_iteration_count_before_instructions_without_counting_claims() {
+    let f = Fixture::new();
+    f.text(&["create", "--title", "Iteration history"]);
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    for count in 0..=2 {
+        if count > 0 {
+            db.execute(
+                "INSERT INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) VALUES(?1,'named:Settings QA',1,1)",
+                [format!("run-{count}")],
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let output = f.text(&["claim", "1"]);
+            let label = format!("Iterations started: {count} (agent launches)\n");
+            let count_position = output.find(&label).expect(&output);
+            assert!(count_position < output.find("Instructions:").unwrap());
+            let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
+            assert_eq!(json["issue"]["agent_launch_count"], count);
+        }
+    }
+    assert!(!f.text(&["view", "1"]).contains("Iterations started:"));
+}
+
+#[test]
 fn ordinary_issue_output_omits_absent_and_disabled_settings() {
     let f = Fixture::new();
     for args in [

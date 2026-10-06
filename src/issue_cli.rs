@@ -1706,6 +1706,10 @@ pub(crate) fn print_text(value: &Value) {
         return;
     }
     if let Some(instructions) = value["instructions"].as_str() {
+        println!(
+            "Iterations started: {} (agent launches)",
+            value["issue"]["agent_launch_count"].as_u64().unwrap_or(0)
+        );
         println!("Instructions: {instructions}");
     }
     if let Some(placement) = value["placement"].as_str() {
