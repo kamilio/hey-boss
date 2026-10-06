@@ -1,6 +1,8 @@
 use crate::{
     ChangePage, Error, Response, Result, Source, Watch, digest, now_ms,
-    scheduler::{Inflight, Job, Metrics, Scheduler, SharedResult, Status},
+    scheduler::{
+        Inflight, Job, Metrics, Scheduler, SharedResult, Status, WaitingDeadline, WaitingDeadlines,
+    },
     store::Store,
 };
 use serde_json::Value;
@@ -220,11 +222,13 @@ struct Inner {
 
 struct RequestWaiter {
     receiver: Option<tokio::sync::watch::Receiver<SharedResult>>,
+    deadline: Option<WaitingDeadline>,
     changed: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for RequestWaiter {
     fn drop(&mut self) {
+        self.deadline.take();
         if let Some(receiver) = self.receiver.take() {
             let pending = !matches!(&*receiver.borrow(), SharedResult::Complete(_));
             // Drop before waking: the scheduler may run on another thread and
@@ -734,7 +738,7 @@ impl Client {
             && CACHE_PROBE.try_with(|_| ()).is_err())
         .then(|| digest(&key));
         let mut queue_clock = None;
-        let (receiver, shared_deadline, caller_limit) = loop {
+        let (receiver, shared_deadline, caller_limit, waiter_deadline) = loop {
             let observed_sequence = completion_fingerprint.as_ref().map(|_| {
                 self.0
                     .inflight
@@ -806,8 +810,14 @@ impl Client {
                 && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
             let required_read = OPTIONAL_SELECTOR_BUDGET.try_with(|_| ()).is_err();
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((receiver, interactive, shared_deadline, completion, required)) =
-                inflight.active.get(&key)
+            if let Some((
+                receiver,
+                interactive,
+                shared_deadline,
+                completion,
+                required,
+                waiting_deadlines,
+            )) = inflight.active.get(&key)
             {
                 if interactive_read() {
                     interactive.store(true, Ordering::Relaxed);
@@ -826,11 +836,17 @@ impl Client {
                     *deadline_guard = caller_deadline;
                 }
                 drop(deadline_guard);
+                let waiter_deadline = waiting_deadlines.register(caller_deadline);
                 // No new job enters the channel when callers coalesce. Wake
                 // the scheduler to reconsider promoted priority/deadlines now.
                 self.0.queue_changed.notify_one();
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
-                break (receiver.clone(), shared_deadline.clone(), caller_limit);
+                break (
+                    receiver.clone(),
+                    shared_deadline.clone(),
+                    caller_limit,
+                    waiter_deadline,
+                );
             } else {
                 if completion_fingerprint
                     .as_ref()
@@ -878,6 +894,8 @@ impl Client {
                 // background report that happened to enqueue a shared source.
                 let interactive = Arc::new(AtomicBool::new(false));
                 let deadline = Arc::new(Mutex::new(caller_deadline));
+                let waiting_deadlines = Arc::new(WaitingDeadlines::default());
+                let waiter_deadline = waiting_deadlines.register(caller_deadline);
                 let completion = Arc::new(AtomicBool::new(completion_validation));
                 let required = Arc::new(AtomicBool::new(required_read));
                 if selector_validation {
@@ -913,6 +931,7 @@ impl Client {
                     cached,
                     notify,
                     deadline: deadline.clone(),
+                    waiting_deadlines: waiting_deadlines.clone(),
                     ready_at: now,
                     protected_pacing: Vec::new(),
                     attempts: 0,
@@ -931,13 +950,15 @@ impl Client {
                         deadline.clone(),
                         completion,
                         required,
+                        waiting_deadlines,
                     ),
                 );
-                break (receiver, deadline, caller_limit);
+                break (receiver, deadline, caller_limit, waiter_deadline);
             }
         };
         let mut waiter = RequestWaiter {
             receiver: Some(receiver),
+            deadline: Some(waiter_deadline),
             changed: self.0.queue_changed.clone(),
         };
         let receiver = waiter.receiver.as_mut().expect("live request waiter");
@@ -987,6 +1008,11 @@ impl Client {
                                     .unwrap_or_else(|error| error.into_inner());
                                 *shared = (*shared).max(until);
                                 drop(shared);
+                                waiter
+                                    .deadline
+                                    .as_mut()
+                                    .expect("live request deadline")
+                                    .extend(until);
                                 budget.deadline.send_replace(until);
                                 tracing::info!(
                                     request_key = completion_fingerprint.as_deref(),
@@ -1922,7 +1948,7 @@ mod priority_tests {
                 .unwrap()
                 .active
                 .values()
-                .all(|(_, priority, _, _, _)| priority.load(Ordering::Relaxed)),
+                .all(|(_, priority, ..)| priority.load(Ordering::Relaxed)),
             "the shared request itself must retain foreground priority"
         );
         assert!(
@@ -2064,7 +2090,7 @@ mod priority_tests {
                             .unwrap()
                             .active
                             .get(&key)
-                            .is_some_and(|(_, _, _, completing, _)| {
+                            .is_some_and(|(_, _, _, completing, ..)| {
                                 completing.load(Ordering::Relaxed)
                             })
                     };
@@ -3587,7 +3613,7 @@ mod priority_tests {
                 .unwrap()
                 .active
                 .values()
-                .any(|(_, priority, _, _, _)| priority.load(Ordering::Relaxed))
+                .any(|(_, priority, ..)| priority.load(Ordering::Relaxed))
         );
         tokio::time::timeout(Duration::from_secs(2), async {
             while client.status().outstanding_requests != 0 {
