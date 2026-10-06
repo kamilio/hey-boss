@@ -48,6 +48,10 @@ tokio::task_local! { static OPTIONAL_SELECTOR_DEADLINE: tokio::time::Instant; }
 #[path = "client/optional_tests.rs"]
 mod optional_tests;
 
+#[cfg(test)]
+#[path = "client/optional_transport_tests.rs"]
+mod optional_transport_tests;
+
 pub(crate) async fn optional_selector_read<T>(
     read: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -736,6 +740,9 @@ impl Client {
                 let caller_deadline = READ_DEADLINE
                     .try_with(|deadline| caller_deadline.min(*deadline))
                     .unwrap_or(caller_deadline);
+                let caller_deadline = OPTIONAL_SELECTOR_DEADLINE
+                    .try_with(|deadline| caller_deadline.min(*deadline))
+                    .unwrap_or(caller_deadline);
                 (now, caller_deadline)
             });
             let selector_validation = (body.is_none()
@@ -748,8 +755,7 @@ impl Client {
             // Give those the same completion turns as REST, including coalesced work.
             let completion_validation = (selector_validation || body.is_some())
                 && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
-            let required_read =
-                body.is_none() || OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_err();
+            let required_read = OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_err();
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion, required)) =
                 inflight.active.get(&key)
