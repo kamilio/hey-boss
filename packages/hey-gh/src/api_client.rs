@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::time::Duration;
 use url::Url;
 
+pub(crate) const READ_TIMEOUT_HEADER: &str = "x-hey-gh-read-timeout-ms";
+
 /// PR feed scope and optional row projection. Omitted fields are unknown.
 /// Transport projections always retain `complete` and `sourceErrors`.
 #[derive(Clone, Copy, Default)]
@@ -24,6 +26,7 @@ pub struct ApiClient {
     http: reqwest::Client,
     background: bool,
     capture_reports: bool,
+    read_deadline: Option<tokio::time::Instant>,
 }
 impl ApiClient {
     /// Explicit release observations; does not register watches or notify agents.
@@ -167,7 +170,15 @@ impl ApiClient {
             http,
             background: false,
             capture_reports: false,
+            read_deadline: None,
         })
+    }
+    /// Bound this client's reads by one total deadline, including transport.
+    /// Remaining time is forwarded to the daemon; shared work and durable
+    /// watches needed by other consumers retain their independent lifetimes.
+    pub fn with_read_deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.read_deadline = Some(self.read_deadline.map_or(deadline, |old| old.min(deadline)));
+        self
     }
     /// Use the daemon's background lane and bounded request lifetime for
     /// targeted PR, CI, policy, metadata, and release reads. Other methods are unchanged.
@@ -393,11 +404,31 @@ impl ApiClient {
         self.read(request).await
     }
     async fn read<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
-        let response = self.authorize(request)?.send().await.map_err(transport)?;
-        if !response.status().is_success() {
-            return Err(remote_error(response).await);
+        let read = async {
+            let mut request = self.authorize(request)?;
+            if let Some(deadline) = self.read_deadline {
+                let remaining = deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis()
+                    .min(3_600_000);
+                if remaining == 0 {
+                    return Err(Error::Deadline);
+                }
+                request = request.header(READ_TIMEOUT_HEADER, remaining.to_string());
+            }
+            let response = request.send().await.map_err(transport)?;
+            if !response.status().is_success() {
+                return Err(remote_error(response).await);
+            }
+            response.json().await.map_err(transport)
+        };
+        if let Some(deadline) = self.read_deadline {
+            tokio::time::timeout_at(deadline, read)
+                .await
+                .unwrap_or(Err(Error::Deadline))
+        } else {
+            read.await
         }
-        response.json().await.map_err(transport)
     }
 }
 
