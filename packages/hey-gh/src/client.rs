@@ -480,6 +480,25 @@ impl Client {
         .await
     }
 
+    pub(crate) async fn ci_source_presence(
+        &self,
+        repository: &str,
+        paths: &[&str],
+    ) -> Result<Vec<bool>> {
+        let prefix = self.rest_url(&format!("repos/{}/", repository.to_ascii_lowercase()))?;
+        let keys = paths
+            .iter()
+            .map(|path| {
+                self.rest_cache_key(self.rest_url(path)?.as_str())
+                    .map(|(key, _)| key)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.0
+            .store
+            .cache_presence(&self.0.scope, repository, prefix.as_str(), keys)
+            .await
+    }
+
     pub async fn graphql(
         &self,
         query: &str,

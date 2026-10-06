@@ -113,7 +113,29 @@ impl Client {
         // limited reads can spend every turn revalidating mutable commit
         // sources, never filling the missing completed-attempt cache.
         let mut order: Vec<_> = (0..sources.len()).collect();
-        order.sort_by_key(|&index| sources[index].name != "workflow_runs");
+        let mut missing = vec![false; sources.len()];
+        if crate::client::interactive_read()
+            && matches!(freshness, Freshness::MaxAge(age) if !age.is_zero())
+        {
+            let candidates: Vec<_> = order
+                .iter()
+                .copied()
+                .filter(|&index| sources[index].name != "workflow_runs")
+                .collect();
+            let paths: Vec<_> = candidates
+                .iter()
+                .map(|&index| sources[index].path.as_str())
+                .collect();
+            // At most four indexed keys. Presence is only an ordering hint;
+            // normal source reads still enforce freshness, shape, and identity.
+            // A hint failure retains normal ordering and normal source errors.
+            if let Ok(present) = self.ci_source_presence(repository, &paths).await {
+                for (index, present) in candidates.into_iter().zip(present) {
+                    missing[index] = !present;
+                }
+            }
+        }
+        order.sort_by_key(|&index| (sources[index].name != "workflow_runs", !missing[index]));
         let mut pending: VecDeque<_> = order
             .into_iter()
             .map(|index| Task::Source(index, sources[index].clone()))
