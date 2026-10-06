@@ -320,6 +320,44 @@ async fn cancelling_full_report_overlap_preserves_a_shared_metadata_reader() {
 }
 
 #[tokio::test]
+async fn full_report_retry_reuses_personal_metadata_validated_during_collection() {
+    for field in ["head", "merge"] {
+        let f = Fixture::new().await;
+        f.warm_metadata().await;
+        f.age_metadata(60_000);
+        {
+            let mut metadata = f.mock.metadata.lock().unwrap();
+            if field == "head" {
+                metadata["head"]["sha"] = json!("c".repeat(40));
+            } else {
+                metadata["merge_commit_sha"] = json!("d".repeat(40));
+            }
+            metadata["title"] = json!("Validated new selectors");
+        }
+        let report = f
+            .client
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+            .await
+            .unwrap();
+        assert!(report.complete, "{field}: {:?}", report.data.errors);
+        assert_eq!(report.data.pull_request["title"], "Validated new selectors");
+        assert_eq!(
+            report.data.pull_request["head"]["sha"],
+            report.data.ci.head_sha
+        );
+        assert_eq!(
+            report.data.pull_request["merge_commit_sha"].as_str(),
+            report.data.ci.merge_sha.as_deref()
+        );
+        assert_eq!(
+            f.metadata_calls(),
+            2,
+            "{field}: the retry must reuse the personal response already validated during collection"
+        );
+    }
+}
+
+#[tokio::test]
 async fn full_report_overlap_rechecks_a_push_after_prefetch_expires() {
     let f = Fixture::new().await;
     let task = pending_full_report(&f).await;
@@ -340,6 +378,7 @@ async fn full_report_overlap_rechecks_a_push_after_prefetch_expires() {
     .await
     .unwrap();
     f.age_metadata(16_000);
+    let before = f.metadata_calls();
     f.mock.metadata.lock().unwrap()["head"]["sha"] = json!("c".repeat(40));
     f.mock.pause_reviews.store(false, Ordering::Relaxed);
     f.mock.pause_graph.store(false, Ordering::Relaxed);
@@ -348,6 +387,11 @@ async fn full_report_overlap_rechecks_a_push_after_prefetch_expires() {
     assert!(report.complete);
     assert_eq!(report.data.pull_request["head"]["sha"], "c".repeat(40));
     assert_eq!(report.data.ci.head_sha, "c".repeat(40));
+    assert_eq!(
+        f.metadata_calls(),
+        before + 1,
+        "Retry must reuse final personal metadata after detecting the push"
+    );
 }
 
 #[tokio::test]
