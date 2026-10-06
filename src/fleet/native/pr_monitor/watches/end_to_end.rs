@@ -272,7 +272,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
             if let Some(last) = last_poll.get() {
                 thread::sleep(Duration::from_secs(30).saturating_sub(last.elapsed()));
             }
-            crate::fleet::native::pr_monitor::poll_cycle(&ctx, &runtime, &client);
+            crate::fleet::native::pr_monitor::poll_cycle(&ctx, &runtime, &client, &mut None);
             last_poll.set(Some(Instant::now()));
         } else {
             let _ = fs::remove_file(ctx.state.join("github-watch-schedule.json"));

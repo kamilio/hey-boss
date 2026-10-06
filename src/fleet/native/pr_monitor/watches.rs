@@ -53,7 +53,7 @@ pub(super) fn fresh(validated_at: u64) -> bool {
         .is_ok_and(|at| at >= crate::issues::worker::now().saturating_sub(120_000))
 }
 
-fn timestamp(value: u64) -> hey_gh::Result<i64> {
+pub(super) fn timestamp(value: u64) -> hey_gh::Result<i64> {
     i64::try_from(value)
         .ok()
         .filter(|at| *at > 0 && *at <= crate::issues::worker::now().saturating_add(30_000))
@@ -179,6 +179,33 @@ pub(super) fn record_terminal(
             "Pull request changed while confirming its closure; refreshing again".into(),
         ));
     }
+    record_terminal_status(ctx, url, response, status)
+}
+
+// GitHub merges are irreversible. Identity-fenced cached merge evidence remains
+// useful after its validation ages; reversible closures still need a fresh read.
+pub(super) fn record_cached_merge(
+    ctx: &Context,
+    url: &str,
+    repository: &str,
+    number: u64,
+    response: &hey_gh::Response,
+) -> hey_gh::Result<()> {
+    timestamp(response.validated_at_ms)?;
+    if !super::merged(&response.data, repository, number) {
+        return Err(hey_gh::Error::Invalid(
+            "Cached metadata does not confirm this PR merged".into(),
+        ));
+    }
+    record_terminal_status(ctx, url, response, Some("merged"))
+}
+
+fn record_terminal_status(
+    ctx: &Context,
+    url: &str,
+    response: &hey_gh::Response,
+    status: Option<&str>,
+) -> hey_gh::Result<()> {
     let mut store = Store::open(&ctx.path).map_err(storage)?;
     store
         .record_pr_status(url, status, timestamp(response.validated_at_ms)?, None)

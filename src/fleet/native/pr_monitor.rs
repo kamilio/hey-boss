@@ -60,6 +60,7 @@ pub(super) fn run(ctx: Context) {
             return;
         }
     };
+    let mut cached_after = None;
     while !ctx.stopped() {
         let started = std::time::Instant::now();
         // Start the same shared daemon used by the CLI if it is absent. Never
@@ -67,12 +68,17 @@ pub(super) fn run(ctx: Context) {
         if let Err(error) = ensure_daemon(&ctx, "127.0.0.1:8787".parse().unwrap()) {
             eprintln!("PR monitor: cannot start hey-gh service: {error}");
         }
-        poll_cycle(&ctx, &runtime, &client);
+        poll_cycle(&ctx, &runtime, &client, &mut cached_after);
         ctx.wait(INTERVAL.saturating_sub(started.elapsed()));
     }
 }
 
-fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClient) {
+fn poll_cycle(
+    ctx: &Context,
+    runtime: &tokio::runtime::Runtime,
+    client: &ApiClient,
+    cached_after: &mut Option<String>,
+) {
     // Both use the shared hey-gh queue, but waiting for ordinary metadata must
     // not add another serial batch before the next required-check observation.
     // Active issue watches run on the foreground priority lane so background
@@ -96,7 +102,7 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
                         // not wait behind this watcher's expensive CI queue.
                         match tokio::time::timeout(
                             Duration::from_secs(10),
-                            cached_merges::poll(ctx, &metadata_client),
+                            cached_merges::poll(ctx, &metadata_client, cached_after),
                         )
                         .await
                         {
