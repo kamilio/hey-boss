@@ -5,7 +5,6 @@ pub(crate) struct TrackedPullRequest {
     pub url: String,
     pub checked_at: Option<i64>,
     pub closed: bool,
-    pub backfill: bool,
 }
 
 fn merged_tasks(db: &Connection) -> Result<Vec<(Project, i64)>> {
@@ -98,14 +97,13 @@ impl Store {
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
         // Closing a task can precede observing its PR merge. Keep unresolved
         // fixes in the ordinary metadata queue until their lifecycle is known.
-        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed'),min(pr.status='merged') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.purpose='fix' AND pr.status NOT IN ('merged','closed')) OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.purpose='fix' AND pr.status NOT IN ('merged','closed')) OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
             .query_map([], |r| {
                 Ok(TrackedPullRequest {
                     url: r.get(0)?,
                     checked_at: r.get(1)?,
                     closed: r.get(2)?,
-                    backfill: r.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
@@ -311,7 +309,6 @@ mod tests {
             .into_iter()
             .find(|pr| pr.url.ends_with("/2"))
             .unwrap();
-        assert!(backfill.backfill);
         assert!(backfill.checked_at.is_none());
         store
             .record_pr_author("https://github.com/o/r/pull/2", 99)
