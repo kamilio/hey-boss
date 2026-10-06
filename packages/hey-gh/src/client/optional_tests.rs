@@ -67,12 +67,18 @@ impl Fixture {
                     }
                     use axum::response::IntoResponse;
                     let mut response = axum::Json(json!({"data":{"tag":tag}})).into_response();
-                    if tag.starts_with("paced-") || tag.starts_with("slow-paced-") {
+                    let reserve = tag.strip_prefix("reserve-");
+                    if tag.starts_with("paced-")
+                        || tag.starts_with("slow-paced-")
+                        || reserve.is_some()
+                    {
                         let headers = response.headers_mut();
                         headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
                         headers.insert(
                             "x-ratelimit-remaining",
-                            if tag == "slow-paced-long-seed" {
+                            if let Some(remaining) = reserve {
+                                remaining
+                            } else if tag == "slow-paced-long-seed" {
                                 "1000"
                             } else if tag.starts_with("slow-paced-") {
                                 "2500"
@@ -269,9 +275,18 @@ impl Drop for Fixture {
 }
 
 async fn read(client: Client, tag: &'static str, freshness: Freshness) -> Result<Response> {
+    read_with_priority(client, tag, freshness, true).await
+}
+
+async fn read_with_priority(
+    client: Client,
+    tag: &'static str,
+    freshness: Freshness,
+    interactive: bool,
+) -> Result<Response> {
     INTERACTIVE_READ
         .scope(
-            foreground_priority(),
+            Arc::new(AtomicBool::new(interactive)),
             client.graphql(
                 "query Fixture($tag:String!) { viewer { login } }",
                 json!({"tag":tag}),
@@ -544,6 +559,15 @@ async fn foreground_selector_gets_a_turn_before_a_paced_background_graphql_backl
 
 #[tokio::test]
 async fn optional_graphql_borrows_its_turn_only_for_a_congested_rest_fallback_and_repays_it() {
+    paced_shortcut_fallbacks(true).await;
+}
+
+#[tokio::test]
+async fn background_shortcut_uses_its_own_congested_turn_and_repays_it() {
+    paced_shortcut_fallbacks(false).await;
+}
+
+async fn paced_shortcut_fallbacks(interactive: bool) {
     for fallback in ["busy", "busy-long", "queued", "exhausted", "free"] {
         let f = Fixture::new().await;
         let core = match fallback {
@@ -581,10 +605,11 @@ async fn optional_graphql_borrows_its_turn_only_for_a_congested_rest_fallback_an
         .await
         .unwrap();
         let started = tokio::time::Instant::now();
-        let response = optional_selector_read(read(
+        let response = optional_selector_read(read_with_priority(
             f.client.clone(),
             "slow-paced-optional",
             Freshness::Revalidate,
+            interactive,
         ))
         .await;
         if fallback == "free" {
@@ -617,5 +642,61 @@ async fn optional_graphql_borrows_its_turn_only_for_a_congested_rest_fallback_an
         if let Some(core) = core {
             core.await.unwrap().unwrap();
         }
+    }
+}
+
+#[tokio::test]
+async fn background_shortcut_waits_for_required_readers_even_with_busy_rest() {
+    for interactive in [false, true] {
+        let f = Fixture::new().await;
+        let core = f.hold_core().await;
+        let held = f.hold().await;
+        let required = tokio::spawn(read_with_priority(
+            f.client.clone(),
+            "required",
+            Freshness::Revalidate,
+            interactive,
+        ));
+        f.queued(3).await;
+        let optional = tokio::spawn(optional_selector_read(read_with_priority(
+            f.client.clone(),
+            "paced-optional",
+            Freshness::Revalidate,
+            false,
+        )));
+        f.queued(4).await;
+        assert!(!optional.is_finished());
+        f.gate.release.notify_one();
+        held.await.unwrap().unwrap();
+        required.await.unwrap().unwrap();
+        optional.await.unwrap().unwrap();
+        f.gate.core_release.notify_one();
+        core.await.unwrap().unwrap();
+        assert_eq!(
+            *f.gate.calls.lock().unwrap(),
+            ["gate", "required", "paced-optional"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn background_shortcut_preserves_graphql_exhaustion_and_reserves() {
+    for seed in ["reserve-0", "reserve-100", "reserve-101"] {
+        let f = Fixture::new().await;
+        let core = f.hold_core().await;
+        read(f.client.clone(), seed, Freshness::Revalidate)
+            .await
+            .unwrap();
+        let response = optional_selector_read(read_with_priority(
+            f.client.clone(),
+            "paced-optional",
+            Freshness::Revalidate,
+            false,
+        ))
+        .await;
+        assert!(response.is_err());
+        assert_eq!(*f.gate.calls.lock().unwrap(), [seed]);
+        f.gate.core_release.notify_one();
+        core.await.unwrap().unwrap();
     }
 }
