@@ -78,15 +78,15 @@ async fn terminal_ci_starts_sources_while_metadata_is_waiting() {
                 h.calls()[before..]
                     .iter()
                     .all(|call| call.path != "/graphql"),
-                "terminal seeds must not request the open-only selector proof"
+                "merged or unknown terminal seeds must not request a selector proof"
             );
         }
     }
 }
 
 #[tokio::test]
-async fn terminal_ci_does_not_request_an_open_only_selector_proof() {
-    let (h, c) = seed(false, false).await;
+async fn merged_terminal_ci_does_not_request_a_test_merge_selector_proof() {
+    let (h, c) = seed(true, false).await;
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
     db.execute("UPDATE cache SET response=json_set(response,'$.data.mergeable',json('true')) WHERE key LIKE '%/pulls/7'", []).unwrap();
     let before = h.calls().len();
