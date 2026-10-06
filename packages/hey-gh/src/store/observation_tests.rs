@@ -41,10 +41,22 @@ async fn observation_phases_explain_external_writer_wait_after_caller_cancellati
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cache.sqlite");
     let store = Store::open(&path, Duration::from_secs(3600), 100, 4096).unwrap();
+    let previous = serde_json::json!({"private_body":"private_token".repeat(4096)});
+    store
+        .observe("private_scope", "private_resource", &previous)
+        .await
+        .unwrap();
+    logs.0.lock().unwrap().clear();
     let external = Connection::open(&path).unwrap();
     external.execute_batch("BEGIN IMMEDIATE").unwrap();
     let value = serde_json::json!({"private_body":"private_token"});
-    let mut cancelled = Box::pin(store.observe("private_scope", "private_resource", &value));
+    // Only the changed observation loads the old body; the second sees the
+    // just-published hash. Count actual old bytes, not the new payload size.
+    let observations = vec![
+        ("private_resource".to_owned(), value.clone()),
+        ("private_resource".to_owned(), value.clone()),
+    ];
+    let mut cancelled = Box::pin(store.observe_many("private_scope", &observations));
     std::future::poll_fn(|cx| {
         assert!(std::future::Future::poll(cancelled.as_mut(), cx).is_pending());
         std::task::Poll::Ready(())
@@ -89,6 +101,9 @@ async fn observation_phases_explain_external_writer_wait_after_caller_cancellati
     assert!(field("encode_ms=") < field("transaction_ms="), "{text}");
     for field in [
         "read_ms=",
+        "alias_ms=",
+        "load_ms=",
+        "decode_ms=",
         "write_ms=",
         "prune_ms=",
         "commit_ms=",
@@ -97,6 +112,12 @@ async fn observation_phases_explain_external_writer_wait_after_caller_cancellati
     ] {
         assert!(line.contains(field), "{text}");
     }
+    assert_eq!(field("observations="), 2);
+    assert_eq!(field("loaded_bodies="), 1);
+    assert_eq!(
+        field("previous_payload_bytes="),
+        serde_json::to_vec(&previous).unwrap().len() as u64
+    );
     for private in [
         "private_scope",
         "private_resource",

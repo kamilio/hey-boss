@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 pub(super) enum Phase {
     Transaction,
     Encode,
+    Alias,
     Read,
+    Decode,
     Write,
     Prune,
     Commit,
@@ -15,9 +17,11 @@ pub(super) enum Phase {
 #[derive(Default)]
 pub(super) struct Timings {
     entered: Option<(Phase, Instant)>,
-    elapsed: [Duration; 7],
+    elapsed: [Duration; 9],
     pub payload_bytes: usize,
     pub observations: usize,
+    pub previous_payload_bytes: usize,
+    pub loaded_bodies: usize,
 }
 
 impl Timings {
@@ -44,9 +48,17 @@ impl Timings {
             elapsed_ms = elapsed.as_millis() as u64,
             observations = self.observations,
             payload_bytes = self.payload_bytes,
+            previous_payload_bytes = self.previous_payload_bytes,
+            loaded_bodies = self.loaded_bodies,
             transaction_ms = ms(Phase::Transaction),
             encode_ms = ms(Phase::Encode),
-            read_ms = ms(Phase::Read),
+            read_ms = (self.elapsed[Phase::Alias as usize]
+                + self.elapsed[Phase::Read as usize]
+                + self.elapsed[Phase::Decode as usize])
+                .as_millis() as u64,
+            alias_ms = ms(Phase::Alias),
+            load_ms = ms(Phase::Read),
+            decode_ms = ms(Phase::Decode),
             write_ms = ms(Phase::Write),
             prune_ms = ms(Phase::Prune),
             commit_ms = ms(Phase::Commit),

@@ -1073,7 +1073,7 @@ impl Store {
                 }
             }
             for (resource, value) in observations {
-                phases.enter(ObservationPhase::Read);
+                phases.enter(ObservationPhase::Alias);
                 let resource = resolve_pr_resource(&tx, &scope, &resource)?;
                 phases.enter(ObservationPhase::Encode);
                 let data = serde_json::to_string(&value).map_err(storage)?;
@@ -1084,10 +1084,16 @@ impl Store {
                 // Matching hashes need neither the old body nor its overflow pages.
                 // Keep the comparison and changed-body read in the same transaction.
                 let old:Option<(String,Option<String>)>=tx.query_row("SELECT hash,CASE WHEN hash=?3 THEN NULL ELSE data END FROM snapshots WHERE scope=?1 AND resource=?2",params![scope,resource,hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+                phases.enter(ObservationPhase::Decode);
                 if old.as_ref().map(|(h, _)| h.as_str()) != Some(&hash) {
                     let previous: Option<Value> = old
                         .and_then(|(_, data)| data)
-                        .map(|data| serde_json::from_str(&data).map_err(storage))
+                        .map(|data| {
+                            phases.loaded_bodies += 1;
+                            phases.previous_payload_bytes =
+                                phases.previous_payload_bytes.saturating_add(data.len());
+                            serde_json::from_str(&data).map_err(storage)
+                        })
                         .transpose()?;
                     phases.enter(ObservationPhase::Write);
                     if resource.starts_with("pr-status://")
