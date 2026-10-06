@@ -493,3 +493,104 @@ async fn idle_stream_sends_heartbeat_then_preserves_final_usage() {
     task.abort();
     proxy.abort();
 }
+
+#[tokio::test]
+async fn model_registry_max_tokens_and_streaming_tool_recovery_succeed_end_to_end() {
+    async fn upstream(
+        State(calls): State<Arc<AtomicUsize>>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> Response {
+        let turn = calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 65536);
+        let tool_name = body["tools"][0]["functionDeclarations"][0]["name"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        if turn == 0 {
+            stream_response(Body::from_stream(async_stream::stream! {
+                yield Ok::<_,std::io::Error>(native_frame(json!({
+                    "candidates":[{"index":0,"content":{"role":"model","parts":[
+                        {"thought":true,"text":"Drafting update"},
+                        {"text":"Updating file now."}
+                    ]}}]
+                })));
+                yield Ok(native_frame(json!({
+                    "candidates":[{"index":0,"content":{"role":"model"},"finishReason":"MAX_TOKENS"}],
+                    "usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":30000,"thoughtsTokenCount":2768,"totalTokenCount":32818}
+                })));
+            }))
+        } else {
+            let contents = body["contents"].as_array().unwrap();
+            assert!(
+                contents.last().unwrap()["parts"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("finishReason=MAX_TOKENS")
+            );
+            stream_response(Body::from_stream(async_stream::stream! {
+                yield Ok::<_,std::io::Error>(native_frame(json!({
+                    "candidates":[{"index":0,"content":{"role":"model","parts":[
+                        {"functionCall":{"name":tool_name,"args":{"cmd":"echo split"}},"thoughtSignature":"sig-2"}
+                    ]},"finishReason":"STOP"}],
+                    "usageMetadata":{"promptTokenCount":60,"candidatesTokenCount":25,"thoughtsTokenCount":15,"totalTokenCount":100}
+                })));
+            }))
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (native, task) = serve(Router::new().fallback(upstream).with_state(calls.clone())).await;
+    let mut config: Config = serde_json::from_value(json!({
+        "listen": "127.0.0.1:0",
+        "providers": {
+            "gemini": {
+                "upstream_url": native,
+                "auth": "bearer",
+                "api_key": "synthetic-gemini"
+            }
+        },
+        "model_registry": {
+            "defaults": crate::model_registry::DEFAULT_BUDGET,
+            "models": {
+                "gemini/test": {
+                    "context_window": 1048576,
+                    "max_tokens": 65536,
+                    "keep_recent_tokens": 120000,
+                    "reserve_tokens": 65536
+                }
+            }
+        }
+    }))
+    .unwrap();
+    config.retry.max_retries = 0;
+    let (url, proxy) = serve(super::super::router(config).unwrap()).await;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({
+            "model": "gemini/test",
+            "input": "Write the file",
+            "stream": true,
+            "tools": [{
+                "type": "function",
+                "name": "exec_command",
+                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    let parsed = events(&text);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(parsed.last().unwrap()["type"], "response.completed");
+    assert_eq!(
+        parsed.last().unwrap()["response"]["usage"]["output_tokens"],
+        30000 + 2768 + 25 + 15
+    );
+    assert!(parsed.iter().any(|e| {
+        e["type"] == "response.output_item.done" && e["item"]["type"] == "function_call"
+    }));
+    task.abort();
+    proxy.abort();
+}

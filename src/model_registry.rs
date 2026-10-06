@@ -139,6 +139,43 @@ impl ModelRegistry {
         }
         resolved.unwrap_or(self.defaults)
     }
+
+    pub fn configured_max_tokens(&self, config: &Config, id: &str) -> Option<u64> {
+        let mut pending = if let Some(alias) = config.alias_for(id, "/v1/responses") {
+            let mut targets = vec![alias.to.as_deref().unwrap_or(&alias.from)];
+            targets.extend(
+                alias
+                    .reasoning_routes
+                    .values()
+                    .map(|route| route.to.as_str()),
+            );
+            targets
+        } else {
+            vec![id]
+        };
+        let mut seen = BTreeSet::new();
+        let mut has_explicit = false;
+        while let Some(target) = pending.pop() {
+            let canonical = hey_proxy::fallback::canonical(target);
+            if !seen.insert(canonical) {
+                continue;
+            }
+            if self
+                .models
+                .get(canonical)
+                .and_then(|e| e.max_tokens)
+                .is_some()
+            {
+                has_explicit = true;
+            }
+            pending.extend(
+                hey_proxy::fallback::targets(&config.fallbacks, target)
+                    .iter()
+                    .map(String::as_str),
+            );
+        }
+        has_explicit.then(|| self.resolve(config, id).max_tokens)
+    }
 }
 
 #[cfg(test)]

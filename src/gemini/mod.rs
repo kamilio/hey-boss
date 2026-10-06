@@ -33,6 +33,8 @@ pub struct ProviderConfig {
     pub thinking: Thinking,
     #[serde(default = "default_cache_seconds")]
     pub credential_cache_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 fn default_cache_seconds() -> u64 {
     2400
@@ -73,6 +75,9 @@ impl ProviderConfig {
         }
         if !(1..=86400).contains(&self.credential_cache_seconds) {
             bail!("credential_cache_seconds must be 1..86400");
+        }
+        if self.max_output_tokens.is_some_and(|v| v == 0) {
+            bail!("gemini.max_output_tokens must be positive");
         }
         match self.auth {
             Auth::Adc | Auth::GcloudAdc if self.api_key.is_some() => {
