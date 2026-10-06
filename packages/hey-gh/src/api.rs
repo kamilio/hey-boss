@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::Mutex, task::JoinHandle};
+mod polling;
 
 #[derive(Clone)]
 pub struct Api(Arc<ApiInner>);
@@ -25,6 +26,7 @@ struct ApiInner {
     client: Client,
     instance: String,
     monitors: Mutex<BTreeMap<String, Monitor>>,
+    polling_task: std::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -33,6 +35,9 @@ struct Access {
 }
 impl Drop for ApiInner {
     fn drop(&mut self) {
+        if let Some(task) = self.polling_task.get_mut().unwrap().take() {
+            task.abort();
+        }
         for monitor in self.monitors.get_mut().values() {
             monitor.task.abort();
         }
@@ -74,6 +79,10 @@ pub struct WatchStatus {
     pub discovery_last_error: Option<String>,
     /// An equal-or-faster account watch owns upstream polling for this PR.
     pub covered_by_account: bool,
+    /// Account hydration is temporarily owned by the supervisor; local evidence
+    /// is not refreshed or made complete by that ownership.
+    #[serde(default)]
+    pub delegated_to_supervisor: bool,
 }
 
 impl Api {
@@ -85,6 +94,7 @@ impl Api {
             client,
             instance: instance.iter().map(|b| format!("{b:02x}")).collect(),
             monitors: Mutex::new(BTreeMap::new()),
+            polling_task: std::sync::Mutex::new(None),
         }));
         for watch in api.0.client.watches().await? {
             api.start_monitor(watch).await?;
@@ -102,6 +112,7 @@ impl Api {
         Router::new()
             .route("/v1/status", get(status))
             .route("/v1/identity", get(shared_identity))
+            .route("/v1/polling-coverage", get(polling::coverage))
             .route("/v1/releases/observe", post(releases))
             .route("/v1/viewer", get(viewer))
             .route("/v1/pr-status", get(pr_status))
@@ -120,6 +131,10 @@ impl Api {
             .route("/v1/snapshot", get(snapshot))
             .route("/v1/watches", get(watches).post(add_watch))
             .route("/v1/watches/{id}", delete(remove_watch))
+            .layer(middleware::from_fn_with_state(
+                self.clone(),
+                polling::local_demand,
+            ))
             .layer(middleware::from_fn_with_state(
                 Access {
                     token: token.map(Arc::from),
@@ -159,6 +174,7 @@ impl Api {
                 .and_then(|health| health.last_success_at_ms),
             discovery_last_error: discovery.and_then(|health| health.last_error),
             covered_by_account: false,
+            delegated_to_supervisor: false,
         }));
         let (client, task_state, task_watch) =
             (self.0.client.clone(), state.clone(), watch.clone());
@@ -186,6 +202,10 @@ impl Api {
     }
 
     pub async fn stop(&self) {
+        if let Some(task) = self.0.polling_task.lock().unwrap().take() {
+            task.abort();
+        }
+        self.0.client.polling().revoke();
         let mut monitors = self.0.monitors.lock().await;
         for (_, monitor) in std::mem::take(&mut *monitors) {
             monitor.task.abort();
@@ -332,6 +352,7 @@ async fn account_policy_loop(client: Client, watch: Watch, state: Arc<Mutex<Watc
         tokio::select! {
             _ = interval.tick() => {},
             _ = client.policy_ready() => {},
+            _ = client.polling().changed("policy") => {},
         }
         state.lock().await.policy_last_poll_at_ms = Some(now_ms());
         let result = client
@@ -355,7 +376,14 @@ async fn monitor_loop(client: Client, watch: Watch, state: Arc<Mutex<WatchStatus
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut tracked = HashSet::new();
     loop {
-        interval.tick().await;
+        if watch.kind == WatchKind::Account {
+            tokio::select! {
+                _ = interval.tick() => {},
+                _ = client.polling().changed(if ci_only { "ci" } else { "details" }) => {},
+            }
+        } else {
+            interval.tick().await;
+        }
         let coverage = account_watch_resource(&client, &watch)
             .await
             .unwrap_or(None);
@@ -1236,6 +1264,7 @@ async fn watches(State(api): State<Api>) -> ApiResult<Json<Vec<WatchStatus>>> {
             status.last_cycle = last_cycle.clone();
             status.ci_last_cycle = ci_last_cycle.clone();
             status.policy_last_cycle = policy_last_cycle.clone();
+            status.delegated_to_supervisor = api.0.client.polling().active();
             let Some(health) = &health else { continue };
             status.discovery_last_success_at_ms = health.last_success_at_ms;
             if health.last_error.is_some()

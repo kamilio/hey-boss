@@ -184,6 +184,9 @@ pub struct AccountRefreshCycle {
     /// Policy prerequisites are not yet recent/complete; no upstream probe ran.
     #[serde(default)]
     pub waiting_for_ci: usize,
+    /// Deferred under a renewable supervisor lease; no local validation occurred.
+    #[serde(default)]
+    pub delegated: usize,
     pub cycle_budget_exhausted: bool,
 }
 
@@ -858,6 +861,7 @@ impl Client {
         let mut interrupted = 0usize;
         let mut deferred = 0usize;
         let mut waiting_for_ci = 0usize;
+        let mut delegated = 0usize;
         let mut work = work.into_iter();
         let cycle = hydration::Cycle {
             client: self,
@@ -890,6 +894,15 @@ impl Client {
                         "refresh cycle budget exhausted; {remaining} PRs remain queued"
                     ));
                     break;
+                }
+                if background
+                    && current.contains_key(&item.key)
+                    && self.polling().covers(mode, &item.node)
+                {
+                    deferred += 1;
+                    delegated += 1;
+                    retry.insert(item.key, item.node);
+                    continue;
                 }
                 if !seed_only {
                     let continuing = schedule.started(&item);
@@ -1057,6 +1070,11 @@ impl Client {
             ));
         }
         let finished_at_ms = crate::now_ms();
+        if delegated > 0 {
+            errors.push(format!(
+                "{delegated} PRs delegated to supervisor; local evidence unchanged"
+            ));
+        }
         if !seed_only {
             self.save_derived(&rotation_key, json!(schedule.next))
                 .await?;
@@ -1072,6 +1090,7 @@ impl Client {
                     interrupted,
                     deferred,
                     waiting_for_ci,
+                    delegated,
                     cycle_budget_exhausted: (deferred > 0 || interrupted > 0)
                         && tokio::time::Instant::now() >= deadline,
                 }),
@@ -1096,6 +1115,7 @@ impl Client {
             interrupted,
             deferred,
             waiting_for_ci,
+            delegated,
             cycle_budget_exhausted =
                 (deferred > 0 || interrupted > 0) && tokio::time::Instant::now() >= deadline,
             elapsed_ms = started.elapsed().as_millis() as u64,

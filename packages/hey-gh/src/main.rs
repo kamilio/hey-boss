@@ -429,6 +429,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::from_gh(config).await?;
         let api = hey_gh::api::Api::new(client).await?;
         let (api_token, _registration) = hey_gh::local_auth::register(listener.local_addr()?)?;
+        api.start_shared_polling(listener.local_addr()?)?;
         tracing::info!(address=%listener.local_addr()?,"daemon listening");
         eprintln!(
             "hey-gh API listening on http://{} (using gh login for {hostname})",
