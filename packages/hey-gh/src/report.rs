@@ -946,20 +946,25 @@ impl Client {
         let repository = repository_spelling.as_str();
         // Recheck the PR head after collecting commit-bound sources. Never
         // present old-head checks as a result for a newly pushed head.
+        let mut retry_seed = None;
         for attempt in 0..2 {
             timings.enter(Phase::Seed);
             crate::entity::clear();
-            let pr = self
-                .initial_report_pr(
-                    repository,
-                    number,
-                    if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {
-                        freshness
-                    } else {
-                        Freshness::Revalidate
-                    },
-                )
-                .await?;
+            let pr = match retry_seed.take() {
+                Some(pr) => pr,
+                None => {
+                    self.initial_report_pr(
+                        repository,
+                        number,
+                        if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {
+                            freshness
+                        } else {
+                            Freshness::Revalidate
+                        },
+                    )
+                    .await?
+                }
+            };
             crate::entity::set(self.pr_owner(repository, number, &pr.data).await?);
             let head = sha(&pr.data, "head")?;
             let merge = pr.data["merge_commit_sha"]
@@ -983,7 +988,7 @@ impl Client {
                 && matches!(freshness, Freshness::MaxAge(age) if age >= confirmation_age);
             let prefetch = async {
                 if !overlap {
-                    return Ok(());
+                    return Ok(None);
                 }
                 tail.ready.notified().await;
                 let started = tokio::time::Instant::now();
@@ -999,7 +1004,7 @@ impl Client {
                 tracing::info!(repository, number, source=?response.source,
                     elapsed_ms=started.elapsed().as_millis() as u64,
                     "Full PR report metadata overlap finished");
-                Ok::<_, Error>(())
+                Ok::<_, Error>(Some(response))
             };
             let (
                 prefetched,
@@ -1059,10 +1064,20 @@ impl Client {
                 )
                 .await;
             let ci_observation = ci_res?;
-            prefetched?;
+            let prefetched = prefetched?;
             VALIDATIONS.with(|records| records.borrow_mut().extend(ci_observation.validations));
             let ci = ci_observation.data;
             if ci.head_sha != head || ci.merge_sha != merge {
+                // Personal metadata may already describe the selectors CI
+                // just validated. Reuse it only to seed the retry; its final
+                // read still enforces freshness, ownership, and selectors.
+                retry_seed = prefetched.filter(|pr| {
+                    pr.data["head"]["sha"].as_str() == Some(ci.head_sha.as_str())
+                        && pr.data["merge_commit_sha"]
+                            .as_str()
+                            .filter(|s| valid_sha(s))
+                            == ci.merge_sha.as_deref()
+                });
                 continue;
             }
             let mut errors = Vec::new();
@@ -1096,6 +1111,7 @@ impl Client {
                     .filter(|s| valid_sha(s))
                     != merge.as_deref()
             {
+                retry_seed = Some(final_pr);
                 continue;
             }
             timings.enter(Phase::Assembly);
