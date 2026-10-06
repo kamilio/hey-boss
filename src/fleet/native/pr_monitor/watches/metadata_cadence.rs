@@ -256,7 +256,7 @@ fn metadata_batches(repeat: bool) {
         .enable_all()
         .build()
         .unwrap();
-    crate::fleet::native::pr_monitor::poll_cycle(&ctx, &runtime, &client);
+    crate::fleet::native::pr_monitor::poll_cycle(&ctx, &runtime, &client, &mut None);
     serving.join().unwrap();
     let view = Store::open(&ctx.path)
         .unwrap()
