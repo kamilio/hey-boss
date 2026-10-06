@@ -2117,3 +2117,138 @@ fn responses_lite_rejects_malformed_or_unsupported_tool_declarations() {
     request["reasoning"]["context"] = json!("unknown");
     assert!(convert_request(&request, &config(), &codec()).is_err());
 }
+
+#[test]
+fn incomplete_stream_never_commits_output_item_done_and_recovery_replays_cleanly() {
+    let codec = codec();
+    let mut cfg = config();
+    cfg.max_output_tokens = Some(65536);
+
+    let mut capped_req = base_request();
+    capped_req["max_output_tokens"] = json!(256);
+    let capped = convert_request(&capped_req, &cfg, &codec).unwrap();
+    assert_eq!(capped.body["generationConfig"]["maxOutputTokens"], 256);
+
+    let mut incomplete_stream = ResponseStream::new(capped, "inc-1");
+    let mut events = incomplete_stream
+        .feed(&json!({
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"thought": true, "text": "Planning step"},
+                        {"text": "Partial answer"}
+                    ]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 200, "thoughtsTokenCount": 56, "totalTokenCount": 266}
+        }))
+        .unwrap();
+    assert!(incomplete_stream.prepare_tool_recovery().is_none());
+    events.extend(incomplete_stream.finish(&codec).unwrap());
+    assert!(
+        !events
+            .iter()
+            .any(|e| e["type"] == "response.output_item.done"),
+        "incomplete stream must not emit response.output_item.done before response.incomplete"
+    );
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal["type"], "response.incomplete");
+    assert_eq!(
+        terminal["response"]["output"][0]["summary"],
+        json!([{"type": "summary_text", "text": "Planning step"}])
+    );
+
+    let mut tool_req = base_request();
+    tool_req["tools"] = json!([{
+        "type": "function",
+        "name": "exec_command",
+        "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+    }]);
+    let uncapped = convert_request(&tool_req, &cfg, &codec).unwrap();
+    assert_eq!(uncapped.body["generationConfig"]["maxOutputTokens"], 65536);
+    let mut rec_stream = ResponseStream::new(uncapped, "rec-1");
+    let mut all_events = rec_stream
+        .feed(&json!({
+            "candidates": [{
+                "index": 0,
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {"thought": true, "text": "Thinking about big file"},
+                        {"text": "I will update the file in smaller steps."}
+                    ]
+                },
+                "finishReason": "MAX_TOKENS"
+            }],
+            "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 30000, "thoughtsTokenCount": 2768, "totalTokenCount": 32868}
+        }))
+        .unwrap();
+    let retry_body = rec_stream
+        .prepare_tool_recovery()
+        .expect("should prepare tool recovery");
+    assert_eq!(rec_stream.recovery_attempts(), 1);
+    let retry_contents = retry_body["contents"].as_array().unwrap();
+    assert_eq!(retry_contents[retry_contents.len() - 2]["role"], "model");
+    assert_eq!(
+        retry_contents[retry_contents.len() - 2]["parts"],
+        json!([{"text": "I will update the file in smaller steps."}])
+    );
+    assert_eq!(retry_contents.last().unwrap()["role"], "user");
+
+    let tool_name = native_tool_name("exec_command");
+    all_events.extend(
+        rec_stream
+            .feed(&json!({
+                "candidates": [{
+                    "index": 0,
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"thought": true, "text": "Splitting into chunk 1."},
+                            {"functionCall": {"name": tool_name, "args": {"cmd": "echo part1"}}, "thoughtSignature": "attempt2-sig"}
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {"promptTokenCount": 120, "candidatesTokenCount": 40, "thoughtsTokenCount": 20, "totalTokenCount": 180}
+            }))
+            .unwrap(),
+    );
+    assert!(rec_stream.prepare_tool_recovery().is_none());
+    all_events.extend(rec_stream.finish(&codec).unwrap());
+
+    let done_items: Vec<_> = all_events
+        .iter()
+        .filter(|e| e["type"] == "response.output_item.done")
+        .map(|e| e["item"].clone())
+        .collect();
+    assert_eq!(done_items.len(), 3);
+    assert_eq!(done_items[0]["type"], "reasoning");
+    assert_eq!(done_items[1]["type"], "message");
+    assert_eq!(done_items[2]["type"], "function_call");
+
+    let completed = &all_events.last().unwrap()["response"];
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["usage"]["input_tokens"], 220);
+    assert_eq!(completed["usage"]["output_tokens"], 30000 + 2768 + 40 + 20);
+
+    let mut next_turn = tool_req.clone();
+    let mut history = vec![json!({"role": "user", "content": "Run the task"})];
+    history.extend(done_items.clone());
+    history.push(json!({
+        "type": "function_call_output",
+        "call_id": done_items[2]["call_id"],
+        "output": "part1 ok"
+    }));
+    next_turn["input"] = json!(history);
+    let replayed = convert_request(&next_turn, &cfg, &codec).unwrap();
+    let model_turn = &replayed.body["contents"][1];
+    assert_eq!(model_turn["role"], "model");
+    assert_eq!(
+        model_turn["parts"][1]["thoughtSignature"],
+        hey_proxy::gemini::IMPORTED_THOUGHT_SIGNATURE
+    );
+}

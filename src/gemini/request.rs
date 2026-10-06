@@ -1189,6 +1189,11 @@ pub fn convert_request(
             }
         }
     }
+    if body["generationConfig"].get("maxOutputTokens").is_none()
+        && let Some(max_tokens) = config.max_output_tokens
+    {
+        body["generationConfig"]["maxOutputTokens"] = json!(max_tokens);
+    }
     if body.get("toolConfig").is_none() && body.get("tools").is_none() && !calls.is_empty() {
         body["toolConfig"] = json!({"functionCallingConfig":{"mode":"NONE"}});
     }
