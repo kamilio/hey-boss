@@ -23,6 +23,7 @@ mod ci_pull_request;
 mod ci_selectors;
 #[cfg(test)]
 mod confirmation_tests;
+pub(crate) mod lifecycle;
 mod policy_ci;
 
 #[cfg(test)]

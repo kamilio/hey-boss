@@ -1553,7 +1553,15 @@ impl Scheduler {
                 pending.push_back(job);
                 continue;
             }
-            if !graphql_errors.is_empty() {
+            let lifecycle_partial =
+                if status.is_success() && !job.installation && !graphql_errors.is_empty() {
+                    serde_json::from_slice(&bytes).ok().and_then(|data| {
+                        crate::client::lifecycle::capture_partial(&job.key, job.body.as_ref(), data)
+                    })
+                } else {
+                    None
+                };
+            if !graphql_errors.is_empty() && lifecycle_partial.is_none() {
                 let partial = if status.is_success()
                     && !job.installation
                     && let Ok(data) = serde_json::from_slice(&bytes)
@@ -1627,7 +1635,9 @@ impl Scheduler {
                 );
                 continue;
             }
-            let data = if bytes.is_empty() {
+            let data = if let Some(data) = lifecycle_partial {
+                Ok(data)
+            } else if bytes.is_empty() {
                 Ok(serde_json::Value::Null)
             } else {
                 serde_json::from_slice(&bytes)

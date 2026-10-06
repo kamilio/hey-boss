@@ -109,6 +109,7 @@ impl Api {
             )
             .route("/v1/repos/{owner}/{repo}", get(repository))
             .route("/v1/repos/{owner}/{repo}/prs", get(repository_prs))
+            .route("/v1/repos/{owner}/{repo}/pr-lifecycles", get(pr_lifecycles))
             .route("/v1/changes", get(changes))
             .route("/v1/snapshot", get(snapshot))
             .route("/v1/watches", get(watches).post(add_watch))
@@ -774,6 +775,55 @@ async fn viewer(
         query
             .run(api.0.client.get("user", query.freshness()?))
             .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct LifecycleQuery {
+    numbers: String,
+    refresh: Option<bool>,
+    cached_only: Option<bool>,
+    max_age_seconds: Option<u64>,
+    #[serde(default)]
+    background: bool,
+}
+impl LifecycleQuery {
+    fn read(&self) -> ReadQuery {
+        ReadQuery {
+            refresh: self.refresh,
+            cached_only: self.cached_only,
+            max_age_seconds: self.max_age_seconds,
+            background: self.background,
+        }
+    }
+}
+async fn pr_lifecycles(
+    State(api): State<Api>,
+    Path((owner, repo)): Path<(String, String)>,
+    Query(query): Query<LifecycleQuery>,
+) -> ApiResult<Json<crate::PrLifecycleBatch>> {
+    let numbers = query
+        .numbers
+        .split(',')
+        .map(|number| number.parse::<u64>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| Error::Invalid("Invalid lifecycle PR numbers".into()))?;
+    let repository = format!("{owner}/{repo}");
+    let read = query.read();
+    crate::client::lifecycle::numbers(&repository, &numbers)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    Ok(Json(
+        read.run(crate::client::READ_DEADLINE.scope(deadline, async {
+            tokio::time::timeout_at(
+                deadline,
+                api.0
+                    .client
+                    .pr_lifecycles(&repository, &numbers, read.freshness()?),
+            )
+            .await
+            .map_err(|_| Error::Deadline)?
+        }))
+        .await?,
     ))
 }
 

@@ -20,6 +20,9 @@ pub mod watcher;
 
 pub use api_client::{ApiClient, PrStatusSelection};
 pub use app_auth::AppInstallation;
+pub use client::lifecycle::{
+    PR_LIFECYCLE_BATCH_LIMIT, PrLifecycle, PrLifecycleBatch, PrLifecycleError, PrLifecycleState,
+};
 pub use client::{Client, Config, Freshness};
 pub use dashboard::{
     AccountDiscoveryHealth, AccountRefreshCycle, PrStatusChange, PrStatusCoverage, PrStatusPage,
