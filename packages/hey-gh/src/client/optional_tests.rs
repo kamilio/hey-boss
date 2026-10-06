@@ -6,6 +6,8 @@ use tokio::sync::Notify;
 struct Gate {
     entered: Notify,
     release: Notify,
+    core_entered: Notify,
+    core_release: Notify,
     calls: Mutex<Vec<String>>,
 }
 
@@ -21,6 +23,16 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let gate = Arc::new(Gate::default());
         let router = axum::Router::new()
+            .route(
+                "/core-held",
+                axum::routing::get(
+                    |axum::extract::State(gate): axum::extract::State<Arc<Gate>>| async move {
+                        gate.core_entered.notify_one();
+                        gate.core_release.notified().await;
+                        axum::Json(json!({"ok":true}))
+                    },
+                ),
+            )
             .route(
                 "/core-reserve/{remaining}",
                 axum::routing::get(
@@ -89,6 +101,16 @@ impl Fixture {
     async fn hold(&self) -> tokio::task::JoinHandle<Result<Response>> {
         let task = tokio::spawn(read(self.client.clone(), "gate", Freshness::Revalidate));
         tokio::time::timeout(Duration::from_secs(1), self.gate.entered.notified())
+            .await
+            .unwrap();
+        task
+    }
+
+    async fn hold_core(&self) -> tokio::task::JoinHandle<Result<Response>> {
+        let client = self.client.clone();
+        let task =
+            tokio::spawn(async move { client.get("core-held", Freshness::Revalidate).await });
+        tokio::time::timeout(Duration::from_secs(1), self.gate.core_entered.notified())
             .await
             .unwrap();
         task
@@ -233,4 +255,94 @@ async fn optional_graphql_keeps_its_route_when_rest_quota_cannot_accept_the_fall
                 .any(|tag| tag == "optional")
         );
     }
+}
+
+#[tokio::test]
+async fn optional_selector_waits_behind_required_graphql_when_rest_socket_is_busy() {
+    let f = Fixture::new().await;
+    let core = f.hold_core().await;
+    let held = f.hold().await;
+    let required = tokio::spawn(read(f.client.clone(), "required", Freshness::Revalidate));
+    f.queued(3).await;
+    let optional = tokio::spawn(optional_selector_read(COMPLETION_VALIDATION.scope(
+        (),
+        read(f.client.clone(), "optional", Freshness::Revalidate),
+    )));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let premature = optional.is_finished();
+    f.gate.release.notify_one();
+    held.await.unwrap().unwrap();
+    required.await.unwrap().unwrap();
+    let response = optional.await.unwrap();
+    f.gate.core_release.notify_one();
+    core.await.unwrap().unwrap();
+    assert!(
+        !premature && response.is_ok(),
+        "The GraphQL shortcut can complete before its busy REST fallback: {response:?}"
+    );
+    assert_eq!(
+        *f.gate.calls.lock().unwrap(),
+        ["gate", "required", "optional"]
+    );
+}
+
+#[tokio::test]
+async fn busy_rest_does_not_extend_the_optional_deadline_or_cancel_required_work() {
+    let f = Fixture::new().await;
+    let core = f.hold_core().await;
+    let held = f.hold().await;
+    let required = tokio::spawn(read(f.client.clone(), "required", Freshness::Revalidate));
+    f.queued(3).await;
+    let optional = tokio::time::timeout(
+        Duration::from_secs(3),
+        optional_selector_read(read(f.client.clone(), "optional", Freshness::Revalidate)),
+    )
+    .await
+    .expect("busy fallback must not extend the shortcut's two-second budget");
+    assert!(matches!(optional, Err(Error::Deadline)));
+    assert!(!held.is_finished() && !required.is_finished() && !core.is_finished());
+    f.queued(3).await;
+    f.gate.release.notify_one();
+    f.gate.core_release.notify_one();
+    held.await.unwrap().unwrap();
+    required.await.unwrap().unwrap();
+    core.await.unwrap().unwrap();
+    assert_eq!(*f.gate.calls.lock().unwrap(), ["gate", "required"]);
+}
+
+#[tokio::test]
+async fn queued_paced_rest_work_keeps_the_graphql_shortcut_alive_with_a_free_socket() {
+    let f = Fixture::new().await;
+    f.client
+        .get("core-reserve/1000", Freshness::Revalidate)
+        .await
+        .unwrap();
+    let core = tokio::spawn({
+        let client = f.client.clone();
+        async move { client.get("core-reserve/2000", Freshness::Revalidate).await }
+    });
+    let held = f.hold().await;
+    let required = tokio::spawn(read(f.client.clone(), "required", Freshness::Revalidate));
+    f.queued(3).await;
+    assert_eq!(f.client.status().active_requests, 1);
+    let optional = tokio::spawn(optional_selector_read(COMPLETION_VALIDATION.scope(
+        (),
+        read(f.client.clone(), "optional", Freshness::Revalidate),
+    )));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let premature = optional.is_finished();
+    f.gate.release.notify_one();
+    held.await.unwrap().unwrap();
+    required.await.unwrap().unwrap();
+    let response = optional.await.unwrap();
+    let rest_still_waiting = !core.is_finished();
+    core.await.unwrap().unwrap();
+    assert!(
+        !premature && rest_still_waiting && response.is_ok(),
+        "A free socket does not make the paced REST backlog a faster fallback: {response:?}"
+    );
+    assert_eq!(
+        *f.gate.calls.lock().unwrap(),
+        ["gate", "required", "optional"]
+    );
 }
