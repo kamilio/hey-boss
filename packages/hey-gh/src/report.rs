@@ -18,6 +18,8 @@ mod review_events;
 mod timings;
 use timings::{Phase, Timings};
 #[cfg(test)]
+mod detail_confirmation_tests;
+#[cfg(test)]
 mod timing_tests;
 
 // Cancelled jobs can appear after the parent stops; reuse empty pages only
@@ -433,20 +435,29 @@ impl Client {
             crate::collection_budget::completed_details();
         }
         let errors = errors.into_iter().map(|(_, error)| error).collect();
+        let confirmation_started = tokio::time::Instant::now();
         let final_pr = self
             .final_pull_request(
                 repository,
                 number,
-                if matches!(freshness, Freshness::CachedOnly) {
-                    freshness
-                } else {
-                    Freshness::Revalidate
+                match freshness {
+                    // A sibling may have validated this personal REST body
+                    // while details loaded. Enforce the full report's bound
+                    // at completion, preserving the response's original clock.
+                    Freshness::MaxAge(age) => {
+                        Freshness::MaxAge(age.min(std::time::Duration::from_secs(15)))
+                    }
+                    other => other,
                 },
             )
             .await?;
         if pr.data["node_id"] != final_pr.data["node_id"] {
             return Err(crate::entity::changed());
         }
+        tracing::info!(repository, number, source=?final_pr.source,
+            elapsed_ms=confirmation_started.elapsed().as_millis() as u64,
+            validated_at_ms=final_pr.validated_at_ms,
+            "PR detail metadata confirmed");
         self.observe(
             &format!("metadata://{suffix}"),
             &json!({"pull_request":final_pr.data,"conflicts":conflicts(&final_pr.data)}),

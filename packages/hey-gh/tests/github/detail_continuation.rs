@@ -43,6 +43,12 @@ async fn detail_continuation(case: &str) {
             .complete
     );
     let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+    // Exercise a genuinely required final validation. A still-fresh personal
+    // observation can now complete details without the stalled REST request.
+    db.execute(
+        "UPDATE cache SET response=json_set(response,'$.validated_at_ms',0) WHERE key LIKE '%/pulls/7'",
+        [],
+    ).unwrap();
     if case == "partial" {
         db.execute(
             "DELETE FROM cache WHERE key LIKE '%/issues/7/timeline%'",
