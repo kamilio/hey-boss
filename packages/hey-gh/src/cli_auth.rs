@@ -105,20 +105,22 @@ fn is_comment(invocation: &Invocation, options: &[(String, Option<OsString>)]) -
             .map(|(_, value)| value.into_owned())
             .collect();
         for (name, value) in options {
-            if matches!(name.as_str(), "-f" | "-F" | "--field" | "--raw-field") {
-                if let Some(value) = value
+            if matches!(name.as_str(), "-f" | "-F" | "--field" | "--raw-field")
+                && let Some(value) = value
                     .as_ref()
                     .and_then(|v| v.to_str())
                     .and_then(|v| v.strip_prefix("query="))
-                {
-                    if matches!(name.as_str(), "-F" | "--field") && value.starts_with('@') {
-                        if value == "@-" {
-                            return Err("GraphQL query from stdin requires explicit --auth app or --auth user".into());
-                        }
-                        queries.push(std::fs::read_to_string(&value[1..])?);
-                    } else {
-                        queries.push(value.to_owned());
+            {
+                if matches!(name.as_str(), "-F" | "--field") && value.starts_with('@') {
+                    if value == "@-" {
+                        return Err(
+                            "GraphQL query from stdin requires explicit --auth app or --auth user"
+                                .into(),
+                        );
                     }
+                    queries.push(std::fs::read_to_string(&value[1..])?);
+                } else {
+                    queries.push(value.to_owned());
                 }
             }
             if name == "--input" {

@@ -227,11 +227,11 @@ pub fn option_values(args: &[OsString]) -> Vec<(String, Option<OsString>)> {
         if !arg.starts_with('-') {
             continue;
         }
-        if let Some((name, value)) = arg.split_once('=') {
-            if name.starts_with("--") || name.len() == 2 {
-                result.push((name.into(), Some(value.into())));
-                continue;
-            }
+        if let Some((name, value)) = arg.split_once('=')
+            && (name.starts_with("--") || name.len() == 2)
+        {
+            result.push((name.into(), Some(value.into())));
+            continue;
         }
         if takes_value(&arg) {
             result.push((arg.into_owned(), args.get(index).cloned()));
