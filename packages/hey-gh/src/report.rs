@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -21,6 +21,23 @@ use timings::{Phase, Timings};
 mod detail_confirmation_tests;
 #[cfg(test)]
 mod timing_tests;
+
+// The full report joins six independent source groups. Start its final
+// metadata read once five finish, while the last slow source is still pending.
+struct ReportTail {
+    finished: AtomicUsize,
+    ready: tokio::sync::Notify,
+}
+
+impl ReportTail {
+    async fn collect<T>(&self, read: impl std::future::Future<Output = T>) -> T {
+        let result = read.await;
+        if self.finished.fetch_add(1, Ordering::Relaxed) == 4 {
+            self.ready.notify_one();
+        }
+        result
+    }
+}
 
 // Cancelled jobs can appear after the parent stops; reuse empty pages only
 // once the existing ten-minute settling interval has elapsed.
@@ -957,40 +974,92 @@ impl Client {
             let timeline_path = format!("{prefix}/issues/{number}/timeline?per_page=100");
             timings.enter(Phase::Collection);
             let first_page = review_activity::FirstPage::new(self, repository, number, freshness);
+            let tail = ReportTail {
+                finished: AtomicUsize::new(0),
+                ready: tokio::sync::Notify::new(),
+            };
+            let confirmation_age = std::time::Duration::from_secs(15);
+            let overlap = self.status().queue_capacity >= 32
+                && matches!(freshness, Freshness::MaxAge(age) if age >= confirmation_age);
+            let prefetch = async {
+                if !overlap {
+                    return Ok(());
+                }
+                tail.ready.notified().await;
+                let started = tokio::time::Instant::now();
+                // Speculation only warms the ordinary personal cache. The
+                // final read below still enforces freshness and all selectors;
+                // only that read contributes metadata validation evidence.
+                let response = VALIDATIONS
+                    .scope(
+                        std::cell::RefCell::new(Vec::new()),
+                        self.pull_request(repository, number, Freshness::MaxAge(confirmation_age)),
+                    )
+                    .await?;
+                tracing::info!(repository, number, source=?response.source,
+                    elapsed_ms=started.elapsed().as_millis() as u64,
+                    "Full PR report metadata overlap finished");
+                Ok::<_, Error>(())
+            };
             let (
-                ci_res,
-                comments_res,
-                review_comments_res,
-                reviews_res,
-                (timeline_res, review_events_res),
-                review_threads_res,
-            ) = tokio::join!(
-                self.ci_for_pr(repository, number, freshness),
-                self.pages(&comments_path, None, freshness),
-                self.pages(&review_comments_path, None, freshness),
-                self.pages(&reviews_path, None, freshness),
-                async {
-                    let timeline = self.pages(&timeline_path, None, freshness).await;
-                    // The full report already needs the complete REST timeline.
-                    // Reuse its event identities and validation clocks where it
-                    // carries all GraphQL fields. Otherwise keep the independent
-                    // source, without waiting for CI or other detail collections.
-                    let events = match timeline
-                        .as_ref()
-                        .ok()
-                        .and_then(|timeline| review_events::from_timeline(timeline))
-                    {
-                        Some(events) => Ok(events),
-                        None => {
-                            self.review_events(repository, number, freshness, &first_page)
-                                .await
-                        }
-                    };
-                    (timeline, events)
-                },
-                self.review_threads(repository, number, freshness, &first_page),
-            );
+                prefetched,
+                (
+                    ci_res,
+                    comments_res,
+                    review_comments_res,
+                    reviews_res,
+                    (timeline_res, review_events_res),
+                    review_threads_res,
+                ),
+            ) = self
+                .collect_with_pending_validation(
+                    Box::pin(prefetch),
+                    Box::pin(async {
+                        let sources = tokio::join!(
+                            tail.collect(self.ci_for_pr(repository, number, freshness)),
+                            tail.collect(self.pages(&comments_path, None, freshness)),
+                            tail.collect(self.pages(&review_comments_path, None, freshness)),
+                            tail.collect(self.pages(&reviews_path, None, freshness)),
+                            tail.collect(async {
+                                let timeline = self.pages(&timeline_path, None, freshness).await;
+                                // The full report already needs the complete REST timeline.
+                                // Reuse its event identities and validation clocks where it
+                                // carries all GraphQL fields. Otherwise keep the independent
+                                // source, without waiting for CI or other detail collections.
+                                let events = match timeline
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|timeline| review_events::from_timeline(timeline))
+                                {
+                                    Some(events) => Ok(events),
+                                    None => {
+                                        self.review_events(
+                                            repository,
+                                            number,
+                                            freshness,
+                                            &first_page,
+                                        )
+                                        .await
+                                    }
+                                };
+                                (timeline, events)
+                            }),
+                            tail.collect(self.review_threads(
+                                repository,
+                                number,
+                                freshness,
+                                &first_page
+                            )),
+                        );
+                        // Include any remaining prefetch wait in confirmation
+                        // timing, rather than hiding it in source collection.
+                        timings.enter(Phase::Confirmation);
+                        sources
+                    }),
+                )
+                .await;
             let ci_observation = ci_res?;
+            prefetched?;
             VALIDATIONS.with(|records| records.borrow_mut().extend(ci_observation.validations));
             let ci = ci_observation.data;
             if ci.head_sha != head || ci.merge_sha != merge {

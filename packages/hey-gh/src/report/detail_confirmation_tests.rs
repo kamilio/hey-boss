@@ -16,6 +16,7 @@ struct Mock {
     pause_metadata: AtomicBool,
     deny_metadata: AtomicBool,
     metadata_release: Notify,
+    reviews_release: Notify,
     release: Notify,
 }
 async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
@@ -44,7 +45,16 @@ async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
         ).into_response();
     }
     if path.ends_with("/reviews") && mock.pause_reviews.load(Ordering::Relaxed) {
-        mock.release.notified().await;
+        mock.reviews_release.notified().await;
+    }
+    if path.ends_with("/check-runs") {
+        return Json(json!({"total_count":0,"check_runs":[]})).into_response();
+    }
+    if path.ends_with("/status") {
+        return Json(json!({"total_count":0,"statuses":[]})).into_response();
+    }
+    if path.ends_with("/actions/runs") {
+        return Json(json!({"total_count":0,"workflow_runs":[]})).into_response();
     }
     Json(json!([])).into_response()
 }
@@ -72,6 +82,7 @@ impl Fixture {
             pause_metadata: AtomicBool::new(false),
             deny_metadata: AtomicBool::new(false),
             metadata_release: Notify::new(),
+            reviews_release: Notify::new(),
             release: Notify::new(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -129,6 +140,214 @@ impl Fixture {
             })
             .await
     }
+}
+
+async fn pending_full_report(f: &Fixture) -> tokio::task::JoinHandle<Result<Report>> {
+    let freshness = Freshness::MaxAge(Duration::from_secs(30));
+    assert!(
+        f.client
+            .ci_for_pr("acme/demo", 7, freshness)
+            .await
+            .unwrap()
+            .complete
+    );
+    f.mock.pause_reviews.store(true, Ordering::Relaxed);
+    f.mock.pause_graph.store(true, Ordering::Relaxed);
+    let reader = f.client.clone();
+    let task = tokio::spawn(async move { reader.pr_report("acme/demo", 7, freshness).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let calls = f.mock.calls.lock().unwrap().clone();
+            if calls.iter().any(|p| p.ends_with("/reviews"))
+                && calls.iter().any(|p| p == "/graphql")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Drain the nested CI owner before aging its personal metadata. Two
+    // independent conversation sources still prevent the report from finishing.
+    assert!(
+        f.client
+            .ci_for_pr("acme/demo", 7, freshness)
+            .await
+            .unwrap()
+            .complete
+    );
+    task
+}
+
+#[tokio::test]
+async fn full_report_confirms_metadata_while_its_last_source_is_pending() {
+    for expire in [false, true] {
+        let f = Fixture::new().await;
+        let task = pending_full_report(&f).await;
+        let before = f.metadata_calls();
+        let old = f.age_metadata(60_000);
+        f.mock.reviews_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let cached = f
+                    .client
+                    .pull_request("acme/demo", 7, Freshness::CachedOnly)
+                    .await
+                    .unwrap();
+                if cached.validated_at_ms > old {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Full-report metadata must finish before the blocked final conversation source");
+        assert!(!task.is_finished());
+        if expire {
+            f.age_metadata(16_000);
+            f.mock.metadata.lock().unwrap()["title"] = json!("Changed while waiting");
+        }
+        f.mock.release.notify_one();
+        let report = task.await.unwrap().unwrap();
+        assert!(report.complete, "{:?}", report.data.errors);
+        assert_eq!(
+            f.metadata_calls(),
+            before + if expire { 2 } else { 1 },
+            "Final publication must reuse the still-fresh confirmation"
+        );
+        assert_eq!(
+            report.data.pull_request["title"],
+            if expire {
+                "Changed while waiting"
+            } else {
+                "Before"
+            }
+        );
+        let final_at = f
+            .client
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap()
+            .validated_at_ms;
+        assert_eq!(
+            report
+                .validations
+                .iter()
+                .filter(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms == final_at)
+                .count(),
+            1,
+            "Only the final REST observation contributes this confirmation's clock"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_report_overlap_denial_cannot_publish_old_metadata() {
+    let f = Fixture::new().await;
+    let task = pending_full_report(&f).await;
+    let before = f.metadata_calls();
+    let old = f.age_metadata(60_000);
+    f.mock.deny_metadata.store(true, Ordering::Relaxed);
+    f.mock.reviews_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.metadata_calls() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.mock.release.notify_one();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(Error::GitHub { status: 403, .. })
+    ));
+    assert_eq!(
+        f.client
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap()
+            .validated_at_ms,
+        old
+    );
+    assert!(
+        f.client
+            .stored_snapshot(&format!(
+                "review_status://{}/acme/demo/7",
+                f.client.hostname()
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn cancelling_full_report_overlap_preserves_a_shared_metadata_reader() {
+    let f = Fixture::new().await;
+    let task = pending_full_report(&f).await;
+    let before = f.metadata_calls();
+    f.age_metadata(60_000);
+    f.mock.pause_metadata.store(true, Ordering::Relaxed);
+    f.mock.reviews_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.metadata_calls() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let coalesced = f.client.status().coalesced_requests;
+    let reader = f.client.clone();
+    let shared = tokio::spawn(async move {
+        reader
+            .pull_request("acme/demo", 7, Freshness::default())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.client.status().coalesced_requests == coalesced {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    f.mock.metadata_release.notify_one();
+    assert!(shared.await.unwrap().is_ok());
+    assert_eq!(f.metadata_calls(), before + 1);
+    f.mock.release.notify_one();
+}
+
+#[tokio::test]
+async fn full_report_overlap_rechecks_a_push_after_prefetch_expires() {
+    let f = Fixture::new().await;
+    let task = pending_full_report(&f).await;
+    let old = f.age_metadata(60_000);
+    f.mock.reviews_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f
+            .client
+            .pull_request("acme/demo", 7, Freshness::CachedOnly)
+            .await
+            .unwrap()
+            .validated_at_ms
+            == old
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.age_metadata(16_000);
+    f.mock.metadata.lock().unwrap()["head"]["sha"] = json!("c".repeat(40));
+    f.mock.pause_reviews.store(false, Ordering::Relaxed);
+    f.mock.pause_graph.store(false, Ordering::Relaxed);
+    f.mock.release.notify_one();
+    let report = task.await.unwrap().unwrap();
+    assert!(report.complete);
+    assert_eq!(report.data.pull_request["head"]["sha"], "c".repeat(40));
+    assert_eq!(report.data.ci.head_sha, "c".repeat(40));
 }
 
 #[tokio::test]
@@ -326,6 +545,7 @@ async fn detail_confirmation_uses_metadata_refreshed_by_a_sibling_during_collect
     f.warm_metadata().await;
     f.age_metadata(60_000);
     f.mock.pause_reviews.store(true, Ordering::Relaxed);
+    f.mock.pause_metadata.store(true, Ordering::Relaxed);
     let reader = f.client.clone();
     let task = tokio::spawn(async move {
         reader
@@ -347,8 +567,26 @@ async fn detail_confirmation_uses_metadata_refreshed_by_a_sibling_during_collect
     .await
     .unwrap();
     f.mock.metadata.lock().unwrap()["title"] = json!("After");
-    f.warm_metadata().await;
-    f.mock.release.notify_one();
+    // Hold the response until the sibling and overlap read have joined it.
+    // Otherwise the response may legitimately capture the old title before
+    // this mock mutation, making the test depend on executor scheduling.
+    let coalesced = f.client.status().coalesced_requests;
+    let reader = f.client.clone();
+    let sibling = tokio::spawn(async move {
+        reader
+            .pull_request("acme/demo", 7, Freshness::Revalidate)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while f.client.status().coalesced_requests == coalesced {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.mock.metadata_release.notify_one();
+    sibling.await.unwrap().unwrap();
+    f.mock.reviews_release.notify_one();
     assert!(task.await.unwrap().unwrap().is_empty());
     assert_eq!(
         f.metadata_calls(),
@@ -407,7 +645,7 @@ async fn detail_confirmation_rejects_a_replaced_identity_during_collection() {
     .unwrap();
     f.mock.metadata.lock().unwrap()["node_id"] = json!("PR_replacement");
     f.warm_metadata().await;
-    f.mock.release.notify_one();
+    f.mock.reviews_release.notify_one();
     assert!(
         task.await.unwrap().is_err(),
         "Retired detail evidence cannot publish against the replacement PR"
