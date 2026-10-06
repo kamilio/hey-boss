@@ -195,6 +195,109 @@ async fn pending_full_report(f: &Fixture) -> tokio::task::JoinHandle<Result<Repo
 }
 
 #[tokio::test]
+async fn short_full_report_overlaps_stale_metadata_with_all_pending_sources() {
+    let f = Fixture::new().await;
+    f.warm_metadata().await;
+    f.age_metadata(60_000);
+    f.mock.pause_reviews.store(true, Ordering::Relaxed);
+    f.mock.pause_graph.store(true, Ordering::Relaxed);
+    // CI cannot supply an incidental metadata refresh for this regression.
+    let lock = f.client.report_lock("acme/demo#7:ci");
+    let guard = lock.lock().await;
+    let before = f.metadata_calls();
+    let reader = f.client.clone();
+    let task = tokio::spawn(async move {
+        crate::client::READ_DEADLINE
+            .scope(
+                tokio::time::Instant::now() + Duration::from_secs(15),
+                reader.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+            )
+            .await
+    });
+    let overlapped = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if f.metadata_calls() > before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let pending = !task.is_finished();
+    drop(guard);
+    f.mock.pause_reviews.store(false, Ordering::Relaxed);
+    f.mock.pause_graph.store(false, Ordering::Relaxed);
+    f.mock.reviews_release.notify_one();
+    f.mock.release.notify_one();
+    let report = task.await.unwrap().unwrap();
+    assert!(
+        overlapped.is_ok(),
+        "Stale metadata must start before CI and conversation sources finish"
+    );
+    assert!(pending);
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(
+        f.metadata_calls(),
+        before + 1,
+        "Early confirmation must be reused, not fetched twice"
+    );
+}
+
+#[tokio::test]
+async fn fresh_or_long_full_reports_do_not_start_early_metadata_work() {
+    for (seconds, metadata_age) in [(15, 0), (60, 60_000)] {
+        let f = Fixture::new().await;
+        f.warm_metadata().await;
+        f.age_metadata(metadata_age);
+        f.mock.pause_reviews.store(true, Ordering::Relaxed);
+        f.mock.pause_graph.store(true, Ordering::Relaxed);
+        let lock = f.client.report_lock("acme/demo#7:ci");
+        let guard = lock.lock().await;
+        let before = f.metadata_calls();
+        let reader = f.client.clone();
+        let task = tokio::spawn(async move {
+            crate::client::READ_DEADLINE
+                .scope(
+                    tokio::time::Instant::now() + Duration::from_secs(seconds),
+                    reader.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|path| path == "/graphql")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(100), async {
+            while f.metadata_calls() == before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        drop(guard);
+        f.mock.pause_reviews.store(false, Ordering::Relaxed);
+        f.mock.pause_graph.store(false, Ordering::Relaxed);
+        f.mock.reviews_release.notify_one();
+        f.mock.release.notify_one();
+        assert!(task.await.unwrap().unwrap().complete);
+        assert!(
+            early.is_err(),
+            "deadline={seconds}, metadata_age={metadata_age}"
+        );
+        assert_eq!(f.metadata_calls(), before + usize::from(metadata_age > 0));
+    }
+}
+
+#[tokio::test]
 async fn full_report_confirms_metadata_while_its_last_source_is_pending() {
     for expire in [false, true] {
         let f = Fixture::new().await;
