@@ -52,6 +52,10 @@ mod optional_tests;
 #[path = "client/optional_transport_tests.rs"]
 mod optional_transport_tests;
 
+#[cfg(test)]
+#[path = "client/native_policy_tests.rs"]
+mod native_policy_tests;
+
 pub(crate) async fn optional_selector_read<T>(
     read: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
