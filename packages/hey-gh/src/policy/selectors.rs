@@ -58,7 +58,7 @@ fn eligible(pr: &Value, repository: &str, number: u64) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case(repository))
 }
 
-fn matches(pr: &Value, response: &Value) -> bool {
+fn identity_matches(pr: &Value, response: &Value) -> bool {
     let repository = &response["data"]["repository"];
     let node = &repository["pullRequest"];
     let base = &pr["base"]["repo"];
@@ -67,6 +67,18 @@ fn matches(pr: &Value, response: &Value) -> bool {
             && repo["databaseId"] == base["id"]
             && repo["nameWithOwner"] == base["full_name"]
     };
+    same_repository(repository) && same_repository(&node["baseRepository"])
+        && node["id"] == pr["node_id"] && node["number"] == pr["number"]
+        && node["state"].as_str() == lifecycle(pr) && node["merged"] == pr["merged"]
+        && node["headRefOid"] == pr["head"]["sha"]
+        && node["baseRefName"] == pr["base"]["ref"] && node["baseRefOid"] == pr["base"]["sha"]
+        // Missing fields are unknown, not evidence of absent native membership.
+        && node.get("stack") == Some(&Value::Null)
+        && node.get("stackEntry") == Some(&Value::Null)
+}
+
+fn matches(pr: &Value, response: &Value) -> bool {
+    let node = &response["data"]["repository"]["pullRequest"];
     let merge_matches = if pr["merged"] == true {
         node["mergeCommit"]["oid"] == pr["merge_commit_sha"]
     } else {
@@ -85,16 +97,9 @@ fn matches(pr: &Value, response: &Value) -> bool {
                         .any(|parent| parent["oid"] == node["headRefOid"])
             })
     };
-    same_repository(repository) && same_repository(&node["baseRepository"])
-        && node["id"] == pr["node_id"] && node["number"] == pr["number"]
-        && node["state"].as_str() == lifecycle(pr) && node["merged"] == pr["merged"]
+    identity_matches(pr, response)
         && (pr["merged"] == true || node["mergeable"] == "MERGEABLE")
-        && node["headRefOid"] == pr["head"]["sha"]
-        && node["baseRefName"] == pr["base"]["ref"] && node["baseRefOid"] == pr["base"]["sha"]
         && merge_matches
-        // Missing fields are unknown, not evidence of absent native membership.
-        && node.get("stack") == Some(&Value::Null)
-        && node.get("stackEntry") == Some(&Value::Null)
 }
 
 impl Client {
@@ -123,20 +128,51 @@ impl Client {
                 let (owner, repo) = repository.split_once('/').expect("validated repository");
                 // This optional route must leave time for REST when GraphQL is
                 // stalled or paced. It shares the existing main-account scope.
-                let result = crate::client::optional_selector_read(self.graphql(
-                    SELECTORS,
-                    json!({"owner":owner,"repo":repo,"number":number}),
-                    freshness,
-                ))
+                // Box the multi-read shortcut to bound nested collector stacks.
+                let result = crate::client::optional_selector_read(Box::pin(async {
+                    let response = self
+                        .graphql(
+                            SELECTORS,
+                            json!({"owner":owner,"repo":repo,"number":number}),
+                            freshness,
+                        )
+                        .await?;
+                    if response.validated_at_ms < seed.validated_at_ms || !recent(&response, age) {
+                        return Ok(false);
+                    }
+                    if matches(&seed.data, &response.data) {
+                        return Ok(true);
+                    }
+                    let node = &response.data["data"]["repository"]["pullRequest"];
+                    if lifecycle(&seed.data) != Some("OPEN")
+                        || !identity_matches(&seed.data, &response.data)
+                        || node["mergeable"] != "UNKNOWN"
+                        || node.get("potentialMergeCommit") != Some(&Value::Null)
+                    {
+                        return Ok(false);
+                    }
+                    // GitHub can omit the test merge from GraphQL while its
+                    // REST ref still exists. A retained ref alone is not proof:
+                    // the fresh node must also match the known-clean seed's
+                    // exact PR, head, base and standalone membership above.
+                    // Confirm only selectors, never mergeability or REST fields.
+                    // Both optional reads share one budget and personal auth.
+                    let merge_ref = self
+                        .get(
+                            &format!("repos/{repository}/git/ref/pull/{number}/merge"),
+                            Freshness::Revalidate,
+                        )
+                        .await?;
+                    Ok(merge_ref.validated_at_ms >= response.validated_at_ms
+                        && recent(&response, age)
+                        && recent(&merge_ref, age)
+                        && merge_ref.data["ref"] == format!("refs/pull/{number}/merge")
+                        && merge_ref.data["object"]["type"] == "commit"
+                        && merge_ref.data["object"]["sha"] == seed.data["merge_commit_sha"])
+                }))
                 .await;
                 match result {
-                    Ok(response)
-                        if response.validated_at_ms >= seed.validated_at_ms
-                            && recent(&response, age)
-                            && matches(&seed.data, &response.data) =>
-                    {
-                        return Ok(None);
-                    }
+                    Ok(true) => return Ok(None),
                     Err(
                         error @ (Error::Auth(_)
                         | Error::LocalAuth(_)

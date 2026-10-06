@@ -26,6 +26,9 @@ mod rules;
 #[path = "policy_selectors/ci_retry.rs"]
 mod ci_retry;
 
+#[path = "policy_selectors/merge_ref.rs"]
+mod merge_ref;
+
 fn metadata() -> Value {
     json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
         "head":{"sha":HEAD},"base":{"ref":"main","sha":BASE,"repo":{"id":123,"node_id":"R_demo","full_name":"acme/demo"}},
@@ -45,6 +48,10 @@ fn selectors() -> Value {
 struct Data {
     rest: Value,
     graph: Value,
+    merge_ref: Value,
+    deny_merge_ref: bool,
+    missing_merge_ref: bool,
+    stall_merge_ref: bool,
     branch: Value,
     branch_graph: Value,
     ci_graph: Value,
@@ -92,6 +99,13 @@ async fn handler(
             path.into(),
             serde_json::from_slice(&body).unwrap_or(Value::Null),
         ));
+        if path.ends_with("/git/ref/pull/7/merge") && s.missing_merge_ref {
+            return (
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"message":"Not Found"})),
+            )
+                .into_response();
+        }
         let result = if path == "/app/installations/42/access_tokens" {
             (
                 json!({"token":"synthetic-app-token","expires_at":"2099-01-01T00:00:00Z"}),
@@ -122,6 +136,8 @@ async fn handler(
                 s.graph.clone()
             };
             (value, false, s.stall_graph)
+        } else if path.ends_with("/git/ref/pull/7/merge") {
+            (s.merge_ref.clone(), s.deny_merge_ref, s.stall_merge_ref)
         } else if path.ends_with("/pulls/7") {
             let result = (s.rest.clone(), s.deny_rest, s.stall_rest);
             if let Some(next) = s.rest_after_read.take() {
@@ -267,6 +283,10 @@ impl Fixture {
         let data = Arc::new(Mutex::new(Data {
             rest: metadata(),
             graph: selectors(),
+            merge_ref: json!({"ref":"refs/pull/7/merge","object":{"type":"commit","sha":MERGE}}),
+            deny_merge_ref: false,
+            missing_merge_ref: false,
+            stall_merge_ref: false,
             branch: json!({"commit":{"sha":BASE},"protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}),
             branch_graph: Value::Null,
             ci_graph: Value::Null,
