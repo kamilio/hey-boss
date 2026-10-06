@@ -8,7 +8,12 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn command(invocation: &Invocation) -> Result<Command> {
+pub struct Prepared {
+    pub command: Command,
+    pub identity: Option<(String, String)>,
+}
+
+pub fn command(invocation: &Invocation) -> Result<Prepared> {
     let original_args = &invocation.args;
     let resolved = crate::cli_alias::resolve(invocation)?;
     let invocation = resolved.as_ref().unwrap_or(invocation);
@@ -23,7 +28,10 @@ pub fn command(invocation: &Invocation) -> Result<Command> {
     let mut command = Command::new("gh");
     command.args(original_args);
     if !app {
-        return Ok(command);
+        return Ok(Prepared {
+            command,
+            identity: None,
+        });
     }
     if comment && flag_enabled(&options, &["--web", "-w"]) {
         return Err("GitHub App comments cannot use a browser's personal login; omit --web or explicitly select --auth user".into());
@@ -46,7 +54,14 @@ pub fn command(invocation: &Invocation) -> Result<Command> {
         }
     };
     set_token(&mut command, &host, &token);
-    Ok(command)
+    // Native gh performs implicit user lookups and expands aliases itself. Its
+    // private transport lets those reads retain personal selection without
+    // replacing gh's parser, output, pagination or mutation behavior.
+    let identity = (invocation.auth == Auth::App
+        && !comment
+        && !matches!(invocation.root(), "auth" | "config" | "alias"))
+    .then_some((host, token));
+    Ok(Prepared { command, identity })
 }
 
 fn set_token(command: &mut Command, host: &str, token: &str) {

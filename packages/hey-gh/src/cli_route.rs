@@ -204,6 +204,23 @@ fn takes_value(arg: &str) -> bool {
             | "--wait"
             | "--title"
             | "--author"
+            | "-A"
+            | "--search"
+            | "-S"
+            | "--assignee"
+            | "--add-assignee"
+            | "--remove-assignee"
+            | "--mention"
+            | "--mentions"
+            | "--reviewer"
+            | "--review-requested"
+            | "--reviewed-by"
+            | "--commenter"
+            | "--involves"
+            | "--owner"
+            | "--source-owner"
+            | "--target-owner"
+            | "--query"
             | "--state"
             | "--limit"
             | "-L"
@@ -237,9 +254,11 @@ pub fn option_values(args: &[OsString]) -> Vec<(String, Option<OsString>)> {
             result.push((arg.into_owned(), args.get(index).cloned()));
             index += 1;
         } else if arg.len() > 2
-            && ["-R", "-b", "-F", "-f", "-X", "-H", "-q", "-t", "-p"]
-                .iter()
-                .any(|prefix| arg.starts_with(prefix))
+            && [
+                "-R", "-b", "-F", "-f", "-X", "-H", "-q", "-t", "-p", "-A", "-S",
+            ]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix))
         {
             result.push((arg[..2].into(), Some(OsStr::new(&arg[2..]).to_owned())));
         } else {

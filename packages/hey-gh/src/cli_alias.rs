@@ -9,7 +9,7 @@ use std::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn resolve(invocation: &Invocation) -> Result<Option<Invocation>> {
-    if invocation.auth != Auth::Auto || invocation.help() || builtin(invocation.root()) {
+    if invocation.auth == Auth::User || invocation.help() || builtin(invocation.root()) {
         return Ok(None);
     }
     // Local config only; never contact GitHub or consume the caller's stdin.
@@ -31,11 +31,15 @@ pub fn resolve(invocation: &Invocation) -> Result<Option<Invocation>> {
     };
     let mut args = invocation.args.clone();
     for _ in 0..16 {
-        let current = Invocation::parse(args)?;
+        let mut current = Invocation::parse(args)?;
+        current.auth = invocation.auth;
         let Some(expansion) = aliases.get(current.root()) else {
             return Ok(Some(current));
         };
         if expansion.starts_with('!') {
+            if invocation.auth == Auth::App {
+                return Ok(None);
+            }
             return Err("shell aliases require explicit --auth app or --auth user; their GitHub operations cannot be inferred".into());
         }
         let words =

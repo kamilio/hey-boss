@@ -32,6 +32,17 @@ comments. Browser comments require `--auth user` because browser identity cannot
 be selected with an installation token. Installation permissions and gh's support
 for App identities still apply, including author-dependent edit/delete operations.
 
+With `--auth app`, `@me`, implicit own-PR/issue status, assignments, mentions,
+review filters, and default repository/project owners still select the personal
+user logged into `gh` on the target host. Native aliases use the same behavior.
+User lookups and search filters are resolved through a private, temporary Unix
+socket transport; data requests and mutations retain App authentication. Personal
+REST reads such as notifications use personal credentials because those endpoints
+are account-scoped. Mutations never fall back to personal credentials. Literal
+comment text and App comment authorship are preserved. Temporary gh configuration
+and cache isolation leave the user's configuration unchanged; cached monitoring
+continues using its existing personal discovery and App CI routing.
+
 App commands mint a separate installation token with the App's granted permissions
 and configured repository selection. Personal credentials are never a fallback
 when minting fails. CI can supply a pre-minted installation token through
