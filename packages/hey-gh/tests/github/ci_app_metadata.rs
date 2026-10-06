@@ -3,6 +3,111 @@ use super::ci_app_selectors::expire_metadata;
 use super::*;
 
 #[tokio::test]
+async fn personal_report_seed_overlaps_nonselector_app_changes_with_final_validation() {
+    for change in ["mergeability", "updated", "head", "lifecycle"] {
+        let overlaps = matches!(change, "mergeability" | "updated");
+        let h = Harness::new().await;
+        h.phase(2);
+        h.mode("account");
+        let c = Client::with_token(app_config(&h), "synthetic-token".into()).unwrap();
+        let warm = c
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap();
+        assert!(warm.complete);
+        let db = rusqlite::Connection::open(h.config().cache_path).unwrap();
+        db.execute("UPDATE cache SET response=json_set(response,'$.validated_at_ms',0,'$.data.title','unvalidated personal seed','$.etag','expired-seed','$.last_modified',null) WHERE key LIKE '%/pulls/7' OR key LIKE '%/issues/7/comments%'", []).unwrap();
+        let (scope, key, raw): (String, String, String) = db.query_row(
+            "SELECT scope,key,response FROM cache WHERE key LIKE '%/pulls/7#installation-ci-pr'", [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        let mut app: Value = serde_json::from_str(&raw).unwrap();
+        app["validated_at_ms"] = json!(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        );
+        app["etag"] = json!("expired-app");
+        app["last_modified"] = Value::Null;
+        if change == "mergeability" {
+            app["data"]["mergeable"] = Value::Null;
+            app["data"]["mergeable_state"] = json!("unknown");
+        } else if change == "updated" {
+            app["data"]["updated_at"] = json!("2026-10-06T00:00:00Z");
+        } else if change == "head" {
+            app["data"]["head"]["sha"] = json!(NEW_HEAD);
+        } else {
+            app["data"]["state"] = json!("closed");
+        }
+        db.execute(
+            "UPDATE cache SET response=?1 WHERE scope=?2 AND key=?3",
+            rusqlite::params![app.to_string(), scope, key],
+        )
+        .unwrap();
+        // A collection seed must not become a usable generic cached response.
+        assert!(matches!(
+            c.pull_request("acme/demo", 7, Freshness::CachedOnly).await,
+            Err(Error::CacheMiss)
+        ));
+        h.mode("issue72-stall-metadata");
+        let before = h.calls().len();
+        let reader = c.clone();
+        let read = tokio::spawn(async move {
+            reader
+                .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+                .await
+        });
+        let started = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if h.calls()[before..]
+                    .iter()
+                    .any(|c| c.path.ends_with("/issues/7/comments"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        let pending = !read.is_finished();
+        h.mode("account");
+        h.mock.release.notify_waiters();
+        assert_eq!(
+            started.is_ok(),
+            overlaps,
+            "{change}: only nonselector changes may overlap personal validation"
+        );
+        assert!(pending, "{change}: a seed cannot bypass final validation");
+        let report = tokio::time::timeout(Duration::from_secs(3), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(report.complete, "{change}: {:?}", report.data.errors);
+        assert_ne!(
+            report.data.pull_request["title"],
+            "unvalidated personal seed"
+        );
+        assert!(report.validations.iter().all(|v| v.validated_at_ms > 0));
+        let calls = h.calls();
+        assert!(
+            calls[before..]
+                .iter()
+                .any(|c| c.path.ends_with("/pulls/7") && c.token == "Bearer synthetic-token")
+        );
+        assert!(
+            calls[before..]
+                .iter()
+                .filter(|c| c.path.ends_with("/comments")
+                    || c.path.ends_with("/reviews")
+                    || c.path.ends_with("/timeline"))
+                .all(|c| c.token == "Bearer synthetic-token")
+        );
+    }
+}
+
+#[tokio::test]
 async fn ci_rest_cold_metadata_uses_app_despite_personal_quota_exhaustion() {
     let h = Harness::new().await;
     h.phase(2);
