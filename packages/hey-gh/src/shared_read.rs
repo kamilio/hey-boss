@@ -127,7 +127,9 @@ pub(crate) fn supported_path(path: &str) -> bool {
             && value.parse::<u64>().is_ok_and(|n| n > 0)
     };
     match parts.as_slice() {
-        ["", "v1", "pr-status" | "snapshot" | "changes"] => true,
+        // Raw source feeds include local explicit watches. Until their source
+        // coverage is negotiated, only the account PR feed can be shared.
+        ["", "v1", "pr-status"] => true,
         ["", "v1", "prs" | "repos", owner, repo] => repository(owner, repo),
         ["", "v1", "prs", owner, repo, n] => repository(owner, repo) && number(n),
         [
@@ -196,8 +198,6 @@ mod tests {
     fn shared_reads_allow_only_supported_get_routes() {
         for path in [
             "/v1/pr-status",
-            "/v1/snapshot",
-            "/v1/changes",
             "/v1/prs/acme/demo",
             "/v1/prs/acme/demo/7",
             "/v1/prs/acme/demo/7/ci",
@@ -210,6 +210,10 @@ mod tests {
             assert!(read(path).validate().is_ok(), "{path}");
         }
         for path in [
+            // These contain companion-local source watches. A same-account
+            // handshake does not prove that the supervisor covers them.
+            "/v1/snapshot",
+            "/v1/changes",
             "https://example.com/v1/pr-status",
             "//example.com/v1/pr-status",
             "/v1/identity",
