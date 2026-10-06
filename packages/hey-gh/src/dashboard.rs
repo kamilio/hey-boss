@@ -16,6 +16,8 @@ mod discovery_progress;
 mod discovery_progress_tests;
 mod hydration;
 pub(crate) mod partial;
+#[cfg(test)]
+mod policy_retirement_tests;
 mod schedule;
 
 // PR updatedAt versions mutable PR metadata, not CI or mergeability. These
@@ -801,6 +803,30 @@ impl Client {
             pending.insert(key(node)?, node.clone());
         }
         pending.extend(current.clone());
+        let mut terminal_retired = 0;
+        if policy_only && authoritative_roster {
+            let mut retired = Vec::new();
+            for ((repo, number), node) in &pending {
+                if current.contains_key(&(repo.clone(), *number)) {
+                    continue;
+                }
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.policy_terminal_cached(repo, *number, node),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => retired.push((repo.clone(), *number)),
+                    Ok(Ok(false)) => {}
+                    Ok(Err(error)) => return Err(error),
+                    Err(_) => break,
+                }
+            }
+            terminal_retired = retired.len();
+            for key in retired {
+                pending.remove(&key);
+            }
+        }
         if !seed_only {
             schedule.reconcile(&pending, refresh.follows_ci());
             self.save_derived(
@@ -813,6 +839,12 @@ impl Client {
         // survive process death between discovery and their final observation.
         self.save_derived(&tracking_key, json!(pending.values().collect::<Vec<_>>()))
             .await?;
+        if terminal_retired > 0 {
+            tracing::info!(
+                retired = terminal_retired,
+                "Terminal PRs retired from policy queue"
+            );
+        }
         if discovered || additive_roster {
             self.observe(&self.roster_resource(), &json!(pulls)).await?;
         }

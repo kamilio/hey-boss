@@ -25,6 +25,7 @@ mod ci_selectors;
 mod confirmation_tests;
 pub(crate) mod lifecycle;
 mod policy_ci;
+mod policy_retirement;
 
 #[cfg(test)]
 tokio::task_local! {
