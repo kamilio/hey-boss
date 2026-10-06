@@ -171,6 +171,20 @@ struct PacingProbe {
     windows: Vec<(u64, Instant)>,
 }
 
+impl PacingProbe {
+    fn observation(&self, quota: &str, reset: u64, queued_at: Instant) -> Option<ReservedWindow> {
+        (self.quota == quota).then_some(())?;
+        let (_, slot) = self.windows.iter().find(|(window, _)| *window == reset)?;
+        // A borrowed slot is sustained queued demand, even though it dispatched
+        // early. Keep the unreserved header-time anchor; charge_probe repays
+        // the captured future slot separately.
+        Some(ReservedWindow {
+            dispatched_at: Instant::now(),
+            waited_for_quota: queued_at < *slot,
+        })
+    }
+}
+
 struct ProbeTurn {
     quota: String,
     owed: String,
@@ -884,6 +898,9 @@ impl Scheduler {
                 // A selected foreground validator may test its own soft wait.
                 // Charged replies keep borrowing blocked after this job leaves.
                 (index != *selected || job.interactive())
+                    // GraphQL is always charged. It may only move its own
+                    // selected turn forward, never borrow another class's turn.
+                    && (job.body.is_none() || index == *selected)
                     && !blocked_probes.contains(&quota)
                     && !probing_quotas.contains(&quota)
                     && ((job.interactive() == turn.interactive()
@@ -899,7 +916,7 @@ impl Scheduler {
                     // socket or global spacing.
                     && ready(turn, &budgets, now) > now
                     && budgets.for_resource(&quota).next().is_some()
-                    && budgets.for_resource(&quota).all(|budget| conditional_probe_eligible(job, budget))
+                    && budgets.for_resource(&quota).all(|budget| pacing_probe_eligible(job, budget))
             };
             let waiting_for_turn = |index: usize, job: &Job| {
                 defers_optional(job)
@@ -1186,6 +1203,7 @@ impl Scheduler {
                         }
                     };
                     let status = response.status();
+                    let unchanged = status == StatusCode::NOT_MODIFIED && job.body.is_none();
                     job.http_status = Some(status.as_u16());
                     if status == StatusCode::NOT_MODIFIED {
                         self.metrics.not_modified.fetch_add(1, Ordering::Relaxed);
@@ -1226,18 +1244,36 @@ impl Scheduler {
                             &job.quota(),
                             remaining,
                             reset,
-                            status == StatusCode::NOT_MODIFIED,
+                            unchanged,
                             reservation
                                 .as_ref()
-                                .and_then(|r| r.for_window(&job.quota(), reset)),
+                                .and_then(|r| r.for_window(&job.quota(), reset))
+                                .or_else(|| {
+                                    job.body.as_ref()?;
+                                    probe.as_ref()?.0.observation(
+                                        &job.quota(),
+                                        reset,
+                                        job.queued_at,
+                                    )
+                                }),
                         );
                     }
                     if let Some((debt, turn)) = &probe
-                        && status != StatusCode::NOT_MODIFIED
+                        && !unchanged
                     {
                         blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
                     }
                     if status == StatusCode::NOT_MODIFIED && !job.minting {
+                        if job.body.is_some() {
+                            self.finish(
+                                job,
+                                Err(Error::Invalid(
+                                    "GitHub returned 304 for a nonconditional GraphQL request"
+                                        .into(),
+                                )),
+                            );
+                            continue;
+                        }
                         if let Some(mut cached) = job.cached.take() {
                             // Validators and pagination metadata may be updated on 304.
                             cached.etag = header(&headers, "etag").or(cached.etag);
@@ -1664,7 +1700,7 @@ fn ready_with_probe(job: &Job, budgets: &Budgets, global: Instant, probe: bool) 
             .for_resource(&job.quota())
             .map(|budget| {
                 if conditional_budget_exempt(job, budget)
-                    || (probe && conditional_probe_eligible(job, budget))
+                    || (probe && pacing_probe_eligible(job, budget))
                 {
                     job.ready_at
                 } else if budget.reset_at_seconds != 0 {
@@ -1707,11 +1743,15 @@ fn conditional_budget_exempt(job: &Job, budget: &Budget) -> bool {
         })
 }
 
-fn conditional_probe_eligible(job: &Job, budget: &Budget) -> bool {
+fn pacing_probe_eligible(job: &Job, budget: &Budget) -> bool {
     // The first foreground REST validation may borrow an older paced turn too.
     // One probe per quota awaits headers; a charged/unknown reply repays the
     // interval and blocks further borrowing until that exact owed job leaves.
-    // This does not grant an unproven validator an ordinary pacing exemption.
+    // Required foreground GraphQL reads may use their own selected slot early.
+    // They always repay it, including transport failures and invalid replies;
+    // the selected debt survives completion/cancellation. Optional shortcuts
+    // retain their normal pacing and REST fallback rather than spending a loan.
+    // Neither case grants an ordinary pacing exemption.
     budget.remaining > QUOTA_RESERVE + 1
         && (conditional_budget_exempt(job, budget)
             || (job.interactive()
@@ -1720,7 +1760,15 @@ fn conditional_probe_eligible(job: &Job, budget: &Budget) -> bool {
                 && job
                     .cached
                     .as_ref()
-                    .is_some_and(|cached| cached.etag.is_some() || cached.last_modified.is_some())))
+                    .is_some_and(|cached| cached.etag.is_some() || cached.last_modified.is_some()))
+            || (job.interactive()
+                && job.resource == "graphql"
+                && job.body.is_some()
+                && job.required_reader.load(Ordering::Relaxed)
+                // GraphQL can charge multiple points. Keep the estimated
+                // shared charge above the reserve in every live window.
+                && budget.remaining.saturating_sub(QUOTA_RESERVE)
+                    > budget.usage.share.ceil() as u64))
 }
 
 pub(crate) fn header(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1954,7 +2002,7 @@ mod tests {
                 ready_with_probe(&job, &budgets, now, true),
                 ready(&job, &budgets, now),
             );
-            assert!(!conditional_probe_eligible(
+            assert!(!pacing_probe_eligible(
                 &job,
                 &budgets.0["core"][&(reset + 60)]
             ));
@@ -1984,14 +2032,14 @@ mod tests {
                 "no-validator" => job.cached.as_mut().unwrap().etag = None,
                 _ => unreachable!(),
             }
-            assert!(!conditional_probe_eligible(&job, budget), "{case}");
+            assert!(!pacing_probe_eligible(&job, budget), "{case}");
         }
         let mut promoted = first_validator();
         promoted.interactive.store(false, Ordering::Relaxed);
         promoted.report_priority.store(true, Ordering::Relaxed);
         promoted.cached.as_mut().unwrap().etag = None;
         promoted.cached.as_mut().unwrap().last_modified = Some("synthetic-date".into());
-        assert!(conditional_probe_eligible(&promoted, budget));
+        assert!(pacing_probe_eligible(&promoted, budget));
         assert!(!conditional_budget_exempt(&promoted, budget));
     }
 
@@ -2481,6 +2529,55 @@ mod tests {
                 1.0,
                 "{resource}"
             );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn borrowed_graphql_slot_retains_shared_point_consumption_estimate() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("graphql", 5000, reset, false, None);
+        for i in 1..=6 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            budgets.observe("graphql", 5000 - i * 60, reset, false, None);
+        }
+        let queued = Instant::now();
+        let loan = budgets.probe("graphql");
+        tokio::time::advance(Duration::from_secs(35)).await;
+        let observation = loan.observation("graphql", reset, queued).unwrap();
+        assert!(observation.waited_for_quota);
+        assert!(
+            loan.observation("installation/graphql", reset, queued)
+                .is_none()
+        );
+        assert!(loan.observation("graphql", reset + 60, queued).is_none());
+        budgets.observe("graphql", 4580, reset, false, Some(observation));
+        assert_eq!(
+            budgets.for_resource("graphql").next().unwrap().usage.share,
+            60.0
+        );
+    }
+
+    #[tokio::test]
+    async fn graphql_borrowing_keeps_room_for_the_estimated_point_charge() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("graphql", 5000, reset, false, None);
+        let budget = budgets
+            .0
+            .get_mut("graphql")
+            .unwrap()
+            .get_mut(&reset)
+            .unwrap();
+        budget.usage.share = 20.0;
+        let mut job = core_job();
+        job.resource = "graphql".into();
+        job.body = Some(serde_json::json!({"query":"{ viewer { login } }"}));
+        job.interactive.store(true, Ordering::Relaxed);
+        job.required_reader.store(true, Ordering::Relaxed);
+        for remaining in [101, 119, 120, 121] {
+            budget.remaining = remaining;
+            assert_eq!(pacing_probe_eligible(&job, budget), remaining > 120);
         }
     }
 
