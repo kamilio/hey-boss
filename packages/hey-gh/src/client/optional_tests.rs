@@ -58,7 +58,7 @@ impl Fixture {
                  axum::Json(body): axum::Json<Value>| async move {
                     let tag = body["variables"]["tag"].as_str().unwrap().to_owned();
                     gate.calls.lock().unwrap().push(tag.clone());
-                    if tag == "gate" || tag == "paced-gate" {
+                    if tag == "gate" || tag == "paced-gate" || tag == "held-optional" {
                         gate.entered.notify_one();
                         gate.release.notified().await;
                     }
@@ -139,6 +139,126 @@ impl Fixture {
             .await
             .unwrap();
         task
+    }
+}
+
+#[tokio::test]
+async fn optional_selector_allows_a_bounded_response_after_a_late_dispatch() {
+    for caller_bound in [false, true] {
+        let f = Fixture::new().await;
+        let gate = f.hold().await;
+        let started = tokio::time::Instant::now();
+        let client = f.client.clone();
+        let optional = tokio::spawn(async move {
+            let read =
+                optional_selector_read(read(client, "slow-paced-optional", Freshness::Revalidate));
+            if caller_bound {
+                READ_DEADLINE
+                    .scope(started + Duration::from_millis(1900), read)
+                    .await
+            } else {
+                read.await
+            }
+        });
+        f.queued(2).await;
+        tokio::time::sleep_until(started + Duration::from_millis(1550)).await;
+        f.gate.release.notify_one();
+        gate.await.unwrap().unwrap();
+        let result = optional.await.unwrap();
+        if caller_bound {
+            assert!(matches!(result, Err(Error::Deadline)));
+            assert!(started.elapsed() < Duration::from_millis(2100));
+        } else {
+            assert!(
+                result.is_ok(),
+                "a dispatched shortcut lost its response: {result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_millis(2800));
+            assert_eq!(f.client.status().network_requests, 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn optional_selector_response_allowance_is_bounded_and_releases_its_lane() {
+    let f = Fixture::new().await;
+    let gate = f.hold().await;
+    let client = f.client.clone();
+    let started = tokio::time::Instant::now();
+    let optional = tokio::spawn(optional_selector_read(read(
+        client,
+        "held-optional",
+        Freshness::Revalidate,
+    )));
+    f.queued(2).await;
+    tokio::time::sleep_until(started + Duration::from_millis(1550)).await;
+    f.gate.release.notify_one();
+    gate.await.unwrap().unwrap();
+    f.gate.entered.notified().await;
+    assert!(matches!(optional.await.unwrap(), Err(Error::Deadline)));
+    assert!(started.elapsed() >= Duration::from_millis(2450));
+    assert!(started.elapsed() < Duration::from_millis(3100));
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while f.client.status().outstanding_requests != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("expired optional transport retained its lane");
+    f.gate.release.notify_one();
+}
+
+#[tokio::test]
+async fn late_optional_dispatch_keeps_each_coalesced_callers_deadline() {
+    for caller_bound in [false, true] {
+        let f = Fixture::new().await;
+        let gate = f.hold().await;
+        let client = f.client.clone();
+        let started = tokio::time::Instant::now();
+        let optional = tokio::spawn(async move {
+            let read = optional_selector_read(read(client, "held-optional", Freshness::Revalidate));
+            if caller_bound {
+                READ_DEADLINE
+                    .scope(started + Duration::from_millis(1800), read)
+                    .await
+            } else {
+                read.await
+            }
+        });
+        f.queued(2).await;
+        let required = tokio::spawn(read(
+            f.client.clone(),
+            "held-optional",
+            Freshness::Revalidate,
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while f.client.status().coalesced_requests == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep_until(started + Duration::from_millis(1550)).await;
+        f.gate.release.notify_one();
+        gate.await.unwrap().unwrap();
+        f.gate.entered.notified().await;
+        assert!(matches!(optional.await.unwrap(), Err(Error::Deadline)));
+        if caller_bound {
+            assert!(started.elapsed() < Duration::from_millis(1950));
+        } else {
+            assert!(started.elapsed() >= Duration::from_millis(2450));
+        }
+        assert!(
+            !required.is_finished(),
+            "optional expiry cancelled its required peer"
+        );
+        f.gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), required)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(f.client.status().network_requests, 2);
     }
 }
 
@@ -469,8 +589,12 @@ async fn optional_graphql_borrows_its_turn_only_for_a_congested_rest_fallback_an
         .await;
         if fallback == "free" {
             assert!(
-                matches!(response, Err(Error::Deadline)),
-                "an available REST fallback must not spend a loan: {response:?}"
+                response.is_ok(),
+                "an ordinarily paced dispatch must retain its bounded response allowance: {response:?}"
+            );
+            assert!(
+                started.elapsed() >= Duration::from_millis(1900),
+                "an available REST fallback must not borrow its paced turn"
             );
         } else {
             assert!(
