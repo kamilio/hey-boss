@@ -225,8 +225,21 @@ impl Polling {
                 DemandScope::PullRequest(key) => state.locally_demanded(key, now),
                 _ => false,
             };
+        let was_delegated = !already_local
+            && state.lease.as_ref().is_some_and(|(until, coverage)| {
+                *until > now
+                    && match &scope {
+                        DemandScope::PullRequest(key) => coverage.rows.contains_key(key),
+                        DemandScope::Repository(repo) => coverage.rows.keys().any(|key| {
+                            key.rsplit_once('/').is_some_and(|(owner, _)| owner == repo)
+                                && !state.locally_demanded(key, now)
+                        }),
+                        DemandScope::Global => false,
+                    }
+            });
         state.scoped.insert(scope, (now + LOCAL_DEMAND, source));
-        if !already_local {
+        // Ordinary reads on the primary must not accelerate its poll cadence.
+        if was_delegated {
             self.wake();
         }
     }
@@ -294,6 +307,34 @@ mod tests {
             interval_seconds: 60,
             modes: [true; 3],
             rows: BTreeMap::from([row(&node()).unwrap()]),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_reads_wake_only_work_previously_delegated() {
+        let polling = Polling::default();
+        polling.demand_scoped("metadata", DemandScope::PullRequest("acme/repo/9".into()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), polling.changed("ci"))
+                .await
+                .is_err()
+        );
+        assert!(polling.renew(&local(), 60, Instant::now(), coverage()));
+        for mode in ["ci", "details", "policy"] {
+            polling.changed(mode).await;
+        }
+        polling.demand_scoped("metadata", DemandScope::PullRequest("acme/repo/8".into()));
+        polling.demand_scoped("repository", DemandScope::Repository("acme/other".into()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), polling.changed("ci"))
+                .await
+                .is_err()
+        );
+        polling.demand_scoped("metadata", DemandScope::PullRequest("acme/repo/7".into()));
+        for mode in ["ci", "details", "policy"] {
+            tokio::time::timeout(Duration::from_millis(1), polling.changed(mode))
+                .await
+                .unwrap();
         }
     }
 
