@@ -1138,6 +1138,7 @@ impl Client {
         repository: Option<&str>,
         fields: Option<&[&str]>,
         cursor: Option<&str>,
+        limit: usize,
     ) -> Result<crate::store::PrBootstrapPage> {
         self.0
             .store
@@ -1147,6 +1148,7 @@ impl Client {
                 repository,
                 fields.map(|fields| fields.iter().map(|field| (*field).to_owned()).collect()),
                 cursor,
+                limit,
             )
             .await
     }

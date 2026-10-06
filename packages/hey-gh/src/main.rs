@@ -711,7 +711,11 @@ async fn run_pr(
             if !(1..=1000).contains(&requested) {
                 return Err("--limit must be 1..1000".into());
             }
-            limit = requested;
+            // Initial CLI --limit only trims the display. Keep the server
+            // page's aggregate health and total information before trimming.
+            if cursor.is_some() {
+                limit = requested;
+            }
             initial_limit = Some(requested);
         }
         Some(PrAction::Changes { limit: requested }) => {
