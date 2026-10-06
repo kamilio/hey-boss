@@ -117,12 +117,15 @@ fn systemd(value: &str) -> String {
 }
 fn definition(macos: bool, executable: &str, env: &[(String, String)]) -> String {
     if macos {
+        // Foreground CLI/UI requests use HTTP, not XPC activity that could
+        // promote an Adaptive job. Default daemon I/O throttling delays even
+        // indexed cache reads, so this shared API needs interactive scheduling.
         let environment: String = env
             .iter()
             .map(|(k, v)| format!("<key>{}</key><string>{}</string>", xml(k), xml(v)))
             .collect();
         format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array><string>{}</string><string>service</string><string>run</string></array><key>EnvironmentVariables</key><dict>{environment}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer></dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array><string>{}</string><string>service</string><string>run</string></array><key>EnvironmentVariables</key><dict>{environment}</dict><key>ProcessType</key><string>Interactive</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>15</integer></dict></plist>\n",
             xml(executable)
         )
     } else {
@@ -442,6 +445,9 @@ mod tests {
         let plist = definition(true, "/test & space/hey-gh", &env);
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
         assert!(plist.contains("/test &amp; space/hey-gh"));
+        // Local HTTP callers depend on this service for interactive reads.
+        // launchd's default daemon class throttles even indexed SQLite I/O.
+        assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
     }
     #[test]
     fn registrations_are_idempotent_and_atomic() {
