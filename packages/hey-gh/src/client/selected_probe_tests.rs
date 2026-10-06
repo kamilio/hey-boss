@@ -146,6 +146,28 @@ async fn selected_probe_preserves_exhaustion_and_quota_reserves() {
 }
 
 #[tokio::test]
+async fn a_free_ordinary_validation_releases_its_reserved_slot_for_cold_work() {
+    for changed in [false, true] {
+        let f = Fixture::new(changed, 5000).await;
+        // Background first validations take their ordinary paced turn. Only
+        // the response tells us whether that reserved charge was actually free.
+        f.client.get("first", Freshness::Revalidate).await.unwrap();
+        let cold = tokio::time::timeout(Duration::from_millis(350), f.read("cold")).await;
+        if changed {
+            assert!(
+                cold.is_err(),
+                "a charged validation must retain its interval"
+            );
+        } else {
+            assert!(
+                matches!(cold, Ok(Ok(_))),
+                "a confirmed 304 kept delaying cold work: {cold:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn proven_validator_uses_borrowed_window_before_unproven_completion() {
     mixed_validation_window(false).await;
 }
