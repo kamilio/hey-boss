@@ -67,7 +67,11 @@ async fn handler(State(state): State<Arc<Mutex<Fixture>>>, uri: Uri) -> impl Int
         }
     } else if path.contains("/branches/") {
         let protection = s.protection.clone();
-        if let Some(next) = s.next_protection.take() {
+        // Protection changes belong to the trunk observation, independent of
+        // whether its sibling diff-base request reaches the server first.
+        if !path.ends_with("/layer")
+            && let Some(next) = s.next_protection.take()
+        {
             s.protection = next;
             s.classic = true;
         }

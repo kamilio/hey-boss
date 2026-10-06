@@ -332,12 +332,14 @@ impl Client {
                         crate::entity::scope(async {
                             tokio::time::timeout(
                                 self.report_timeout(),
-                                self.collect_required_checks(
+                                // Keep the collector's concurrent source futures
+                                // off the nested account-watch task's stack.
+                                Box::pin(self.collect_required_checks(
                                     repository,
                                     number,
                                     freshness,
                                     &mut timings,
-                                ),
+                                )),
                             )
                             .await
                             .map_err(|_| Error::Deadline)?
@@ -456,7 +458,7 @@ impl Client {
                 segment(&identity.branch)
             );
             timings.enter(Phase::Policy);
-            let ((branch, protection_res), rules_first_res) = tokio::join!(
+            let ((branch, protection_res), rules_first_res, direct_branch) = tokio::join!(
                 async {
                     // Keep the optional selector's future out of the nested
                     // account collector's stack frame.
@@ -473,13 +475,19 @@ impl Client {
                     (branch, protection)
                 },
                 Box::pin(self.policy_rules(repository, &identity.branch, freshness)),
+                async {
+                    if identity.branch != base {
+                        // Native stacks have a separate diff base. Its tip is
+                        // independent of trunk policy; retain the same read
+                        // semantics without putting it behind those requests.
+                        Some(Box::pin(self.get(&branch_path, freshness)).await)
+                    } else {
+                        None
+                    }
+                },
             );
             let mut errors = Vec::new();
-            let direct_branch = if identity.branch == base {
-                branch.clone()
-            } else {
-                self.get(&branch_path, freshness).await
-            };
+            let direct_branch = direct_branch.unwrap_or_else(|| branch.clone());
             if let Ok(branch) = &branch
                 && !branch.data["commit"]["sha"]
                     .as_str()
@@ -693,6 +701,15 @@ impl Client {
                 "satisfied"
             };
             timings.enter(Phase::Confirmation);
+            let mut direct_confirmation = (!matches!(freshness, Freshness::CachedOnly)
+                && identity.branch != base)
+                .then(|| {
+                    Box::pin(
+                        crate::client::COMPLETION_VALIDATION
+                            .scope((), self.get(&branch_path, Freshness::Revalidate)),
+                    )
+                });
+            let mut direct_result = None;
             let (final_rest_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
                 (None, None)
             } else {
@@ -713,18 +730,27 @@ impl Client {
                 // Only the final selectors get completion priority. Collection
                 // still queues normally, and the scheduler alternates these
                 // confirmations with other work under the same quota limits.
-                let (pr_res, branch_res) = crate::client::COMPLETION_VALIDATION
-                    .scope((), async {
-                        tokio::join!(
-                            self.confirm_policy_pr(repository, number, &pr, pr_policy),
-                            Box::pin(self.policy_branch(
-                                repository,
-                                &identity.branch,
-                                branch_policy
-                            )),
-                        )
-                    })
-                    .await;
+                let primary = crate::client::COMPLETION_VALIDATION.scope((), async {
+                    tokio::join!(
+                        self.confirm_policy_pr(repository, number, &pr, pr_policy),
+                        Box::pin(self.policy_branch(repository, &identity.branch, branch_policy)),
+                    )
+                });
+                tokio::pin!(primary);
+                let (pr_res, branch_res) = if let Some(direct) = direct_confirmation.as_mut() {
+                    // Poll both, but process changed/denied PR selectors before
+                    // waiting for a now-irrelevant diff base. Dropping this
+                    // waiter leaves other coalesced readers intact.
+                    tokio::select! {
+                        result = &mut primary => result,
+                        result = direct => {
+                            direct_result = Some(result);
+                            primary.await
+                        }
+                    }
+                } else {
+                    primary.await
+                };
                 (pr_res?, Some(branch_res))
             };
             let final_pr = final_rest_pr.as_ref().unwrap_or(&pr);
@@ -756,11 +782,12 @@ impl Client {
                 } else if let Err(e) = confirmed {
                     errors.push(source("base_confirmation", e));
                 }
-                if identity.branch != base {
-                    match crate::client::COMPLETION_VALIDATION
-                        .scope((), self.get(&branch_path, Freshness::Revalidate))
-                        .await
-                    {
+                if let Some(direct) = direct_confirmation {
+                    let direct_confirmed = match direct_result {
+                        Some(result) => result,
+                        None => direct.await,
+                    };
+                    match direct_confirmed {
                         Ok(after)
                             if after.data["commit"]["sha"].as_str() != base_sha.as_deref() =>
                         {
