@@ -29,7 +29,7 @@ mod policy_retirement;
 
 #[cfg(test)]
 tokio::task_local! {
-    static CACHE_LOOKUP_GATE: std::cell::RefCell<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+    pub(crate) static CACHE_LOOKUP_GATE: std::cell::RefCell<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
 }
 
 // Admission probes apply ordinary freshness/version rules without dispatching,

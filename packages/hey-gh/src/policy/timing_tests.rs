@@ -63,14 +63,14 @@ async fn blocked_policy_reads_log_the_wait_even_when_the_caller_cancels() {
     let _owner = lock.lock().await;
     assert!(matches!(
         client
-            .required_checks_for_pr("private-org/private-repo", 7, Freshness::CachedOnly)
+            .required_checks_for_pr("private-org/private-repo", 7, Freshness::Revalidate)
             .await,
         Err(Error::Deadline)
     ));
     assert!(
         tokio::time::timeout(
             Duration::from_millis(150),
-            client.required_checks_for_pr("PRIVATE-ORG/PRIVATE-REPO", 7, Freshness::CachedOnly)
+            client.required_checks_for_pr("PRIVATE-ORG/PRIVATE-REPO", 7, Freshness::Revalidate)
         )
         .await
         .is_err()
