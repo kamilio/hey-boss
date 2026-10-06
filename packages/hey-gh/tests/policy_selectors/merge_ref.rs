@@ -36,6 +36,13 @@ async fn matching_ref_confirms_policy_without_refreshing_metadata_or_using_app_a
         .expect("matching merge ref waited for full REST metadata")
         .unwrap();
         assert_eq!(report.state, "satisfied", "{:?}", report.errors);
+        let confirmation =
+            serde_json::to_value(&report).unwrap()["pull_request_confirmation"].clone();
+        assert!(
+            confirmation["selectors"]["mergeable"].is_null(),
+            "A retained merge ref cannot confirm clean mergeability"
+        );
+        assert!(confirmation["validated_at_ms"].as_u64().unwrap() > old);
         assert_eq!(report.merge_sha.as_deref(), Some(MERGE));
         assert!(
             report

@@ -213,6 +213,11 @@ export interface RequiredCheck {
   sha: string | null
   url: string | null
 }
+/** Limited selector evidence; never a fresh full REST PR body. */
+export interface PullRequestConfirmation {
+  selectors: GitHubRecord
+  validated_at_ms: number
+}
 export interface RequiredChecksReport {
   repository: string
   pull_number: number
@@ -228,6 +233,7 @@ export interface RequiredChecksReport {
   rules: GitHubRecord[]
   errors: SourceError[]
   cursor: string
+  pull_request_confirmation?: PullRequestConfirmation
 }
 export interface RateLimit { remaining: number; reset_at_seconds: number }
 export interface Status {

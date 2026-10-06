@@ -3,6 +3,41 @@ use crate::{Client, Error, Freshness, Response, Result, now_ms};
 use serde_json::{Value, json};
 use std::time::Duration;
 
+pub(super) struct Confirmation {
+    pub rest: Option<Response>,
+    pub selectors: super::PullRequestConfirmation,
+}
+
+fn project(pr: &Value, validated_at_ms: u64) -> super::PullRequestConfirmation {
+    let stack = &pr["stack"];
+    let stack = if stack.is_null() {
+        Value::Null
+    } else {
+        json!({"id":stack["id"],"number":stack["number"],"position":stack["position"],"size":stack["size"],
+            "base":{"ref":stack["base"]["ref"],"sha":stack["base"]["sha"]}})
+    };
+    super::PullRequestConfirmation {
+        selectors: json!({
+            "node_id":pr["node_id"],"number":pr["number"],
+            "state":pr["state"],"merged":pr["merged"],"mergeable":pr["mergeable"],
+            "head":{"sha":pr["head"]["sha"]},
+            "base":{"ref":pr["base"]["ref"],"sha":pr["base"]["sha"],
+                "repo":{"id":pr["base"]["repo"]["id"],"node_id":pr["base"]["repo"]["node_id"],"full_name":pr["base"]["repo"]["full_name"]}},
+            "merge_commit_sha":pr["merge_commit_sha"],"stack":stack
+        }),
+        validated_at_ms,
+    }
+}
+
+impl Confirmation {
+    fn rest(response: Response) -> Self {
+        Self {
+            selectors: project(&response.data, response.validated_at_ms),
+            rest: Some(response),
+        }
+    }
+}
+
 const SELECTORS: &str = r#"query RequiredPolicySelectors($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     id databaseId nameWithOwner
@@ -118,14 +153,14 @@ fn matches(pr: &Value, response: &Value) -> bool {
 }
 
 impl Client {
-    /// None confirms only the seeded selectors; it is never a fresh REST body.
+    /// Selector confirmation never refreshes the seeded REST body.
     pub(super) async fn confirm_policy_pr(
         &self,
         repository: &str,
         number: u64,
         seed: &Response,
         freshness: Freshness,
-    ) -> Result<Option<Response>> {
+    ) -> Result<Confirmation> {
         if let Freshness::MaxAge(age) = freshness
             && !age.is_zero()
             && eligible(&seed.data, repository, number)
@@ -153,10 +188,19 @@ impl Client {
                         )
                         .await?;
                     if response.validated_at_ms < seed.validated_at_ms || !recent(&response, age) {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     if matches(&seed.data, &response.data) {
-                        return Ok(true);
+                        let mut proof = project(&seed.data, response.validated_at_ms);
+                        proof.selectors["mergeable"] =
+                            match response.data["data"]["repository"]["pullRequest"]["mergeable"]
+                                .as_str()
+                            {
+                                Some("MERGEABLE") => json!(true),
+                                Some("CONFLICTING") => json!(false),
+                                _ => Value::Null,
+                            };
+                        return Ok(Some(proof));
                     }
                     let node = &response.data["data"]["repository"]["pullRequest"];
                     if lifecycle(&seed.data) != Some("OPEN")
@@ -165,7 +209,7 @@ impl Client {
                         || node["mergeable"] != "UNKNOWN"
                         || node.get("potentialMergeCommit") != Some(&Value::Null)
                     {
-                        return Ok(false);
+                        return Ok(None);
                     }
                     // GitHub can omit the test merge from GraphQL while its
                     // REST ref still exists. A retained ref alone is not proof:
@@ -179,16 +223,26 @@ impl Client {
                             Freshness::Revalidate,
                         )
                         .await?;
-                    Ok(merge_ref.validated_at_ms >= response.validated_at_ms
+                    let confirmed = merge_ref.validated_at_ms >= response.validated_at_ms
                         && recent(&response, age)
                         && recent(&merge_ref, age)
                         && merge_ref.data["ref"] == format!("refs/pull/{number}/merge")
                         && merge_ref.data["object"]["type"] == "commit"
-                        && merge_ref.data["object"]["sha"] == seed.data["merge_commit_sha"])
+                        && merge_ref.data["object"]["sha"] == seed.data["merge_commit_sha"];
+                    Ok(confirmed.then(|| {
+                        let mut proof = project(&seed.data, response.validated_at_ms);
+                        proof.selectors["mergeable"] = Value::Null;
+                        proof
+                    }))
                 }))
                 .await;
                 match result {
-                    Ok(true) => return Ok(None),
+                    Ok(Some(selectors)) => {
+                        return Ok(Confirmation {
+                            rest: None,
+                            selectors,
+                        });
+                    }
                     Err(
                         error @ (Error::Auth(_)
                         | Error::LocalAuth(_)
@@ -209,11 +263,11 @@ impl Client {
                 return self
                     .pull_request(repository, number, Freshness::Revalidate)
                     .await
-                    .map(Some);
+                    .map(Confirmation::rest);
             }
         }
         self.pull_request(repository, number, freshness)
             .await
-            .map(Some)
+            .map(Confirmation::rest)
     }
 }

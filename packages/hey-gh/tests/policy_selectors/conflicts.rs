@@ -26,6 +26,10 @@ async fn confirmed_conflict_uses_personal_selectors_without_renewing_rest_metada
         // Required checks can pass while the PR has a merge conflict. This is
         // evidence about the head's checks, never a claim of merge readiness.
         assert_eq!(report.state, "satisfied", "{:?}", report.errors);
+        let confirmation =
+            serde_json::to_value(&report).unwrap()["pull_request_confirmation"].clone();
+        assert_eq!(confirmation["selectors"]["mergeable"], false);
+        assert!(confirmation["validated_at_ms"].as_u64().unwrap() > old);
         assert_eq!(report.merge_sha, None);
         assert!(
             report

@@ -71,6 +71,15 @@ struct RequiredEvidence {
     policy: hey_gh::RequiredChecksReport,
     published: bool,
     force: bool,
+    started_at_ms: u64,
+}
+
+fn confirmation_fresh(validated_at_ms: u64, started_at_ms: u64, force: bool) -> bool {
+    validated_at_ms > 0
+        && (crate::issues::worker::now() as u64)
+            .checked_sub(validated_at_ms)
+            .is_some_and(|age| age < 30_000)
+        && (!force || validated_at_ms >= started_at_ms)
 }
 
 async fn poll_required(
@@ -82,6 +91,7 @@ async fn poll_required(
     batch_deadline: tokio::time::Instant,
     force: bool,
 ) -> hey_gh::Result<Option<RequiredEvidence>> {
+    let started_at_ms = crate::issues::worker::now() as u64;
     let freshness = fetch_freshness(force);
     let deadline = batch_deadline.min(tokio::time::Instant::now() + Duration::from_secs(60));
     let read_client = client.clone().with_read_deadline(deadline);
@@ -142,6 +152,7 @@ async fn poll_required(
         policy,
         published: published_required,
         force,
+        started_at_ms,
     }))
 }
 
@@ -246,6 +257,7 @@ async fn poll_details(
         policy,
         published: published_required,
         force,
+        started_at_ms,
     } = required;
     let _ = batch_deadline;
     let freshness = fetch_freshness(force);
@@ -255,19 +267,28 @@ async fn poll_details(
         let (ci, metadata) = tokio::join!(
             read_client.ci_for_pr(repository, number, freshness),
             async {
-                let metadata = read_client
-                    .pull_request(repository, number, freshness)
-                    .await?;
-                if fresh(metadata.validated_at_ms)
+                let confirmed = hey_gh::watcher::confirmed_metadata(repository, number, &policy)
+                    .filter(|proof| {
+                        confirmation_fresh(proof.validated_at_ms, started_at_ms, force)
+                            && policy.oldest_validation_at_ms.is_some_and(fresh)
+                            && policy
+                                .observed_at_ms
+                                .is_some_and(|at| proof.validated_at_ms <= at)
+                    });
+                let (metadata, validated_at_ms, reused) = if let Some(proof) = confirmed {
+                    (proof.selectors.clone(), proof.validated_at_ms, true)
+                } else {
+                    let response = read_client
+                        .pull_request(repository, number, freshness)
+                        .await?;
+                    (response.data, response.validated_at_ms, false)
+                };
+                if fresh(validated_at_ms)
                     && policy.oldest_validation_at_ms.is_some_and(fresh)
-                    && metadata.data["mergeable"] == false
+                    && metadata["mergeable"] == false
                 {
-                    let observation = hey_gh::watcher::observe_metadata(
-                        repository,
-                        number,
-                        &metadata.data,
-                        &policy,
-                    );
+                    let observation =
+                        hey_gh::watcher::observe_metadata(repository, number, &metadata, &policy);
                     if observation.evidence["sources_match"] == true {
                         Store::open(&ctx.path)
                             .map_err(storage)?
@@ -279,14 +300,24 @@ async fn poll_details(
                             .map_err(storage)?;
                     }
                 }
-                Ok::<_, hey_gh::Error>(metadata)
+                Ok::<_, hey_gh::Error>((metadata, validated_at_ms, reused))
             }
         );
-        Ok::<_, hey_gh::Error>((ci?, metadata?))
+        let ci = ci?;
+        let mut metadata = metadata?;
+        // A slow CI read can outlive the reused proof. Spend only the remaining
+        // detail deadline on normal metadata, rather than repeating policy/CI.
+        if metadata.2 && !confirmation_fresh(metadata.1, started_at_ms, force) {
+            let response = read_client
+                .pull_request(repository, number, freshness)
+                .await?;
+            metadata = (response.data, response.validated_at_ms, false);
+        }
+        Ok::<_, hey_gh::Error>((ci, metadata))
     })
     .await
     .unwrap_or(Err(hey_gh::Error::Deadline));
-    let (ci, metadata) = match result {
+    let (ci, (metadata, validated_at_ms, reused)) = match result {
         Ok(result) => result,
         Err(error) if published_required => {
             Store::open(&ctx.path)
@@ -297,7 +328,12 @@ async fn poll_details(
         }
         Err(error) => return Err(error),
     };
-    if !fresh(ci.oldest_validation_at_ms) || !fresh(metadata.validated_at_ms) {
+    if !fresh(ci.oldest_validation_at_ms)
+        || !fresh(validated_at_ms)
+        || (reused
+            && (!confirmation_fresh(validated_at_ms, started_at_ms, force)
+                || !policy.oldest_validation_at_ms.is_some_and(fresh)))
+    {
         let error = hey_gh::Error::Invalid(
             "GitHub CI evidence is stale; waiting for fresh validation".into(),
         );
@@ -310,8 +346,7 @@ async fn poll_details(
         }
         return Err(error);
     }
-    let observation =
-        hey_gh::watcher::observe_ci(repository, number, &metadata.data, &ci.data, &policy);
+    let observation = hey_gh::watcher::observe_ci(repository, number, &metadata, &ci.data, &policy);
     if observation.evidence["sources_match"] == false {
         Store::open(&ctx.path)
             .map_err(storage)?
@@ -325,9 +360,9 @@ async fn poll_details(
     }
     {
         let mut store = Store::open(&ctx.path).map_err(storage)?;
-        if super::pr_status(&metadata.data, repository, number) == Some("open") {
+        if super::pr_status(&metadata, repository, number) == Some("open") {
             store
-                .record_open_pr_if_changed(url, timestamp(metadata.validated_at_ms)?)
+                .record_open_pr_if_changed(url, timestamp(validated_at_ms)?)
                 .map_err(storage)?;
         }
         store

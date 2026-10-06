@@ -29,7 +29,7 @@ pub use client::{Client, Config, Freshness};
 pub use dashboard::{
     AccountDiscoveryHealth, AccountRefreshCycle, PrStatusChange, PrStatusCoverage, PrStatusPage,
 };
-pub use policy::{PolicyIdentity, RequiredCheck, RequiredChecksReport};
+pub use policy::{PolicyIdentity, PullRequestConfirmation, RequiredCheck, RequiredChecksReport};
 pub use polling::PollingStatus;
 pub use pr_fields::PR_STATUS_FIELDS;
 pub use report::{
