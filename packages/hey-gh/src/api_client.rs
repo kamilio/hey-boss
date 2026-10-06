@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::time::Duration;
 use url::Url;
+mod relay;
 mod shared;
 
 pub(crate) const READ_TIMEOUT_HEADER: &str = "x-hey-gh-read-timeout-ms";
@@ -28,6 +29,7 @@ pub struct ApiClient {
     background: bool,
     capture_reports: bool,
     read_deadline: Option<tokio::time::Instant>,
+    relay_socket: Option<std::path::PathBuf>,
 }
 impl ApiClient {
     /// Explicit release observations; does not register watches or notify agents.
@@ -190,6 +192,9 @@ impl ApiClient {
             .build()
             .map_err(|e| Error::Transport(e.to_string()))?;
         Ok(Self {
+            relay_socket: (base.port_or_known_default() == Some(8787))
+                .then(crate::shared_read::socket_path)
+                .transpose()?,
             base,
             http,
             background: false,
@@ -428,6 +433,17 @@ impl ApiClient {
         self.read(request).await
     }
     async fn read<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
+        let deadline = self
+            .read_deadline
+            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(180));
+        let client = self.clone().with_read_deadline(deadline);
+        tokio::time::timeout_at(deadline, async {
+            client.relay_read(request.build().map_err(transport)?).await
+        })
+        .await
+        .unwrap_or(Err(Error::Deadline))
+    }
+    async fn direct_read<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T> {
         let read = async {
             let mut request = self.authorize(request)?;
             if let Some(deadline) = self.read_deadline {

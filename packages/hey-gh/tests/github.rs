@@ -176,16 +176,20 @@ async fn shared_identity_is_cache_only_and_changes_on_daemon_restart() {
     assert_eq!(identity.user_id, 42);
     assert_eq!(identity.hostname, "github.com");
     assert_eq!(identity, sdk.shared_identity().await.unwrap());
+    client
+        .pull_request("o/r", 1, Freshness::Revalidate)
+        .await
+        .unwrap();
     let request = hey_gh::shared_read::Read {
         identity: identity.clone(),
-        path: "/v1/snapshot".into(),
-        query: None,
+        path: "/v1/prs/o/r/1/metadata".into(),
+        query: Some("cached_only=true".into()),
         timeout_ms: 1000,
     };
     let reply = sdk.shared_read(&request).await.unwrap();
     assert_eq!(reply.status, 200);
     let missing = hey_gh::shared_read::Read {
-        path: "/v1/prs/o/r/1/metadata".into(),
+        path: "/v1/prs/o/r/2/metadata".into(),
         query: Some("cached_only=true".into()),
         ..request.clone()
     };
@@ -205,7 +209,7 @@ async fn shared_identity_is_cache_only_and_changes_on_daemon_restart() {
     ));
     assert_eq!(
         h.calls().len(),
-        1,
+        2,
         "shared cache reads and identity guards stay offline"
     );
     task.abort();

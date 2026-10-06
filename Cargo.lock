@@ -920,6 +920,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "libc",
  "rcgen",
  "reqwest",
  "rusqlite",
