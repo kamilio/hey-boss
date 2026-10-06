@@ -4967,18 +4967,25 @@ async fn full_report_final_bound_does_not_promote_discovery_selectors_to_rest_me
         "UPDATE cache SET response=json_set(response,'$.validated_at_ms',?1,'$.data.title','Stale REST title','$.etag',NULL) WHERE key LIKE '%/pulls/7'",
         [old],
     ).unwrap();
+    // Establish that selectors alone can satisfy CI while the REST title is
+    // still old. During the full report, a metadata prefetch can finish before
+    // nested CI chooses its source, so its choice is no longer deterministic.
+    let ci = c
+        .ci_for_pr("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
+        .await
+        .unwrap();
+    assert!(ci.complete);
+    assert!(
+        ci.validations
+            .iter()
+            .any(|v| v.resource.ends_with("#ci-selectors"))
+    );
     let before = h.calls().len();
     let report = c
         .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
         .await
         .unwrap();
     assert!(report.complete);
-    assert!(
-        report
-            .validations
-            .iter()
-            .any(|v| v.resource.ends_with("#ci-selectors"))
-    );
     assert_eq!(
         h.calls()[before..]
             .iter()
