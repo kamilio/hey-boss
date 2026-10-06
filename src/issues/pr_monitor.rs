@@ -1,4 +1,4 @@
-//! Atomic completion of tasks whose explicitly classified fix PRs have merged.
+//! Merged PR history and atomic completion of tasks whose fix PRs have merged.
 use super::*;
 
 pub(crate) struct TrackedPullRequest {
@@ -26,6 +26,8 @@ pub(super) fn merged_history(
         [],
         |row| row.get(0),
     )?;
+    // History includes every linked PR by this account; only task completion
+    // depends on the link's fix classification.
     // Materialize the PR selection once, then drive indexed URL lookups from it.
     // CROSS JOIN prevents SQLite from rescanning the selection per task link.
     let mut query = db.prepare(
@@ -33,13 +35,13 @@ pub(super) fn merged_history(
             SELECT pr.url,max(pr.pr_title) AS title,min(pr.merged_at) AS merged_at,min(pr.checked_at) AS observed_at
             FROM issue_pull_requests pr
             JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number
-            WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND pr.author_id=?4 AND i.deleted_at IS NULL
+            WHERE pr.project_id=?1 AND pr.status='merged' AND pr.author_id=?4 AND i.deleted_at IS NULL
             GROUP BY pr.url
             ORDER BY coalesce(min(pr.merged_at),0) DESC,pr.url LIMIT ?2 OFFSET ?3
         )
         SELECT h.url,h.title,h.merged_at,h.observed_at,i.number,i.title
         FROM history h
-        CROSS JOIN issue_pull_requests pr ON pr.project_id=?1 AND pr.url=h.url AND pr.purpose='fix'
+        CROSS JOIN issue_pull_requests pr ON pr.project_id=?1 AND pr.url=h.url
         CROSS JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number
         WHERE i.deleted_at IS NULL
         ORDER BY coalesce(h.merged_at,0) DESC,h.url,i.number",
@@ -62,7 +64,7 @@ pub(super) fn merged_history(
     }
     let more = prs.len() > limit as usize;
     prs.truncate(limit as usize);
-    let authorship_pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND pr.purpose='fix' AND i.deleted_at IS NULL AND (?2 IS NULL OR pr.author_id IS NULL))", params![project,viewer], |row| row.get(0))?;
+    let authorship_pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE pr.project_id=?1 AND pr.status='merged' AND i.deleted_at IS NULL AND (?2 IS NULL OR pr.author_id IS NULL))", params![project,viewer], |row| row.get(0))?;
     Ok(
         json!({"ok":true,"pull_requests":prs,"authorship_pending":authorship_pending,"next_offset":more.then_some(u64::from(offset)+u64::from(limit))}),
     )
@@ -96,8 +98,9 @@ impl Store {
 
     pub(crate) fn tracked_pull_requests(&self) -> Result<Vec<TrackedPullRequest>> {
         // Closing a task can precede observing its PR merge. Keep unresolved
-        // fixes in the ordinary metadata queue until their lifecycle is known.
-        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.purpose='fix' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR (pr.purpose='fix' AND pr.status NOT IN ('merged','closed')) OR (pr.status='merged' AND (pr.merged_at IS NULL OR (pr.purpose='fix' AND pr.author_id IS NULL)))) GROUP BY pr.url ORDER BY pr.url")?;
+        // links in the metadata queue until history has their lifecycle, merge
+        // date, and author. This does not make reference PRs close tasks.
+        let mut query = self.db.prepare("SELECT pr.url,CASE WHEN count(pr.checked_at)=count(*) AND sum(pr.status='merged' AND pr.author_id IS NULL)=0 THEN min(pr.checked_at) END,min(pr.status='closed') FROM issue_pull_requests pr JOIN issues i ON i.project_id=pr.project_id AND i.number=pr.issue_number WHERE i.deleted_at IS NULL AND ((i.state<>'closed' AND pr.status<>'merged') OR pr.status NOT IN ('merged','closed') OR (pr.status='merged' AND (pr.merged_at IS NULL OR pr.author_id IS NULL))) GROUP BY pr.url ORDER BY pr.url")?;
         Ok(query
             .query_map([], |r| {
                 Ok(TrackedPullRequest {
@@ -332,6 +335,58 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn merged_history_backfills_authorship_for_every_link_purpose() {
+        for purpose in ["fix", "unspecified", "prerequisite", "supporting-evidence"] {
+            let (mut store, _, root) = fixture();
+            let url = "https://github.com/o/r/pull/1";
+            store
+                .db
+                .execute(
+                    "UPDATE issue_pull_requests SET purpose=?1,author_id=NULL",
+                    [purpose],
+                )
+                .unwrap();
+            store
+                .db
+                .execute("UPDATE issues SET state='closed'", [])
+                .unwrap();
+            store
+                .record_pr_status(url, Some("merged"), 2000, None)
+                .unwrap();
+            store
+                .record_pr_merge_details(url, "Merged", Some("2026-10-05T21:04:49Z"), 2000)
+                .unwrap();
+            let pending = merged_history(&store.db, "named:test", 10, 0).unwrap();
+            assert_eq!(pending["authorship_pending"], true, "{purpose}");
+            assert!(pending["pull_requests"].as_array().unwrap().is_empty());
+            let tracked = store.tracked_pull_requests().unwrap();
+            assert!(
+                tracked
+                    .iter()
+                    .any(|pr| pr.url == url && pr.checked_at.is_none()),
+                "{purpose}"
+            );
+            store.record_pr_author(url, 42).unwrap();
+            let confirmed = merged_history(&store.db, "named:test", 10, 0).unwrap();
+            assert_eq!(confirmed["authorship_pending"], false);
+            assert_eq!(
+                confirmed["pull_requests"].as_array().unwrap().len(),
+                1,
+                "{purpose}"
+            );
+            assert!(
+                !store
+                    .tracked_pull_requests()
+                    .unwrap()
+                    .iter()
+                    .any(|pr| pr.url == url)
+            );
+            drop(store);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn merged_history_backfills_closed_tasks_and_repairs_fleet_capture() {
         let (mut store, _, root) = fixture();
         let url = "https://github.com/o/r/pull/1";
@@ -393,7 +448,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn merged_history_excludes_reference_only_prs_before_pagination() {
+    fn merged_history_includes_all_link_purposes_before_pagination() {
         let (mut store, actor, root) = fixture();
         for (issue, pr, purpose) in [(2, 4, "prerequisite"), (3, 5, "unspecified"), (4, 6, "fix")] {
             store.db.execute("INSERT INTO issue_pull_requests(project_id,issue_number,url,added_by,created_at,purpose) VALUES('named:test',?1,?2,?3,0,?4)",params![issue,format!("https://github.com/o/r/pull/{pr}"),actor.id,purpose]).unwrap();
@@ -423,29 +478,38 @@ mod tests {
         let page = merged_history(&store.db, "named:test", 1, 0).unwrap();
         assert_eq!(
             page["pull_requests"][0]["url"],
-            "https://github.com/o/r/pull/1"
+            "https://github.com/o/r/pull/3"
         );
         assert_eq!(
             page["pull_requests"][0]["issues"],
             json!([
-                {"number":1,"title":"Task"}, {"number":5,"title":"Task"}
+                {"number":1,"title":"Task"}
             ])
         );
         assert_eq!(page["next_offset"], 1);
         let next = merged_history(&store.db, "named:test", 1, 1).unwrap();
         assert_eq!(
             next["pull_requests"][0]["url"],
-            "https://github.com/o/r/pull/2"
+            "https://github.com/o/r/pull/4"
         );
-        assert!(next["next_offset"].is_null());
-        // A reference can enter delivered history when explicitly reclassified.
+        assert_eq!(next["next_offset"], 2);
+        let all = merged_history(&store.db, "named:test", 10, 0).unwrap();
+        assert_eq!(all["pull_requests"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            all["pull_requests"][3]["issues"],
+            json!([
+                {"number":1,"title":"Task"}, {"number":2,"title":"Task"},
+                {"number":3,"title":"Task"}, {"number":5,"title":"Task"}
+            ])
+        );
+        // Reclassifying a link cannot change the merged history.
         store.db.execute("UPDATE issue_pull_requests SET purpose='fix' WHERE url='https://github.com/o/r/pull/3'", []).unwrap();
         assert_eq!(
             merged_history(&store.db, "named:test", 10, 0).unwrap()["pull_requests"]
                 .as_array()
                 .unwrap()
                 .len(),
-            3
+            5
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
@@ -476,7 +540,7 @@ mod tests {
         assert_eq!(page["pull_requests"][0]["merged_at"], 1790724600000_i64);
         assert_eq!(
             page["pull_requests"][0]["issues"].as_array().unwrap().len(),
-            2
+            4
         );
         assert_eq!(page["next_offset"], 1);
         let older = merged_history(&store.db, "named:test", 1, 1).unwrap();
@@ -682,11 +746,11 @@ mod tests {
     }
 
     #[test]
-    fn tracks_distinct_active_issue_prs_and_resumes_references_when_reopened() {
+    fn tracks_distinct_unresolved_links_even_after_issue_closure() {
         let (store, _, root) = fixture();
         store.db.execute("UPDATE issue_pull_requests SET url='https://github.com/o/r/pull/99',purpose='supporting-evidence' WHERE issue_number=5", []).unwrap();
         assert!(
-            !store
+            store
                 .tracked_pull_requests()
                 .unwrap()
                 .iter()
@@ -706,7 +770,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn closed_tasks_keep_unresolved_fix_prs_until_their_lifecycle_is_confirmed() {
+    fn closed_tasks_keep_all_unresolved_prs_until_their_lifecycle_is_confirmed() {
         let (mut store, _, root) = fixture();
         store
             .db
@@ -721,8 +785,8 @@ mod tests {
         let prs = store.tracked_pull_requests().unwrap();
         assert_eq!(
             prs.iter().map(|pr| pr.url.as_str()).collect::<Vec<_>>(),
-            [first, second],
-            "Closed tasks retain unresolved fixes, excluding reference-only and deleted task links"
+            [first, second, "https://github.com/o/r/pull/3"],
+            "Closed tasks retain all unresolved links, excluding deleted task links"
         );
         store
             .record_pr_status(first, Some("merged"), 2000, None)
@@ -738,6 +802,9 @@ mod tests {
         store.record_pr_author(first, 42).unwrap();
         store
             .record_pr_status(second, Some("closed"), 2000, None)
+            .unwrap();
+        store
+            .record_pr_status("https://github.com/o/r/pull/3", Some("closed"), 2000, None)
             .unwrap();
         assert!(
             store.tracked_pull_requests().unwrap().is_empty(),

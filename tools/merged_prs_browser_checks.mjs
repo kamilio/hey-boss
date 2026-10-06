@@ -73,12 +73,12 @@ try{
   assert.equal(await page.locator('.merge-row').count(),105,'Manual refresh preserves expanded history');
   assert.equal(await page.locator('#merged-error').isVisible(),false);
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:empty"]').click();
-  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged fix PRs authored by your GitHub account'));
+  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged PRs authored by your GitHub account'));
   assert.equal(await page.locator('.merge-row').count(),0);
   pending=true;await page.locator('#merged-refresh').click();
   await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('Checking GitHub authors'));
   pending=false;
-  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged fix PRs authored by your GitHub account'));
+  await page.waitForFunction(()=>document.querySelector('#merged-status').textContent.includes('No merged PRs authored by your GitHub account'));
   delayed=true;
   await page.evaluate(project=>location.hash=new URLSearchParams({project}),project);
   await page.waitForTimeout(75);
