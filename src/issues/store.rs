@@ -1476,7 +1476,12 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
-        if matches!(r.operation, Operation::RefreshGithub { .. }) {
+        // Status must be durable at the authority before acknowledging it:
+        // Ready bypasses the outbox and would make a delayed status ineligible.
+        if matches!(
+            r.operation,
+            Operation::RefreshGithub { .. } | Operation::Status { .. }
+        ) {
             validate(r)?;
             let companion: bool =
                 self.db

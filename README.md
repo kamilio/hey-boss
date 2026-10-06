@@ -177,6 +177,12 @@ keep local replicas and continue allocated work offline; their
 transaction journals sync on reconnect. Allocations do not expire when a machine
 disconnects, preventing another machine from starting the same task. Concurrent
 same-field edits are retained as conflicts rather than overwriting work.
+Companion `issue status` writes require the connected supervisor and are acknowledged
+only after it saves the update. An immediate `issue ready` therefore retains the
+latest status. Use `--request-id` to retry an uncertain write without adding another
+history entry; `issue --supervisor status-history` reads authoritative history.
+Disconnected or older supervisors return an error without a local status write.
+
 `hey-boss fleet status` shows bounded, read-only fleet health without opening a
 browser; `--json` returns the same summary as structured data. Counts include all
 unresolved supervisor conflicts, all signals and pending signals. Unknown values

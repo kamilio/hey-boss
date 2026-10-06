@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, path::PathBuf, process::Command};
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+struct Fixture(PathBuf, hey_boss::database::Owner);
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
@@ -12,12 +12,18 @@ impl Fixture {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
-        Self(path)
+        let database = path.join("issues.db");
+        drop(hey_boss::issues::Store::open(&database).unwrap());
+        let owner = hey_boss::database::Owner::start(&database)
+            .unwrap()
+            .unwrap();
+        Self(path, owner)
     }
     fn run(&self, actor: &str, args: &[&str], exit: i32) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&self.0)
             .env("HEY_BOSS_ISSUE_DB", self.0.join("issues.db"))
+            .env("HEY_BOSS_FLEET_STATE", &self.0)
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .args([
@@ -83,6 +89,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        self.1.stop();
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -330,5 +337,153 @@ fn status_validates_short_plain_text_and_keeps_history_through_restore() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn companion_status_is_authoritative_before_immediate_ready() {
+    use hey_boss::issues::{Request, Store};
+    use serde_json::json;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, atomic::AtomicBool};
+    use std::time::Duration;
+
+    let f = Fixture::new();
+    f.create();
+    f.run("owner", &["settings", "set", "--prs-enabled"], 0);
+    f.run(
+        "owner",
+        &["pr", "add", "1", "https://github.com/example/repo/pull/1"],
+        0,
+    );
+    f.run("owner", &["claim", "1"], 0);
+    f.run(
+        "owner",
+        &["status", "1", "orange", "--comment", "Old review pending."],
+        0,
+    );
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    let supervisor = f.0.join("supervisor.db");
+    fs::copy(f.0.join("issues.db"), &supervisor).unwrap();
+    db.execute_batch("UPDATE fleet_meta SET role='agent'")
+        .unwrap();
+    let listener = UnixListener::bind(f.0.join("fleet-authority.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let stop = stopped.clone();
+    let server = std::thread::spawn(move || {
+        let mut store = Store::open(&supervisor).unwrap();
+        while !stop.load(Ordering::Acquire) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let envelope: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(envelope["request"]["kind"], "issue_metadata");
+            let request: Request =
+                serde_json::from_value(envelope["request"]["request"].clone()).unwrap();
+            let result = store
+                .execute_supervisor(&request)
+                .unwrap_or_else(|error| json!({"ok":false,"error":error}));
+            writeln!(stream, "{result}").unwrap();
+        }
+    });
+    // Always stop the isolated relay, including when a regression assertion fails.
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let args = [
+            "status",
+            "1",
+            "green",
+            "--comment",
+            "Current revision verified.",
+            "--request-id",
+            "final-status",
+        ];
+        let status = f.run("owner", &args, 0);
+        assert_eq!(status["store"]["host"], "supervisor");
+        let ready = f.run("owner", &["ready", "1"], 0);
+        assert_eq!(ready["issue"]["state"], "ready");
+        assert_eq!(ready["issue"]["status"], status["issue"]["status"]);
+        assert_eq!(
+            f.run("owner", &["--supervisor", "view", "1"], 0)["issue"]["status"],
+            status["issue"]["status"]
+        );
+        assert_eq!(
+            f.run("owner", &args, 0),
+            status,
+            "Retry after Ready must not append another status"
+        );
+        let history = f.run("owner", &["--supervisor", "status-history", "1"], 0);
+        assert_eq!(history["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(history["updates"][0], status["issue"]["status"]);
+        f.run(
+            "owner",
+            &["status", "1", "red", "--comment", "Too late."],
+            4,
+        );
+        let main = rusqlite::Connection::open(f.0.join("supervisor.db")).unwrap();
+        assert_eq!(
+            main.query_row("SELECT count(*) FROM issue_status_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM issue_status_updates", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "No optimistic replica-only status"
+        );
+    }));
+    stopped.store(true, Ordering::Release);
+    server.join().unwrap();
+    checked.unwrap();
+}
+
+#[test]
+fn disconnected_companion_status_does_not_acknowledge_a_replica_write() {
+    let f = Fixture::new();
+    f.create();
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    db.execute_batch("UPDATE fleet_meta SET role='agent'")
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .env("HEY_BOSS_ISSUE_DB", f.0.join("issues.db"))
+        .env("HEY_BOSS_FLEET_STATE", &f.0)
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .args([
+            "issue",
+            "--project",
+            "Status QA",
+            "--agent",
+            "owner",
+            "--json",
+            "status",
+            "1",
+            "green",
+            "--comment",
+            "Offline update.",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "Offline status was acknowledged");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "fleet_unavailable");
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issue_status_updates", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
     );
 }

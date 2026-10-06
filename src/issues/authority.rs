@@ -7,6 +7,8 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
         | Operation::ViewCompact { .. }
         | Operation::Allocation { .. }
         | Operation::RequestStatus { .. }
+        | Operation::StatusView { .. }
+        | Operation::StatusHistory { .. }
         | Operation::PullRequests { .. } => {
             return Ok(());
         }
@@ -33,6 +35,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             ..
         } if *version > 0 => {}
         Operation::RefreshGithub { .. } => {}
+        Operation::Status { .. } => {}
         Operation::Ready { guard: Some(_), .. } => {}
         Operation::Close {
             guard: Some(_),
@@ -46,7 +49,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
                 .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, allocation, PR add/list, queue-version-guarded moves, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, status, status-history, allocation, PR add/list, queue-version-guarded moves, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }

@@ -133,7 +133,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -224,6 +224,7 @@ impl Relay {
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
+                            "issue_status": message["capabilities"]["issue_status"] == true,
                             "issue_detail_compact": message["capabilities"]["issue_detail_compact"] == true,
                             "issue_pr_attachments": message["capabilities"]["issue_pr_attachments"] == true,
                             "issue_request_status": message["capabilities"]["issue_request_status"] == true,
@@ -253,6 +254,7 @@ impl Relay {
                         let message = advertisement.lock().unwrap();
                         for capability in ["authority_rpc", "issue_metadata"]
                             .into_iter()
+                            .chain(matches!(metadata.operation, crate::issues::Operation::Status { .. } | crate::issues::Operation::StatusHistory { .. } | crate::issues::Operation::StatusView { .. }).then_some("issue_status"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::ViewCompact { .. }).then_some("issue_detail_compact"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::Move { .. }).then_some("issue_move"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::RequestStatus { .. }).then_some("issue_request_status"))
@@ -435,6 +437,96 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_status_survives_ready_and_replica_sync() {
+        let (root, ctx, mut main) = test_context();
+        let (peer_root, peer_ctx, mut peer) = test_context();
+        let request = |operation: Value, key: Option<&str>| -> Request {
+            serde_json::from_value(json!({"version":1,"project":{"id":"named:Status handoff","name":"Status handoff"},"actor":{"id":"codex:owner","kind":"codex","session_id":"owner","machine":"authority-test","host":"fixture","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},"operation":operation,"request_id":key})).unwrap()
+        };
+        main.execute(&request(
+            json!({"action":"configure_project","prs_enabled":true}),
+            None,
+        ))
+        .unwrap();
+        main.execute(&request(
+            json!({"action":"create","title":"Status handoff","body":"","labels":[]}),
+            None,
+        ))
+        .unwrap();
+        main.execute(&request(json!({"action":"add_pull_request","number":1,"url":"https://github.com/example/repo/pull/1"}), None)).unwrap();
+        main.execute(&request(
+            json!({"action":"claim","number":1,"force":false}),
+            None,
+        ))
+        .unwrap();
+        main.execute(&request(
+            json!({"action":"status","number":1,"level":"orange","comment":"Old review pending."}),
+            None,
+        ))
+        .unwrap();
+        let main_db = ctx.db().unwrap();
+        let peer_db = peer_ctx.db().unwrap();
+        let replica = crate::fleet::test_replica;
+        replica(
+            &main_db,
+            &json!({"replica":"capture","role":"controller","node":"main"}),
+        );
+        replica(
+            &peer_db,
+            &json!({"replica":"capture","role":"agent","node":"peer"}),
+        );
+        let pull = || {
+            let payload = replica(&main_db, &json!({"replica":"snapshot","node":"peer"}));
+            replica(
+                &peer_db,
+                &json!({"replica":"pull","node":"peer","payload":payload,"receipts":[]}),
+            );
+        };
+        pull();
+        let status_request = request(
+            json!({"action":"status","number":1,"level":"green","comment":"Current revision verified."}),
+            Some("final-status"),
+        );
+        let status = main.execute_supervisor(&status_request).unwrap();
+        let view = main
+            .execute(&request(json!({"action":"view","number":1}), None))
+            .unwrap();
+        let ready_request = request(
+            json!({"action":"ready","number":1,"force":false,"guard":view["ready_guard"]}),
+            Some("ready-once"),
+        );
+        let ready = main.execute_supervisor(&ready_request).unwrap();
+        assert_eq!(ready["issue"]["state"], "ready");
+        assert_eq!(ready["issue"]["status"], status["issue"]["status"]);
+        assert_eq!(main.execute_supervisor(&status_request).unwrap(), status);
+        assert_eq!(main.execute_supervisor(&ready_request).unwrap(), ready);
+        pull();
+        let history = request(
+            json!({"action":"status_history","number":1,"limit":20,"offset":0}),
+            None,
+        );
+        let canonical = main.execute_supervisor(&history).unwrap();
+        assert_eq!(canonical["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(canonical["updates"][0], status["issue"]["status"]);
+        assert_eq!(peer.execute(&history).unwrap(), canonical);
+        assert_eq!(
+            peer.execute(&request(json!({"action":"view","number":1}), None))
+                .unwrap()["issue"]["status"],
+            status["issue"]["status"]
+        );
+        assert_eq!(
+            peer_db
+                .query_row("SELECT count(*) FROM fleet_conflicts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop((main, peer, main_db, peer_db));
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(peer_root).unwrap();
+    }
+
+    #[test]
     fn legacy_relay_rejection_explains_required_fleet_upgrade() {
         let (root, ctx, store) = test_context();
         let listener = UnixListener::bind(ctx.state.join(SOCKET)).unwrap();
@@ -495,6 +587,20 @@ mod tests {
         assert_eq!(capabilities["route"], "supervisor_tunnel");
         assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
+        for operation in [
+            json!({"action":"status","number":1,"level":"green","comment":"Verified."}),
+            json!({"action":"status_history","number":1,"limit":20,"offset":0}),
+            json!({"action":"status_view","number":1}),
+        ] {
+            let request = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"status-old","operation":operation}});
+            let error = call(&ctx.state, &ctx.path, request).unwrap_err();
+            assert_eq!(error.code, "fleet_capability_unsupported");
+            assert_eq!(
+                error.details.unwrap()["required_capability"],
+                "issue_status"
+            );
+            assert!(output.lock().unwrap().is_empty());
+        }
         let compact = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"view_compact","number":1,"limit":20,"offset":0}}});
         let error = call(&ctx.state, &ctx.path, compact).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");
