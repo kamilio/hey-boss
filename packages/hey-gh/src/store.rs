@@ -1192,6 +1192,22 @@ impl Store {
         self.bootstrap_prefix(scope, "").await
     }
 
+    /// Capture a feed position without loading bodies or acquiring the writer.
+    pub(crate) async fn current_cursor(&self, scope: &str) -> Result<String> {
+        let scope = scope.to_owned();
+        self.read(move |conn| {
+            let head: u64 = conn
+                .query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(storage)?
+                .unwrap_or(0);
+            Ok(format!("{}.{}", feed_prefix(conn, &scope)?, head))
+        })
+        .await
+    }
+
     /// Select before decoding: unrelated source bodies must not consume a
     /// scoped feed's byte budget or hold the connection while being parsed.
     pub async fn bootstrap_prefix(&self, scope: &str, prefix: &str) -> Result<SnapshotPage> {

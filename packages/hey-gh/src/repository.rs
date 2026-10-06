@@ -124,7 +124,20 @@ impl Client {
         }
         let lock = self.report_lock(&format!("repository:{repository}"));
         tokio::time::timeout(self.report_timeout(), async {
-            let _guard = lock.lock().await;
+            let cached = matches!(freshness, Freshness::CachedOnly);
+            let _guard = if cached {
+                None
+            } else {
+                Some(lock.lock().await)
+            };
+            // Capture before reading cached rows: concurrent publications can
+            // be replayed from this position, never skipped. Cached evidence
+            // must neither wait for live collection nor overwrite its results.
+            let cached_cursor = if cached {
+                Some(self.source_cursor().await?)
+            } else {
+                None
+            };
             let metadata = self.get(&format!("repos/{repository}"), freshness).await?;
             let default_branch = metadata.data["default_branch"]
                 .as_str()
@@ -216,9 +229,11 @@ impl Client {
                             self.hostname(),
                             segment(&branch)
                         );
-                        let old = self.stored_snapshot(&resource).await?;
-                        if old.as_ref().map(|v| &v["sha"]) != Some(&json!(report.sha)) {
-                            changed_branches.push(branch.clone());
+                        if !cached {
+                            let old = self.stored_snapshot(&resource).await?;
+                            if old.as_ref().map(|v| &v["sha"]) != Some(&json!(report.sha)) {
+                                changed_branches.push(branch.clone());
+                            }
                         }
                         for commit in &mut report.transition.commits {
                             *commit = commit_metadata(commit);
@@ -250,7 +265,9 @@ impl Client {
                             ),
                             value,
                         ));
-                        self.observe_many(&branch_observations).await?;
+                        if !cached {
+                            self.observe_many(&branch_observations).await?;
+                        }
                         reports.push(report);
                     }
                     Err(e) => errors.push(error(&format!("branch:{branch}"), e)),
@@ -262,7 +279,10 @@ impl Client {
             {
                 observations.push((roster_resource, roster));
             }
-            let cursor = self.observe_many(&observations).await?;
+            let cursor = match cached_cursor {
+                Some(cursor) => cursor,
+                None => self.observe_many(&observations).await?,
+            };
             Ok(RepositoryReport {
                 repository: repository.into(),
                 default_branch,
@@ -513,4 +533,66 @@ fn commit_metadata(commit: &Value) -> Value {
     json!({"sha":commit["sha"],"html_url":commit["html_url"],"author":commit["author"],"committer":commit["committer"],
         "commit":{"message":commit["commit"]["message"],"author":commit["commit"]["author"],"committer":commit["commit"]["committer"],"tree":commit["commit"]["tree"]},
         "parents":commit["parents"].as_array().map(|parents|parents.iter().map(|p|json!({"sha":p["sha"]})).collect::<Vec<_>>()).unwrap_or_default()})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cached_repository_reads_never_wait_for_refresh_or_publish_observations() {
+        for busy in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let client = Client::with_token(
+                crate::Config {
+                    cache_path: dir.path().join("cache.sqlite"),
+                    rest_url: "http://127.0.0.1:9/".parse().unwrap(),
+                    graphql_url: "http://127.0.0.1:9/graphql".parse().unwrap(),
+                    ..Default::default()
+                },
+                "synthetic-token".into(),
+            )
+            .unwrap();
+            client
+                .save_derived(
+                    "http://127.0.0.1:9/repos/acme/demo",
+                    json!({"default_branch":"main"}),
+                )
+                .await
+                .unwrap();
+            let branch = json!({"repository":"acme/demo","branch":"main","sha":"a".repeat(40),"tip_commit":null,
+                "transition":{"kind":"baseline","old_sha":null,"new_sha":"a".repeat(40),"ancestry":"unknown","comparison_complete":true,"commits":[],"compare_url":null},"errors":[]});
+            client
+                .observe("branch://github.com/acme/demo/main", &branch)
+                .await
+                .unwrap();
+            let before = client.bootstrap().await.unwrap();
+            let lock = client.report_lock("repository:acme/demo");
+            let guard = if busy { Some(lock.lock().await) } else { None };
+            let result = tokio::time::timeout(
+                Duration::from_millis(200),
+                client.repository_report("acme/demo", &[], false, Freshness::CachedOnly),
+            )
+            .await;
+            assert!(result.is_ok(), "cache-only read waited for refresh");
+            let report = result.unwrap().unwrap();
+            assert_eq!(report.branches.len(), 1);
+            assert_eq!(
+                report.branches[0].sha.as_deref(),
+                Some("a".repeat(40).as_str())
+            );
+            assert!(report.changed_branches.is_empty());
+            assert_eq!(report.cursor, before.cursor);
+            let after = client.bootstrap().await.unwrap();
+            assert_eq!(
+                after.cursor, before.cursor,
+                "cached read published evidence"
+            );
+            assert_eq!(
+                serde_json::to_value(after).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            drop(guard);
+        }
+    }
 }
