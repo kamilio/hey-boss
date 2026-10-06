@@ -748,7 +748,7 @@ impl Client {
             let selector_validation = (body.is_none()
                 && matches!(
                     endpoint_class(&url, false, &self.0.config.rest_url),
-                    "pull_request" | "branch"
+                    "pull_request" | "branch" | "pull_merge_ref"
                 ))
                 || installation;
             // The final selector scope also contains personal GraphQL confirmations.
@@ -1692,6 +1692,7 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
         ["repos", _, _] => "repository",
         ["repos", _, _, "pulls"] => "pull_requests",
         ["repos", _, _, "pulls", _] => "pull_request",
+        ["repos", _, _, "git", "ref", "pull", _, "merge"] => "pull_merge_ref",
         ["repos", _, _, "pulls", _, "reviews"] => "reviews",
         ["repos", _, _, "pulls", _, "comments"] => "review_comments",
         ["repos", _, _, "issues", _, "comments"] => "comments",
