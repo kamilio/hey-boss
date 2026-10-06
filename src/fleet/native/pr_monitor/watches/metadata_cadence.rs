@@ -8,6 +8,18 @@ fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
             .expect("Both polling batches must progress while the other waits");
         if request.url().starts_with("/v1/viewer?") {
             request.respond(tiny_http::Response::from_string(json!({"data":{"id":42},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
+        } else if request.url().ends_with("metadata?cached_only=true") {
+            request
+                .respond(
+                    tiny_http::Response::from_string(
+                        json!({"code":"cache_miss","error":"missing cache"}).to_string(),
+                    )
+                    .with_status_code(404)
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
+                )
+                .unwrap();
         } else {
             return request;
         }
@@ -182,6 +194,18 @@ fn metadata_batches(repeat: bool) {
                     .expect("Metadata must poll again while required checks are pending");
                 if next.url().starts_with("/v1/viewer?") {
                     next.respond(tiny_http::Response::from_string(json!({"data":{"id":42},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
+                } else if next.url().ends_with("metadata?cached_only=true") {
+                    next.respond(
+                        tiny_http::Response::from_string(
+                            json!({"code":"cache_miss","error":"missing cache"}).to_string(),
+                        )
+                        .with_status_code(404)
+                        .with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "application/json")
+                                .unwrap(),
+                        ),
+                    )
+                    .unwrap();
                 } else {
                     break next;
                 }
