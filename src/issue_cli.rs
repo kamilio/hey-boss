@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 #[command(
-    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions use the supervisor tunnel for assignment and drafting.\nUse --supervisor for remote metadata edits; no SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
+    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions use the supervisor tunnel for status updates, assignment and drafting.\nUse --supervisor for remote metadata edits; no SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
 )]
 pub struct Options {
     /// Full project ID or an unambiguous short name; defaults to this checkout.
@@ -475,6 +475,9 @@ enum Action {
         allow_long_comment: bool,
     },
     /// Publish a short progress update (green=on track, orange=at risk, red=in trouble).
+    #[command(
+        after_help = "Companions save through the connected supervisor before acknowledging status. Offline writes are rejected.\nRetry an uncertain write with the same --request-id."
+    )]
     Status {
         number: i64,
         #[arg(value_enum)]
@@ -1262,6 +1265,8 @@ pub fn run(options: &Options) -> Result<()> {
         if !matches!(
             options.action,
             Action::View { .. }
+                | Action::Status { .. }
+                | Action::StatusHistory { .. }
                 | Action::Move { .. }
                 | Action::Request { .. }
                 | Action::Allocation { .. }
@@ -1280,7 +1285,7 @@ pub fn run(options: &Options) -> Result<()> {
                 }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, status, status-history, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
             ));
         }
     }
