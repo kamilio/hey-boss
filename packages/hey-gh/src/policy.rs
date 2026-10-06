@@ -113,6 +113,8 @@ pub struct RequiredChecksReport {
     pub checks: Vec<RequiredCheck>,
     pub rules: Vec<Value>,
     pub errors: Vec<SourceError>,
+    /// Source feed position. Contended cached reads capture it before reading
+    /// evidence and do not publish a policy snapshot.
     pub cursor: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_state: Option<String>,
@@ -417,7 +419,19 @@ impl Client {
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let repository = repository_spelling.as_str();
         timings.enter(Phase::Lock);
-        let _guard = lock.lock().await;
+        let guard = if matches!(freshness, Freshness::CachedOnly) {
+            lock.try_lock().ok()
+        } else {
+            Some(lock.lock().await)
+        };
+        // A live owner must not delay an offline read or have its eventual
+        // result overwritten by that read. Capture before reading evidence so
+        // any concurrent publication can still be replayed from this cursor.
+        let cached_cursor = if guard.is_none() {
+            Some(self.source_cursor().await?)
+        } else {
+            None
+        };
         let mut retry_seed = None;
         let caller_freshness = freshness;
         let mut previous_ci = None;
@@ -849,7 +863,14 @@ impl Client {
                     json!({"pull_request":final_pr.data,"conflicts":conflicts}),
                 ));
             }
-            report.cursor = self.observe_many(&observations).await?;
+            report.cursor = if let Some(cursor) = &cached_cursor {
+                if !self.current_pr_owner_is_valid().await? {
+                    return Err(Error::CacheMiss);
+                }
+                cursor.clone()
+            } else {
+                self.observe_many(&observations).await?
+            };
             if !matches!(freshness, Freshness::CachedOnly) {
                 timings.enter(Phase::StatusPublication);
                 self.publish_individual_pr_status(repository, number, &[])

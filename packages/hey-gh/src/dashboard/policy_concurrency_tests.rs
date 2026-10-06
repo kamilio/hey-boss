@@ -126,6 +126,122 @@ async fn cached_policy_progresses_while_another_pr_waits_and_keeps_evidence_sepa
 }
 
 #[tokio::test]
+async fn an_offline_policy_read_never_waits_for_the_same_pr_or_publishes_over_its_owner() {
+    let f = Fixture::new(256).await;
+    let lock = f.client.report_lock("required-checks:acme/demo#1");
+    let _owner = lock.lock().await;
+    let before = f.client.bootstrap().await.unwrap();
+    let metadata = f
+        .client
+        .pull_request("acme/demo", 1, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    let report = tokio::time::timeout(
+        Duration::from_millis(500),
+        f.client
+            .required_checks_for_pr("acme/demo", 1, Freshness::CachedOnly),
+    )
+    .await
+    .expect("offline policy waited for its live owner")
+    .unwrap();
+    assert_eq!(report.state, "satisfied");
+    assert_eq!(report.head_sha, format!("{:040x}", 1));
+    assert_eq!(report.cursor, before.cursor);
+    assert!(
+        report
+            .validations
+            .iter()
+            .any(|v| v.resource.ends_with("/pulls/1")
+                && v.validated_at_ms == metadata.validated_at_ms)
+    );
+    let after = f.client.bootstrap().await.unwrap();
+    assert_eq!(after.cursor, before.cursor);
+    assert_eq!(
+        serde_json::to_value(after.snapshots).unwrap(),
+        serde_json::to_value(before.snapshots).unwrap()
+    );
+    assert_eq!(f.client.status().network_requests, 0);
+}
+
+#[tokio::test]
+async fn a_contended_offline_policy_preserves_missing_evidence_and_denials() {
+    for absent_metadata in [false, true] {
+        let f = Fixture::new(256).await;
+        if absent_metadata {
+            let db = rusqlite::Connection::open(f._dir.path().join("cache.sqlite")).unwrap();
+            db.execute("DELETE FROM cache WHERE key LIKE '%/pulls/1'", [])
+                .unwrap();
+        } else {
+            f.client
+                .save_derived(
+                    "policy-error://github.com/repos/acme/demo/rules/branches/main",
+                    json!({"status":403,"message":"Policy inaccessible"}),
+                )
+                .await
+                .unwrap();
+        }
+        let lock = f.client.report_lock("required-checks:acme/demo#1");
+        let _owner = lock.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            f.client
+                .required_checks_for_pr("acme/demo", 1, Freshness::CachedOnly),
+        )
+        .await
+        .expect("unavailable offline policy waited for its live owner");
+        if absent_metadata {
+            assert!(matches!(result, Err(Error::CacheMiss)));
+        } else {
+            let report = result.unwrap();
+            assert_eq!(report.state, "unknown");
+            assert!(report.errors.iter().any(|e| e.source == "rulesets"));
+        }
+        assert!(f.report(1).await.is_none());
+        assert_eq!(f.client.status().network_requests, 0);
+    }
+}
+
+#[tokio::test]
+async fn offline_policy_cursor_does_not_skip_a_publication_during_cached_collection() {
+    let f = Fixture::new(256).await;
+    let lock = f.client.report_lock("required-checks:acme/demo#1");
+    let _owner = lock.lock().await;
+    let before = f.client.bootstrap().await.unwrap();
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let reader = tokio::spawn({
+        let (client, entered, release) = (f.client.clone(), entered.clone(), release.clone());
+        async move {
+            crate::client::CACHE_LOOKUP_GATE
+                .scope(
+                    std::cell::RefCell::new(Some((entered, release))),
+                    client.required_checks_for_pr("acme/demo", 1, Freshness::CachedOnly),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .unwrap();
+    let resource = "branch://github.com/acme/demo/other";
+    f.client
+        .observe(resource, &json!({"sha":format!("{:040x}", 5)}))
+        .await
+        .unwrap();
+    let published = f.client.bootstrap().await.unwrap();
+    assert_ne!(published.cursor, before.cursor);
+    release.notify_one();
+    let report = reader.await.unwrap().unwrap();
+    assert_eq!(
+        report.cursor, before.cursor,
+        "concurrent changes must remain replayable"
+    );
+    assert_eq!(f.client.bootstrap().await.unwrap().cursor, published.cursor);
+    assert!(f.report(1).await.is_none());
+    assert_eq!(f.client.status().network_requests, 0);
+}
+
+#[tokio::test]
 async fn confirmation_socket_does_not_block_cached_policy_or_publish_early() {
     use std::sync::Arc;
     let entered = Arc::new(tokio::sync::Notify::new());
