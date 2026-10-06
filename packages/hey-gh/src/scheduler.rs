@@ -163,6 +163,25 @@ struct Active {
     future: Pin<Box<dyn Future<Output = (Job, Attempt)> + Send>>,
 }
 
+// Providers/resources have independent allowances but share dispatch spacing
+// and sockets. Completion priority within one must not monopolize the others.
+#[derive(Default)]
+struct QuotaOrder(VecDeque<String>);
+
+impl QuotaOrder {
+    fn choose(&self, quotas: impl Iterator<Item = String>) -> Option<String> {
+        quotas.min_by_key(|quota| self.0.iter().position(|recent| recent == quota))
+    }
+
+    fn dispatched(&mut self, quota: String, capacity: usize) {
+        self.0.retain(|recent| recent != &quota);
+        if self.0.len() >= capacity {
+            self.0.pop_front();
+        }
+        self.0.push_back(quota);
+    }
+}
+
 // A conditional validation may borrow a paced turn's wait. If it returns a
 // charged response, repay the full interval from the existing future slot,
 // rather than replacing that debt with an interval starting at the response.
@@ -745,6 +764,7 @@ impl Scheduler {
         let mut pending = VecDeque::<Job>::new();
         let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
+        let mut quota_order = QuotaOrder::default();
         let mut blocked_probes = ProbeBlocks::default();
         let mut budgets = Budgets::default();
         let mut routes = HashMap::<String, String>::new();
@@ -947,6 +967,20 @@ impl Scheduler {
                         && !(job.installation && minting)
                         && !lane_busy(&active, job, prod)
                         && !waiting_for_turn(index, job)
+                };
+                // Rotate only among quotas with a dispatchable request. A
+                // paced, throttled or socket-blocked quota cannot hold up a
+                // peer. Keep each quota's existing class/turn/probe ordering.
+                let quota = quota_order.choose(
+                    pending
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, job)| eligible(*index, job))
+                        .map(|(_, job)| job.quota()),
+                );
+                let eligible = |index: usize, job: &Job| {
+                    quota.as_ref().is_some_and(|quota| *quota == job.quota())
+                        && eligible(index, job)
                 };
                 // Prefer interactive policy, but owe the background a turn
                 // after three foreground turns in the same quota. Validators
@@ -1183,6 +1217,7 @@ impl Scheduler {
                     attempt.future = Box::pin(async move { outcome });
                 }
                 global_next = Instant::now() + self.config.min_spacing;
+                quota_order.dispatched(quota, self.config.queue_capacity);
                 active.push(attempt);
                 continue;
             }
@@ -1902,6 +1937,43 @@ mod transport_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_rotation_serves_every_eligible_bucket_and_skips_unavailable_peers() {
+        let mut order = QuotaOrder::default();
+        let quotas = [
+            "core",
+            "installation/core",
+            "graphql",
+            "installation/graphql",
+        ];
+        for expected in quotas.into_iter().cycle().take(20) {
+            let selected = order.choose(quotas.into_iter().map(str::to_owned)).unwrap();
+            assert_eq!(selected, expected);
+            order.dispatched(selected, 256);
+        }
+        // Eligibility is decided by the real scheduler's quota/socket gates.
+        // A bucket absent from that set must not reserve a dispatch turn.
+        assert_eq!(
+            order.choose(["graphql".into()].into_iter()).as_deref(),
+            Some("graphql")
+        );
+        assert!(order.choose(std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn quota_rotation_history_is_bounded_and_repeated_dispatch_moves_only_that_bucket() {
+        let mut order = QuotaOrder::default();
+        for index in 0..1000 {
+            order.dispatched(format!("resource-{index}"), 8);
+            assert!(order.0.len() <= 8);
+        }
+        assert_eq!(order.0.front().unwrap(), "resource-992");
+        order.dispatched("resource-992".into(), 8);
+        assert_eq!(order.0.front().unwrap(), "resource-993");
+        assert_eq!(order.0.back().unwrap(), "resource-992");
+        assert_eq!(order.0.len(), 8);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn secondary_episodes_share_backoff_and_recover_after_quiet() {

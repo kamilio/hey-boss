@@ -49,6 +49,10 @@ tokio::task_local! { static OPTIONAL_SELECTOR_DEADLINE: tokio::time::Instant; }
 mod optional_tests;
 
 #[cfg(test)]
+#[path = "client/quota_fairness_tests.rs"]
+mod quota_fairness_tests;
+
+#[cfg(test)]
 #[path = "client/optional_transport_tests.rs"]
 mod optional_transport_tests;
 
