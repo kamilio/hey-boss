@@ -62,12 +62,26 @@ impl Fixture {
                         gate.entered.notify_one();
                         gate.release.notified().await;
                     }
+                    if tag == "slow-paced-optional" {
+                        tokio::time::sleep(Duration::from_millis(650)).await;
+                    }
                     use axum::response::IntoResponse;
                     let mut response = axum::Json(json!({"data":{"tag":tag}})).into_response();
-                    if tag.starts_with("paced-") {
+                    if tag.starts_with("paced-") || tag.starts_with("slow-paced-") {
                         let headers = response.headers_mut();
                         headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
-                        headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-remaining",
+                            if tag == "slow-paced-long-seed" {
+                                "1000"
+                            } else if tag.starts_with("slow-paced-") {
+                                "2500"
+                            } else {
+                                "5000"
+                            }
+                            .parse()
+                            .unwrap(),
+                        );
                         headers.insert(
                             "x-ratelimit-reset",
                             (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
@@ -406,4 +420,78 @@ async fn foreground_selector_gets_a_turn_before_a_paced_background_graphql_backl
         "A foreground selector must get its normal foreground turn, while required background work continues: response={response:?}, calls={calls:?}"
     );
     assert_eq!(calls.len(), 8);
+}
+
+#[tokio::test]
+async fn optional_graphql_borrows_its_turn_only_for_a_congested_rest_fallback_and_repays_it() {
+    for fallback in ["busy", "busy-long", "queued", "exhausted", "free"] {
+        let f = Fixture::new().await;
+        let core = match fallback {
+            "busy" | "busy-long" => Some(f.hold_core().await),
+            "queued" => {
+                f.client
+                    .get("core-reserve/1000", Freshness::Revalidate)
+                    .await
+                    .unwrap();
+                let client = f.client.clone();
+                let core = tokio::spawn(async move {
+                    client.get("core-reserve/2000", Freshness::Revalidate).await
+                });
+                f.queued(1).await;
+                Some(core)
+            }
+            "exhausted" => {
+                f.client
+                    .get("core-reserve/0", Freshness::Revalidate)
+                    .await
+                    .unwrap();
+                None
+            }
+            _ => None,
+        };
+        read(
+            f.client.clone(),
+            if fallback == "busy-long" {
+                "slow-paced-long-seed"
+            } else {
+                "slow-paced-seed"
+            },
+            Freshness::Revalidate,
+        )
+        .await
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let response = optional_selector_read(read(
+            f.client.clone(),
+            "slow-paced-optional",
+            Freshness::Revalidate,
+        ))
+        .await;
+        if fallback == "free" {
+            assert!(
+                matches!(response, Err(Error::Deadline)),
+                "an available REST fallback must not spend a loan: {response:?}"
+            );
+        } else {
+            assert!(
+                response.is_ok(),
+                "{fallback}: dispatch must leave response time inside the two-second budget: {response:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_millis(1400),
+                "{fallback}: shortcut waited for its paced slot"
+            );
+            read(f.client.clone(), "after-loan", Freshness::Revalidate)
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() >= Duration::from_millis(2700),
+                "{fallback}: completing the optional read erased its pacing debt"
+            );
+        }
+        f.gate.core_release.notify_one();
+        if let Some(core) = core {
+            core.await.unwrap().unwrap();
+        }
+    }
 }

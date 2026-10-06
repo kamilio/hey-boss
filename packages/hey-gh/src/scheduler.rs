@@ -880,50 +880,6 @@ impl Scheduler {
                     && !rest_socket_busy
                     && !queued_rest.contains(job.rest_quota())
             };
-            // Optional GraphQL selectors have a short REST-fallback budget.
-            // Yield to equal/higher priority required reads in the same quota,
-            // or fall back when known pacing alone exceeds the shortcut budget.
-            // Required coalescers keep their job and its existing quota gates.
-            // An exhausted REST quota keeps the GraphQL route eligible. Busy
-            // sockets or queued REST work for this provider keep its bounded
-            // waiter behind required GraphQL work instead of abandoning it
-            // for a congested fallback. No extra time or quota is reserved.
-            for job in pending.iter().filter(|job| job.body.is_some()) {
-                let until = ready(job, &budgets, global);
-                if defers_optional(job) {
-                    if job.notify.send_if_modified(|state| {
-                        if !matches!(state, SharedResult::OptionalDeferred) {
-                            *state = SharedResult::OptionalDeferred;
-                            true
-                        } else {
-                            false
-                        }
-                    }) {
-                        tracing::info!(request_id=%job.request_id, endpoint=job.endpoint,
-                            "Optional GraphQL shortcut yielded to a required read");
-                    }
-                } else if until > now {
-                    job.notify.send_if_modified(|state| {
-                        if matches!(state, SharedResult::Queued | SharedResult::OptionalDeferred)
-                            || matches!(state, SharedResult::QueuedUntil(previous) if *previous != until)
-                        {
-                            *state = SharedResult::QueuedUntil(until);
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                } else {
-                    job.notify.send_if_modified(|state| {
-                        if matches!(state, SharedResult::OptionalDeferred) {
-                            *state = SharedResult::Queued;
-                            true
-                        } else {
-                            false
-                        }
-                    });
-                }
-            }
             // Choose each quota's turn before considering pacing. A charged
             // conditional probe must not keep moving an older turn forever.
             // Keep foreground/background and completion/ordinary alternation;
@@ -965,7 +921,14 @@ impl Scheduler {
                 (index != *selected || job.interactive())
                     // GraphQL is always charged. It may only move its own
                     // selected turn forward, never borrow another class's turn.
-                    && (job.body.is_none() || index == *selected)
+                    // Optional reads borrow only when fallback is congested,
+                    // and never ahead of required peers in this quota.
+                    && (job.body.is_none() || (index == *selected
+                        && (job.required_reader.load(Ordering::Relaxed)
+                            || (!job.defers_optional(&required_quotas)
+                                && (rest_socket_busy
+                                    || queued_rest.contains(job.rest_quota())
+                                    || !budgets.rest_fallback_has_headroom(job))))))
                     && !blocked_probes.contains(&quota)
                     && !probing_quotas.contains(&quota)
                     && ((job.interactive() == turn.interactive()
@@ -983,6 +946,58 @@ impl Scheduler {
                     && budgets.for_resource(&quota).next().is_some()
                     && budgets.for_resource(&quota).all(|budget| pacing_probe_eligible(job, budget))
             };
+            // Optional GraphQL selectors have a short REST-fallback budget.
+            // Yield to equal/higher priority required reads in the same quota,
+            // or fall back when known pacing alone exceeds the shortcut budget.
+            // Required coalescers keep their job and its existing quota gates.
+            // An exhausted REST quota keeps the GraphQL route eligible. Busy
+            // sockets or queued REST work for this provider keep its bounded
+            // waiter behind required GraphQL work instead of abandoning it
+            // for a congested fallback. Use the effective selected turn so an
+            // admitted loan is not rejected using its old pacing deadline.
+            for (index, job) in pending
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| job.body.is_some())
+            {
+                let until = ready_with_probe(job, &budgets, global, can_probe(index, job));
+                if defers_optional(job) {
+                    if job.notify.send_if_modified(|state| {
+                        if !matches!(state, SharedResult::OptionalDeferred) {
+                            *state = SharedResult::OptionalDeferred;
+                            true
+                        } else {
+                            false
+                        }
+                    }) {
+                        tracing::info!(request_id=%job.request_id, endpoint=job.endpoint,
+                            "Optional GraphQL shortcut yielded to a required read");
+                    }
+                } else if until > now {
+                    job.notify.send_if_modified(|state| {
+                        if matches!(state, SharedResult::Queued | SharedResult::OptionalDeferred)
+                            || matches!(state, SharedResult::QueuedUntil(previous) if *previous != until)
+                        {
+                            *state = SharedResult::QueuedUntil(until);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                } else {
+                    job.notify.send_if_modified(|state| {
+                        if matches!(
+                            state,
+                            SharedResult::OptionalDeferred | SharedResult::QueuedUntil(_)
+                        ) {
+                            *state = SharedResult::Queued;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                }
+            }
             let waiting_for_turn = |index: usize, job: &Job| {
                 waits_for_required(job)
                     || (job.ready_at <= now
@@ -1882,10 +1897,10 @@ fn pacing_probe_eligible(job: &Job, budget: &Budget) -> bool {
     // The first foreground REST validation may borrow an older paced turn too.
     // One probe per quota awaits headers; a charged/unknown reply repays the
     // interval and blocks further borrowing until that exact owed job leaves.
-    // Required foreground GraphQL reads may use their own selected slot early.
+    // Foreground GraphQL reads may use their own selected slot early. The
+    // scheduler admits optional readers only when REST fallback is congested.
     // They always repay it, including transport failures and invalid replies;
-    // the selected debt survives completion/cancellation. Optional shortcuts
-    // retain their normal pacing and REST fallback rather than spending a loan.
+    // the selected debt survives completion/cancellation.
     // Neither case grants an ordinary pacing exemption.
     budget.remaining > QUOTA_RESERVE + 1
         && (conditional_budget_exempt(job, budget)
@@ -1899,7 +1914,6 @@ fn pacing_probe_eligible(job: &Job, budget: &Budget) -> bool {
             || (job.interactive()
                 && job.resource == "graphql"
                 && job.body.is_some()
-                && job.required_reader.load(Ordering::Relaxed)
                 // GraphQL can charge multiple points. Keep the estimated
                 // shared charge above the reserve in every live window.
                 && budget.remaining.saturating_sub(QUOTA_RESERVE)
@@ -2364,7 +2378,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn selected_probe_debt_survives_departure_and_keeps_each_auth_quota_separate() {
-        for quota in ["core", "installation/core"] {
+        for quota in [
+            "core",
+            "installation/core",
+            "graphql",
+            "installation/graphql",
+        ] {
             let mut budgets = Budgets::default();
             let reset = now_ms() / 1000 + 3600;
             budgets.observe(quota, 5000, reset, false, None);
@@ -2384,14 +2403,15 @@ mod tests {
                 blocks.contains(quota),
                 "A completed or canceled probe erased its debt"
             );
-            assert!(!blocks.contains(if quota == "core" {
-                "installation/core"
-            } else {
-                "core"
-            }));
+            let other_auth = quota
+                .strip_prefix("installation/")
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("installation/{quota}"));
+            assert!(!blocks.contains(&other_auth));
             // Other reservations cannot erase the debt or postpone its own wake.
             let mut later = core_job();
             later.installation = quota.starts_with("installation/");
+            later.resource = quota.rsplit('/').next().unwrap().into();
             budgets.reserve(&mut later);
             assert_eq!(blocks.wake(Instant::now()), Some(paid_at));
             tokio::time::advance(paid_at - Instant::now()).await;
@@ -2756,10 +2776,12 @@ mod tests {
         job.resource = "graphql".into();
         job.body = Some(serde_json::json!({"query":"{ viewer { login } }"}));
         job.interactive.store(true, Ordering::Relaxed);
-        job.required_reader.store(true, Ordering::Relaxed);
-        for remaining in [101, 119, 120, 121] {
-            budget.remaining = remaining;
-            assert_eq!(pacing_probe_eligible(&job, budget), remaining > 120);
+        for required in [false, true] {
+            job.required_reader.store(required, Ordering::Relaxed);
+            for remaining in [101, 119, 120, 121] {
+                budget.remaining = remaining;
+                assert_eq!(pacing_probe_eligible(&job, budget), remaining > 120);
+            }
         }
     }
 
