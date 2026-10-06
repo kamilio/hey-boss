@@ -175,12 +175,12 @@ struct ProbeTurn {
     quota: String,
     owed: String,
     owns_turn: bool,
-    protect_completion: bool,
+    protect_turn: bool,
 }
 
 impl ProbeTurn {
     fn protect(&self, debt: &PacingProbe, pending: &mut VecDeque<Job>) {
-        if self.protect_completion
+        if self.protect_turn
             && let Some(owed) = pending.iter_mut().find(|job| job.request_id == self.owed)
         {
             owed.protected_pacing.clone_from(&debt.windows);
@@ -891,11 +891,10 @@ impl Scheduler {
                         // Foreground validators may use an owed background
                         // turn's pacing wait. The turn and its one-probe debt
                         // remain owned by that exact background request.
-                        // They may also borrow a foreground completion's wait;
-                        // a changed reply preserves that completion's slot.
-                        || (job.interactive()
-                            && (!turn.interactive()
-                                || turn.completion_validation.load(Ordering::Relaxed))))
+                        // Foreground completion and ordinary validators may
+                        // borrow each other's waits; a charged reply preserves
+                        // the exact owed turn's original slot.
+                        || job.interactive())
                     // The class's turn is held by soft pacing, not by a retry,
                     // socket or global spacing.
                     && ready(turn, &budgets, now) > now
@@ -962,17 +961,17 @@ impl Scheduler {
                     let quota = pending[index].quota();
                     let owed = pending[turns[&quota].1].request_id.clone();
                     let owns_turn = index == turns[&quota].1;
-                    let protect_completion = pending[index].interactive()
+                    let protect_turn = pending[index].interactive()
                         && pending[turns[&quota].1].interactive()
-                        && !pending[index].completion_validation.load(Ordering::Relaxed)
-                        && pending[turns[&quota].1]
-                            .completion_validation
-                            .load(Ordering::Relaxed);
+                        && pending[index].completion_validation.load(Ordering::Relaxed)
+                            != pending[turns[&quota].1]
+                                .completion_validation
+                                .load(Ordering::Relaxed);
                     ProbeTurn {
                         quota,
                         owed,
                         owns_turn,
-                        protect_completion,
+                        protect_turn,
                     }
                 });
                 let mut job = pending.remove(index).expect("existing queue entry");
@@ -2143,7 +2142,7 @@ mod tests {
                 quota: quota.into(),
                 owed: "finished".into(),
                 owns_turn: true,
-                protect_completion: false,
+                protect_turn: false,
             };
             let debt = budgets.probe(quota);
             let mut blocks = ProbeBlocks::default();
@@ -2186,7 +2185,7 @@ mod tests {
             quota: "core".into(),
             owed: "finished".into(),
             owns_turn: true,
-            protect_completion: false,
+            protect_turn: false,
         };
         let debt = budgets.probe("core");
         let mut blocks = ProbeBlocks::default();
@@ -2221,7 +2220,7 @@ mod tests {
                 quota: "core".into(),
                 owed: "test".into(),
                 owns_turn: false,
-                protect_completion: true,
+                protect_turn: true,
             }
             .protect(&debt, &mut pending);
             let now = Instant::now();
@@ -2294,7 +2293,7 @@ mod tests {
             quota: "core".into(),
             owed: "test".into(),
             owns_turn: false,
-            protect_completion: true,
+            protect_turn: true,
         };
         turn.protect(&debt, &mut pending);
         pending.clear();
