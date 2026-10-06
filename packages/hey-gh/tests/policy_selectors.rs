@@ -29,6 +29,9 @@ mod ci_retry;
 #[path = "policy_selectors/merge_ref.rs"]
 mod merge_ref;
 
+#[path = "policy_selectors/conflicts.rs"]
+mod conflicts;
+
 fn metadata() -> Value {
     json!({"node_id":"PR_demo_7","number":7,"title":"REST title","state":"open","merged":false,"mergeable":true,
         "head":{"sha":HEAD},"base":{"ref":"main","sha":BASE,"repo":{"id":123,"node_id":"R_demo","full_name":"acme/demo"}},
