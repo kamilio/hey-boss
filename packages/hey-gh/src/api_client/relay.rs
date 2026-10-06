@@ -10,7 +10,15 @@ impl ApiClient {
         mut request: reqwest::Request,
     ) -> Result<T> {
         let get = request.method() == reqwest::Method::GET;
+        // A bootstrap that fell back locally must be able to drain every page,
+        // even when the primary reconnects or cannot carry one large PR row.
+        let local_cursor = get
+            && request
+                .url()
+                .query_pairs()
+                .any(|(key, value)| key == "cursor" && !cursor::wrapped(&value));
         if get
+            && !local_cursor
             && shared_read::supported_path(request.url().path())
             && let Some(reply) = self.try_relay(&request).await?
         {
@@ -53,30 +61,37 @@ impl ApiClient {
         let deadline = self.read_deadline.expect("one outer read deadline");
         // Discovery must never turn an absent or obsolete companion into a
         // long wait. It uses only cache-only local and primary identities.
-        let handshake = async {
-            let mut socket = connect(path).await?;
-            let local = self.shared_identity().await?;
-            let response = exchange(
-                &mut socket,
-                &Request::Probe {
-                    identity: local.clone(),
-                },
-            )
-            .await?;
-            let Response::Identity { identity: primary } = response else {
-                return Ok(None);
+        let handshake =
+            async {
+                let mut socket = connect(path).await?;
+                let local = self.shared_identity().await?;
+                let local_source = cursor::Source::new(false, &local);
+                if request.url().query_pairs().any(|(key, value)| {
+                    key == "cursor" && local_source.unwrap(&value, false).is_ok()
+                }) {
+                    return Ok(None);
+                }
+                let response = exchange(
+                    &mut socket,
+                    &Request::Probe {
+                        identity: local.clone(),
+                    },
+                )
+                .await?;
+                let Response::Identity { identity: primary } = response else {
+                    return Ok(None);
+                };
+                primary.validate()?;
+                if local.user_id != primary.user_id
+                    || !local.hostname.eq_ignore_ascii_case(&primary.hostname)
+                {
+                    return Ok(None);
+                }
+                // Negotiation selects the supervisor's primary credential scope.
+                // Equal GitHub user IDs do not imply equal token permissions; API
+                // access errors from that primary must therefore remain visible.
+                Ok::<_, Error>(Some((local, primary)))
             };
-            primary.validate()?;
-            if local.user_id != primary.user_id
-                || !local.hostname.eq_ignore_ascii_case(&primary.hostname)
-            {
-                return Ok(None);
-            }
-            // Negotiation selects the supervisor's primary credential scope.
-            // Equal GitHub user IDs do not imply equal token permissions; API
-            // access errors from that primary must therefore remain visible.
-            Ok::<_, Error>(Some((local, primary)))
-        };
         let Ok(Ok(Some((local, primary)))) = tokio::time::timeout_at(
             deadline.min(Instant::now() + Duration::from_secs(1)),
             handshake,

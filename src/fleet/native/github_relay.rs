@@ -34,6 +34,7 @@ pub(super) struct Replies(Arc<Mutex<State>>);
 struct State {
     supported: bool,
     alive: bool,
+    probe_after: Option<Instant>,
     pending: BTreeMap<String, oneshot::Sender<Response>>,
 }
 impl Replies {
@@ -57,6 +58,12 @@ impl Replies {
             return Err(invalid("GitHub relay reply exceeds size limit"));
         }
         let response: Response = serde_json::from_value(message["response"].clone())?;
+        if matches!(response, Response::TooLarge) {
+            // Preserve a bootstrap window across short-lived CLI processes.
+            // Native local cursors then keep that feed local after the window
+            // expires. This changes relay discovery, never GitHub quota backoff.
+            self.0.lock().unwrap().probe_after = Some(Instant::now() + Duration::from_secs(60));
+        }
         let _ = reply.send(response);
         Ok(())
     }
@@ -112,6 +119,11 @@ impl<W: Write> Bridge<W> {
         };
         let mut state = self.replies.0.lock().unwrap();
         if !state.alive || !state.supported || state.pending.len() >= LIMIT {
+            return Ok(None);
+        }
+        if matches!(request, Request::Probe { .. })
+            && state.probe_after.is_some_and(|at| Instant::now() < at)
+        {
             return Ok(None);
         }
         let remaining = deadline
@@ -264,6 +276,7 @@ impl Relay {
         let replies = Replies(Arc::new(Mutex::new(State {
             supported: false,
             alive: true,
+            probe_after: None,
             pending: BTreeMap::new(),
         })));
         let bridge = Arc::new(Bridge {

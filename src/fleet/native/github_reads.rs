@@ -155,12 +155,10 @@ impl Backend {
                 Err(Error::Transport(_) | Error::LocalAuth(_) | Error::CacheMiss) => {
                     Response::Unavailable
                 }
-                Err(Error::Invalid(message))
-                    if matches!(
-                        message.as_str(),
-                        "shared daemon identity changed" | "shared response exceeds size limit"
-                    ) =>
-                {
+                Err(Error::Invalid(message)) if message == "shared response exceeds size limit" => {
+                    Response::TooLarge
+                }
+                Err(Error::Invalid(message)) if message == "shared daemon identity changed" => {
                     Response::Unavailable
                 }
                 Err(error) => Response::Reply {
@@ -201,7 +199,7 @@ pub(super) fn frame(id: &str, response: &Response) -> Result<Value> {
     {
         Ok(value)
     } else {
-        Ok(json!({"kind":"github_reply","id":id,"response":Response::Unavailable}))
+        Ok(json!({"kind":"github_reply","id":id,"response":Response::TooLarge}))
     }
 }
 impl Drop for Backend {

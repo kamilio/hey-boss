@@ -102,6 +102,19 @@ impl Fixture {
             .unwrap()
         })
     }
+    fn rejected(&self) -> Response {
+        let mut socket = self.runtime.block_on(async {
+            let mut socket = UnixStream::connect(self.root.join("socket")).await.unwrap();
+            // At capacity the relay sends Unavailable and closes immediately.
+            // Its close may race our request write, but the rejection must
+            // still be readable and no request may reach the supervisor.
+            if let Err(error) = wire::write(&mut socket, &read(), MAX_REQUEST_BYTES).await {
+                assert!(matches!(error, hey_gh::Error::Transport(_)));
+            }
+            socket
+        });
+        self.response(&mut socket)
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -128,6 +141,47 @@ fn body(response: Response) -> Value {
         Response::Reply { reply } => reply.decode().unwrap(),
         _ => panic!("expected API reply"),
     }
+}
+
+#[test]
+fn oversized_reply_leaves_a_local_bootstrap_window_across_sdk_processes() {
+    let f = Fixture::new();
+    f.ready();
+    let mut socket = f.request();
+    let sent = f.frame();
+    f.replies
+        .receive(&json!({"kind":"github_reply","id":sent["id"],"response":{"kind":"too_large"}}))
+        .unwrap();
+    assert!(matches!(f.response(&mut socket), Response::TooLarge));
+    // A fresh SDK process reconnects with a probe after cursor expiry. It
+    // must be allowed to bootstrap the local feed instead of looping over the
+    // same primary pages until it reaches the same oversized row again.
+    let Request::Read { read } = read() else {
+        unreachable!()
+    };
+    let mut bootstrap = f.request_with(&Request::Probe {
+        identity: read.identity.clone(),
+    });
+    assert!(matches!(f.response(&mut bootstrap), Response::Unavailable));
+    assert!(f.frames.try_recv().is_err());
+    f.ready();
+    let mut reconfigured = f.request_with(&Request::Probe {
+        identity: read.identity.clone(),
+    });
+    assert!(matches!(
+        f.response(&mut reconfigured),
+        Response::Unavailable
+    ));
+    f.replies.0.lock().unwrap().probe_after = Some(Instant::now() - Duration::from_secs(1));
+    let mut recovered = f.request_with(&Request::Probe {
+        identity: read.identity,
+    });
+    let sent = f.frame();
+    f.replies.receive(&json!({"kind":"github_reply","id":sent["id"],"response":{"kind":"identity","identity":{"hostname":"github.com","user_id":42,"instance":"a".repeat(32)}}})).unwrap();
+    assert!(matches!(
+        f.response(&mut recovered),
+        Response::Identity { .. }
+    ));
 }
 
 #[test]
@@ -166,8 +220,7 @@ fn cancel_releases_capacity_and_late_replies_cannot_alias_new_requests() {
         held.push(f.request());
         assert_eq!(f.frame()["id"], n.to_string());
     }
-    let mut excess = f.request();
-    assert!(matches!(f.response(&mut excess), Response::Unavailable));
+    assert!(matches!(f.rejected(), Response::Unavailable));
     assert!(f.frames.try_recv().is_err());
     drop(held.remove(0));
     let cancelled = f.frame();
@@ -224,8 +277,7 @@ fn delivered_remote_replies_keep_capacity_until_the_socket_writer_finishes() {
     for n in 1..=4 {
         f.answer(&n.to_string(), json!("x".repeat(1024 * 1024)));
     }
-    let mut excess = f.request();
-    assert!(matches!(f.response(&mut excess), Response::Unavailable));
+    assert!(matches!(f.rejected(), Response::Unavailable));
     assert!(f.frames.try_recv().is_err());
     assert_eq!(
         body(f.response(&mut held[0])).as_str().unwrap().len(),
