@@ -43,7 +43,11 @@ tokio::task_local! { pub(crate) static REQUEST_DEADLINE: Option<tokio::time::Ins
 // A bounded HTTP read keeps its own limit even at foreground priority. Other
 // consumers can still extend the lifetime of a coalesced shared request.
 tokio::task_local! { pub(crate) static READ_DEADLINE: tokio::time::Instant; }
-tokio::task_local! { static OPTIONAL_SELECTOR_DEADLINE: tokio::time::Instant; }
+struct OptionalSelectorBudget {
+    queued_until: tokio::time::Instant,
+    deadline: watch::Sender<tokio::time::Instant>,
+}
+tokio::task_local! { static OPTIONAL_SELECTOR_BUDGET: OptionalSelectorBudget; }
 
 #[cfg(test)]
 #[path = "client/optional_tests.rs"]
@@ -64,13 +68,30 @@ mod native_policy_tests;
 pub(crate) async fn optional_selector_read<T>(
     read: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    OPTIONAL_SELECTOR_DEADLINE
-        .scope(deadline, async {
-            tokio::time::timeout_at(deadline, read)
-                .await
-                .unwrap_or(Err(Error::Deadline))
-        })
+    let queued_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = READ_DEADLINE
+        .try_with(|deadline| queued_until.min(*deadline))
+        .unwrap_or(queued_until);
+    let (sender, mut receiver) = watch::channel(deadline);
+    OPTIONAL_SELECTOR_BUDGET
+        .scope(
+            OptionalSelectorBudget {
+                queued_until,
+                deadline: sender,
+            },
+            async {
+                tokio::pin!(read);
+                loop {
+                    let until = *receiver.borrow_and_update();
+                    tokio::select! {
+                        biased;
+                        result = &mut read => return result,
+                        _ = receiver.changed() => {},
+                        _ = tokio::time::sleep_until(until) => return Err(Error::Deadline),
+                    }
+                }
+            },
+        )
         .await
 }
 tokio::task_local! { pub(crate) static INTERACTIVE_READ: Arc<AtomicBool>; }
@@ -694,7 +715,7 @@ impl Client {
             && CACHE_PROBE.try_with(|_| ()).is_err())
         .then(|| digest(&key));
         let mut queue_clock = None;
-        let receiver = loop {
+        let (receiver, shared_deadline, caller_limit) = loop {
             let observed_sequence = completion_fingerprint.as_ref().map(|_| {
                 self.0
                     .inflight
@@ -733,7 +754,7 @@ impl Client {
             if matches!(freshness, Freshness::CachedOnly) || CACHE_PROBE.try_with(|_| ()).is_ok() {
                 return Err(Error::CacheMiss);
             }
-            let (now, caller_deadline) = *queue_clock.get_or_insert_with(|| {
+            let (now, caller_limit) = *queue_clock.get_or_insert_with(|| {
                 let now = tokio::time::Instant::now();
                 let caller_deadline = if interactive_read() {
                     now + self.0.config.queue_timeout
@@ -749,11 +770,11 @@ impl Client {
                 let caller_deadline = READ_DEADLINE
                     .try_with(|deadline| caller_deadline.min(*deadline))
                     .unwrap_or(caller_deadline);
-                let caller_deadline = OPTIONAL_SELECTOR_DEADLINE
-                    .try_with(|deadline| caller_deadline.min(*deadline))
-                    .unwrap_or(caller_deadline);
                 (now, caller_deadline)
             });
+            let caller_deadline = OPTIONAL_SELECTOR_BUDGET
+                .try_with(|budget| caller_limit.min(budget.queued_until))
+                .unwrap_or(caller_limit);
             let selector_validation = (body.is_none()
                 && matches!(
                     endpoint_class(&url, false, &self.0.config.rest_url),
@@ -764,7 +785,7 @@ impl Client {
             // Give those the same completion turns as REST, including coalesced work.
             let completion_validation = (selector_validation || body.is_some())
                 && COMPLETION_VALIDATION.try_with(|_| ()).is_ok();
-            let required_read = OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_err();
+            let required_read = OPTIONAL_SELECTOR_BUDGET.try_with(|_| ()).is_err();
             let mut inflight = self.0.inflight.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((receiver, interactive, shared_deadline, completion, required)) =
                 inflight.active.get(&key)
@@ -790,7 +811,7 @@ impl Client {
                 // the scheduler to reconsider promoted priority/deadlines now.
                 self.0.queue_changed.notify_one();
                 self.0.metrics.coalesced.fetch_add(1, Ordering::Relaxed);
-                break receiver.clone();
+                break (receiver.clone(), shared_deadline.clone(), caller_limit);
             } else {
                 if completion_fingerprint
                     .as_ref()
@@ -888,12 +909,12 @@ impl Client {
                     (
                         receiver.clone(),
                         interactive,
-                        deadline,
+                        deadline.clone(),
                         completion,
                         required,
                     ),
                 );
-                break receiver;
+                break (receiver, deadline, caller_limit);
             }
         };
         let mut waiter = RequestWaiter {
@@ -913,8 +934,8 @@ impl Client {
                     return result.map(|r| (*r).clone());
                 }
                 SharedResult::QueuedUntil(until)
-                    if OPTIONAL_SELECTOR_DEADLINE
-                        .try_with(|deadline| until >= *deadline)
+                    if OPTIONAL_SELECTOR_BUDGET
+                        .try_with(|budget| until >= budget.queued_until)
                         .unwrap_or(false) =>
                 {
                     // Only this optional waiter falls back. A required caller
@@ -922,13 +943,44 @@ impl Client {
                     return Err(Error::Deadline);
                 }
                 SharedResult::OptionalDeferred
-                    if OPTIONAL_SELECTOR_DEADLINE.try_with(|_| ()).is_ok() =>
+                    if OPTIONAL_SELECTOR_BUDGET.try_with(|_| ()).is_ok() =>
                 {
                     // Only the shortcut falls back to REST. Required callers
                     // sharing this request retain the job and its quota gates.
                     return Err(Error::Deadline);
                 }
                 state => {
+                    if matches!(state, SharedResult::Active) {
+                        let _ = OPTIONAL_SELECTOR_BUDGET.try_with(|budget| {
+                            // Do not discard a paid shortcut merely because
+                            // queuing left too little time for its response.
+                            // Only dispatched work gets up to one response
+                            // second, within a three-second operation ceiling
+                            // and the original caller/queue deadlines. Retries
+                            // and coalescing cannot renew that ceiling.
+                            let until = (tokio::time::Instant::now() + Duration::from_secs(1))
+                                .min(budget.queued_until + Duration::from_secs(1))
+                                .min(caller_limit);
+                            let previous = *budget.deadline.borrow();
+                            if until > previous {
+                                let mut shared = shared_deadline
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner());
+                                *shared = (*shared).max(until);
+                                drop(shared);
+                                budget.deadline.send_replace(until);
+                                tracing::info!(
+                                    request_key = completion_fingerprint.as_deref(),
+                                    allowance_ms = until
+                                        .saturating_duration_since(budget.queued_until)
+                                        .as_millis()
+                                        as u64,
+                                    "Extended optional GitHub selector for its dispatched response"
+                                );
+                                self.0.queue_changed.notify_one();
+                            }
+                        });
+                    }
                     if let Some(wait) = &mut wait {
                         wait.update(matches!(
                             state,
