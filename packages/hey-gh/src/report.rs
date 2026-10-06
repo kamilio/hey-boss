@@ -15,6 +15,10 @@ mod policy_ci;
 pub(crate) use ci_metadata::discovery::scope as ci_discovery_scope;
 mod review_activity;
 mod review_events;
+mod timings;
+use timings::{Phase, Timings};
+#[cfg(test)]
+mod timing_tests;
 
 // Cancelled jobs can appear after the parent stops; reuse empty pages only
 // once the existing ten-minute settling interval has elapsed.
@@ -550,13 +554,17 @@ impl Client {
         freshness: Freshness,
     ) -> Result<CiObservation> {
         validate_repository(repository)?;
+        let mut timings = Timings::new("ci", repository, number, freshness);
         let lock = self.report_lock(&format!("{}#{number}:ci", repository.to_ascii_lowercase()));
-        PUBLICATION_READ_ONLY.scope(publication_scope(), self.individual_read_result(repository, number, "ci", tokio::time::timeout(self.report_timeout(), async {
+        let result = PUBLICATION_READ_ONLY.scope(publication_scope(), self.individual_read_result(repository, number, "ci", tokio::time::timeout(self.report_timeout(), async {
+            timings.enter(Phase::Lock);
             let _guard = acquire_report_lock(lock, freshness).await;
+            timings.enter(Phase::Prepare);
             let repository_spelling = self.pr_repository_spelling(repository, number).await?;
             let repository = repository_spelling.as_str();
             VALIDATIONS.scope(std::cell::RefCell::new(Vec::new()), async {
                 for attempt in 0..2 {
+                    timings.enter(Phase::Seed);
                     let policy = if attempt == 0 || matches!(freshness, Freshness::CachedOnly) {
                         freshness
                     } else {
@@ -564,6 +572,7 @@ impl Client {
                     };
                     crate::entity::clear();
                     let seed = self.cached_ci_pr_seed(repository, number, policy).await?;
+                    timings.enter(Phase::Collection);
                     let (pr, data) = if let Some(seed) = seed {
                         crate::entity::set(self.pr_owner(repository, number, &seed.data).await?);
                         let head = sha(&seed.data, "head")?;
@@ -607,6 +616,7 @@ impl Client {
                         Freshness::MaxAge(age) => Freshness::MaxAge(age.min(std::time::Duration::from_secs(15))),
                         other => other,
                     };
+                    timings.enter(Phase::Confirmation);
                     let final_pr = crate::client::COMPLETION_VALIDATION.scope((), self.ci_metadata(repository, number, final_policy)).await?;
                     if pr.data()["node_id"] != final_pr.data()["node_id"]
                         || pr.data()["head"]["sha"] != final_pr.data()["head"]["sha"]
@@ -614,6 +624,7 @@ impl Client {
                         || pr.data()["merge_commit_sha"] != final_pr.data()["merge_commit_sha"] {
                         continue;
                     }
+                    timings.enter(Phase::Assembly);
                     let complete = data.errors.is_empty();
                     let suffix = format!("{}/{repository}/{number}", self.hostname());
                     let mut observations = Vec::new();
@@ -624,8 +635,10 @@ impl Client {
                         observations.push((format!("ci://{suffix}"), serde_json::to_value(&data).map_err(|e| Error::Invalid(e.to_string()))?));
                     }
                     let cursor = if can_publish() {
+                        timings.enter(Phase::Publication);
                         let cursor = self.observe_many(&observations).await?;
                         if !preserves_ci_health() {
+                            timings.enter(Phase::StatusPublication);
                             self.publish_individual_pr_status(repository, number, &[("ci", source_error_message(&data.errors))]).await?;
                         }
                         complete.then_some(cursor)
@@ -639,7 +652,9 @@ impl Client {
                 }
                 Err(Error::Invalid("PR head changed repeatedly while collecting CI".into()))
             }).await
-        }))).await
+        }))).await;
+        timings.finish(result.as_ref().map(|report| report.complete));
+        result
     }
     async fn final_pull_request(
         &self,
@@ -774,8 +789,9 @@ impl Client {
         freshness: Freshness,
     ) -> Result<Report> {
         validate_repository(repository)?;
+        let mut timings = Timings::new("pr", repository, number, freshness);
         let lock = self.report_lock(&format!("{}#{number}", repository.to_ascii_lowercase()));
-        PUBLICATION_READ_ONLY
+        let result = PUBLICATION_READ_ONLY
             .scope(
                 publication_scope(),
                 self.individual_read_result(
@@ -783,11 +799,13 @@ impl Client {
                     number,
                     "details",
                     tokio::time::timeout(self.report_timeout(), async {
+                        timings.enter(Phase::Lock);
                         let _guard = acquire_report_lock(lock, freshness).await;
                         VALIDATIONS
                             .scope(std::cell::RefCell::new(Vec::new()), async {
-                                let mut report =
-                                    self.build_report(repository, number, freshness).await?;
+                                let mut report = self
+                                    .build_report(repository, number, freshness, &mut timings)
+                                    .await?;
                                 report.validations =
                                     VALIDATIONS.with(|records| records.borrow().clone());
                                 report.oldest_validation_at_ms = report
@@ -802,7 +820,9 @@ impl Client {
                     }),
                 ),
             )
-            .await
+            .await;
+        timings.finish(result.as_ref().map(|report| report.complete));
+        result
     }
 
     async fn initial_report_pr(
@@ -855,12 +875,15 @@ impl Client {
         repository: &str,
         number: u64,
         freshness: Freshness,
+        timings: &mut Timings,
     ) -> Result<Report> {
+        timings.enter(Phase::Prepare);
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let repository = repository_spelling.as_str();
         // Recheck the PR head after collecting commit-bound sources. Never
         // present old-head checks as a result for a newly pushed head.
         for attempt in 0..2 {
+            timings.enter(Phase::Seed);
             crate::entity::clear();
             let pr = self
                 .initial_report_pr(
@@ -885,6 +908,7 @@ impl Client {
             let review_comments_path = format!("{prefix}/pulls/{number}/comments?per_page=100");
             let reviews_path = format!("{prefix}/pulls/{number}/reviews?per_page=100");
             let timeline_path = format!("{prefix}/issues/{number}/timeline?per_page=100");
+            timings.enter(Phase::Collection);
             let first_page = review_activity::FirstPage::new(self, repository, number, freshness);
             let (
                 ci_res,
@@ -935,6 +959,7 @@ impl Client {
             // Nested CI or another reader may have validated metadata during
             // collection. Apply the final bound to the newest cached response,
             // rather than forcing another request because the initial one aged.
+            timings.enter(Phase::Confirmation);
             let final_pr = self
                 .final_pull_request(
                     repository,
@@ -957,6 +982,7 @@ impl Client {
             {
                 continue;
             }
+            timings.enter(Phase::Assembly);
             let conflicts = conflicts(&final_pr.data).to_owned();
             check_size(
                 std::iter::once(&final_pr.data)
@@ -1035,11 +1061,13 @@ impl Client {
                 ));
             }
             let cursor = if can_publish() {
+                timings.enter(Phase::Publication);
                 let head = self.observe_many(&observations).await?;
                 let mut health = vec![("details", source_error_message(&report.errors))];
                 if !preserves_ci_health() {
                     health.push(("ci", source_error_message(&report.ci.errors)));
                 }
+                timings.enter(Phase::StatusPublication);
                 self.publish_individual_pr_status(repository, number, &health)
                     .await?;
                 complete.then_some(head)
