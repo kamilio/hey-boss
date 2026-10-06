@@ -40,6 +40,7 @@ pub(super) struct Backend {
     slots: Arc<Semaphore>,
     peer_slots: Arc<Semaphore>,
     last_id: AtomicU64,
+    owner: std::thread::Thread,
 }
 impl Backend {
     pub fn new(client: ApiClient) -> Result<Self> {
@@ -58,6 +59,7 @@ impl Backend {
             slots: SLOTS.clone(),
             peer_slots: Arc::new(Semaphore::new(PEER_LIMIT)),
             last_id: AtomicU64::new(0),
+            owner: std::thread::current(),
         })
     }
     pub fn receive(&self, message: &Value) -> Result<Option<Value>> {
@@ -128,6 +130,7 @@ impl Backend {
             });
         let client = self.client.clone().with_read_deadline(deadline);
         let outgoing = self.outgoing.clone();
+        let owner = self.owner.clone();
         let key = id.to_owned();
         let task = self.runtime.as_ref().unwrap().spawn(async move {
             let result = match request {
@@ -165,12 +168,19 @@ impl Backend {
                     reply: error.into(),
                 },
             };
-            let _ = outgoing.try_send(Completed {
-                id: key,
-                response,
-                _slot: slot,
-                _peer: peer,
-            });
+            if outgoing
+                .try_send(Completed {
+                    id: key,
+                    response,
+                    _slot: slot,
+                    _peer: peer,
+                })
+                .is_ok()
+            {
+                // Wake the creating connection thread after publication. The
+                // retained park token also covers completion before it sleeps.
+                owner.unpark();
+            }
         });
         pending.insert(id.to_owned(), task.abort_handle());
         Ok(None)

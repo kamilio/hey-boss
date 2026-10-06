@@ -949,6 +949,8 @@ impl Supervisor {
             let _ = errors_finished.send(());
         });
         let (incoming, rx) = mpsc::sync_channel(32);
+        let reader_wake = std::thread::current();
+        let authority_wake = reader_wake.clone();
         let peer = Arc::new(std::sync::OnceLock::<String>::new());
         let authenticated_peer = peer.clone();
         let app = self.clone();
@@ -962,6 +964,7 @@ impl Supervisor {
                     .and_then(|response| send(&mut *replies.lock().unwrap(), response));
                 if let Err(error) = result {
                     let _ = authority_errors.send(Err(error));
+                    authority_wake.unpark();
                     break;
                 }
             }
@@ -992,7 +995,9 @@ impl Supervisor {
                     continue;
                 }
                 let done = !matches!(result, Ok(Some(_)));
-                if incoming.send(result).is_err() || done {
+                let sent = incoming.send(result).is_ok();
+                reader_wake.unpark();
+                if !sent || done {
                     break;
                 }
             }
@@ -1129,7 +1134,7 @@ impl Supervisor {
             if last_message.elapsed() > Duration::from_secs(15) {
                 return Err("Companion heartbeat timed out".into());
             }
-            let message = match rx.recv_timeout(Duration::from_millis(250)) {
+            let message = match rx.try_recv() {
                 Ok(result) => result?.ok_or_else(|| {
                     invalid(&format!(
                         "Companion connection closed: {}",
@@ -1141,7 +1146,14 @@ impl Supervisor {
                             .join("\n")
                     ))
                 })?,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Peer frames and completed GitHub reads unpark this
+                    // thread. Keep the idle control cadence without delaying
+                    // ready replies until a receive timeout; unpark tokens
+                    // prevent a wake from being lost between try_recv/park.
+                    std::thread::park_timeout(Duration::from_millis(250));
+                    continue;
+                }
                 Err(_) => return Err("Companion reader exited".into()),
             };
             if message["version"] != 1 {
