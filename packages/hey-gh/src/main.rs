@@ -5,6 +5,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 mod cli_alias;
 mod cli_auth;
+mod cli_identity;
 mod cli_route;
 mod comment_cli;
 mod log_summary;
@@ -240,7 +241,22 @@ fn main() {
         }
     };
     if !invocation.cached {
-        let result = cli_auth::command(&invocation).and_then(|mut command| {
+        let result = cli_auth::command(&invocation).and_then(|prepared| {
+            let mut command = prepared.command;
+            if let Some((host, token)) = prepared.identity {
+                let status = cli_identity::run(command, host, token)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(signal) = status.signal() {
+                        unsafe {
+                            libc::signal(signal, libc::SIG_DFL);
+                            libc::raise(signal);
+                        }
+                    }
+                }
+                std::process::exit(status.code().unwrap_or(1));
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;

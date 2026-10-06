@@ -69,7 +69,7 @@ pub async fn post(kind: &str, args: &CommentArgs, repo: Option<&str>) -> Result<
         crate::cli_auth::command(&invocation).map_err(|error| error.to_string())
     })
     .await??;
-    let mut command = tokio::process::Command::from(native);
+    let mut command = tokio::process::Command::from(native.command);
     let mut child = command.stdin(Stdio::piped()).kill_on_drop(true).spawn()?;
     let write = child
         .stdin

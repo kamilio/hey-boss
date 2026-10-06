@@ -17,7 +17,7 @@ getrandom = "0.4"
 subtle = "2"
 httpdate = "1"
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "http2", "stream"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 shlex = "2"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -38,5 +39,4 @@ flate2 = { version = "1.1.10", default-features = false, features = ["rust_backe
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 rcgen = "0.13"
-tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
