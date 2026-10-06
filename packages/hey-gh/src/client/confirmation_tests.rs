@@ -106,6 +106,93 @@ async fn personal_graphql_confirmations_take_completion_turns_without_starving_o
 }
 
 #[tokio::test]
+async fn shorter_http_read_deadlines_reach_the_shared_scheduler() {
+    let dir = tempfile::tempdir().unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let router = axum::Router::new().fallback({
+        let calls = calls.clone();
+        let release = release.clone();
+        move |uri: axum::http::Uri| {
+            let calls = calls.clone();
+            let release = release.clone();
+            async move {
+                let number = uri
+                    .path()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap();
+                calls.lock().unwrap().push(number);
+                if number == 1 {
+                    release.notified().await;
+                }
+                if number == 2 {
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                }
+                axum::Json(json!({"number":number}))
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let github = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = Client::with_token(
+        Config {
+            rest_url: url.parse().unwrap(),
+            graphql_url: format!("{url}graphql").parse().unwrap(),
+            cache_path: dir.path().join("cache.sqlite"),
+            min_spacing: Duration::ZERO,
+            ..Config::default()
+        },
+        "synthetic-token".into(),
+    )
+    .unwrap();
+    let api = crate::api::Api::new(client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sdk = crate::ApiClient::new(
+        format!("http://{}/", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    let daemon = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let start = tokio::time::Instant::now();
+    let read = |number, seconds| {
+        let sdk = sdk
+            .clone()
+            .with_read_deadline(start + Duration::from_secs(seconds));
+        tokio::spawn(async move {
+            sdk.pull_request("acme/demo", number, Freshness::Revalidate)
+                .await
+        })
+    };
+    let mut tasks = vec![read(1, 25)];
+    until(|| calls.lock().unwrap().len() == 1).await;
+    for (number, seconds) in [(2, 20), (3, 21), (4, 2), (5, 4)] {
+        tasks.push(read(number, seconds));
+        until(|| client.status().outstanding_requests == tasks.len()).await;
+    }
+    // A longer HTTP coalescer cannot erase the short caller's urgency.
+    tasks.push(read(4, 24));
+    until(|| client.status().coalesced_requests == 1).await;
+    release.notify_one();
+    let mut results = Vec::new();
+    for task in tasks {
+        results.push(task.await.unwrap());
+    }
+    daemon.abort();
+    github.abort();
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [1, 4, 2, 5, 3],
+        "Short deadlines must get bounded turns while FIFO still progresses"
+    );
+}
+
+#[tokio::test]
 async fn shorter_read_deadlines_get_bounded_turns_without_starving_older_reads() {
     for (completion, scenario) in [false, true].into_iter().flat_map(|completion| {
         ["normal", "extended", "cancelled", "cancelled_shared"].map(|s| (completion, s))

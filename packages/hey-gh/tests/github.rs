@@ -10715,8 +10715,19 @@ async fn issue73_deadline_bounds_cold_cache_branch_resolution_and_backoff() {
                 String::from_utf8_lossy(&output.stderr)
             )
         });
-        assert_eq!(value["code"], "deadline", "{value}");
-        assert_eq!(value["deadlineExceeded"], true);
+        // With the caller's deadline at admission, an already known cooldown
+        // can report its real cause instead of waiting for the outer timer.
+        let throttled = mode == "issue73-backoff";
+        assert_eq!(
+            value["code"],
+            if throttled {
+                "rate_limited"
+            } else {
+                "deadline"
+            },
+            "{value}"
+        );
+        assert_eq!(value["deadlineExceeded"], !throttled);
         assert_eq!(value["available"], false);
         assert_eq!(value["complete"], false);
         assert_eq!(value["validations"], json!([]));
