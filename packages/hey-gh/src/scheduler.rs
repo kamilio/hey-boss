@@ -17,6 +17,9 @@ use tokio::{
     time::Instant,
 };
 
+mod pacing;
+use pacing::Pacing;
+
 pub(crate) const MAX_ACTIVE_BUCKETS: usize = 3;
 const QUOTA_RESERVE: u64 = 100;
 
@@ -213,6 +216,7 @@ impl PacingProbe {
         Some(ReservedWindow {
             dispatched_at: Instant::now(),
             waited_for_quota: queued_at < *slot,
+            probe: true,
         })
     }
 }
@@ -287,6 +291,7 @@ impl ProbeBlocks {
 }
 
 struct Reservation {
+    ticket: u128,
     resource: String,
     resets: Vec<(u64, bool)>,
     dispatched_at: Instant,
@@ -296,6 +301,7 @@ struct Reservation {
 struct ReservedWindow {
     dispatched_at: Instant,
     waited_for_quota: bool,
+    probe: bool,
 }
 
 impl Reservation {
@@ -309,6 +315,7 @@ impl Reservation {
             .map(|(_, waited)| ReservedWindow {
                 dispatched_at: self.dispatched_at,
                 waited_for_quota: *waited,
+                probe: false,
             })
     }
 }
@@ -396,6 +403,7 @@ async fn next_attempt(active: &mut [Active]) -> (usize, Job, Attempt) {
 
 struct Budget {
     next: Instant,
+    pacing: Pacing,
     remaining: u64,
     spacing: Duration,
     reset_at_seconds: u64,
@@ -531,13 +539,12 @@ impl Budgets {
     fn charge_probe(&mut self, probe: &PacingProbe) {
         let now = Instant::now();
         if let Some(windows) = self.0.get_mut(&probe.quota) {
-            for (reset, prior_slot) in &probe.windows {
+            for (reset, _) in &probe.windows {
                 if let Some(budget) = windows.get_mut(reset) {
-                    let debt = now
-                        .max(*prior_slot)
-                        .checked_add(budget.spacing)
-                        .unwrap_or_else(|| quota_deadline(Duration::from_secs(86400)));
-                    budget.next = budget.next.max(debt);
+                    if budget.remaining > QUOTA_RESERVE {
+                        budget.pacing.charge(now, budget.spacing);
+                    }
+                    budget.next = budget.pacing.deadline();
                 }
             }
         }
@@ -585,7 +592,7 @@ impl Budgets {
                 }
             }
         }
-        let previous = windows.remove(&reset);
+        let mut previous = windows.remove(&reset);
         // Parallel responses and cached upstream headers may arrive out of order.
         // Only expiry, never a higher header in a live window, restores capacity.
         let remaining = previous
@@ -609,26 +616,27 @@ impl Budgets {
         } else {
             Duration::from_secs_f64(seconds as f64 / (remaining as f64 + 1.0))
         };
-        let next = if unchanged && remaining > 0 {
-            previous.as_ref().map_or(now, |b| b.next)
-        } else {
-            // A charged dispatch already reserved this window's pacing slot.
-            // Revise its spacing from dispatch, without charging header latency
-            // again or erasing later reservations. Unreserved probes/new windows
-            // still start pacing at observation. Exhaustion always waits to reset.
+        let mut pacing = previous
+            .as_mut()
+            .map(|b| std::mem::replace(&mut b.pacing, Pacing::new(now)))
+            .unwrap_or_else(|| Pacing::new(now));
+        let hard_gate = remaining == 0 || (shared_quota(resource) && remaining <= QUOTA_RESERVE);
+        if hard_gate || (!unchanged && !reservation.is_some_and(|r| r.probe)) {
             let anchor = reservation
-                .filter(|_| remaining > 0 && (!shared_quota(resource) || remaining > QUOTA_RESERVE))
+                .filter(|_| !hard_gate)
                 .map(|r| r.dispatched_at)
                 .unwrap_or(now);
             let deadline = anchor
                 .checked_add(spacing)
                 .unwrap_or_else(|| quota_deadline(Duration::from_secs(86400)));
-            previous.as_ref().map_or(deadline, |b| b.next.max(deadline))
-        };
+            pacing.floor(deadline);
+        }
+        let next = pacing.deadline();
         windows.insert(
             reset,
             Budget {
                 next,
+                pacing,
                 remaining,
                 spacing,
                 reset_at_seconds: reset,
@@ -639,6 +647,7 @@ impl Budgets {
 
     fn reserve(&mut self, job: &mut Job) -> Reservation {
         let mut reservation = Reservation {
+            ticket: fastrand::u128(..),
             resource: job.quota(),
             resets: Vec::new(),
             dispatched_at: Instant::now(),
@@ -652,14 +661,12 @@ impl Budgets {
                     reservation
                         .resets
                         .push((budget.reset_at_seconds, job.queued_at < budget.next));
-                    // A protected completion may consume its original slot
-                    // before a charged probe's debt. Reserve after that debt;
-                    // dispatching the owed job must never erase the extra cost.
-                    budget.next = budget
-                        .next
-                        .max(reservation.dispatched_at)
-                        .checked_add(budget.spacing)
-                        .unwrap_or_else(|| quota_deadline(Duration::from_secs(86400)));
+                    budget.pacing.reserve(
+                        reservation.ticket,
+                        reservation.dispatched_at,
+                        budget.spacing,
+                    );
+                    budget.next = budget.pacing.deadline();
                 }
             }
         }
@@ -668,11 +675,26 @@ impl Budgets {
         reservation
     }
 
+    fn settle(&mut self, reservation: &Reservation, free: bool) -> Duration {
+        let mut released = Duration::ZERO;
+        if let Some(windows) = self.0.get_mut(&reservation.resource) {
+            for budget in windows.values_mut() {
+                budget.pacing.settle(reservation.ticket, free);
+                let next = budget.pacing.deadline();
+                released = released.max(budget.next.saturating_duration_since(next));
+                budget.next = next;
+            }
+        }
+        released
+    }
+
     fn exhausted(&mut self, resource: &str, reset: u64, wait: Duration) {
+        let next = quota_deadline(wait);
         self.0.entry(resource.to_owned()).or_default().insert(
             reset,
             Budget {
-                next: quota_deadline(wait),
+                next,
+                pacing: Pacing::new(next),
                 remaining: 0,
                 spacing: wait,
                 reset_at_seconds: reset,
@@ -1310,6 +1332,9 @@ impl Scheduler {
             let probe = probe.map(|turn| (budgets.probe(&turn.quota), turn));
             let (status, headers, bytes) = match outcome {
                 Attempt::Deadline => {
+                    if let Some(reservation) = &reservation {
+                        budgets.settle(reservation, false);
+                    }
                     if let Some((debt, turn)) = &probe {
                         blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
                     }
@@ -1332,6 +1357,9 @@ impl Scheduler {
                     let response = match response {
                         Ok(r) => r,
                         Err(e) => {
+                            if let Some(reservation) = &reservation {
+                                budgets.settle(reservation, false);
+                            }
                             if let Some((debt, turn)) = &probe {
                                 blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
                             }
@@ -1389,12 +1417,16 @@ impl Scheduler {
                                 .as_ref()
                                 .and_then(|r| r.for_window(&job.quota(), reset))
                                 .or_else(|| {
-                                    job.body.as_ref()?;
-                                    probe.as_ref()?.0.observation(
-                                        &job.quota(),
-                                        reset,
-                                        job.queued_at,
-                                    )
+                                    probe
+                                        .as_ref()?
+                                        .0
+                                        .observation(&job.quota(), reset, job.queued_at)
+                                        .map(|mut observed| {
+                                            if job.body.is_none() {
+                                                observed.waited_for_quota = false;
+                                            }
+                                            observed
+                                        })
                                 }),
                         );
                     }
@@ -1402,6 +1434,15 @@ impl Scheduler {
                         && !unchanged
                     {
                         blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
+                    }
+                    if let Some(reservation) = &reservation {
+                        let released =
+                            budgets.settle(reservation, unchanged && job.cached.is_some());
+                        if !released.is_zero() {
+                            tracing::info!(request_id=%job.request_id,
+                                max_window_refund_ms=released.as_millis() as u64,
+                                "Released unused GitHub pacing reservation");
+                        }
                     }
                     if status == StatusCode::NOT_MODIFIED && !job.minting {
                         if job.body.is_some() {
@@ -2278,6 +2319,288 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn free_reservations_release_all_live_windows_only_in_their_auth_quota() {
+        for installation in [false, true] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            let mut job = core_job();
+            job.installation = installation;
+            let quota = job.quota();
+            let peer = if installation {
+                "core"
+            } else {
+                "installation/core"
+            };
+            for window in [reset, reset + 600] {
+                budgets.observe(&quota, 5000, window, true, None);
+            }
+            budgets.observe(peer, 5000, reset, false, None);
+            let peer_slot = budgets.for_resource(peer).next().unwrap().next;
+            let reserved = budgets.reserve(&mut job);
+            tokio::time::advance(Duration::from_millis(100)).await;
+            budgets.observe(
+                &quota,
+                5000,
+                reset,
+                true,
+                reserved.for_window(&quota, reset),
+            );
+            budgets.settle(&reserved, true);
+            assert!(
+                budgets
+                    .for_resource(&quota)
+                    .all(|b| b.next <= Instant::now() && b.pacing.pending() == 0)
+            );
+            assert_eq!(budgets.for_resource(peer).next().unwrap().next, peer_slot);
+            let after = ready(&job, &budgets, Instant::now());
+            budgets.settle(&reserved, true);
+            assert_eq!(
+                ready(&job, &budgets, Instant::now()),
+                after,
+                "a repeated settlement spent the credit twice"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_reservation_releases_only_its_share_of_a_later_charged_probe() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, false, None);
+        let turn = budgets.for_resource("core").next().unwrap().next;
+        tokio::time::advance(turn - Instant::now()).await;
+        let free = budgets.reserve(&mut core_job());
+        let credit = budgets.0["core"][&reset].spacing;
+        let probe = budgets.probe("core");
+        tokio::time::advance(Duration::from_millis(100)).await;
+        budgets.observe(
+            "core",
+            4999,
+            reset,
+            false,
+            probe.observation("core", reset, Instant::now()),
+        );
+        budgets.charge_probe(&probe);
+        let before = budgets.for_resource("core").next().unwrap().next;
+        let paid_floor = Instant::now() + budgets.0["core"][&reset].spacing;
+        budgets.observe("core", 4999, reset, true, free.for_window("core", reset));
+        budgets.settle(&free, true);
+        let next = budgets.for_resource("core").next().unwrap().next;
+        assert_eq!(next, (before - credit).max(paid_floor));
+        assert!(
+            next < before && next > Instant::now(),
+            "free work must release its interval and retain the paid probe's interval"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_reservations_preserve_interleaved_charged_and_unknown_attempts() {
+        for charged_first in [false, true] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe("core", 5000, reset, true, None);
+            let free = budgets.reserve(&mut core_job());
+            let paid = budgets.reserve(&mut core_job());
+            let third = budgets.reserve(&mut core_job());
+            let before = budgets.0["core"][&reset].next;
+            let credit = budgets.0["core"][&reset].spacing;
+            if charged_first {
+                budgets.observe("core", 5000, reset, false, paid.for_window("core", reset));
+                budgets.settle(&paid, false);
+            }
+            budgets.settle(&free, true);
+            assert_eq!(budgets.0["core"][&reset].next, before - credit);
+            if !charged_first {
+                budgets.observe("core", 5000, reset, false, paid.for_window("core", reset));
+                budgets.settle(&paid, false);
+            }
+            budgets.settle(&third, false);
+            assert_eq!(budgets.0["core"][&reset].next, before - credit);
+            assert!(budgets.0["core"][&reset].pacing.pending() == 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_reservation_cannot_refund_a_later_independent_turn() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, true, None);
+        let old = budgets.reserve(&mut core_job());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let later = budgets.reserve(&mut core_job());
+        let another = budgets.reserve(&mut core_job());
+        let before = budgets.0["core"][&reset].next;
+        budgets.settle(&old, true);
+        assert_eq!(budgets.0["core"][&reset].next, before);
+        budgets.settle(&later, false);
+        budgets.settle(&another, false);
+        assert!(budgets.0["core"][&reset].pacing.pending() == 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absorbed_free_credit_cannot_release_later_protected_reservations() {
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, true, None);
+        let old = budgets.reserve(&mut core_job());
+        // A larger shared charge replaces the entire earlier reserved wait.
+        budgets.observe("core", 500, reset, false, None);
+        let paid = budgets.reserve(&mut core_job());
+        let before = budgets.0["core"][&reset].next;
+        budgets.settle(&old, true);
+        assert_eq!(budgets.0["core"][&reset].next, before);
+        budgets.settle(&paid, false);
+        assert!(budgets.0["core"][&reset].pacing.pending() == 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn free_response_preserves_hard_reserves_new_windows_and_cooldowns() {
+        for remaining in [0, 50, QUOTA_RESERVE] {
+            let mut budgets = Budgets::default();
+            let reset = now_ms() / 1000 + 3600;
+            budgets.observe("core", 5000, reset, true, None);
+            let free = budgets.reserve(&mut core_job());
+            budgets.observe(
+                "core",
+                remaining,
+                reset,
+                true,
+                free.for_window("core", reset),
+            );
+            budgets.settle(&free, true);
+            assert!(
+                ready(&core_job(), &budgets, Instant::now())
+                    > Instant::now() + Duration::from_secs(3500)
+            );
+        }
+        let mut budgets = Budgets::default();
+        let reset = now_ms() / 1000 + 3600;
+        budgets.observe("core", 5000, reset, true, None);
+        let free = budgets.reserve(&mut core_job());
+        budgets.exhausted("core", reset + 60, Duration::from_secs(120));
+        budgets.settle(&free, true);
+        assert_eq!(
+            ready(&core_job(), &budgets, Instant::now()),
+            Instant::now() + Duration::from_secs(120)
+        );
+        assert_eq!(
+            ready(
+                &core_job(),
+                &budgets,
+                Instant::now() + Duration::from_secs(300)
+            ),
+            Instant::now() + Duration::from_secs(300)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reservation_refunds_never_undercut_a_queue_with_free_reads_removed() {
+        // Counterfactual lower bound: replay dispatches with every ultimately
+        // free read removed. Paid reservations, response floors and probes
+        // still cost their complete interval, independent of response order.
+        enum Cost {
+            Reserve(usize, Instant, Duration),
+            Floor(Instant),
+            Probe(Instant, Duration),
+        }
+        fn ideal(start: Instant, free_mask: usize, costs: &[Cost]) -> Instant {
+            costs.iter().fold(start, |next, cost| match *cost {
+                Cost::Reserve(id, at, spacing) if id >= 3 || free_mask & (1 << id) == 0 => {
+                    next.max(at) + spacing
+                }
+                Cost::Reserve(..) => next,
+                Cost::Floor(floor) => next.max(floor),
+                Cost::Probe(at, spacing) => next.max(at) + spacing,
+            })
+        }
+        for free_mask in 0..8 {
+            for gap in [
+                Duration::ZERO,
+                Duration::from_millis(100),
+                Duration::from_secs(3),
+            ] {
+                for remaining in [500, 5000] {
+                    for order in [
+                        [0, 1, 2],
+                        [0, 2, 1],
+                        [1, 0, 2],
+                        [1, 2, 0],
+                        [2, 0, 1],
+                        [2, 1, 0],
+                    ] {
+                        let start = Instant::now();
+                        let reset = now_ms() / 1000 + 3600;
+                        let mut budgets = Budgets::default();
+                        budgets.observe("core", 5000, reset, true, None);
+                        let mut reservations = Vec::new();
+                        let mut costs = Vec::new();
+                        for id in 0..3 {
+                            tokio::time::advance(gap).await;
+                            costs.push(Cost::Reserve(
+                                id,
+                                Instant::now(),
+                                budgets.0["core"][&reset].spacing,
+                            ));
+                            reservations.push(budgets.reserve(&mut core_job()));
+                        }
+                        let probe = budgets.probe("core");
+                        budgets.observe(
+                            "core",
+                            remaining,
+                            reset,
+                            false,
+                            probe.observation("core", reset, Instant::now()),
+                        );
+                        costs.push(Cost::Probe(
+                            Instant::now(),
+                            budgets.0["core"][&reset].spacing,
+                        ));
+                        budgets.charge_probe(&probe);
+                        for id in order {
+                            let free = free_mask & (1 << id) != 0;
+                            if !free {
+                                budgets.observe(
+                                    "core",
+                                    remaining,
+                                    reset,
+                                    false,
+                                    reservations[id].for_window("core", reset),
+                                );
+                                costs.push(Cost::Floor(
+                                    reservations[id].dispatched_at
+                                        + budgets.0["core"][&reset].spacing,
+                                ));
+                            }
+                            budgets.settle(&reservations[id], free);
+                            let ideal = ideal(start, free_mask, &costs);
+                            assert!(
+                                budgets.0["core"][&reset].next.max(Instant::now())
+                                    >= ideal.max(Instant::now()),
+                                "refund erased paid work: mask={free_mask}, gap={gap:?}, remaining={remaining}, order={order:?}, completed={id}"
+                            );
+                            // A refund arriving after this additional turn must
+                            // not spend a credit absorbed by an older floor.
+                            costs.push(Cost::Reserve(
+                                3,
+                                Instant::now(),
+                                budgets.0["core"][&reset].spacing,
+                            ));
+                            let later = budgets.reserve(&mut core_job());
+                            budgets.settle(&later, false);
+                        }
+                        assert_eq!(
+                            budgets.0["core"][&reset].next.max(Instant::now()),
+                            ideal(start, free_mask, &costs).max(Instant::now()),
+                            "settled free work retained pacing debt"
+                        );
+                        assert!(budgets.0["core"][&reset].pacing.pending() == 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn slow_reserved_response_does_not_charge_pacing_twice() {
         let mut budgets = Budgets::default();
         let reset = now_ms() / 1000 + 3600;
@@ -2327,7 +2650,13 @@ mod tests {
         budgets.reserve(&mut core_job());
         let prior = budgets.for_resource("core").next().unwrap().next;
         let probe = budgets.probe("core");
-        budgets.observe("core", 4999, reset, false, None);
+        budgets.observe(
+            "core",
+            4999,
+            reset,
+            false,
+            probe.observation("core", reset, Instant::now()),
+        );
         budgets.charge_probe(&probe);
         let budget = budgets.for_resource("core").next().unwrap();
         assert_eq!(budget.next, prior + budget.spacing);
@@ -2347,7 +2676,13 @@ mod tests {
             .unwrap()
             .next;
         let probe = budgets.probe("core");
-        budgets.observe("core", 4999, reset, false, None);
+        budgets.observe(
+            "core",
+            4999,
+            reset,
+            false,
+            probe.observation("core", reset, Instant::now()),
+        );
         budgets.charge_probe(&probe);
         for (window, prior) in probe.windows {
             let budget = &budgets.0["core"][&window];

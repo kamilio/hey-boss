@@ -8290,11 +8290,22 @@ async fn conditional_validations_skip_soft_pacing_without_bypassing_exhaustion()
     .unwrap();
     assert!(matches!(validated.source, Source::Revalidated));
     assert_eq!(validated.data, json!({"stable":true}));
-    // A free validation does not erase the charged request's pacing debt.
+    // The preceding 200's interval elapsed before the first 304 was admitted.
+    // That free response must release its own speculative reservation.
+    let _ = tokio::time::timeout(
+        Duration::from_millis(250),
+        c.get("charged-after-conditional", Freshness::Revalidate),
+    )
+    .await
+    .expect("a free validation retained an unused pacing reservation");
+    c.get("conditional-paced", Freshness::Revalidate)
+        .await
+        .unwrap();
+    // A further free validation cannot erase this new charged request's debt.
     assert!(
         tokio::time::timeout(
             Duration::from_millis(250),
-            c.get("charged-after-conditional", Freshness::Revalidate)
+            c.get("charged-after-second-conditional", Freshness::Revalidate)
         )
         .await
         .is_err()
@@ -8302,7 +8313,7 @@ async fn conditional_validations_skip_soft_pacing_without_bypassing_exhaustion()
     assert!(
         !h.calls()
             .iter()
-            .any(|call| call.path == "/charged-after-conditional")
+            .any(|call| call.path == "/charged-after-second-conditional")
     );
     h.phase(1);
     c.get("conditional-paced", Freshness::Revalidate)
