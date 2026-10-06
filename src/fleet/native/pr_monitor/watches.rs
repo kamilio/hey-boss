@@ -24,7 +24,6 @@ pub(super) async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
             url,
             checked_at: None,
             closed: false,
-            backfill: false,
         })
         .collect();
     let requested = store.requested_github_fetches()?;

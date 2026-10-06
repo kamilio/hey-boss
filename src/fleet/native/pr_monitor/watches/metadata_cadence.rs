@@ -1,4 +1,5 @@
 use super::*;
+use crate::fleet::native::pr_monitor::lifecycle_tests::from_metadata;
 
 fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
     loop {
@@ -14,7 +15,7 @@ fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
                 5_000
             } else if request.url().ends_with("metadata?cached_only=true") {
                 10_000
-            } else if request.url().ends_with("metadata?max_age_seconds=300") {
+            } else if request.url().contains("/pr-lifecycles?") {
                 20_000
             } else {
                 60_000
@@ -41,7 +42,7 @@ fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
 }
 
 #[test]
-fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
+fn stale_lifecycle_batch_in_flight_cannot_stop_a_new_watcher() {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
         version: 1,
@@ -73,7 +74,7 @@ fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
     let database = ctx.path.clone();
     let serving = std::thread::spawn(move || {
         let incoming = receive_metadata_request(&server);
-        assert!(incoming.url().ends_with("metadata?max_age_seconds=300"));
+        assert!(incoming.url().contains("/pr-lifecycles?"));
         Store::open(&database)
             .unwrap()
             .execute(&assignment)
@@ -84,9 +85,10 @@ fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
         metadata["validated_at_ms"] = json!(crate::issues::worker::now() - 60_000);
         incoming
             .respond(
-                tiny_http::Response::from_string(metadata.to_string()).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                ),
+                tiny_http::Response::from_string(from_metadata(&metadata, &[1]).to_string())
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
             )
             .unwrap();
     });
@@ -157,6 +159,7 @@ fn metadata_batches(repeat: bool) {
         let (ci, policy, metadata) = evidence(true, false);
         let mut ordinary_metadata = metadata.clone();
         ordinary_metadata["data"]["number"] = json!(2);
+        let ordinary_lifecycles = from_metadata(&ordinary_metadata, &[1, 2]);
         let receive = || receive_metadata_request(&server);
         // Withhold both responses until both batches have started. Serial
         // polling would wait here and also add both batches to the next wakeup.
@@ -167,15 +170,15 @@ fn metadata_batches(repeat: bool) {
         assert!(
             paths
                 .iter()
-                .any(|url| url.ends_with("/2/metadata?max_age_seconds=300")),
-            "General polling must leave watched PRs to their watcher: {paths:?}"
+                .any(|url| url.contains("/pr-lifecycles?") && url.contains("numbers=1%2C2")),
+            "Lifecycle polling must include both watched and ordinary PRs: {paths:?}"
         );
         let respond = |request: tiny_http::Request| {
             let path = request.url().split('?').next().unwrap();
             let value = if path.ends_with("required-checks") {
                 &policy
-            } else if path.ends_with("/2/metadata") {
-                &ordinary_metadata
+            } else if path.ends_with("pr-lifecycles") {
+                &ordinary_lifecycles
             } else if path.ends_with("metadata") {
                 &metadata
             } else if path.ends_with("ci") {
@@ -224,7 +227,7 @@ fn metadata_batches(repeat: bool) {
                     break next;
                 }
             };
-            assert!(next.url().ends_with("/3/metadata?max_age_seconds=300"));
+            assert!(next.url().contains("/pr-lifecycles?") && next.url().ends_with("numbers=3"));
             let mut merged = metadata.clone();
             merged["data"]["number"] = json!(3);
             merged["data"]["state"] = json!("closed");
@@ -233,9 +236,10 @@ fn metadata_batches(repeat: bool) {
             merged["data"]["title"] = json!("New merge");
             merged["data"]["merged_at"] = json!("2026-10-05T21:04:49Z");
             next.respond(
-                tiny_http::Response::from_string(merged.to_string()).with_header(
-                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
-                ),
+                tiny_http::Response::from_string(from_metadata(&merged, &[3]).to_string())
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
             )
             .unwrap();
             respond(held);

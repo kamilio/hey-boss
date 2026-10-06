@@ -232,7 +232,12 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
                     policy["checks"][0]["failure_key"] = json!(observation.blocking[0]);
                 }
                 let path = request.url().split('?').next().unwrap();
-                let body = if path.ends_with("required-checks") {
+                let body = if path.ends_with("pr-lifecycles") {
+                    crate::fleet::native::pr_monitor::lifecycle_tests::from_metadata(
+                        &metadata,
+                        &[1],
+                    )
+                } else if path.ends_with("required-checks") {
                     policy
                 } else if path.ends_with("metadata") {
                     metadata

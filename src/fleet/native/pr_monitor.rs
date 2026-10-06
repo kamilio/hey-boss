@@ -5,6 +5,9 @@ use hey_gh::{ApiClient, Freshness};
 use std::time::Duration;
 mod cached_merges;
 #[cfg(test)]
+mod lifecycle_tests;
+mod lifecycles;
+#[cfg(test)]
 mod read_deadlines;
 mod schedule;
 mod watches;
@@ -184,120 +187,13 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
     actor.id = "human:pr-monitor".into();
     store.close_merged_pull_requests(&actor)?;
     store.reconcile_github_assignments(&actor)?;
-    let watched: std::collections::HashSet<_> = store.github_watch_urls()?.into_iter().collect();
-    let prs: Vec<_> = store
-        .tracked_pull_requests()?
-        .into_iter()
-        .filter(|pr| !watched.contains(&pr.url))
-        .collect();
+    let prs = store.tracked_pull_requests()?;
     drop(store);
     let path = ctx.state.join("pr-monitor-schedule.json");
     let mut schedule: schedule::Schedule = serde_json::from_value(
         ctx.read_json(&path, serde_json::json!({"cooldown_until":0,"entries":{}}))?,
     )?;
-    let urls = schedule.due(&prs, crate::issues::worker::now());
-    if urls.is_empty() {
-        return Ok(());
-    }
-    let started = std::time::Instant::now();
-    for url in urls {
-        if ctx.stopped() || started.elapsed() >= Duration::from_secs(40) {
-            break;
-        }
-        let Some((repository, number)) = selector(&url) else {
-            schedule.failure(
-                &url,
-                crate::issues::worker::now(),
-                &hey_gh::Error::Invalid("Unsupported PR URL".into()),
-            );
-            ctx.atomic_json(&path, &serde_json::to_value(&schedule)?)?;
-            Store::open(&ctx.path)?.record_pr_status(
-                &url,
-                None,
-                crate::issues::worker::now(),
-                Some("Unsupported PR URL"),
-            )?;
-            continue;
-        };
-        let backfill = prs.iter().any(|pr| pr.url == url && pr.backfill);
-        let result = tokio_read(client, &repository, number, backfill).await;
-        let mut store = Store::open(&ctx.path)?;
-        // A task may enter watching while this ordinary read is in flight.
-        // Its cached metadata must not race the watcher's fresher observation.
-        if store.github_watch_urls()?.contains(&url) {
-            continue;
-        }
-        match result {
-            Ok(response) => {
-                let checked_at = i64::try_from(response.validated_at_ms)?;
-                let data = response.data;
-                let status = pr_status(&data, &repository, number);
-                if status.is_some()
-                    && let Some(id) = data["user"]["id"].as_i64()
-                {
-                    store.record_pr_author(&url, id)?;
-                }
-                store.record_pr_status(
-                    &url,
-                    status,
-                    checked_at,
-                    if status.is_none() {
-                        Some("Incomplete PR metadata")
-                    } else {
-                        None
-                    },
-                )?;
-                if status == Some("merged") {
-                    store.record_pr_merge_details(
-                        &url,
-                        data["title"].as_str().unwrap_or(""),
-                        data["merged_at"].as_str(),
-                        checked_at,
-                    )?;
-                }
-                if let Some(status) = status {
-                    schedule.success(
-                        &url,
-                        crate::issues::worker::now(),
-                        checked_at,
-                        status == "closed",
-                    );
-                } else {
-                    schedule.failure(
-                        &url,
-                        crate::issues::worker::now(),
-                        &hey_gh::Error::Invalid("Incomplete PR metadata".into()),
-                    );
-                }
-                ctx.atomic_json(&path, &serde_json::to_value(&schedule)?)?;
-            }
-            Err(error) => {
-                schedule.failure(&url, crate::issues::worker::now(), &error);
-                ctx.atomic_json(&path, &serde_json::to_value(&schedule)?)?;
-                store.record_pr_status(
-                    &url,
-                    None,
-                    crate::issues::worker::now(),
-                    Some(&error.to_string()),
-                )?;
-                eprintln!("PR monitor: {repository}#{number}: {error}");
-                // Global failures stop the batch. Repo-specific denials back
-                // off that PR so they cannot starve unrelated repositories.
-                if matches!(
-                    error,
-                    hey_gh::Error::GitHub { status: 401, .. }
-                        | hey_gh::Error::Auth(_)
-                        | hey_gh::Error::RateLimited { .. }
-                        | hey_gh::Error::Transport(_)
-                        | hey_gh::Error::LocalAuth(_)
-                        | hey_gh::Error::QueueFull
-                        | hey_gh::Error::Deadline
-                ) {
-                    break;
-                }
-            }
-        }
-    }
+    lifecycles::poll(ctx, client, &prs, &mut schedule, &path).await?;
     let mut store = Store::open(&ctx.path)?;
     let count = store.close_merged_pull_requests(&actor)?;
     store.reconcile_github_assignments(&actor)?;
@@ -307,33 +203,18 @@ async fn poll_once(ctx: &Context, client: &ApiClient) -> Result<()> {
     Ok(())
 }
 
-async fn tokio_read(
+async fn repair_identity(
     client: &ApiClient,
     repository: &str,
     number: u64,
-    backfill: bool,
 ) -> hey_gh::Result<hey_gh::Response> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let client = client.clone().with_read_deadline(deadline);
     tokio::time::timeout_at(deadline, async {
-        // Authorship and merge dates of confirmed merges can be backfilled
-        // from old metadata without revalidating every historical PR.
-        if backfill {
-            match client
-                .pull_request(repository, number, Freshness::CachedOnly)
-                .await
-            {
-                Ok(response) => return Ok(response),
-                Err(hey_gh::Error::CacheMiss) => {}
-                Err(error) => return Err(error),
-            }
-        }
+        // A different node was just observed. Cached REST metadata may still
+        // describe the retired identity, including an irreversible merge.
         client
-            .pull_request(
-                repository,
-                number,
-                Freshness::MaxAge(Duration::from_secs(300)),
-            )
+            .pull_request(repository, number, Freshness::Revalidate)
             .await
     })
     .await
@@ -446,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_authorship_backfill_reads_cached_metadata_without_revalidation() {
+    fn merged_authorship_backfill_uses_lifecycle_batch_when_needed() {
         polling_scenario(false, true);
     }
 
@@ -513,9 +394,11 @@ mod tests {
             assert_eq!(
                 request.url(),
                 if backfill {
-                    "/v1/prs/o/r/1/metadata?cached_only=true"
+                    "/v1/repos/o/r/pr-lifecycles?max_age_seconds=30&numbers=1"
+                } else if rate_limited {
+                    "/v1/repos/o/r/pr-lifecycles?max_age_seconds=30&numbers=1%2C2"
                 } else {
-                    "/v1/prs/o/r/1/metadata?max_age_seconds=300"
+                    "/v1/repos/o/r/pr-lifecycles?max_age_seconds=30&numbers=1"
                 }
             );
             let response = if rate_limited {
@@ -525,7 +408,7 @@ mod tests {
                 .with_status_code(503)
                 .with_header(tiny_http::Header::from_bytes("Retry-After", "600").unwrap())
             } else {
-                tiny_http::Response::from_string(json!({"data":{"number":1,"state":"closed","merged":true,"user":{"id":42},"base":{"repo":{"full_name":"o/r"}}},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string())
+                tiny_http::Response::from_string(lifecycle_tests::from_metadata(&json!({"data":{"number":1,"state":"closed","merged":true,"title":"Merged PR","merged_at":"2026-10-01T00:00:00Z","user":{"id":42},"base":{"repo":{"full_name":"o/r"}}},"validated_at_ms":crate::issues::worker::now(),"fetched_at_ms":crate::issues::worker::now(),"source":"network"}), &[1]).to_string())
             };
             request
                 .respond(response.with_header(
@@ -566,7 +449,7 @@ mod tests {
             assert_eq!(history["pull_requests"].as_array().unwrap().len(), 1);
             assert_eq!(history["authorship_pending"], false);
         } else {
-            assert!(value["issue"]["pull_requests"][1]["error"].is_null());
+            assert!(value["issue"]["pull_requests"][1]["error"].is_string());
             assert!(value["issue"]["pull_requests"][0]["checked_at"].is_null());
         }
         drop(store);
