@@ -316,6 +316,7 @@ fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
 }
 
 enum Attempt {
+    Deadline,
     Headers(std::result::Result<reqwest::Response, reqwest::Error>),
     Stored(Result<Response>),
     Body {
@@ -328,6 +329,20 @@ enum Attempt {
 enum BodyError {
     Transport(reqwest::Error),
     TooLarge,
+}
+
+// A short optional reader cannot leave a stalled transport occupying the lane.
+// Coalesced callers may extend the shared deadline even after dispatch; keep
+// the same transport alive until that current deadline or the HTTP timeout.
+async fn before_deadline<T>(job: &Job, future: impl Future<Output = T>) -> Option<T> {
+    tokio::pin!(future);
+    loop {
+        match tokio::time::timeout_at(job.deadline(), &mut future).await {
+            Ok(value) => return Some(value),
+            Err(_) if job.deadline() > Instant::now() => continue,
+            Err(_) => return None,
+        }
+    }
 }
 
 async fn next_attempt(active: &mut [Active]) -> (usize, Job, Attempt) {
@@ -1124,16 +1139,13 @@ impl Scheduler {
                 }
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", &self.config.api_version)
-                .timeout(
-                    self.config
-                        .request_timeout
-                        .min(if job.background_collection() {
-                            crate::collection_budget::STALL_LIMIT
-                        } else {
-                            self.config.request_timeout
-                        })
-                        .min(job.deadline().saturating_duration_since(now)),
-                );
+                .timeout(self.config.request_timeout.min(
+                    if job.background_collection() {
+                        crate::collection_budget::STALL_LIMIT
+                    } else {
+                        self.config.request_timeout
+                    },
+                ));
                 if let Some(cache) = &job.cached
                     && job.body.is_none()
                     && !job.minting
@@ -1151,7 +1163,12 @@ impl Scheduler {
                     detail_lane: job.detail_lane,
                     reservation,
                     probe,
-                    future: Box::pin(async move { (job, Attempt::Headers(request.send().await)) }),
+                    future: Box::pin(async move {
+                        let outcome = before_deadline(&job, request.send())
+                            .await
+                            .map_or(Attempt::Deadline, Attempt::Headers);
+                        (job, outcome)
+                    }),
                 };
                 // Start the socket now, rather than treating an unpolled
                 // future as dispatched before a later cooldown is learned.
@@ -1211,6 +1228,21 @@ impl Scheduler {
             // before its own response headers update the observed quota debt.
             let probe = probe.map(|turn| (budgets.probe(&turn.quota), turn));
             let (status, headers, bytes) = match outcome {
+                Attempt::Deadline => {
+                    if let Some((debt, turn)) = &probe {
+                        blocked_probes.charge(turn, debt, &mut budgets, &mut pending);
+                    }
+                    if job.minting {
+                        minting = false;
+                        self.config
+                            .installation
+                            .as_ref()
+                            .unwrap()
+                            .failed(Error::Deadline);
+                    }
+                    self.finish(job, Err(Error::Deadline));
+                    continue;
+                }
                 Attempt::Stored(result) => {
                     self.finish(job, result);
                     continue;
@@ -1363,15 +1395,15 @@ impl Scheduler {
                         reservation: None,
                         probe: None,
                         future: Box::pin(async move {
-                            let bytes = read_body(response, max_body_bytes).await;
-                            (
-                                job,
-                                Attempt::Body {
-                                    status,
-                                    headers,
-                                    bytes,
-                                },
-                            )
+                            let outcome =
+                                before_deadline(&job, read_body(response, max_body_bytes))
+                                    .await
+                                    .map_or(Attempt::Deadline, |bytes| Attempt::Body {
+                                        status,
+                                        headers,
+                                        bytes,
+                                    });
+                            (job, outcome)
                         }),
                     });
                     continue;
