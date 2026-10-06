@@ -141,7 +141,7 @@ pub(crate) fn supported_path(path: &str) -> bool {
     match parts.as_slice() {
         // Raw source feeds include local explicit watches. Until their source
         // coverage is negotiated, only the account PR feed can be shared.
-        ["", "v1", "pr-status"] => true,
+        ["", "v1", "pr-status" | "polling-coverage"] => true,
         // Repository reports implicitly include refs from local PR watches,
         // even when the caller supplies an explicit branch selection.
         ["", "v1", "prs", owner, repo] => repository(owner, repo),

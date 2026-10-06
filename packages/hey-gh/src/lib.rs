@@ -10,6 +10,7 @@ mod discovery_fallback;
 mod entity;
 pub mod local_auth;
 mod policy;
+mod polling;
 mod pr_fields;
 pub mod release;
 mod report;

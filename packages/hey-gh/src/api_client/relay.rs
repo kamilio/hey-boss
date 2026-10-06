@@ -5,6 +5,28 @@ use crate::shared_read::{self, Read, Reply, Request, Response, wire};
 use tokio::time::Instant;
 
 impl ApiClient {
+    pub(crate) async fn relay_polling_coverage(
+        &self,
+        expected: &shared_read::Identity,
+    ) -> Result<Option<crate::polling::Coverage>> {
+        if self.relay_socket.as_ref().is_none_or(|path| !path.exists()) {
+            return Ok(None);
+        }
+        if self.shared_identity().await? != *expected {
+            return Ok(None);
+        }
+        let request = self
+            .http
+            .get(self.url("v1/polling-coverage"))
+            .build()
+            .map_err(|error| Error::Transport(error.to_string()))?;
+        // No local fallback: an unavailable supervisor cannot own local work.
+        self.try_relay(&request)
+            .await?
+            .map(Reply::decode)
+            .transpose()
+    }
+
     pub(super) async fn relay_read<T: DeserializeOwned>(
         &self,
         mut request: reqwest::Request,

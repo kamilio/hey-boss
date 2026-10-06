@@ -146,6 +146,58 @@ async fn read(client: &ApiClient, path: &str) -> Result<Value> {
 }
 
 #[tokio::test]
+async fn polling_coverage_uses_only_the_authenticated_primary_and_never_local_fallback() {
+    let mut local = Local::normal().await;
+    let proof = crate::polling::Coverage {
+        identity: identity(true),
+        interval_seconds: 60,
+        modes: [true; 3],
+        rows: std::collections::BTreeMap::from([("acme/repo/7".into(), "c".repeat(64))]),
+    };
+    let relay = Relay::replying(reply(serde_json::to_value(&proof).unwrap()));
+    local.client.relay_socket = Some(relay.path.clone());
+    let client = local
+        .client
+        .clone()
+        .with_read_deadline(Instant::now() + Duration::from_secs(2));
+    assert_eq!(
+        client
+            .relay_polling_coverage(&identity(false))
+            .await
+            .unwrap(),
+        Some(proof)
+    );
+    assert!(
+        relay
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r,Request::Read{read} if read.path == "/v1/polling-coverage"))
+    );
+    drop(relay);
+    let offline = local
+        .client
+        .clone()
+        .with_read_deadline(Instant::now() + Duration::from_secs(2));
+    assert!(
+        offline
+            .relay_polling_coverage(&identity(false))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        local
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|url| url == "/v1/identity")
+    );
+}
+
+#[tokio::test]
 async fn forwards_query_budget_and_fences_every_exposed_cursor() {
     let mut local = Local::normal().await;
     let relay = Relay::replying(reply(

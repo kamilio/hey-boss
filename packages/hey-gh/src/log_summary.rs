@@ -90,6 +90,7 @@ pub struct CycleSummary {
     pub local_budget_interruptions: u64,
     /// Repeated deferrals across cycles, not unique PRs.
     pub deferred_across_cycles: u64,
+    pub delegated_across_cycles: u64,
     pub budget_exhausted_cycles: usize,
     pub latest_cycle: Option<Cycle>,
 }
@@ -105,6 +106,7 @@ pub struct Cycle {
     pub interrupted: u64,
     pub deferred: u64,
     pub waiting_for_ci: u64,
+    pub delegated: u64,
     pub cycle_budget_exhausted: bool,
 }
 
@@ -123,6 +125,10 @@ fn cycle(line: &str, at_ms: u64) -> Option<Cycle> {
             Some(value) => value.parse().ok()?,
             None => 0,
         },
+        delegated: match field(line, "delegated") {
+            Some(value) => value.parse().ok()?,
+            None => 0,
+        },
         cycle_budget_exhausted: match field(line, "cycle_budget_exhausted")? {
             "true" => true,
             "false" => false,
@@ -137,12 +143,20 @@ fn cycle(line: &str, at_ms: u64) -> Option<Cycle> {
             .checked_add(cycle.interrupted)?
             == cycle.attempted
         && cycle.attempted.checked_add(cycle.deferred)? == cycle.total
-        && cycle.waiting_for_ci <= cycle.deferred
+        && cycle.waiting_for_ci.checked_add(cycle.delegated)? <= cycle.deferred
         && (cycle.waiting_for_ci == 0 || field(line, "mode") == Some("policy"))
-        // Awaiting cached CI is a dependency deferral, not budget exhaustion.
-        && (cycle.deferred == cycle.waiting_for_ci || cycle.cycle_budget_exhausted)
+        // Dependency and ownership deferrals do not imply budget exhaustion.
+        && (cycle.deferred == cycle.waiting_for_ci + cycle.delegated || cycle.cycle_budget_exhausted)
         && (!cycle.cycle_budget_exhausted || cycle.interrupted > 0 || cycle.deferred > 0))
         .then_some(cycle)
+}
+
+#[test]
+fn delegated_cycles_are_not_misclassified_as_budget_exhaustion() {
+    let line = "mode=ci started_at_ms=1000 finished_at_ms=2000 total=10 attempted=2 succeeded=2 failed=0 interrupted=0 deferred=8 delegated=8 cycle_budget_exhausted=false";
+    assert_eq!(cycle(line, 2000).unwrap().delegated, 8);
+    assert!(cycle(&line.replace("delegated=8", "delegated=9"), 2000).is_none());
+    assert!(cycle(&line.replace("delegated=8", "delegated=7"), 2000).is_none());
 }
 
 struct Completion {
@@ -428,6 +442,9 @@ pub fn read(directory: &Path, seconds: u64, sampled_at_ms: u64) -> io::Result<Su
         aggregate.deferred_across_cycles = aggregate
             .deferred_across_cycles
             .saturating_add(cycle.deferred);
+        aggregate.delegated_across_cycles = aggregate
+            .delegated_across_cycles
+            .saturating_add(cycle.delegated);
         aggregate.budget_exhausted_cycles += usize::from(cycle.cycle_budget_exhausted);
         if aggregate.latest_cycle.as_ref().is_none_or(|latest| {
             (latest.finished_at_ms, latest.started_at_ms)

@@ -181,6 +181,7 @@ struct Inner {
     metrics: Arc<Metrics>,
     changes_notify: tokio::sync::Notify,
     policy_ready: tokio::sync::Notify,
+    polling: crate::polling::Polling,
 }
 
 struct RequestWaiter {
@@ -203,6 +204,9 @@ impl Drop for RequestWaiter {
 }
 
 impl Client {
+    pub(crate) fn polling(&self) -> &crate::polling::Polling {
+        &self.0.polling
+    }
     pub(crate) fn notify_policy_ready(&self) {
         self.0.policy_ready.notify_one();
     }
@@ -360,6 +364,7 @@ impl Client {
             metrics,
             changes_notify: tokio::sync::Notify::new(),
             policy_ready: tokio::sync::Notify::new(),
+            polling: crate::polling::Polling::default(),
         })))
     }
 
