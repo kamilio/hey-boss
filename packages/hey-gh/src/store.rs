@@ -7,6 +7,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod checkpoint;
+#[cfg(test)]
+mod checkpoint_tests;
 #[cfg(test)]
 mod decode_tests;
 #[cfg(test)]
@@ -196,6 +199,7 @@ fn discovery_identity(node: &Value, collection: &Value) -> Option<(String, u64, 
 pub(crate) struct Store {
     connection: Arc<Mutex<Connection>>,
     writer_admission: Arc<tokio::sync::Semaphore>,
+    checkpoint: Option<Arc<checkpoint::Checkpointer>>,
     readers: Option<Readers>,
     payload_decoders: Arc<tokio::sync::Semaphore>,
     retention: std::time::Duration,
@@ -427,9 +431,22 @@ impl Store {
                 })
             })
             .transpose()?;
+        let checkpoint = conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(checkpoint::Checkpointer::open)
+            .transpose()?;
+        if checkpoint.is_some() {
+            // Only checkpoint placement changes. Commits retain their existing
+            // FULL WAL sync, and a dedicated connection is ready before the
+            // writer's inline checkpoint hook is disabled.
+            conn.pragma_update(None, "wal_autocheckpoint", 0)
+                .map_err(storage)?;
+        }
         Ok(Self {
             connection: Arc::new(Mutex::new(conn)),
             writer_admission: Arc::new(tokio::sync::Semaphore::new(1)),
+            checkpoint,
             readers,
             payload_decoders: Arc::new(tokio::sync::Semaphore::new(4)),
             retention,
@@ -447,6 +464,7 @@ impl Store {
         let operation = std::any::type_name_of_val(&f);
         let conn = self.connection.clone();
         let admission = self.writer_admission.clone();
+        let checkpoint = self.checkpoint.clone();
         // Wait in FIFO order without occupying blocking threads needed by
         // independent WAL reads and decoders. Drive admission independently:
         // a paused/cancelled caller must not reserve and stall the writer turn.
@@ -459,10 +477,15 @@ impl Store {
                 let mut conn = conn.lock().map_err(storage)?;
                 let working = std::time::Instant::now();
                 let result = f(&mut conn);
+                let pending_checkpoint =
+                    checkpoint.is_some() && conn.is_autocommit() && checkpoint::pending(&conn);
                 let finished = std::time::Instant::now();
                 // Diagnostics must not extend ownership of the writer turn.
                 drop(conn);
                 drop(_permit);
+                if pending_checkpoint && let Some(checkpoint) = checkpoint {
+                    checkpoint.request();
+                }
                 if finished.duration_since(started) >= std::time::Duration::from_millis(250) {
                     // Emit from the independently driven write, even when its
                     // original caller stopped waiting. No keys or raw errors.
