@@ -58,11 +58,22 @@ impl Fixture {
                  axum::Json(body): axum::Json<Value>| async move {
                     let tag = body["variables"]["tag"].as_str().unwrap().to_owned();
                     gate.calls.lock().unwrap().push(tag.clone());
-                    if tag == "gate" {
+                    if tag == "gate" || tag == "paced-gate" {
                         gate.entered.notify_one();
                         gate.release.notified().await;
                     }
-                    axum::Json(json!({"data":{"tag":tag}}))
+                    use axum::response::IntoResponse;
+                    let mut response = axum::Json(json!({"data":{"tag":tag}})).into_response();
+                    if tag.starts_with("paced-") {
+                        let headers = response.headers_mut();
+                        headers.insert("x-ratelimit-resource", "graphql".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "5000".parse().unwrap());
+                        headers.insert(
+                            "x-ratelimit-reset",
+                            (now_ms() / 1000 + 3600).to_string().parse().unwrap(),
+                        );
+                    }
+                    response
                 },
             )
             .with_state(gate.clone());
@@ -345,4 +356,54 @@ async fn queued_paced_rest_work_keeps_the_graphql_shortcut_alive_with_a_free_soc
         *f.gate.calls.lock().unwrap(),
         ["gate", "required", "optional"]
     );
+}
+
+#[tokio::test]
+async fn foreground_selector_gets_a_turn_before_a_paced_background_graphql_backlog() {
+    let f = Fixture::new().await;
+    let core = f.hold_core().await;
+    let held = tokio::spawn(read(f.client.clone(), "paced-gate", Freshness::Revalidate));
+    tokio::time::timeout(Duration::from_secs(1), f.gate.entered.notified())
+        .await
+        .unwrap();
+    let mut background = Vec::new();
+    for tag in [
+        "paced-a", "paced-b", "paced-c", "paced-d", "paced-e", "paced-f",
+    ] {
+        let client = f.client.clone();
+        background.push(tokio::spawn(async move {
+            INTERACTIVE_READ
+                .scope(
+                    Arc::new(AtomicBool::new(false)),
+                    client.graphql(
+                        "query Fixture($tag:String!) { viewer { login } }",
+                        json!({"tag":tag}),
+                        Freshness::Revalidate,
+                    ),
+                )
+                .await
+        }));
+    }
+    f.queued(8).await;
+    let optional = tokio::spawn(optional_selector_read(read(
+        f.client.clone(),
+        "paced-optional",
+        Freshness::Revalidate,
+    )));
+    f.queued(9).await;
+    f.gate.release.notify_one();
+    held.await.unwrap().unwrap();
+    let response = optional.await.unwrap();
+    for task in background {
+        task.await.unwrap().unwrap();
+    }
+    f.gate.core_release.notify_one();
+    core.await.unwrap().unwrap();
+    let calls = f.gate.calls.lock().unwrap();
+    let position = calls.iter().position(|tag| tag == "paced-optional");
+    assert!(
+        response.is_ok() && position.is_some_and(|index| index <= 2),
+        "A foreground selector must get its normal foreground turn, while required background work continues: response={response:?}, calls={calls:?}"
+    );
+    assert_eq!(calls.len(), 8);
 }

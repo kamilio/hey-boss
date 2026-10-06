@@ -153,11 +153,13 @@ impl Job {
         }
     }
 
-    fn defers_optional(&self, required_quotas: &std::collections::HashSet<String>) -> bool {
+    fn defers_optional(&self, required_quotas: &HashMap<String, bool>) -> bool {
         self.body.is_some()
             && !self.minting
             && !self.required_reader.load(Ordering::Relaxed)
-            && required_quotas.contains(&self.quota())
+            && required_quotas
+                .get(&self.quota())
+                .is_some_and(|foreground| *foreground || !self.interactive())
     }
     pub(crate) fn deadline(&self) -> Instant {
         *self.deadline.lock().unwrap_or_else(|e| e.into_inner())
@@ -855,11 +857,15 @@ impl Scheduler {
                 continue;
             }
             let global = global_next.max(secondary.until);
-            let required_quotas: std::collections::HashSet<_> = pending
+            // Background required reads retain their ordinary paced turns,
+            // rather than forcing a foreground shortcut into REST fallback.
+            let mut required_quotas = HashMap::<String, bool>::new();
+            for job in pending
                 .iter()
                 .filter(|job| job.required_reader.load(Ordering::Relaxed))
-                .map(Job::quota)
-                .collect();
+            {
+                *required_quotas.entry(job.quota()).or_default() |= job.interactive();
+            }
             let waits_for_required = |job: &Job| {
                 job.defers_optional(&required_quotas) && budgets.rest_fallback_has_headroom(job)
             };
@@ -875,7 +881,7 @@ impl Scheduler {
                     && !queued_rest.contains(job.rest_quota())
             };
             // Optional GraphQL selectors have a short REST-fallback budget.
-            // Yield to queued required reads using the same provider's quota,
+            // Yield to equal/higher priority required reads in the same quota,
             // or fall back when known pacing alone exceeds the shortcut budget.
             // Required coalescers keep their job and its existing quota gates.
             // An exhausted REST quota keeps the GraphQL route eligible. Busy
@@ -2085,12 +2091,20 @@ mod tests {
         optional.required_reader.store(false, Ordering::Relaxed);
         optional.resource = "graphql".into();
         optional.body = Some(serde_json::json!({"query":"query { viewer { login } }"}));
-        let personal = std::collections::HashSet::from(["graphql".into()]);
-        let installation = std::collections::HashSet::from(["installation/graphql".into()]);
-        let rest = std::collections::HashSet::from(["core".into()]);
+        let personal = HashMap::from([("graphql".into(), true)]);
+        let installation = HashMap::from([("installation/graphql".into(), true)]);
+        let rest = HashMap::from([("core".into(), true)]);
+        let background = HashMap::from([("graphql".into(), false)]);
         assert!(optional.defers_optional(&personal));
         assert!(!optional.defers_optional(&installation));
         assert!(!optional.defers_optional(&rest));
+        assert!(!optional.defers_optional(&background));
+        optional.interactive.store(false, Ordering::Relaxed);
+        assert!(optional.defers_optional(&background));
+        assert!(optional.defers_optional(&personal));
+        optional.report_priority.store(true, Ordering::Relaxed);
+        assert!(!optional.defers_optional(&background));
+        assert!(optional.defers_optional(&personal));
         optional.installation = true;
         assert!(!optional.defers_optional(&personal));
         assert!(optional.defers_optional(&installation));
