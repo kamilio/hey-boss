@@ -58,6 +58,9 @@ pub enum Response {
     },
     /// Only relay availability failures permit the SDK to try its local daemon.
     Unavailable,
+    /// The bounded relay cannot carry this response. A companion briefly
+    /// declines new probes so cursor-expiry recovery can bootstrap locally.
+    TooLarge,
 }
 
 impl Reply {

@@ -940,8 +940,10 @@ remain local. Background polling is not yet delegated.
 
 Unavailable relays fall back locally within the original caller deadline;
 primary API errors, including access denials and rate limits, remain visible.
-Shared cursors bind to their daemon and route. Switching daemons expires a cursor
-and requires the usual bootstrap; a shared report's source cursor cannot continue
+Shared cursors bind to their daemon and route. Switching away from a shared feed
+expires its cursor and requires the usual bootstrap. Existing local cursors stay
+local. Oversized responses briefly suspend relay discovery so a fresh CLI process
+can bootstrap and continue locally. A shared report's source cursor cannot continue
 against a local raw change feed. Explicit nondefault daemon ports stay direct.
 
 ## JavaScript / TypeScript (napi-rs)

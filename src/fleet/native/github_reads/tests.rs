@@ -301,8 +301,5 @@ fn fleet_envelopes_are_bounded_and_invalid_requests_never_reach_the_daemon() {
             body: json!("x".repeat(hey_gh::shared_read::MAX_RESPONSE_BYTES)),
         },
     };
-    assert_eq!(
-        frame("2", &huge).unwrap()["response"]["kind"],
-        "unavailable"
-    );
+    assert_eq!(frame("2", &huge).unwrap()["response"]["kind"], "too_large");
 }

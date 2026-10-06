@@ -101,9 +101,11 @@ impl Relay {
         let task = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let request: Request = wire::read(&mut socket, shared_read::MAX_REQUEST_BYTES)
-                    .await
-                    .unwrap();
+                let Ok(request) =
+                    wire::read::<Request>(&mut socket, shared_read::MAX_REQUEST_BYTES).await
+                else {
+                    continue;
+                };
                 captured.lock().unwrap().push(request.clone());
                 if let Some(response) = handler(request).await {
                     wire::write(&mut socket, &response, shared_read::MAX_RESPONSE_BYTES)
@@ -311,15 +313,21 @@ async fn shared_cursor_cannot_enter_a_local_feed_on_fallback() {
 }
 
 #[tokio::test]
-async fn legacy_local_cursor_expires_before_reading_a_primary_feed() {
+async fn local_cursor_continues_locally_even_when_a_primary_feed_is_available() {
     let mut local = Local::normal().await;
     let relay = Relay::replying(reply(json!({"from":"primary"})));
     local.client.relay_socket = Some(relay.path.clone());
-    assert!(matches!(
-        read(&local.client, "v1/pr-status?cursor=native-local").await,
-        Err(Error::CursorExpired)
-    ));
-    assert_eq!(relay.seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        read(&local.client, "v1/pr-status?cursor=native-local")
+            .await
+            .unwrap()["from"],
+        "local"
+    );
+    assert!(relay.seen.lock().unwrap().is_empty());
+    assert_eq!(
+        *local.seen.lock().unwrap(),
+        vec!["/v1/pr-status?cursor=native-local"]
+    );
 }
 
 #[tokio::test]
@@ -485,6 +493,83 @@ async fn local_wrapped_continuation_validates_the_local_daemon() {
             "/v1/identity"
         ]
     );
+}
+
+#[tokio::test]
+async fn wrapped_local_cursor_does_not_switch_to_an_available_primary() {
+    let mut local = Local::normal().await;
+    let relay = Relay::replying(reply(json!({"from":"primary"})));
+    local.client.relay_socket = Some(relay.path.clone());
+    let source = cursor::Source::new(false, &identity(false));
+    let mut body = json!({"cursor":"previous"});
+    source.wrap(&mut body).unwrap();
+    let body = read(
+        &local.client,
+        &format!("v1/pr-status?cursor={}", body["cursor"].as_str().unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(body["from"], "local");
+    assert_eq!(
+        source
+            .unwrap(body["cursor"].as_str().unwrap(), false)
+            .unwrap(),
+        "native-local"
+    );
+    assert!(relay.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_oversized_shared_continuation_can_rebootstrap_and_drain_locally() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut local = Local::normal().await;
+    let oversized = Arc::new(AtomicBool::new(false));
+    let state = oversized.clone();
+    let relay = Relay::new(move |request| {
+        Some(match request {
+            Request::Probe { .. } => {
+                if state.load(Ordering::Acquire) {
+                    Response::Unavailable
+                } else {
+                    Response::Identity {
+                        identity: identity(true),
+                    }
+                }
+            }
+            Request::Read { .. } => {
+                state.store(true, Ordering::Release);
+                Response::TooLarge
+            }
+        })
+    });
+    local.client.relay_socket = Some(relay.path.clone());
+    let mut body = json!({"cursor":"previous-primary"});
+    cursor::Source::new(true, &identity(true))
+        .wrap(&mut body)
+        .unwrap();
+    assert!(matches!(
+        read(
+            &local.client,
+            &format!("v1/pr-status?cursor={}", body["cursor"].as_str().unwrap())
+        )
+        .await,
+        Err(Error::CursorExpired)
+    ));
+    // No per-SDK state may be needed for the next CLI process to recover.
+    let mut fresh = ApiClient::new(local.client.base.clone()).unwrap();
+    fresh.relay_socket = Some(relay.path.clone());
+    let body = read(&fresh, "v1/pr-status").await.unwrap();
+    assert_eq!(body["from"], "local");
+    oversized.store(false, Ordering::Release);
+    let count = relay.seen.lock().unwrap().len();
+    let next = read(
+        &fresh,
+        &format!("v1/pr-status?cursor={}", body["cursor"].as_str().unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(next["from"], "local");
+    assert_eq!(relay.seen.lock().unwrap().len(), count);
 }
 
 #[tokio::test]
