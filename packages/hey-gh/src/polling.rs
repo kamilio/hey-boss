@@ -7,7 +7,15 @@ use tokio::{sync::Notify, time::Instant};
 
 pub(crate) const LEASE: Duration = Duration::from_secs(30);
 const LOCAL_DEMAND: Duration = Duration::from_secs(120);
+const MAX_DEMANDS: usize = 1024;
 pub(crate) const MAX_ROWS: usize = 10_000;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DemandScope {
+    Global,
+    Repository(String),
+    PullRequest(String),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +32,22 @@ struct State {
     local_until: Option<Instant>,
     local_source: Option<&'static str>,
     last_probe: Option<&'static str>,
+    scoped: BTreeMap<DemandScope, (Instant, &'static str)>,
+}
+
+impl State {
+    fn locally_demanded(&self, key: &str, now: Instant) -> bool {
+        self.local_until.is_some_and(|until| until > now)
+            || self
+                .scoped
+                .get(&DemandScope::PullRequest(key.into()))
+                .is_some_and(|(until, _)| *until > now)
+            || key.rsplit_once('/').is_some_and(|(repo, _)| {
+                self.scoped
+                    .get(&DemandScope::Repository(repo.into()))
+                    .is_some_and(|(until, _)| *until > now)
+            })
+    }
 }
 
 #[derive(Default)]
@@ -39,6 +63,10 @@ pub struct PollingStatus {
     pub local_demand_seconds: u64,
     pub local_demand_source: Option<String>,
     pub covered_prs: usize,
+    #[serde(default)]
+    pub local_pr_demands: usize,
+    #[serde(default)]
+    pub local_repository_demands: usize,
 }
 
 pub(crate) fn row(node: &Value) -> Option<(String, String)> {
@@ -59,13 +87,26 @@ impl Polling {
     pub fn health(&self) -> PollingStatus {
         let state = self.state.lock().unwrap();
         let now = Instant::now();
-        let remaining = state
-            .local_until
+        let latest = state
+            .scoped
+            .values()
+            .copied()
+            .chain(state.local_until.zip(state.local_source))
+            .max_by_key(|(until, _)| *until);
+        let remaining = latest
+            .map(|(until, _)| until)
             .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
         let active = state.lease.as_ref().filter(|(until, _)| *until > now);
+        let covered_prs = active.map_or(0, |(_, coverage)| {
+            coverage
+                .rows
+                .keys()
+                .filter(|key| !state.locally_demanded(key, now))
+                .count()
+        });
         let last_probe = state.last_probe.unwrap_or("not_started");
         PollingStatus {
-            state: if active.is_some() {
+            state: if covered_prs > 0 {
                 "delegated"
             } else if !remaining.is_zero() {
                 "local_demand"
@@ -78,10 +119,24 @@ impl Polling {
             last_probe: last_probe.into(),
             local_demand_seconds: remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0),
             local_demand_source: (!remaining.is_zero())
-                .then_some(state.local_source)
+                .then_some(latest.map(|(_, source)| source))
                 .flatten()
                 .map(str::to_owned),
-            covered_prs: active.map_or(0, |(_, coverage)| coverage.rows.len()),
+            covered_prs,
+            local_pr_demands: state
+                .scoped
+                .iter()
+                .filter(|(scope, (until, _))| {
+                    matches!(scope, DemandScope::PullRequest(_)) && *until > now
+                })
+                .count(),
+            local_repository_demands: state
+                .scoped
+                .iter()
+                .filter(|(scope, (until, _))| {
+                    matches!(scope, DemandScope::Repository(_)) && *until > now
+                })
+                .count(),
         }
     }
     pub fn renew(
@@ -145,10 +200,33 @@ impl Polling {
         }
     }
     pub fn demand(&self, source: &'static str) {
+        self.demand_scoped(source, DemandScope::Global);
+    }
+    pub fn demand_scoped(&self, source: &'static str, mut scope: DemandScope) {
         let mut state = self.state.lock().unwrap();
-        state.local_until = Some(Instant::now() + LOCAL_DEMAND);
-        state.local_source = Some(source);
-        if state.lease.take().is_some() {
+        let now = Instant::now();
+        state.scoped.retain(|_, (until, _)| *until > now);
+        // Never discard an unexpired consumer hold to admit another one.
+        if !state.scoped.contains_key(&scope) && state.scoped.len() >= MAX_DEMANDS {
+            scope = DemandScope::Global;
+        }
+        if scope == DemandScope::Global {
+            state.local_until = Some(now + LOCAL_DEMAND);
+            state.local_source = Some(source);
+            state.scoped.clear();
+            if state.lease.take().is_some() {
+                self.wake();
+            }
+            return;
+        }
+        let already_local = state.local_until.is_some_and(|until| until > now)
+            || state.scoped.contains_key(&scope)
+            || match &scope {
+                DemandScope::PullRequest(key) => state.locally_demanded(key, now),
+                _ => false,
+            };
+        state.scoped.insert(scope, (now + LOCAL_DEMAND, source));
+        if !already_local {
             self.wake();
         }
     }
@@ -171,7 +249,10 @@ impl Polling {
         if *until <= Instant::now() || !coverage.modes[mode] {
             return false;
         }
-        row(node).is_some_and(|(key, fingerprint)| coverage.rows.get(&key) == Some(&fingerprint))
+        row(node).is_some_and(|(key, fingerprint)| {
+            !state.locally_demanded(&key, Instant::now())
+                && coverage.rows.get(&key) == Some(&fingerprint)
+        })
     }
     pub async fn changed(&self, mode: &str) {
         self.changed[mode_index(mode).expect("account hydration mode")]
@@ -217,6 +298,70 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn scoped_demand_preserves_other_ownership_across_renewal_and_failure() {
+        let polling = Polling::default();
+        let mut sibling = node();
+        sibling["number"] = json!(8);
+        let mut other = node();
+        other["repository"]["nameWithOwner"] = json!("acme/other");
+        let mut proof = coverage();
+        proof
+            .rows
+            .extend([row(&sibling).unwrap(), row(&other).unwrap()]);
+        assert!(polling.renew(&local(), 60, Instant::now(), proof.clone()));
+        for mode in ["ci", "details", "policy"] {
+            polling.changed(mode).await;
+        }
+        polling.demand_scoped("ci", DemandScope::PullRequest("acme/repo/7".into()));
+        for mode in ["ci", "details", "policy"] {
+            assert!(!polling.covers(mode, &node()));
+            assert!(polling.covers(mode, &sibling));
+            assert!(polling.covers(mode, &other));
+            tokio::time::timeout(Duration::from_millis(1), polling.changed(mode))
+                .await
+                .unwrap();
+        }
+        polling.demand_scoped("ci", DemandScope::PullRequest("acme/repo/7".into()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), polling.changed("ci"))
+                .await
+                .is_err()
+        );
+        assert_eq!(polling.health().covered_prs, 2);
+        polling.revoke();
+        assert!(polling.renew(&local(), 60, Instant::now(), proof.clone()));
+        assert!(!polling.covers("ci", &node()));
+        polling.demand_scoped("repository", DemandScope::Repository("acme/repo".into()));
+        assert!(!polling.covers("ci", &sibling));
+        assert!(polling.covers("ci", &other));
+        assert_eq!(polling.health().covered_prs, 1);
+        assert_eq!(polling.health().local_pr_demands, 1);
+        assert_eq!(polling.health().local_repository_demands, 1);
+        tokio::time::advance(LOCAL_DEMAND).await;
+        assert!(polling.renew(&local(), 60, Instant::now(), proof));
+        assert!(polling.covers("ci", &node()));
+        assert_eq!(polling.health().local_pr_demands, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn scoped_demand_overflow_fails_closed_and_expired_entries_are_pruned() {
+        let polling = Polling::default();
+        for n in 1..=MAX_DEMANDS {
+            polling.demand_scoped("ci", DemandScope::PullRequest(format!("acme/repo/{n}")));
+        }
+        assert_eq!(polling.state.lock().unwrap().scoped.len(), MAX_DEMANDS);
+        polling.demand_scoped("ci", DemandScope::PullRequest("acme/repo/100000".into()));
+        assert!(!polling.renew(&local(), 60, Instant::now(), coverage()));
+        assert_eq!(polling.health().state, "local_demand");
+        assert!(polling.state.lock().unwrap().scoped.len() <= MAX_DEMANDS);
+        tokio::time::advance(LOCAL_DEMAND).await;
+        polling.demand_scoped("ci", DemandScope::PullRequest("acme/repo/9".into()));
+        assert_eq!(polling.state.lock().unwrap().scoped.len(), 1);
+        assert!(polling.renew(&local(), 60, Instant::now(), coverage()));
+        assert!(polling.covers("ci", &node()));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn health_distinguishes_local_demand_from_coverage_and_expiry() {
         let polling = Polling::default();
         assert_eq!(polling.health().state, "not_started");
@@ -256,18 +401,20 @@ mod tests {
         )
         .unwrap();
         let watch = client.save_account_watch(60).await.unwrap();
+        let mut sibling = node();
+        sibling["number"] = json!(8);
+        let mut proof = coverage();
+        proof
+            .rows
+            .insert(row(&sibling).unwrap().0, row(&sibling).unwrap().1);
         client
             .save_derived(
                 crate::dashboard::DISCOVERY_CACHE,
-                json!({"pulls":[node()],"validatedAtMs":crate::now_ms()}),
+                json!({"pulls":[node(), sibling],"validatedAtMs":crate::now_ms()}),
             )
             .await
             .unwrap();
-        assert!(
-            client
-                .polling()
-                .renew(&local(), 60, Instant::now(), coverage())
-        );
+        assert!(client.polling().renew(&local(), 60, Instant::now(), proof));
         let errors = client
             .hydrate_pr_status_ci(crate::Freshness::default())
             .await
@@ -275,7 +422,7 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("delegated")), "{errors:?}");
         let cycle = client.account_refresh_cycle(true).await.unwrap().unwrap();
         assert_eq!(cycle.attempted, 0);
-        assert_eq!(cycle.deferred, 1);
+        assert_eq!(cycle.deferred, 2);
         assert!(
             client
                 .derived("account-status-validated:ci:acme/repo/7")
@@ -288,9 +435,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(pending.data, json!([node()]));
+        assert_eq!(pending.data, json!([node(), sibling]));
         assert_eq!(client.watches().await.unwrap()[0].id, watch.id);
-        client.polling().revoke();
+        client
+            .polling()
+            .demand_scoped("ci", DemandScope::PullRequest("acme/repo/7".into()));
         client
             .hydrate_pr_status_ci(crate::Freshness::default())
             .await
@@ -303,6 +452,20 @@ mod tests {
                 .unwrap()
                 .attempted,
             1
+        );
+        assert!(client.polling().covers("ci", &sibling));
+        let pending = client
+            .derived("account-status-pending:ci")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.data.as_array().unwrap().contains(&sibling));
+        assert!(
+            client
+                .derived("account-status-validated:ci:acme/repo/8")
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
