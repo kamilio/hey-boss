@@ -1229,6 +1229,39 @@ async fn local_requests(
                 .into_response();
         }
     }
+    // A caller-owned read deadline must reach the handler. Closing the client
+    // socket alone does not cancel Axum's future or its queued GitHub work.
+    // State-changing routes retain their existing independent semantics.
+    if request.method() == axum::http::Method::GET
+        && let Some(value) = request
+            .headers()
+            .get(crate::api_client::READ_TIMEOUT_HEADER)
+    {
+        let budget = value
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let Some(budget) = budget.filter(|budget| (1..=3_600_000).contains(budget)) else {
+            return ApiError(Error::Invalid(
+                "read timeout must be 1..3600000 milliseconds".into(),
+            ))
+            .into_response();
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(budget);
+        // Bound the handler, not a shared physical attempt's socket timeout:
+        // another caller may join after dispatch and need that attempt longer.
+        // Dropping this handler releases its waiters; the scheduler removes
+        // unobserved queued work while active responses retain their own bound.
+        return tokio::time::timeout_at(deadline, next.run(request))
+            .await
+            .unwrap_or_else(|_| {
+                tracing::info!(
+                    budget_ms = budget,
+                    "Caller read budget elapsed; releasing daemon handler"
+                );
+                ApiError(Error::Deadline).into_response()
+            });
+    }
     next.run(request).await
 }
 

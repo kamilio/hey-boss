@@ -1,5 +1,5 @@
-//! Caller-owned total read budgets. Dropping an HTTP caller leaves the daemon's
-//! handler and shared scheduler running; no watch or cursor is changed here.
+//! Caller-owned total read budgets, propagated to daemon read handlers.
+//! Shared work may outlive this caller; no watch or cursor is changed here.
 use super::{Command, PrAction, policy, resolve_pr, run_pr};
 use hey_gh::{ApiClient, Freshness};
 use serde_json::{Value, json};
@@ -54,6 +54,8 @@ pub(super) async fn read(
     repo: Option<String>,
     deadline: Instant,
 ) -> Result<(Value, bool)> {
+    let bounded_api = api.clone().with_read_deadline(deadline);
+    let api = &bounded_api;
     let mut cached = None;
     let mut identity = json!({"repository": repo});
     // One timer includes local git/branch discovery, cache transport, upstream
@@ -158,33 +160,48 @@ pub(super) async fn read(
         }
     })
     .await;
-    match result {
-        Ok(result) => result,
-        Err(_) => {
-            let available = cached.is_some();
-            let mut value = cached.unwrap_or_else(|| {
-                json!({
-                    "available": false, "state": "unknown", "validations": [],
-                    "oldestValidationAtMs": null, "observedAtMs": null,
-                    "repository": identity["repository"], "number": identity["number"],
-                    "selector": identity["selector"],
-                })
-            });
-            value["complete"] = json!(false);
-            value["available"] = json!(available);
-            value["code"] = json!("deadline");
-            value["deadlineExceeded"] = json!(true);
-            value["pendingSources"] = json!(["upstream_read"]);
-            // A fallback is evidence, not an observation-feed replacement. Do not
-            // hand a consumer a cursor for a timed-out read.
-            value["cursor"] = Value::Null;
-            if !value["sourceErrors"].is_object() {
-                value["sourceErrors"] = json!({});
-            }
-            value["sourceErrors"]["deadline"] = json!([{
-                "source":"upstream_read", "message":"caller deadline exceeded; upstream evidence remains pending"
-            }]);
-            Ok((value, false))
-        }
+    let retry_after = match result {
+        Ok(Ok(value)) => return Ok(value),
+        Ok(Err(error)) => match error.downcast_ref::<hey_gh::Error>() {
+            Some(hey_gh::Error::Deadline) => None,
+            Some(hey_gh::Error::RateLimited {
+                retry_after_seconds,
+            }) => Some(*retry_after_seconds),
+            _ => return Err(error),
+        },
+        Err(_) => None,
+    };
+    let available = cached.is_some();
+    let mut value = cached.unwrap_or_else(|| {
+        json!({
+            "available": false, "state": "unknown", "validations": [],
+            "oldestValidationAtMs": null, "observedAtMs": null,
+            "repository": identity["repository"], "number": identity["number"],
+            "selector": identity["selector"],
+        })
+    });
+    value["complete"] = json!(false);
+    value["available"] = json!(available);
+    value["deadlineExceeded"] = json!(retry_after.is_none());
+    value["pendingSources"] = json!(["upstream_read"]);
+    // Incomplete fallback evidence is never an observation-feed replacement.
+    value["cursor"] = Value::Null;
+    if !value["sourceErrors"].is_object() {
+        value["sourceErrors"] = json!({});
     }
+    if let Some(seconds) = retry_after {
+        // A known cooldown may exceed the propagated budget. Return its cause
+        // promptly and explicitly rather than waiting to manufacture expiry.
+        value["code"] = json!("rate_limited");
+        value["retryAfterSeconds"] = json!(seconds);
+        value["sourceErrors"]["rateLimit"] = json!([{
+            "source":"upstream_read", "message":"GitHub quota or cooldown currently prevents fresh evidence"
+        }]);
+    } else {
+        value["code"] = json!("deadline");
+        value["sourceErrors"]["deadline"] = json!([{
+            "source":"upstream_read", "message":"caller deadline exceeded; upstream evidence remains pending"
+        }]);
+    }
+    Ok((value, false))
 }

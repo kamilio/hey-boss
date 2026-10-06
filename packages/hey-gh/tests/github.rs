@@ -20,6 +20,8 @@ const BASE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const MERGE: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const OTHER_BASE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
+#[path = "github/daemon_deadline.rs"]
+mod daemon_deadline;
 #[path = "github/deadline_capture.rs"]
 mod deadline_capture;
 
@@ -10503,6 +10505,13 @@ async fn issue73_deadline_returns_cached_evidence_without_stopping_shared_work()
             .unwrap();
         let before = c.bootstrap().await.unwrap();
         h.mode("issue72-stall-metadata");
+        // A real second consumer must keep the shared metadata request alive
+        // after the bounded HTTP caller releases its own work.
+        let survivor = tokio::spawn({
+            let c = c.clone();
+            async move { c.pull_request("acme/demo", 7, Freshness::Revalidate).await }
+        });
+        until(|| c.status().outstanding_requests > 0).await;
         let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}/", listener.local_addr().unwrap());
@@ -10551,6 +10560,7 @@ async fn issue73_deadline_returns_cached_evidence_without_stopping_shared_work()
         );
         assert_eq!(c.bootstrap().await.unwrap().cursor, before.cursor);
         h.mock.release.notify_waiters();
+        survivor.await.unwrap().unwrap();
         until(|| c.status().outstanding_requests == 0).await;
         h.mode("");
         // A timed-out read must not leave its report lock permanently held.
@@ -10608,6 +10618,7 @@ async fn issue73_deadline_bounds_cold_cache_branch_resolution_and_backoff() {
             )
         });
         assert_eq!(value["code"], "deadline", "{value}");
+        assert_eq!(value["deadlineExceeded"], true);
         assert_eq!(value["available"], false);
         assert_eq!(value["complete"], false);
         assert_eq!(value["validations"], json!([]));

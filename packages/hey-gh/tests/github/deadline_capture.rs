@@ -9,6 +9,8 @@ enum Capture {
     CachedOnly,
     BothBlocked,
     LiveFailed,
+    DaemonDeadline,
+    RateLimited,
 }
 
 struct Gate {
@@ -23,6 +25,12 @@ async fn gate(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let budget: u64 = request.headers()["x-hey-gh-read-timeout-ms"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=1000).contains(&budget));
     if request
         .uri()
         .query()
@@ -55,7 +63,10 @@ async fn gate(
                 )
                     .into_response();
             }
-            Capture::CachedOnly | Capture::LiveFailed => {}
+            Capture::CachedOnly
+            | Capture::LiveFailed
+            | Capture::DaemonDeadline
+            | Capture::RateLimited => {}
         }
     } else {
         gate.live.fetch_add(1, Ordering::SeqCst);
@@ -64,6 +75,21 @@ async fn gate(
         gate.cache_started.notified().await;
         if matches!(gate.capture, Capture::BothBlocked) {
             std::future::pending::<()>().await;
+        }
+        if matches!(gate.capture, Capture::RateLimited) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "60")],
+                axum::Json(json!({"code":"rate_limited","error":"quota unavailable"})),
+            )
+                .into_response();
+        }
+        if matches!(gate.capture, Capture::DaemonDeadline) {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                axum::Json(json!({"code":"deadline","error":"request deadline exceeded"})),
+            )
+                .into_response();
         }
         if matches!(gate.capture, Capture::LiveFailed) {
             return (
@@ -139,12 +165,33 @@ async fn scenario(capture: Capture) {
             let value: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
                 panic!("{error}: {}", String::from_utf8_lossy(&output.stderr))
             });
-            if matches!(capture, Capture::BothBlocked) {
+            if matches!(
+                capture,
+                Capture::BothBlocked | Capture::DaemonDeadline | Capture::RateLimited
+            ) {
                 assert!(!output.status.success());
-                assert_eq!(value["code"], "deadline");
-                assert_eq!(value["available"], false);
+                assert_eq!(
+                    value["code"],
+                    if matches!(capture, Capture::RateLimited) {
+                        "rate_limited"
+                    } else {
+                        "deadline"
+                    }
+                );
+                assert_eq!(
+                    value["deadlineExceeded"],
+                    !matches!(capture, Capture::RateLimited)
+                );
+                if matches!(capture, Capture::RateLimited) {
+                    assert_eq!(value["retryAfterSeconds"], 60);
+                }
+                if matches!(capture, Capture::BothBlocked) {
+                    assert_eq!(value["available"], false);
+                }
                 assert_eq!(value["complete"], false);
-                assert_eq!(value["validations"], json!([]));
+                if value["available"] == false {
+                    assert_eq!(value["validations"], json!([]));
+                }
                 assert_eq!(value["cursor"], Value::Null);
             } else {
                 assert!(
@@ -290,4 +337,14 @@ async fn fallback_capture_rejects_live_reads_without_fetching_github() {
     assert!(h.calls().is_empty());
     api.stop().await;
     server.abort();
+}
+
+#[tokio::test]
+async fn daemon_deadline_keeps_cli_fallback_structured() {
+    scenario(Capture::DaemonDeadline).await;
+}
+
+#[tokio::test]
+async fn known_quota_failure_keeps_bounded_cli_output_structured() {
+    scenario(Capture::RateLimited).await;
 }
