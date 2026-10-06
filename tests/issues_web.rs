@@ -991,17 +991,17 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         (
             None,
             false,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
         ),
         (
             Some("/goal"),
             true,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
         ),
         (
             Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
             true,
-            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\nCommit your changes. If a Git remote is configured, push to main. Close the issue with `hey-boss issue close <number>` only after all issue requirements are resolved and verified. A successful partial delivery must leave the issue open.",
+            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
         ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
