@@ -8,6 +8,7 @@ mod context;
 mod control;
 mod conversation;
 mod github_reads;
+mod github_relay;
 mod handshake;
 mod mobile;
 mod model_recovery;
