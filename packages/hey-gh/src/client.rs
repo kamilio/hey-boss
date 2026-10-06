@@ -1137,6 +1137,10 @@ impl Client {
         self.0.store.bootstrap(&self.0.scope).await
     }
 
+    pub(crate) async fn source_cursor(&self) -> Result<String> {
+        self.0.store.current_cursor(&self.0.scope).await
+    }
+
     pub(crate) async fn bootstrap_open_prs(
         &self,
         prefix: &str,
