@@ -930,6 +930,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For embedding without the daemon, use `Client::from_gh(Config::default()).await?`. It provides generic conditional REST reads, paginated reads, read-only GraphQL queries, typed PR decoding, CI/PR reports, and the local feed. `Config` controls queue capacity, deadlines, pacing, retention, and body bounds. See [examples/sdk.rs](examples/sdk.rs).
 
+With a connected, upgraded fleet companion, SDK reads through the default local
+daemon can use the supervisor's GitHub cache and queue. This requires matching
+GitHub account and host identities and selects the supervisor's credential
+permissions. It does not combine token permissions. PR status, metadata, CI,
+required-check policy, PR lists, and lifecycle batches support this transport.
+Writes, releases, watch registration, repository reports, and raw source feeds
+remain local. Background polling is not yet delegated.
+
+Unavailable relays fall back locally within the original caller deadline;
+primary API errors, including access denials and rate limits, remain visible.
+Shared cursors bind to their daemon and route. Switching daemons expires a cursor
+and requires the usual bootstrap; a shared report's source cursor cannot continue
+against a local raw change feed. Explicit nondefault daemon ports stay direct.
+
 ## JavaScript / TypeScript (napi-rs)
 
 The native Node package wraps the shared Rust daemon SDK, including PR/CI and required-check reports, repository commits, watches, and durable cursor reads. Start `hey-gh serve`, then build the addon:

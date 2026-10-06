@@ -5,6 +5,7 @@ use hey_gh::shared_read::{
 use serde_json::json;
 use std::{sync::mpsc, time::Duration};
 use tokio::{net::UnixStream, runtime::Runtime};
+mod round_trip;
 
 struct Recording {
     bytes: Vec<u8>,
