@@ -144,6 +144,15 @@ impl Job {
             self.resource.clone()
         }
     }
+
+    fn rest_quota(&self) -> &'static str {
+        if self.installation {
+            "installation/core"
+        } else {
+            "core"
+        }
+    }
+
     fn defers_optional(&self, required_quotas: &std::collections::HashSet<String>) -> bool {
         self.body.is_some()
             && !self.minting
@@ -306,7 +315,19 @@ fn shared_quota(resource: &str) -> bool {
     matches!(resource.rsplit('/').next(), Some("core" | "graphql"))
 }
 
+fn core_lane_busy(active: &[Active], prod: bool) -> bool {
+    active.iter().filter(|attempt| !attempt.detail_lane).count() >= if prod { 6 } else { 2 }
+        || active
+            .iter()
+            .filter(|attempt| !attempt.detail_lane && attempt.resource == "core")
+            .count()
+            >= if prod { 5 } else { 1 }
+}
+
 fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
+    if !job.detail_lane && job.resource == "core" {
+        return core_lane_busy(active, prod);
+    }
     if !prod {
         return if job.detail_lane {
             active.iter().any(|attempt| attempt.detail_lane)
@@ -319,13 +340,6 @@ fn lane_busy(active: &[Active], job: &Job, prod: bool) -> bool {
     }
     if job.detail_lane {
         active.iter().filter(|attempt| attempt.detail_lane).count() >= 2
-    } else if job.resource == "core" {
-        active.iter().filter(|attempt| !attempt.detail_lane).count() >= 6
-            || active
-                .iter()
-                .filter(|attempt| !attempt.detail_lane && attempt.resource == "core")
-                .count()
-                >= 5
     } else {
         active.iter().filter(|attempt| !attempt.detail_lane).count() >= 6
             || active
@@ -498,12 +512,7 @@ struct Budgets(HashMap<String, BTreeMap<u64, Budget>>);
 
 impl Budgets {
     fn rest_fallback_has_headroom(&self, job: &Job) -> bool {
-        let quota = if job.installation {
-            "installation/core"
-        } else {
-            "core"
-        };
-        self.for_resource(quota)
+        self.for_resource(job.rest_quota())
             .all(|budget| budget.remaining > QUOTA_RESERVE)
     }
 
@@ -851,15 +860,28 @@ impl Scheduler {
                 .filter(|job| job.required_reader.load(Ordering::Relaxed))
                 .map(Job::quota)
                 .collect();
-            let defers_optional = |job: &Job| {
+            let waits_for_required = |job: &Job| {
                 job.defers_optional(&required_quotas) && budgets.rest_fallback_has_headroom(job)
+            };
+            let rest_socket_busy = core_lane_busy(&active, prod);
+            let queued_rest: std::collections::HashSet<_> = pending
+                .iter()
+                .filter(|job| job.resource == "core")
+                .map(Job::rest_quota)
+                .collect();
+            let defers_optional = |job: &Job| {
+                waits_for_required(job)
+                    && !rest_socket_busy
+                    && !queued_rest.contains(job.rest_quota())
             };
             // Optional GraphQL selectors have a short REST-fallback budget.
             // Yield to queued required reads using the same provider's quota,
             // or fall back when known pacing alone exceeds the shortcut budget.
             // Required coalescers keep their job and its existing quota gates.
-            // When REST is exhausted, keep the GraphQL route eligible: yielding
-            // would send an otherwise viable read into an unavailable fallback.
+            // An exhausted REST quota keeps the GraphQL route eligible. Busy
+            // sockets or queued REST work for this provider keep its bounded
+            // waiter behind required GraphQL work instead of abandoning it
+            // for a congested fallback. No extra time or quota is reserved.
             for job in pending.iter().filter(|job| job.body.is_some()) {
                 let until = ready(job, &budgets, global);
                 if defers_optional(job) {
@@ -904,7 +926,7 @@ impl Scheduler {
             let mut turns = HashMap::new();
             for (index, job) in pending.iter().enumerate() {
                 if job.ready_at > now
-                    || defers_optional(job)
+                    || waits_for_required(job)
                     || (job.installation && minting)
                     || lane_busy(&active, job, prod)
                 {
@@ -956,7 +978,7 @@ impl Scheduler {
                     && budgets.for_resource(&quota).all(|budget| pacing_probe_eligible(job, budget))
             };
             let waiting_for_turn = |index: usize, job: &Job| {
-                defers_optional(job)
+                waits_for_required(job)
                     || (job.ready_at <= now
                         && turns
                             .get(&job.quota())
