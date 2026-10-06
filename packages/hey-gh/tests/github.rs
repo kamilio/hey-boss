@@ -153,6 +153,66 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn shared_identity_is_cache_only_and_changes_on_daemon_restart() {
+    let h = Harness::new().await;
+    let client = h.client();
+    let serve = |api: hey_gh::api::Api| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sdk = hey_gh::ApiClient::new(
+            format!("http://{}/", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+        (sdk, task)
+    };
+    let (sdk, task) = serve(hey_gh::api::Api::new(client.clone()).await.unwrap()).await;
+    assert!(matches!(sdk.shared_identity().await, Err(Error::CacheMiss)));
+    assert!(h.calls().is_empty(), "cold identity must not fetch GitHub");
+    client.get("user", Freshness::Revalidate).await.unwrap();
+    let identity = sdk.shared_identity().await.unwrap();
+    identity.validate().unwrap();
+    assert_eq!(identity.user_id, 42);
+    assert_eq!(identity.hostname, "github.com");
+    assert_eq!(identity, sdk.shared_identity().await.unwrap());
+    let request = hey_gh::shared_read::Read {
+        identity: identity.clone(),
+        path: "/v1/snapshot".into(),
+        query: None,
+        timeout_ms: 1000,
+    };
+    let reply = sdk.shared_read(&request).await.unwrap();
+    assert_eq!(reply.status, 200);
+    let missing = hey_gh::shared_read::Read {
+        path: "/v1/prs/o/r/1/metadata".into(),
+        query: Some("cached_only=true".into()),
+        ..request.clone()
+    };
+    assert!(matches!(
+        sdk.shared_read(&missing).await.unwrap().decode::<Value>(),
+        Err(Error::CacheMiss)
+    ));
+    assert!(client.watches().await.unwrap().is_empty());
+    let (restarted, restart_task) =
+        serve(hey_gh::api::Api::new(client.clone()).await.unwrap()).await;
+    let next = restarted.shared_identity().await.unwrap();
+    assert_eq!(next.user_id, identity.user_id);
+    assert_ne!(next.instance, identity.instance);
+    assert!(matches!(
+        restarted.shared_read(&request).await,
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(
+        h.calls().len(),
+        1,
+        "shared cache reads and identity guards stay offline"
+    );
+    task.abort();
+    restart_task.abort();
+}
+
+#[tokio::test]
 async fn viewer_api_reuses_authenticated_identity_without_extra_requests() {
     let h = Harness::new().await;
     let client = h.client();
