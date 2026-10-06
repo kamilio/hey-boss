@@ -7,6 +7,12 @@ use tokio::sync::watch;
 
 tokio::task_local! { static METADATA_READY: watch::Receiver<bool>; }
 
+pub(super) fn metadata_pending() -> bool {
+    METADATA_READY
+        .try_with(|ready| !*ready.borrow())
+        .unwrap_or(false)
+}
+
 async fn staged<T>(read: impl Future<Output = T>) -> (T, Vec<ResourceValidation>) {
     VALIDATIONS
         .scope(RefCell::new(Vec::new()), async {
@@ -55,14 +61,14 @@ impl Client {
         let Some(mut ready) = pending else {
             return read.await;
         };
-        // REST starts normally. This only races evidence from the metadata
-        // read already owned by this collection; it never starts another query
-        // or waits for metadata before admitting the REST request.
+        // REST starts normally while metadata is pending. Once selectors are
+        // ready, reuse their evidence; closed PRs can also use their collection's
+        // bounded, shared commit-summary fallback. Never restart the REST read.
         let read = staged(read);
         tokio::pin!(read);
         let late = Box::pin(async {
             drop(ready.wait_for(|done| *done).await);
-            staged(self.cached_commit_list(repository, sha, rest_path, list, freshness)).await
+            staged(self.reusable_commit_list(repository, sha, rest_path, list, freshness)).await
         });
         tokio::select! {
             // Prefer a completed direct read, including its explicit errors.
