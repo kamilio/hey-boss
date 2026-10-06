@@ -13,6 +13,7 @@ mod ci_collection;
 mod ci_metadata;
 mod policy_ci;
 pub(crate) use ci_metadata::discovery::scope as ci_discovery_scope;
+mod review_activity;
 mod review_events;
 
 // Cancelled jobs can appear after the parent stops; reuse empty pages only
@@ -346,6 +347,7 @@ impl Client {
         let mut errors = Vec::new();
         let mut reviews = None;
         let mut threads = None;
+        let first_page = review_activity::FirstPage::new(self, repository, number, freshness);
         let sources = [
             (
                 "comments",
@@ -379,7 +381,14 @@ impl Client {
         // so entity fencing, validation clocks and collection budgets survive.
         let fetch = |index: usize| {
             let (source, path) = &sources[index];
-            Box::pin(self.refresh_pr_detail_source(repository, number, source, path, freshness))
+            Box::pin(self.refresh_pr_detail_source(
+                repository,
+                number,
+                source,
+                path,
+                freshness,
+                &first_page,
+            ))
         };
         let mut next = 0;
         let mut active = Vec::new();
@@ -457,6 +466,7 @@ impl Client {
         source: &str,
         path: &str,
         freshness: Freshness,
+        first_page: &review_activity::FirstPage<'_>,
     ) -> Result<Vec<Value>> {
         let started = tokio::time::Instant::now();
         tracing::info!(
@@ -467,8 +477,14 @@ impl Client {
         );
         let result: Result<Vec<Value>> = async {
             let values = match source {
-                "review_events" => self.review_events(repository, number, freshness).await?,
-                "review_threads" => self.review_threads(repository, number, freshness).await?,
+                "review_events" => {
+                    self.review_events(repository, number, freshness, first_page)
+                        .await?
+                }
+                "review_threads" => {
+                    self.review_threads(repository, number, freshness, first_page)
+                        .await?
+                }
                 _ => self.pages(path, None, freshness).await?,
             };
             check_size(values.iter(), self.collection_limit())?;
@@ -869,6 +885,7 @@ impl Client {
             let review_comments_path = format!("{prefix}/pulls/{number}/comments?per_page=100");
             let reviews_path = format!("{prefix}/pulls/{number}/reviews?per_page=100");
             let timeline_path = format!("{prefix}/issues/{number}/timeline?per_page=100");
+            let first_page = review_activity::FirstPage::new(self, repository, number, freshness);
             let (
                 ci_res,
                 comments_res,
@@ -893,11 +910,14 @@ impl Client {
                         .and_then(|timeline| review_events::from_timeline(timeline))
                     {
                         Some(events) => Ok(events),
-                        None => self.review_events(repository, number, freshness).await,
+                        None => {
+                            self.review_events(repository, number, freshness, &first_page)
+                                .await
+                        }
                     };
                     (timeline, events)
                 },
-                self.review_threads(repository, number, freshness),
+                self.review_threads(repository, number, freshness, &first_page),
             );
             let ci_observation = ci_res?;
             VALIDATIONS.with(|records| records.borrow_mut().extend(ci_observation.validations));
@@ -1190,6 +1210,7 @@ impl Client {
         repository: &str,
         number: u64,
         freshness: Freshness,
+        first_page: &review_activity::FirstPage<'_>,
     ) -> Result<Vec<Value>> {
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let (owner, repo) = repository_spelling
@@ -1200,13 +1221,18 @@ impl Client {
         let mut events = Vec::new();
         let mut bytes = 0usize;
         for _ in 0..1000 {
-            let response = self
-                .graphql(
-                    REVIEW_EVENTS_QUERY,
-                    json!({"owner":owner,"repo":repo,"number":number,"after":after}),
-                    freshness,
+            let response = if after.is_null() {
+                first_page.get(REVIEW_EVENTS_QUERY, "timelineItems").await?
+            } else {
+                Arc::new(
+                    self.graphql(
+                        REVIEW_EVENTS_QUERY,
+                        json!({"owner":owner,"repo":repo,"number":number,"after":after}),
+                        freshness,
+                    )
+                    .await?,
                 )
-                .await?;
+            };
             bytes = bytes.saturating_add(response.data.to_string().len());
             if bytes > self.collection_limit() {
                 return Err(Error::Invalid(
@@ -1245,6 +1271,7 @@ impl Client {
         repository: &str,
         number: u64,
         freshness: Freshness,
+        first_page: &review_activity::FirstPage<'_>,
     ) -> Result<Vec<Value>> {
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
         let (owner, repo) = repository_spelling
@@ -1255,13 +1282,18 @@ impl Client {
         let mut threads = Vec::new();
         let mut bytes = 0usize;
         for _ in 0..1000 {
-            let response = self
-                .graphql(
-                    THREAD_QUERY,
-                    json!({"owner":owner,"repo":repo,"number":number,"after":cursor}),
-                    freshness,
+            let response = if cursor.is_null() {
+                first_page.get(THREAD_QUERY, "reviewThreads").await?
+            } else {
+                Arc::new(
+                    self.graphql(
+                        THREAD_QUERY,
+                        json!({"owner":owner,"repo":repo,"number":number,"after":cursor}),
+                        freshness,
+                    )
+                    .await?,
                 )
-                .await?;
+            };
             bytes = bytes.saturating_add(response.data.to_string().len());
             if bytes > self.collection_limit() {
                 return Err(Error::Invalid(
@@ -1625,6 +1657,9 @@ const REVIEW_EVENTS_QUERY: &str = "query ReviewEvents($owner:String!,$repo:Strin
  __typename ... on ReviewRequestedEvent { id createdAt requestedReviewer { __typename ... on User { login } ... on Team { slug name } } }
  ... on ReviewRequestRemovedEvent { id createdAt requestedReviewer { __typename ... on User { login } ... on Team { slug name } } }
  } } } } }";
+
+#[cfg(test)]
+mod review_activity_tests;
 
 #[cfg(test)]
 mod tests {
