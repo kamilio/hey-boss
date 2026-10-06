@@ -58,7 +58,7 @@ const HeyBossMergedPRs = (() => {
         rows=[...new Map([...(reset?[]:rows),...collected].map(pr=>[pr.url,pr])).values()];next=offset;
         $('#merged-list').innerHTML=render(rows,current);
         HeyBossUI.icons($('#merged-list'));
-        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:pending?'Checking GitHub authors before showing your merged PRs…':'No merged fix PRs authored by your GitHub account yet.';
+        $('#merged-status').textContent=rows.length?`${rows.length}${next!==null?' +':''} merged ${rows.length===1?'PR':'PRs'} · Dates in your local timezone`:pending?'Checking GitHub authors before showing your merged PRs…':'No merged PRs authored by your GitHub account yet.';
         $('#merged-more').hidden=next===null;
         if(pending){if(rows.length)$('#merged-status').textContent+=' · Checking remaining PR authors…';refreshDelay=3000;}
       } catch(e) {if(seq===generation){error(e.message);$('#merged-status').textContent='';}}
