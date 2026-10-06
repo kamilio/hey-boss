@@ -405,7 +405,7 @@ fn policy_error_never_completes_work_without_fresh_terminal_identity() {
 }
 
 #[test]
-fn closed_unmerged_pr_returns_waiting_issue_to_boss() {
+fn closed_unmerged_pr_finishes_watched_issue() {
     scenario(Scenario::Closed);
 }
 #[test]
@@ -413,7 +413,7 @@ fn merged_fix_pr_keeps_existing_automatic_completion() {
     scenario(Scenario::Merged);
 }
 #[test]
-fn disabling_automatic_completion_returns_merged_work_to_boss() {
+fn disabled_link_auto_close_still_finishes_terminal_watch() {
     scenario(Scenario::KeepMergedOpen);
 }
 
@@ -631,9 +631,9 @@ fn scenario(scenario: Scenario) {
     let view = store
         .execute(&request(json!({"action":"view","number":1})))
         .unwrap();
-    if terminal && !matches!(scenario, Scenario::Merged | Scenario::PolicyErrorMerged) {
-        assert_eq!(view["issue"]["assignee"], "human:boss");
-        assert_eq!(view["issue"]["state"], "open");
+    if terminal {
+        assert!(view["issue"]["assignee"].is_null());
+        assert_eq!(view["issue"]["state"], "closed");
     } else if stale || invalid_time || unconfirmed {
         assert_eq!(view["issue"]["assignee"], "watcher:github");
     } else {
