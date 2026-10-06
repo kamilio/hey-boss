@@ -396,44 +396,80 @@ impl Client {
                 &first_page,
             ))
         };
-        let mut next = 0;
-        let mut active = Vec::new();
-        while next < sources.len() || !active.is_empty() {
-            while next < sources.len() && active.len() < width {
-                active.push((next, fetch(next)));
-                next += 1;
+        let tail_admitted = tokio::sync::Notify::new();
+        let confirmation_age = std::time::Duration::from_secs(15);
+        let overlap =
+            width > 1 && matches!(freshness, Freshness::MaxAge(age) if age >= confirmation_age);
+        let prefetch = async {
+            if !overlap {
+                return Ok(());
             }
-            let (position, result) = std::future::poll_fn(|cx| {
-                for (position, (_, read)) in active.iter_mut().enumerate() {
-                    if let std::task::Poll::Ready(result) = read.as_mut().poll(cx) {
-                        return std::task::Poll::Ready((position, result));
+            tail_admitted.notified().await;
+            // Start only when the last conversation sources have been admitted.
+            // This warms the normal personal cache, never a published report.
+            // The original final read below still checks its age and owner at
+            // publication; an early response may expire while sources finish.
+            // Keep speculative clocks out of that report's validation evidence.
+            let started = tokio::time::Instant::now();
+            let response = VALIDATIONS
+                .scope(
+                    std::cell::RefCell::new(Vec::new()),
+                    self.pull_request(repository, number, Freshness::MaxAge(confirmation_age)),
+                )
+                .await?;
+            tracing::info!(repository, number, source=?response.source,
+                elapsed_ms=started.elapsed().as_millis() as u64,
+                validated_at_ms=response.validated_at_ms,
+                "PR detail metadata overlap finished");
+            Ok::<_, Error>(())
+        };
+        let collection = async {
+            let mut next = 0;
+            let mut active = Vec::new();
+            while next < sources.len() || !active.is_empty() {
+                while next < sources.len() && active.len() < width {
+                    active.push((next, fetch(next)));
+                    next += 1;
+                    if next == sources.len() {
+                        tail_admitted.notify_one();
                     }
                 }
-                std::task::Poll::Pending
-            })
+                let (position, result) = std::future::poll_fn(|cx| {
+                    for (position, (_, read)) in active.iter_mut().enumerate() {
+                        if let std::task::Poll::Ready(result) = read.as_mut().poll(cx) {
+                            return std::task::Poll::Ready((position, result));
+                        }
+                    }
+                    std::task::Poll::Pending
+                })
+                .await;
+                let (index, _) = active.remove(position);
+                match result {
+                    Ok(values) => {
+                        if sources[index].0 == "reviews" {
+                            reviews = Some(values);
+                        } else if sources[index].0 == "review_threads" {
+                            threads = Some(values);
+                        }
+                    }
+                    Err(error) => errors.push((
+                        index,
+                        SourceError {
+                            source: sources[index].0.into(),
+                            message: error.to_string(),
+                        },
+                    )),
+                }
+            }
+            if errors.is_empty() {
+                crate::collection_budget::completed_details();
+            }
+        };
+        let (prefetched, ()) = self
+            .collect_with_pending_validation(Box::pin(prefetch), Box::pin(collection))
             .await;
-            let (index, _) = active.remove(position);
-            match result {
-                Ok(values) => {
-                    if sources[index].0 == "reviews" {
-                        reviews = Some(values);
-                    } else if sources[index].0 == "review_threads" {
-                        threads = Some(values);
-                    }
-                }
-                Err(error) => errors.push((
-                    index,
-                    SourceError {
-                        source: sources[index].0.into(),
-                        message: error.to_string(),
-                    },
-                )),
-            }
-        }
+        prefetched?;
         errors.sort_by_key(|(index, _)| *index);
-        if errors.is_empty() {
-            crate::collection_budget::completed_details();
-        }
         let errors = errors.into_iter().map(|(_, error)| error).collect();
         let confirmation_started = tokio::time::Instant::now();
         let final_pr = self
@@ -454,7 +490,7 @@ impl Client {
         if pr.data["node_id"] != final_pr.data["node_id"] {
             return Err(crate::entity::changed());
         }
-        tracing::info!(repository, number, source=?final_pr.source,
+        tracing::info!(repository, number, overlap, source=?final_pr.source,
             elapsed_ms=confirmation_started.elapsed().as_millis() as u64,
             validated_at_ms=final_pr.validated_at_ms,
             "PR detail metadata confirmed");

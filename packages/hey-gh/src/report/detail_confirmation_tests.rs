@@ -1,5 +1,10 @@
 use super::*;
-use axum::{Json, Router, extract::State, http::Uri};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{StatusCode, Uri},
+    response::{IntoResponse, Response},
+};
 use std::{sync::Mutex, time::Duration};
 use tokio::sync::Notify;
 
@@ -7,24 +12,41 @@ struct Mock {
     calls: Mutex<Vec<String>>,
     metadata: Mutex<Value>,
     pause_reviews: AtomicBool,
+    pause_graph: AtomicBool,
+    pause_metadata: AtomicBool,
+    deny_metadata: AtomicBool,
+    metadata_release: Notify,
     release: Notify,
 }
-async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Json<Value> {
+async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     let path = uri.path();
     mock.calls.lock().unwrap().push(path.into());
     if path.ends_with("/pulls/7") {
-        return Json(mock.metadata.lock().unwrap().clone());
+        if mock.pause_metadata.load(Ordering::Relaxed) {
+            mock.metadata_release.notified().await;
+        }
+        if mock.deny_metadata.load(Ordering::Relaxed) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"message":"metadata denied"})),
+            )
+                .into_response();
+        }
+        return Json(mock.metadata.lock().unwrap().clone()).into_response();
     }
     if path == "/graphql" {
+        if mock.pause_graph.load(Ordering::Relaxed) {
+            mock.release.notified().await;
+        }
         let empty = json!({"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}});
         return Json(
             json!({"data":{"repository":{"pullRequest":{"reviewThreads":empty,"timelineItems":empty}}}}),
-        );
+        ).into_response();
     }
     if path.ends_with("/reviews") && mock.pause_reviews.load(Ordering::Relaxed) {
         mock.release.notified().await;
     }
-    Json(json!([]))
+    Json(json!([])).into_response()
 }
 struct Fixture {
     client: Client,
@@ -46,6 +68,10 @@ impl Fixture {
                 json!({"number":7,"node_id":"PR_7","state":"open","merged":false,"title":"Before","head":{"sha":"a".repeat(40)},"base":{"sha":"b".repeat(40),"ref":"main","repo":{"id":1,"node_id":"R_1","full_name":"acme/demo"}},"merge_commit_sha":null,"mergeable":true,"requested_reviewers":[],"requested_teams":[]}),
             ),
             pause_reviews: AtomicBool::new(false),
+            pause_graph: AtomicBool::new(false),
+            pause_metadata: AtomicBool::new(false),
+            deny_metadata: AtomicBool::new(false),
+            metadata_release: Notify::new(),
             release: Notify::new(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -106,6 +132,83 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn detail_metadata_overlaps_the_last_sources_and_is_rechecked_at_publication() {
+    for expire in [false, true] {
+        let f = Fixture::new().await;
+        f.warm_metadata().await;
+        f.age_metadata(60_000);
+        f.mock.pause_graph.store(true, Ordering::Relaxed);
+        let reader = f.client.clone();
+        let task = tokio::spawn(async move {
+            VALIDATIONS
+                .scope(std::cell::RefCell::new(Vec::new()), async {
+                    let result = reader
+                        .refresh_pr_details(
+                            "acme/demo",
+                            7,
+                            Freshness::MaxAge(Duration::from_secs(30)),
+                        )
+                        .await;
+                    (result, VALIDATIONS.with(|records| records.borrow().clone()))
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.metadata_calls() < 2 {
+                tokio::task::yield_now().await;
+            }
+            // Wait until the response is cached, not merely dispatched.
+            loop {
+                let cached = f
+                    .client
+                    .pull_request("acme/demo", 7, Freshness::CachedOnly)
+                    .await
+                    .unwrap();
+                if now_ms().saturating_sub(cached.validated_at_ms) < 5_000 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "Metadata must be validated while the final conversation sources are still pending",
+        );
+        assert!(!task.is_finished());
+        if expire {
+            f.age_metadata(16_000);
+            f.mock.metadata.lock().unwrap()["title"] = json!("Newer at publication");
+        }
+        f.mock.release.notify_one();
+        let (result, validations) = task.await.unwrap();
+        assert!(result.unwrap().is_empty());
+        assert_eq!(
+            validations
+                .iter()
+                .filter(|v| v.resource.ends_with("/pulls/7"))
+                .count(),
+            1,
+            "Only the final observation supplies report validation evidence"
+        );
+        assert_eq!(f.metadata_calls(), if expire { 3 } else { 2 });
+        let snapshot = f
+            .client
+            .stored_snapshot(&format!("metadata://{}/acme/demo/7", f.client.hostname()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot["pull_request"]["title"],
+            if expire {
+                "Newer at publication"
+            } else {
+                "Before"
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn detail_confirmation_reuses_recent_personal_metadata_without_refreshing_its_clock() {
     let f = Fixture::new().await;
     f.warm_metadata().await;
@@ -119,6 +222,102 @@ async fn detail_confirmation_reuses_recent_personal_metadata_without_refreshing_
     assert!(validations.iter().any(|v| v.resource.ends_with("/pulls/7")
         && v.validated_at_ms == at
         && matches!(v.source, crate::Source::Cache)));
+}
+
+#[tokio::test]
+async fn denied_metadata_overlap_cannot_publish_old_success() {
+    let f = Fixture::new().await;
+    f.warm_metadata().await;
+    let old = f.age_metadata(60_000);
+    f.mock.pause_graph.store(true, Ordering::Relaxed);
+    f.mock.deny_metadata.store(true, Ordering::Relaxed);
+    let reader = f.client.clone();
+    let task = tokio::spawn(async move {
+        reader
+            .refresh_pr_details("acme/demo", 7, Freshness::default())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.metadata_calls() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.mock.release.notify_one();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(Error::GitHub { status: 403, .. })
+    ));
+    let metadata = f
+        .client
+        .pull_request("acme/demo", 7, Freshness::CachedOnly)
+        .await
+        .unwrap();
+    assert_eq!(metadata.validated_at_ms, old);
+    let snapshot = f
+        .client
+        .stored_snapshot(&format!(
+            "review_status://{}/acme/demo/7",
+            f.client.hostname()
+        ))
+        .await
+        .unwrap();
+    assert!(
+        snapshot.is_none(),
+        "Denied confirmation must not publish a successful review rollup"
+    );
+    let comments = f
+        .client
+        .stored_snapshot(&format!("comments://{}/acme/demo/7", f.client.hostname()))
+        .await
+        .unwrap();
+    assert!(
+        comments.is_some(),
+        "Independent successful sources retain their progress"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_detail_overlap_preserves_a_shared_metadata_reader() {
+    let f = Fixture::new().await;
+    f.warm_metadata().await;
+    f.age_metadata(60_000);
+    f.mock.pause_graph.store(true, Ordering::Relaxed);
+    f.mock.pause_metadata.store(true, Ordering::Relaxed);
+    let reader = f.client.clone();
+    let task = tokio::spawn(async move {
+        reader
+            .refresh_pr_details("acme/demo", 7, Freshness::default())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.metadata_calls() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = f.client.status().coalesced_requests;
+    let sibling = f.client.clone();
+    let shared = tokio::spawn(async move {
+        sibling
+            .pull_request("acme/demo", 7, Freshness::Revalidate)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.client.status().coalesced_requests == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    f.mock.metadata_release.notify_one();
+    assert_eq!(shared.await.unwrap().unwrap().data["node_id"], "PR_7");
+    assert_eq!(f.metadata_calls(), 2, "A shared read must not be restarted");
+    f.mock.release.notify_one();
 }
 
 #[tokio::test]
