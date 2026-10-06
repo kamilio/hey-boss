@@ -3,6 +3,7 @@ use super::{Context, Result};
 use crate::issues::Store;
 use hey_gh::{ApiClient, Freshness};
 use std::time::Duration;
+mod cached_merges;
 mod schedule;
 mod watches;
 
@@ -86,8 +87,22 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
             async {
                 loop {
                     let started = tokio::time::Instant::now();
-                    match tokio::time::timeout(Duration::from_secs(40), poll_once(ctx, client))
+                    match tokio::time::timeout(Duration::from_secs(40), async {
+                        // Lifecycle already learned by the shared daemon must
+                        // not wait behind this watcher's expensive CI queue.
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            cached_merges::poll(ctx, client),
+                        )
                         .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => eprintln!("PR monitor: cached merges: {error}"),
+                            Err(_) => eprintln!("PR monitor: cached merge batch deadline reached"),
+                        }
+                        poll_once(ctx, client).await
+                    })
+                    .await
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => eprintln!("PR monitor: {error}"),

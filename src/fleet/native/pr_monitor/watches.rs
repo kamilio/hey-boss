@@ -48,7 +48,7 @@ fn fetch_freshness(force: bool) -> Freshness {
     }
 }
 
-fn fresh(validated_at: u64) -> bool {
+pub(super) fn fresh(validated_at: u64) -> bool {
     timestamp(validated_at)
         .is_ok_and(|at| at >= crate::issues::worker::now().saturating_sub(120_000))
 }
@@ -161,6 +161,16 @@ async fn confirm_terminal(
     )
     .await
     .map_err(|_| hey_gh::Error::Deadline)??;
+    record_terminal(ctx, url, repository, number, &response)
+}
+
+pub(super) fn record_terminal(
+    ctx: &Context,
+    url: &str,
+    repository: &str,
+    number: u64,
+    response: &hey_gh::Response,
+) -> hey_gh::Result<()> {
     let status = super::pr_status(&response.data, repository, number);
     if !fresh(response.validated_at_ms) || !matches!(status, Some("merged" | "closed")) {
         return Err(hey_gh::Error::Invalid(
