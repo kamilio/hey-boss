@@ -1703,6 +1703,9 @@ fn endpoint_class(url: &str, graphql: bool, rest_base: &Url) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "client/graphql_slot_tests.rs"]
+mod graphql_slot_tests;
+#[cfg(test)]
 #[path = "client/selected_probe_tests.rs"]
 mod selected_probe_tests;
 #[cfg(test)]
