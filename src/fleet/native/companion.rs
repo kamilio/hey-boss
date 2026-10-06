@@ -176,6 +176,7 @@ impl Incoming {
     fn start<R: Read + AsRawFd + Send + 'static>(
         input: R,
         replies: mpsc::SyncSender<Value>,
+        github: Option<super::github_relay::Replies>,
         stop: Arc<AtomicBool>,
         mut observe: impl FnMut(bool) -> Result<()> + Send + 'static,
     ) -> Self {
@@ -203,6 +204,19 @@ impl Incoming {
                     }
                 });
                 if let Ok(Some(message)) = &frame {
+                    if let Some(github) = &github {
+                        if message["kind"] == "configure" {
+                            github.configure(message);
+                        }
+                        if message["kind"] == "github_reply" {
+                            if let Err(error) = github.receive(message) {
+                                github.close();
+                                let _ = messages.send(Err(error));
+                                break;
+                            }
+                            continue;
+                        }
+                    }
                     if message["kind"] == "authority_reply" {
                         let _ = replies.try_send(frame.unwrap().unwrap());
                         continue;
@@ -212,9 +226,15 @@ impl Incoming {
                     }
                 }
                 let done = !matches!(frame, Ok(Some(_)));
+                if done && let Some(github) = &github {
+                    github.close();
+                }
                 if messages.send(frame).is_err() || done {
                     break;
                 }
+            }
+            if let Some(github) = &github {
+                github.close();
             }
             let _ = observe(false);
         });
@@ -310,11 +330,18 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let output = Arc::new(Mutex::new(std::io::stdout()));
     startup.phase("relay");
     let relay = authority::Relay::start(&ctx, output.clone())?;
+    let github = match super::github_relay::Relay::start(output.clone()) {
+        Ok(relay) => Some(relay),
+        Err(error) => {
+            eprintln!("GitHub read relay unavailable; local reads remain available: {error}");
+            None
+        }
+    };
     startup.phase("workers");
     let workers = ctx.workers()?;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true,"issue_archives":true},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -341,9 +368,13 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     }
     let input = unsafe { std::fs::File::from_raw_fd(fd) };
     let observed = status.clone();
-    let mut input = Incoming::start(input, relay.replies(), ctx.stop.clone(), move |connected| {
-        observed.lock().unwrap().observe(connected)
-    });
+    let mut input = Incoming::start(
+        input,
+        relay.replies(),
+        github.as_ref().map(|relay| relay.replies()),
+        ctx.stop.clone(),
+        move |connected| observed.lock().unwrap().observe(connected),
+    );
     let mut pulls = pull::PullReader::default();
     while !ctx.stopped() {
         let Some(message) = input.next()? else {
@@ -569,7 +600,7 @@ mod tests {
         let (replies, _) = mpsc::sync_channel(2);
         let (observations, received) = mpsc::channel();
         let observed = status.clone();
-        let input = Incoming::start(reader, replies, ctx.stop.clone(), move |connected| {
+        let input = Incoming::start(reader, replies, None, ctx.stop.clone(), move |connected| {
             observed.lock().unwrap().observe(connected)?;
             let _ = observations.send(connected);
             Ok(())
@@ -600,13 +631,13 @@ mod tests {
     fn input_delivers_authority_replies_ahead_of_work_and_coalesces_pings() {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (replies, received) = mpsc::sync_channel(2);
-        let mut input =
-            Incoming::start(
-                reader,
-                replies,
-                Arc::new(AtomicBool::new(false)),
-                |_| Ok(()),
-            );
+        let mut input = Incoming::start(
+            reader,
+            replies,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        );
         send(&mut writer, json!({"kind":"pull"})).unwrap();
         for _ in 0..100 {
             send(&mut writer, json!({"kind":"ping"})).unwrap();
@@ -634,13 +665,13 @@ mod tests {
         ] {
             let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
             let (replies, _) = mpsc::sync_channel(2);
-            let input =
-                Incoming::start(
-                    reader,
-                    replies,
-                    Arc::new(AtomicBool::new(false)),
-                    |_| Ok(()),
-                );
+            let input = Incoming::start(
+                reader,
+                replies,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                |_| Ok(()),
+            );
             writer.write_all(&bytes).unwrap();
             let started = std::time::Instant::now();
             drop(input);
@@ -652,13 +683,13 @@ mod tests {
     fn input_rejects_incompatible_replies_before_routing_them() {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         let (replies, received) = mpsc::sync_channel(2);
-        let mut input =
-            Incoming::start(
-                reader,
-                replies,
-                Arc::new(AtomicBool::new(false)),
-                |_| Ok(()),
-            );
+        let mut input = Incoming::start(
+            reader,
+            replies,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        );
         writeln!(
             writer,
             "{}",
@@ -673,6 +704,65 @@ mod tests {
                 .contains("protocol version")
         );
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn github_replies_arrive_while_the_main_consumer_is_blocked_on_a_pull() {
+        use hey_gh::shared_read::{MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Response, wire};
+        let root =
+            std::path::PathBuf::from(format!("/tmp/hgr-input-{}-{}", std::process::id(), now()));
+        let (frames, received) = mpsc::channel();
+        let relay = super::super::github_relay::Relay::start_at(
+            root.join("socket"),
+            Arc::new(Mutex::new(Recording {
+                bytes: vec![],
+                frames,
+            })),
+        )
+        .unwrap();
+        let github = relay.replies();
+        github.configure(&json!({"capabilities":{"github_reads_v1":true}}));
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, _) = mpsc::sync_channel(2);
+        let mut input = Incoming::start(
+            reader,
+            replies,
+            Some(github),
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        );
+        send(&mut writer, json!({"kind":"pull"})).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut socket=runtime.block_on(async {
+            let mut socket=tokio::net::UnixStream::connect(root.join("socket")).await.unwrap();
+            wire::write(&mut socket,&json!({"kind":"probe","identity":{"hostname":"github.com","user_id":42,"instance":"a".repeat(32)}}),MAX_REQUEST_BYTES).await.unwrap();
+            socket
+        });
+        let sent = received.recv_timeout(Duration::from_secs(3)).unwrap();
+        send(
+            &mut writer,
+            json!({"kind":"github_reply","id":sent["id"],"response":{"kind":"unavailable"}}),
+        )
+        .unwrap();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wire::read::<Response>(&mut socket, MAX_RESPONSE_BYTES),
+            )
+            .await
+        });
+        assert!(
+            matches!(result, Ok(Ok(Response::Unavailable))),
+            "GitHub reply waited for a database handler: {result:?}"
+        );
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "pull");
+        drop(writer);
+        drop(input);
+        drop(relay);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     struct Recording {
