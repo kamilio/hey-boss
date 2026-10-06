@@ -918,7 +918,7 @@ impl Client {
                 Ok(cached)
                     if usable_pr_seed(&cached.data, number)
                         && !self
-                            .personal_pr_metadata_superseded(repository, number, &cached)
+                            .personal_pr_seed_superseded(repository, number, &cached)
                             .await? =>
                 {
                     // Only a collection seed, not a validation or observation.

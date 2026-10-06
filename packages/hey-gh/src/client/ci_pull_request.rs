@@ -9,38 +9,86 @@ impl Client {
         number: u64,
         personal: &Response,
     ) -> Result<bool> {
-        if !self.ci_uses_installation(repository) {
+        let Some(app) = self
+            .newer_ci_pr_metadata(repository, number, personal)
+            .await?
+        else {
             return Ok(false);
+        };
+        Ok([
+            "/node_id",
+            "/number",
+            "/state",
+            "/merged",
+            "/draft",
+            "/updated_at",
+            "/closed_at",
+            "/merged_at",
+            "/head/sha",
+            "/base/sha",
+            "/base/ref",
+            "/merge_commit_sha",
+            "/mergeable",
+            "/mergeable_state",
+        ]
+        .iter()
+        .any(|field| app.data.pointer(field) != personal.data.pointer(field)))
+    }
+
+    pub(crate) async fn personal_pr_seed_superseded(
+        &self,
+        repository: &str,
+        number: u64,
+        personal: &Response,
+    ) -> Result<bool> {
+        let Some(app) = self
+            .newer_ci_pr_metadata(repository, number, personal)
+            .await?
+        else {
+            return Ok(false);
+        };
+        // A seed only starts collection: it supplies neither validation clocks
+        // nor published metadata. Mergeability/timestamp changes may overlap
+        // the mandatory final personal read, but known changed selectors and
+        // lifecycle must be reconciled before starting commit-bound collection.
+        Ok([
+            "/node_id",
+            "/number",
+            "/state",
+            "/merged",
+            "/draft",
+            "/closed_at",
+            "/merged_at",
+            "/head/sha",
+            "/base/sha",
+            "/base/ref",
+            "/merge_commit_sha",
+        ]
+        .iter()
+        .any(|field| app.data.pointer(field) != personal.data.pointer(field)))
+    }
+
+    async fn newer_ci_pr_metadata(
+        &self,
+        repository: &str,
+        number: u64,
+        personal: &Response,
+    ) -> Result<Option<Response>> {
+        if !self.ci_uses_installation(repository) {
+            return Ok(None);
         }
         let app = match self
             .ci_pr_response(repository, number, Freshness::CachedOnly)
             .await
         {
             Ok(app) => app,
-            Err(Error::CacheMiss) => return Ok(false),
+            Err(Error::CacheMiss) => return Ok(None),
             Err(error) => return Err(error),
         };
-        Ok(app.validated_at_ms > 0
+        Ok((app.validated_at_ms > 0
             && app.validated_at_ms >= personal.validated_at_ms
-            && app.validated_at_ms <= crate::now_ms()
-            && [
-                "/node_id",
-                "/number",
-                "/state",
-                "/merged",
-                "/draft",
-                "/updated_at",
-                "/closed_at",
-                "/merged_at",
-                "/head/sha",
-                "/base/sha",
-                "/base/ref",
-                "/merge_commit_sha",
-                "/mergeable",
-                "/mergeable_state",
-            ]
-            .iter()
-            .any(|field| app.data.pointer(field) != personal.data.pointer(field)))
+            && app.validated_at_ms <= crate::now_ms())
+        .then_some(app))
     }
 
     // Fixed CI-only endpoint. Generic PR metadata and activity stay personal.
