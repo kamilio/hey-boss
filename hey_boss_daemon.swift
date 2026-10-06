@@ -3927,11 +3927,21 @@ enum QuickIssueText {
     }
 }
 
+struct QuickIssueImage {
+    let id = UUID().uuidString
+    let name: String
+    let data: Data
+    let thumbnail: NSImage
+}
+
 final class QuickIssuePanel: NSPanel {
     var toggleBottom: (() -> Void)?
     var submitIssue: (() -> Void)?
+    var pasteImage: (() -> Bool)?
+    var cancel: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { cancel?() }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
            event.keyCode == 36 || event.keyCode == 76 {
@@ -3939,11 +3949,14 @@ final class QuickIssuePanel: NSPanel {
             return true
         }
         if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v", !event.isARepeat,
+           pasteImage?() == true { return true }
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
            let editor = firstResponder as? NSTextView {
             switch event.charactersIgnoringModifiers?.lowercased() {
             case "a": editor.selectAll(nil); return true
             case "c": editor.copy(nil); return true
-            case "v": if editor.isEditable { editor.paste(nil) }; return true
+            case "v": if editor.isEditable, !event.isARepeat { editor.paste(nil) }; return true
             case "x": if editor.isEditable { editor.cut(nil) }; return true
             case "z": if editor.isEditable { editor.undoManager?.undo() }; return true
             default: break
@@ -3981,6 +3994,22 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     let confirmation = NSTextField(labelWithString: "Issue created")
     let progress = NSProgressIndicator()
     let submitHint = NSTextField(labelWithString: "⌘↵")
+    let pasteButton = NSButton(title: "Paste image", target: nil, action: nil)
+    let mediaHint = NSTextField(labelWithString: "⌘V to attach a screenshot")
+    let imageStrip = NSScrollView()
+    let imageCanvas = NSView()
+    var images: [QuickIssueImage] = []
+    // Once creation begins, preserve an immutable snapshot through all retries.
+    // Draft publication is the last step, after every attachment is acknowledged.
+    struct MediaSubmission {
+        let project: QuickIssueProject
+        let arguments: [String]
+        let id: String
+        let directory: URL
+        var number: Int?
+        var uploaded = 0
+    }
+    var mediaSubmission: MediaSubmission?
     var projects: [QuickIssueProject] = []
     var current: QuickIssueProject?
     var matches: [QuickIssueProject] = []
@@ -4035,17 +4064,28 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseProject)
         table.setAccessibilityLabel("Matching projects"); table.selectionHighlightStyle = .regular
         picker.documentView = table; picker.hasVerticalScroller = true; picker.drawsBackground = false
-        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer] { canvas.addSubview(view) }
+        pasteButton.bezelStyle = .rounded; pasteButton.image = NSImage(systemSymbolName: "photo.badge.plus", accessibilityDescription: nil)
+        pasteButton.imagePosition = .imageLeading; pasteButton.target = self; pasteButton.action = #selector(pasteImage)
+        pasteButton.toolTip = "Paste an image from the clipboard (⌘V)"
+        mediaHint.font = .systemFont(ofSize: 11); mediaHint.textColor = .secondaryLabelColor
+        imageStrip.documentView = imageCanvas; imageStrip.hasHorizontalScroller = true; imageStrip.drawsBackground = false
+        imageStrip.setAccessibilityLabel("Attached images")
+        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, pasteButton, mediaHint, imageStrip] { canvas.addSubview(view) }
         for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
         window.submitIssue = { [weak self] in self?.create() }
-        window.toggleBottom = { [weak self] in guard let self, !self.saving else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
+        window.pasteImage = { [weak self] in self?.pasteImages(.general) ?? false }
+        window.cancel = { [weak self] in self?.dismiss() }
+        window.toggleBottom = { [weak self] in guard let self, !self.saving, self.mediaSubmission == nil else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
         selectionObserver = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: nil, queue: .main) { [weak self] notice in
             guard let self, let editor = notice.object as? NSTextView, editor === self.input.currentEditor() else { return }
             self.updatePicker()
         }
         layout()
     }
-    deinit { if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) } }
+    deinit {
+        if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
+        if let mediaSubmission { try? FileManager.default.removeItem(at: mediaSubmission.directory) }
+    }
     func layout() {
         let width = window.frame.width
         let expanded = !matches.isEmpty || mention != nil
@@ -4053,7 +4093,8 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         let listHeight = expanded ? CGFloat(rows) * 64 : 0
         let errorHeight: CGFloat = error.stringValue.isEmpty ? 0 : 56
         let overflowHeight: CGFloat = overflowNote.stringValue.isEmpty || saving || succeeded ? 0 : 36
-        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight + overflowHeight
+        let mediaHeight: CGFloat = succeeded ? 0 : 40 + (images.isEmpty ? 0 : 100)
+        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight + overflowHeight + mediaHeight
         var frame = window.frame; frame.origin.y += frame.height - height; frame.size.height = height
         window.setFrame(frame, display: present)
         canvas.layoutSubtreeIfNeeded()
@@ -4065,7 +4106,13 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         heading.frame = NSRect(x: 24, y: height - 102, width: width - 48, height: 18)
         picker.frame = NSRect(x: 20, y: height - 110 - listHeight, width: width - 40, height: listHeight)
         table.tableColumns[0].width = width - 40
-        hint.frame = NSRect(x: 24, y: 68 + errorHeight + overflowHeight, width: width - 48, height: 18)
+        hint.frame = NSRect(x: 24, y: 68 + errorHeight + overflowHeight + mediaHeight, width: width - 48, height: 18)
+        let mediaY = 68 + errorHeight + overflowHeight
+        pasteButton.frame = NSRect(x: 20, y: mediaY, width: 120, height: 32)
+        mediaHint.frame = NSRect(x: 154, y: mediaY + 8, width: width - 178, height: 18)
+        imageStrip.frame = NSRect(x: 24, y: mediaY + 38, width: width - 48, height: 96)
+        imageCanvas.frame = NSRect(x: 0, y: 0, width: max(width - 48, CGFloat(images.count) * 152), height: 80)
+        imageStrip.isHidden = images.isEmpty || succeeded
         overflowNote.isHidden = overflowHeight == 0
         overflowNote.frame = NSRect(x: 24, y: 60 + errorHeight, width: width - 48, height: overflowHeight)
         error.isHidden = errorHeight == 0; error.frame = NSRect(x: 24, y: 60, width: width - 48, height: errorHeight)
@@ -4106,10 +4153,14 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
     }
     func updateEnabled() {
-        input.isEnabled = !saving && !succeeded; bottom.isEnabled = !saving; closeButton.isEnabled = !saving
+        let editable = !saving && !succeeded && mediaSubmission == nil
+        input.isEnabled = editable; bottom.isEnabled = editable; closeButton.isEnabled = !saving
+        pasteButton.isEnabled = editable
+        pasteButton.isHidden = succeeded; mediaHint.isHidden = succeeded
+        for button in imageCanvas.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = editable }
         input.isHidden = succeeded; confirmation.isHidden = !succeeded
         bottom.isHidden = succeeded; submit.isHidden = succeeded; submitHint.isHidden = succeeded
-        submit.title = saving ? "Creating…" : "Create"
+        submit.title = saving ? "Creating…" : mediaSubmission == nil ? "Create" : "Retry"
         icon.image = NSImage(systemSymbolName: succeeded ? "checkmark.circle.fill" : "circle.dashed", accessibilityDescription: succeeded ? "Issue created" : "Issue")
         icon.contentTintColor = succeeded ? .systemGreen : .controlAccentColor
         if saving || (!ready && error.stringValue.isEmpty) { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
@@ -4191,14 +4242,68 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         if command == #selector(NSResponder.insertTab(_:)), !matches.isEmpty { chooseProject(); return true }
         return false
     }
+    @objc func pasteImage() {
+        if !pasteImages(.general) && mediaSubmission == nil { fail("Copy an image or screenshot, then paste it here.") }
+    }
+    @discardableResult func pasteImages(_ board: NSPasteboard) -> Bool {
+        guard !saving, !succeeded, mediaSubmission == nil else { return false }
+        guard ArtifactImageInput.containsImages(board) else { return false }
+        do {
+            let inputs = ArtifactImageInput.read(board)
+            guard !inputs.isEmpty, images.count + inputs.count <= 8 else { throw StorageError(description: "Attach up to 8 images per issue.") }
+            let added = try inputs.map { input -> QuickIssueImage in
+                let value = try input.contents()
+                guard let source = CGImageSourceCreateWithData(value.data as CFData, nil),
+                      let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 280, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { throw StorageError(description: "Could not preview this image.") }
+                return QuickIssueImage(name: value.name, data: value.data, thumbnail: NSImage(cgImage: thumbnail, size: .zero))
+            }
+            images += added; rebuildImages(); changed()
+        } catch { fail(error.localizedDescription) }
+        return true
+    }
+    func rebuildImages() {
+        imageCanvas.subviews.forEach { $0.removeFromSuperview() }
+        for (index, image) in images.enumerated() {
+            let x = CGFloat(index) * 152
+            let preview = NSImageView(frame: NSRect(x: x, y: 22, width: 140, height: 58))
+            preview.image = image.thumbnail; preview.imageScaling = .scaleProportionallyUpOrDown
+            preview.wantsLayer = true; preview.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor; preview.layer?.cornerRadius = 8
+            preview.setAccessibilityLabel(image.name)
+            let name = NSTextField(labelWithString: image.name); name.font = .systemFont(ofSize: 10); name.lineBreakMode = .byTruncatingMiddle
+            name.frame = NSRect(x: x, y: 2, width: 116, height: 16); name.toolTip = image.name
+            let remove = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove \(image.name)")!, target: self, action: #selector(removeImage(_:)))
+            remove.tag = index; remove.isBordered = false; remove.frame = NSRect(x: x + 118, y: 0, width: 22, height: 20)
+            remove.toolTip = "Remove \(image.name)"
+            for view in [preview, name, remove] { imageCanvas.addSubview(view) }
+        }
+    }
+    @objc func removeImage(_ sender: NSButton) {
+        guard !saving, mediaSubmission == nil, images.indices.contains(sender.tag) else { return }
+        images.remove(at: sender.tag); rebuildImages(); changed()
+    }
     @objc func dismiss() { guard !saving else { return }; generation += 1; window.orderOut(nil) }
     func windowDidResignKey(_ notification: Notification) { if !saving { dismiss() } }
     @objc func create() {
         guard ready, !saving, !succeeded, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        if mediaSubmission != nil { saveMedia(); return }
         do {
             let parsed = try QuickIssueText.parse(input.stringValue, projects: projects, current: current)
             var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.name, "--title", parsed.title]
             if bottom.state != .on { args.append("--at-top") }
+            if !images.isEmpty {
+                args.append("--draft")
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-quick-images-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                do {
+                    for image in images {
+                        let folder = directory.appendingPathComponent(image.id)
+                        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+                        try image.data.write(to: folder.appendingPathComponent(image.name), options: .atomic)
+                    }
+                } catch { try? FileManager.default.removeItem(at: directory); throw error }
+                mediaSubmission = MediaSubmission(project: parsed.project, arguments: args, id: UUID().uuidString, directory: directory)
+                saveMedia(); return
+            }
             if pending?.key != args { pending = (args, UUID().uuidString) }
             let requestID = pending!.id; saving = true; error.stringValue = ""; context.stringValue = "Creating in \(parsed.project.name)…"
             matches = []; mention = nil; updateEnabled(); layout()
@@ -4208,27 +4313,70 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                 do {
                     let data = try result.get()
                     guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the issue. Retry safely with the same draft.") }
-                    self.current = parsed.project; self.preferences.set(parsed.project.name, forKey: "quickIssueProject")
-                    self.pending = nil; self.input.stringValue = ""; self.bottom.state = .off
-                    self.succeeded = true
-                    self.context.stringValue = "Created #\(number) in \(parsed.project.name)"; self.updateEnabled(); self.layout()
-                    self.window.makeFirstResponder(nil)
-                    NSAccessibility.post(element: self.confirmation, notification: .announcementRequested, userInfo: [.announcement: self.context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
-                    // Brief confirmation remains native; no browser is launched.
-                    let sequence = self.generation
-                    if self.present { DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-                        guard let self, sequence == self.generation, self.succeeded, !self.saving else { return }; self.dismiss()
-                    } }
+                    self.complete(number: number, project: parsed.project)
                 } catch { self.fail(error.localizedDescription) }
             }
         } catch { fail(error.localizedDescription) }
+    }
+    func saveMedia() {
+        guard let saved = mediaSubmission else { return }
+        saving = true; error.stringValue = ""; matches = []; mention = nil
+        var args: [String]
+        if let number = saved.number {
+            let common = ["--json", "--agent", "human:boss", "--project", saved.project.name]
+            if saved.uploaded < images.count {
+                let image = images[saved.uploaded]
+                let file = saved.directory.appendingPathComponent(image.id).appendingPathComponent(image.name)
+                args = ["attachment", "upload", file.path, "--issue", String(number)] + common + ["--request-id", image.id]
+                context.stringValue = "Attaching image \(saved.uploaded + 1) of \(images.count)…"
+            } else {
+                args = ["undraft", String(number)] + common + ["--request-id", saved.id + "-publish"]
+                context.stringValue = "Finishing #\(number)…"
+            }
+        } else { args = saved.arguments + ["--request-id", saved.id]; context.stringValue = "Creating in \(saved.project.name)…" }
+        updateEnabled(); layout()
+        request(args) { [weak self] result in
+            guard let self else { return }
+            do {
+                let data = try result.get()
+                guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw StorageError(description: "Could not confirm the response.") }
+                if saved.number == nil {
+                    guard let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the draft.") }
+                    self.mediaSubmission?.number = number
+                } else if saved.uploaded < self.images.count {
+                    guard let attachment = value["attachment"] as? [String: Any], attachment["id"] is String else { throw StorageError(description: "Could not confirm the image upload.") }
+                    self.mediaSubmission?.uploaded += 1
+                } else {
+                    guard let issue = value["issue"] as? [String: Any], issue["number"] as? Int == saved.number else { throw StorageError(description: "Could not confirm publication.") }
+                    try? FileManager.default.removeItem(at: saved.directory)
+                    self.mediaSubmission = nil; self.images = []; self.rebuildImages()
+                    self.saving = false; self.complete(number: saved.number!, project: saved.project); return
+                }
+                self.saveMedia()
+            } catch {
+                self.saving = false
+                let location = self.mediaSubmission?.number.map { "Issue #\($0) · " } ?? ""
+                self.fail(location + error.localizedDescription + " Retry to finish attaching images.")
+            }
+        }
+    }
+    func complete(number: Int, project: QuickIssueProject) {
+        current = project; preferences.set(project.name, forKey: "quickIssueProject")
+        pending = nil; input.stringValue = ""; bottom.state = .off; succeeded = true
+        context.stringValue = "Created #\(number) in \(project.name)"; updateEnabled(); layout(); window.makeFirstResponder(nil)
+        NSAccessibility.post(element: confirmation, notification: .announcementRequested, userInfo: [.announcement: context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        let sequence = generation
+        if present { DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self, sequence == self.generation, self.succeeded, !self.saving else { return }; self.dismiss()
+        } }
     }
     func request(_ args: [String], completion: @escaping (Result<Data, Error>) -> Void) {
         if let runner { runner(args, completion); return }
         let candidates = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
         guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { completion(.failure(StorageError(description: "Install the updated hey-boss CLI."))); return }
         DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: path); process.arguments = ["issue"] + args
+            let process = Process(); process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = args.first == "attachment" ? args : ["issue"] + args
             // Home-directory reads do not register a phantom project.
             process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
             var env = ProcessInfo.processInfo.environment
