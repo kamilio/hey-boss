@@ -798,7 +798,15 @@ fn private_home_inspection_skips_discovery_but_claims_still_require_identity() {
         assert_eq!(actor["creation_run"], Value::Null);
         if let Some(session) = id.strip_prefix("codex:") {
             assert_eq!(actor["kind"], "codex");
-            assert_eq!(actor["session_id"], session);
+            // Configured aliases are stable actors, not canonical session IDs.
+            assert_eq!(
+                actor["session_id"],
+                if source == "CODEX_THREAD_ID" {
+                    Value::String(session.into())
+                } else {
+                    Value::Null
+                }
+            );
         } else {
             assert_eq!(actor["session_id"], Value::Null);
         }
