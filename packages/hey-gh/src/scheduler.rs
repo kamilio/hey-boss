@@ -938,9 +938,12 @@ impl Scheduler {
                     return false;
                 };
                 let turn = &pending[*selected];
-                // A selected foreground validator may test its own soft wait.
-                // Charged replies keep borrowing blocked after this job leaves.
-                (index != *selected || job.interactive())
+                // Selected foreground validators and background GraphQL
+                // shortcuts may use their own soft wait. Shortcuts still need
+                // congested REST and no required peers below. Charged replies
+                // keep borrowing blocked after this job leaves.
+                (index != *selected || job.interactive()
+                    || (job.body.is_some() && !job.required_reader.load(Ordering::Relaxed)))
                     // GraphQL is always charged. It may only move its own
                     // selected turn forward, never borrow another class's turn.
                     // Optional reads borrow only when fallback is congested,
@@ -1938,8 +1941,8 @@ fn pacing_probe_eligible(job: &Job, budget: &Budget) -> bool {
     // The first foreground REST validation may borrow an older paced turn too.
     // One probe per quota awaits headers; a charged/unknown reply repays the
     // interval and blocks further borrowing until that exact owed job leaves.
-    // Foreground GraphQL reads may use their own selected slot early. The
-    // scheduler admits optional readers only when REST fallback is congested.
+    // Foreground GraphQL reads and background shortcuts may use their own
+    // selected slot early. Optional readers require congested REST fallback.
     // They always repay it, including transport failures and invalid replies;
     // the selected debt survives completion/cancellation.
     // Neither case grants an ordinary pacing exemption.
@@ -1952,7 +1955,7 @@ fn pacing_probe_eligible(job: &Job, budget: &Budget) -> bool {
                     .cached
                     .as_ref()
                     .is_some_and(|cached| cached.etag.is_some() || cached.last_modified.is_some()))
-            || (job.interactive()
+            || ((job.interactive() || !job.required_reader.load(Ordering::Relaxed))
                 && job.resource == "graphql"
                 && job.body.is_some()
                 // GraphQL can charge multiple points. Keep the estimated
