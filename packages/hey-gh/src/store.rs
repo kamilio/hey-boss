@@ -12,9 +12,13 @@ mod checkpoint;
 mod checkpoint_tests;
 #[cfg(test)]
 mod decode_tests;
+#[cfg(test)]
+mod observation_tests;
+mod observation_timings;
 mod terminal;
 #[cfg(test)]
 mod writer_tests;
+use observation_timings::{Phase as ObservationPhase, Timings as ObservationTimings};
 
 // Keep the partial index and bootstrap selection identical. Malformed PR JSON
 // remains a candidate so reads report corruption instead of silently hiding it.
@@ -465,9 +469,17 @@ impl Store {
         &self,
         f: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let started = std::time::Instant::now();
         // This static closure type identifies the method, never captured data.
         let operation = std::any::type_name_of_val(&f);
+        self.run_measured(operation, move |conn, _| f(conn)).await
+    }
+
+    async fn run_measured<T: Send + 'static>(
+        &self,
+        operation: &'static str,
+        f: impl FnOnce(&mut Connection, &mut ObservationTimings) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let started = std::time::Instant::now();
         let conn = self.connection.clone();
         let admission = self.writer_admission.clone();
         let checkpoint = self.checkpoint.clone();
@@ -482,7 +494,10 @@ impl Store {
                 // Retain poisoning semantics if a writer panics.
                 let mut conn = conn.lock().map_err(storage)?;
                 let working = std::time::Instant::now();
-                let result = f(&mut conn);
+                let mut phases = ObservationTimings::default();
+                let result = f(&mut conn, &mut phases);
+                phases.finish();
+                let checkpoint_started = std::time::Instant::now();
                 let pending_checkpoint =
                     checkpoint.is_some() && conn.is_autocommit() && checkpoint::pending(&conn);
                 let finished = std::time::Instant::now();
@@ -495,7 +510,9 @@ impl Store {
                 if finished.duration_since(started) >= std::time::Duration::from_millis(250) {
                     // Emit from the independently driven write, even when its
                     // original caller stopped waiting. No keys or raw errors.
+                    let write_id = format!("{:032x}", fastrand::u128(..));
                     tracing::info!(
+                        write_id,
                         operation,
                         succeeded = result.is_ok(),
                         error_code = result.as_ref().err().map_or("none", Error::diagnostic_code),
@@ -503,8 +520,11 @@ impl Store {
                         queue_ms = admitted.duration_since(started).as_millis() as u64,
                         dispatch_ms = working.duration_since(admitted).as_millis() as u64,
                         work_ms = finished.duration_since(working).as_millis() as u64,
+                        checkpoint_probe_ms =
+                            finished.duration_since(checkpoint_started).as_millis() as u64,
                         "Cache writer operation finished"
                     );
+                    phases.log(&write_id, operation);
                 }
                 result
             })
@@ -1017,57 +1037,115 @@ impl Store {
         let (scope, observations) = (scope.to_owned(), observations.to_vec());
         let cutoff = now_ms().saturating_sub(self.retention.as_millis() as u64);
         let max_events = self.max_events;
-        self.run(move |conn| {
-            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(storage)?;
-            if let Some(owner)=&owner && !owner_is_current(&tx,&scope,owner)? {
-                return Err(Error::Invalid("PR entity changed while collecting evidence".into()));
+        let work = move |conn: &mut Connection, phases: &mut ObservationTimings| {
+            phases.enter(ObservationPhase::Transaction);
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(storage)?;
+            if let Some(owner) = &owner
+                && !owner_is_current(&tx, &scope, owner)?
+            {
+                return Err(Error::Invalid(
+                    "PR entity changed while collecting evidence".into(),
+                ));
             }
             if let Some((resource, expected_hash)) = expected {
                 let resource = resolve_pr_resource(&tx, &scope, &resource)?;
-                let hash:Option<String> = tx.query_row("SELECT hash FROM snapshots WHERE scope=?1 AND resource=?2", params![scope,resource], |r|r.get(0)).optional().map_err(storage)?;
+                let hash: Option<String> = tx
+                    .query_row(
+                        "SELECT hash FROM snapshots WHERE scope=?1 AND resource=?2",
+                        params![scope, resource],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(storage)?;
                 if hash.as_deref().unwrap_or_default() != expected_hash {
                     // A separate client replaced the row used for projection.
                     // Leave its payload, clocks and cursor untouched.
-                    let sequence:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
+                    let sequence: u64 = tx
+                        .query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| {
+                            r.get(0)
+                        })
+                        .optional()
+                        .map_err(storage)?
+                        .unwrap_or(0);
                     return Ok((format!("{}.{}", feed_prefix(&tx, &scope)?, sequence), false));
                 }
             }
-            for (resource,value) in observations {
-            let resource=resolve_pr_resource(&tx,&scope,&resource)?;
-            let data=serde_json::to_string(&value).map_err(storage)?;
-            let hash=digest(&data);
-            // Matching hashes need neither the old body nor its overflow pages.
-            // Keep the comparison and changed-body read in the same transaction.
-            let old:Option<(String,Option<String>)>=tx.query_row("SELECT hash,CASE WHEN hash=?3 THEN NULL ELSE data END FROM snapshots WHERE scope=?1 AND resource=?2",params![scope,resource,hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-            if old.as_ref().map(|(h,_)|h.as_str())!=Some(&hash) {
-                let previous:Option<Value>=old.and_then(|(_,data)|data).map(|data|serde_json::from_str(&data).map_err(storage)).transpose()?;
-                if resource.starts_with("pr-status://") && previous.as_ref().and_then(|v|v["pullRequest"]["id"].as_str()).zip(value["pullRequest"]["id"].as_str()).is_some_and(|(old,new)|old!=new) {
-                    tx.execute("DELETE FROM snapshot_validation WHERE scope=?1 AND resource IN (?2,?3)",params![scope,resource,format!("{resource}#discovery")]).map_err(storage)?;
+            for (resource, value) in observations {
+                phases.enter(ObservationPhase::Read);
+                let resource = resolve_pr_resource(&tx, &scope, &resource)?;
+                phases.enter(ObservationPhase::Encode);
+                let data = serde_json::to_string(&value).map_err(storage)?;
+                let hash = digest(&data);
+                phases.observations += 1;
+                phases.payload_bytes = phases.payload_bytes.saturating_add(data.len());
+                phases.enter(ObservationPhase::Read);
+                // Matching hashes need neither the old body nor its overflow pages.
+                // Keep the comparison and changed-body read in the same transaction.
+                let old:Option<(String,Option<String>)>=tx.query_row("SELECT hash,CASE WHEN hash=?3 THEN NULL ELSE data END FROM snapshots WHERE scope=?1 AND resource=?2",params![scope,resource,hash],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+                if old.as_ref().map(|(h, _)| h.as_str()) != Some(&hash) {
+                    let previous: Option<Value> = old
+                        .and_then(|(_, data)| data)
+                        .map(|data| serde_json::from_str(&data).map_err(storage))
+                        .transpose()?;
+                    phases.enter(ObservationPhase::Write);
+                    if resource.starts_with("pr-status://")
+                        && previous
+                            .as_ref()
+                            .and_then(|v| v["pullRequest"]["id"].as_str())
+                            .zip(value["pullRequest"]["id"].as_str())
+                            .is_some_and(|(old, new)| old != new)
+                    {
+                        tx.execute("DELETE FROM snapshot_validation WHERE scope=?1 AND resource IN (?2,?3)",params![scope,resource,format!("{resource}#discovery")]).map_err(storage)?;
+                    }
+                    let fields: Vec<String> = value
+                        .as_object()
+                        .map(|object| {
+                            object
+                                .iter()
+                                .filter(|(k, v)| {
+                                    previous.as_ref().and_then(|p| p.get(*k)) != Some(*v)
+                                })
+                                .map(|(k, _)| k.clone())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| vec!["data".into()]);
+                    let stamp = now_ms();
+                    tx.execute("INSERT INTO changes(scope,resource,observed_at_ms,fields) VALUES(?1,?2,?3,?4)",params![scope,resource,stamp,serde_json::to_string(&fields).map_err(storage)?]).map_err(storage)?;
+                    let sequence = tx.last_insert_rowid();
+                    tx.execute("INSERT INTO snapshots(scope,resource,hash,data,cursor,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET hash=excluded.hash,data=excluded.data,cursor=excluded.cursor,observed_at_ms=excluded.observed_at_ms",params![scope,resource,hash,data,sequence,stamp]).map_err(storage)?;
+                    tx.execute("INSERT INTO feeds(scope,head) VALUES(?1,?2) ON CONFLICT(scope) DO UPDATE SET head=excluded.head",params![scope,sequence]).map_err(storage)?;
                 }
-                let fields:Vec<String>=value.as_object().map(|object|object.iter().filter(|(k,v)|previous.as_ref().and_then(|p|p.get(*k))!=Some(*v)).map(|(k,_)|k.clone()).collect()).unwrap_or_else(||vec!["data".into()]);
-                let stamp=now_ms();
-                tx.execute("INSERT INTO changes(scope,resource,observed_at_ms,fields) VALUES(?1,?2,?3,?4)",params![scope,resource,stamp,serde_json::to_string(&fields).map_err(storage)?]).map_err(storage)?;
-                let sequence=tx.last_insert_rowid();
-                tx.execute("INSERT INTO snapshots(scope,resource,hash,data,cursor,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET hash=excluded.hash,data=excluded.data,cursor=excluded.cursor,observed_at_ms=excluded.observed_at_ms",params![scope,resource,hash,data,sequence,stamp]).map_err(storage)?;
-                tx.execute("INSERT INTO feeds(scope,head) VALUES(?1,?2) ON CONFLICT(scope) DO UPDATE SET head=excluded.head",params![scope,sequence]).map_err(storage)?;
-            }
-            if let Some(owner)=&owner {
-                tx.execute("INSERT INTO source_owner(scope,resource,repository,pull_number,node_id,generation) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET repository=excluded.repository,pull_number=excluded.pull_number,node_id=excluded.node_id,generation=excluded.generation",params![scope,resource,owner.repository,owner.number,owner.node_id,owner.generation]).map_err(storage)?;
-            }
+                phases.enter(ObservationPhase::Write);
+                if let Some(owner) = &owner {
+                    tx.execute("INSERT INTO source_owner(scope,resource,repository,pull_number,node_id,generation) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(scope,resource) DO UPDATE SET repository=excluded.repository,pull_number=excluded.pull_number,node_id=excluded.node_id,generation=excluded.generation",params![scope,resource,owner.repository,owner.number,owner.node_id,owner.generation]).map_err(storage)?;
+                }
             }
             for (resource, clock) in clocks {
-                let resource=resolve_pr_resource(&tx,&scope,&resource)?;
+                let resource = resolve_pr_resource(&tx, &scope, &resource)?;
                 tx.execute("INSERT INTO snapshot_validation(scope,resource,validated_at_ms) VALUES(?1,?2,?3) ON CONFLICT(scope,resource) DO UPDATE SET validated_at_ms=MAX(snapshot_validation.validated_at_ms,excluded.validated_at_ms)", params![scope,resource,clock]).map_err(storage)?;
             }
+            phases.enter(ObservationPhase::Prune);
             prune_changes(&tx, &scope, cutoff, max_events)?;
-            let sequence:u64=tx.query_row("SELECT head FROM feeds WHERE scope=?1",[&scope],|r|r.get(0)).optional().map_err(storage)?.unwrap_or(0);
-            let cursor=format!("{}.{}",feed_prefix(&tx,&scope)?,sequence);
+            let sequence: u64 = tx
+                .query_row("SELECT head FROM feeds WHERE scope=?1", [&scope], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(storage)?
+                .unwrap_or(0);
+            let cursor = format!("{}.{}", feed_prefix(&tx, &scope)?, sequence);
+            phases.enter(ObservationPhase::Commit);
             tx.commit().map_err(storage)?;
             // Bound maintenance work per observation; the WAL checkpoint will
             // return these pages to the filesystem without a full vacuum.
+            phases.enter(ObservationPhase::Maintenance);
             let _ = conn.execute_batch("PRAGMA incremental_vacuum(64);");
             Ok((cursor, true))
-        }).await
+        };
+        self.run_measured(std::any::type_name_of_val(&work), work)
+            .await
     }
 
     /// Validate feed identity and retention without scanning observation bodies.
