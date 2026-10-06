@@ -944,7 +944,10 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
         .unwrap();
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     let mut replacement = f.worker();
-    let resumed = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let resumed = f.wait(|s| {
+        s["runs"][0]["claimed_at"].is_number()
+            && f.cli(&["view", "1"])["issue"]["agent_launch_count"] == 2
+    });
     assert_eq!(resumed["runs"][0]["session_id"], session);
     assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 2);
     assert_eq!(
@@ -2499,12 +2502,14 @@ fn model_queue_wait_does_not_consume_manual_claim_deadline() {
     f.setup(&["--claim-timeout", "5"]);
     let mut worker = f.worker();
     f.wait(|s| s["runs"][0]["state"] == "awaiting_model");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 0);
     thread::sleep(Duration::from_secs(5));
     let status = f.cli(&["worker", "status"]);
     assert!(status["runs"][0]["finished_at"].is_null());
     f.wait(|s| s["runs"][0]["state"] == "awaiting_claim");
     let status = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(status["runs"][0]["state"], "claim_timeout");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 1);
     worker.stop();
 }
 
@@ -2598,6 +2603,7 @@ fn codex_sqlite_startup_contention_retries_the_same_reservation() {
         1,
         "Startup retry created an issue attempt"
     );
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 1);
     worker.stop();
 }
 
@@ -2615,12 +2621,14 @@ fn stopping_worker_cancels_codex_sqlite_startup_retry() {
             .as_str()
             .is_some_and(|event| event.contains("retrying startup"))
     });
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 0);
     let started = Instant::now();
     worker.stop();
     assert!(started.elapsed() < Duration::from_secs(3));
     let status = f.cli(&["worker", "status"]);
     assert_eq!(status["runs"][0]["state"], "cancelled", "{status}");
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 0);
 }
 
 #[test]

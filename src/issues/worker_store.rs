@@ -378,8 +378,16 @@ impl Store {
         )?;
         Ok(())
     }
-    pub(crate) fn worker_begin_claim(&self, id: &str) -> Result<()> {
-        self.db.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=?2+coalesce((SELECT json_extract(config,'$.reservation_seconds') FROM issue_workers WHERE id=worker_runs.worker_id),?3)*1000 WHERE id=?1 AND state='awaiting_model' AND claimed_at IS NULL AND finished_at IS NULL", params![id, now(), crate::issues::worker::DEFAULT_CLAIM_TIMEOUT_SECONDS])?;
+    pub(crate) fn worker_begin_claim(&mut self, id: &str) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let at = now();
+        // Count the first model activity, not a process that may fail to initialize.
+        // The run key keeps later turns and repeated activity notifications idempotent.
+        tx.execute("INSERT OR IGNORE INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) SELECT id,project_id,issue_number,?2 FROM worker_runs WHERE id=?1 AND finished_at IS NULL", params![id,at])?;
+        tx.execute("UPDATE worker_runs SET state='awaiting_claim',reservation_expires=?2+coalesce((SELECT json_extract(config,'$.reservation_seconds') FROM issue_workers WHERE id=worker_runs.worker_id),?3)*1000 WHERE id=?1 AND state='awaiting_model' AND claimed_at IS NULL AND finished_at IS NULL", params![id, at, crate::issues::worker::DEFAULT_CLAIM_TIMEOUT_SECONDS])?;
+        tx.commit()?;
         Ok(())
     }
     pub(crate) fn worker_model_expired(&self, job: &Job) -> Result<bool> {
@@ -400,13 +408,7 @@ impl Store {
                 "Codex exited before its process could be recorded",
             )
         })?;
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let at = now();
-        tx.execute("UPDATE worker_runs SET pid=?2,process_start=?3,updated_at=?4 WHERE id=?1 AND finished_at IS NULL",params![id,pid,start,at])?;
-        tx.execute("INSERT OR IGNORE INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) SELECT id,project_id,issue_number,?2 FROM worker_runs WHERE id=?1 AND finished_at IS NULL", params![id,at])?;
-        tx.commit()?;
+        self.db.execute("UPDATE worker_runs SET pid=?2,process_start=?3,updated_at=?4 WHERE id=?1 AND finished_at IS NULL",params![id,pid,start,now()])?;
         Ok(())
     }
     pub(crate) fn worker_prepare_provider(&mut self, job: &mut Job) -> Result<()> {
@@ -2752,21 +2754,38 @@ mod tests {
                 0
             );
             let pid = std::process::id();
+            store.worker_process("run", pid).unwrap();
+            store.worker_process("run", pid).unwrap();
+            assert_eq!(
+                get_issue(&store.db, "named:Launches", 1, false)
+                    .unwrap()
+                    .agent_launch_count,
+                0,
+                "A process that has not started model activity is not an iteration"
+            );
+            store
+                .db
+                .execute(
+                    "UPDATE worker_runs SET state='awaiting_model' WHERE id='run'",
+                    [],
+                )
+                .unwrap();
             store.db.execute_batch("CREATE TRIGGER reject_launch BEFORE INSERT ON issue_agent_launches BEGIN SELECT RAISE(ABORT,'fixture failure'); END;").unwrap();
-            assert!(store.worker_process("run", pid).is_err());
+            assert!(store.worker_begin_claim("run").is_err());
             assert!(
                 store
                     .db
-                    .query_row("SELECT pid IS NULL FROM worker_runs", [], |r| r
-                        .get::<_, bool>(0))
+                    .query_row("SELECT state='awaiting_model' FROM worker_runs", [], |r| {
+                        r.get::<_, bool>(0)
+                    })
                     .unwrap()
             );
             store
                 .db
                 .execute_batch("DROP TRIGGER reject_launch;")
                 .unwrap();
-            store.worker_process("run", pid).unwrap();
-            store.worker_process("run", pid).unwrap();
+            store.worker_begin_claim("run").unwrap();
+            store.worker_begin_claim("run").unwrap();
             assert_eq!(
                 get_issue(&store.db, "named:Launches", 1, false)
                     .unwrap()

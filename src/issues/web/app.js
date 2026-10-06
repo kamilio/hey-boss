@@ -1036,7 +1036,7 @@ function agentLaunchCount(issue, showZero = false) {
   const count = issue.agent_launch_count || 0;
   if (!count && !showZero) return "";
   const label = `${count} agent ${count === 1 ? "launch" : "launches"}`;
-  const help = "Worker agent process launches, including retries and resumed sessions. Reservations and failed process starts are excluded. This is a count, not a limit.";
+  const help = "Worker runs that reached model activity, including retries and resumed sessions. Reservations and failed starts are excluded; failures after model activity still count. This is a count, not a limit.";
   return `<span class="agent-launch-count" tabindex="0" aria-label="${label}. ${help}">${icon("refresh")}<span>${label}</span><span class="agent-launch-help" aria-hidden="true">${help}</span></span>`;
 }
 

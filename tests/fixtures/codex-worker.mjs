@@ -82,10 +82,9 @@ for await (const line of createInterface({input: process.stdin})) {
     continue;
   }
   if (mode === 'delay-model-start') await new Promise(resolve => setTimeout(resolve, 6000));
-  if (['delay-unclaimed', 'delay-model-start'].includes(mode)) {
+  if (['delay', 'delay-unclaimed', 'delay-model-start'].includes(mode)) {
     send({method: 'item/started', params: {threadId: session, item: {type: 'reasoning'}}}); continue;
   }
-  if (mode === 'delay') continue;
   if (mode === 'transient-error-recovered') send({method:'error',params:{threadId:session,turnId:turn,willRetry:true,error:{message:'Temporary disconnect; retry in progress'}}});
   if (mode === 'approval') {
     send({id: 'approval-1', method: 'item/commandExecution/requestApproval', params: {threadId: session, command: 'synthetic privileged operation'}}); continue;

@@ -192,6 +192,10 @@ fn claude_and_pi_goals_continue_in_the_same_session() {
         );
         let inputs = fs::read_to_string(f.root.join("inputs.jsonl")).unwrap();
         assert_eq!(inputs.lines().count(), 2);
+        assert_eq!(
+            f.wait("SELECT CAST(count(*) AS TEXT) FROM issue_agent_launches"),
+            "1"
+        );
         assert!(inputs.contains("Continue the saved goal"));
         assert_eq!(
             f.wait("SELECT json_extract(goal,'$.status') FROM worker_runs LIMIT 1"),
