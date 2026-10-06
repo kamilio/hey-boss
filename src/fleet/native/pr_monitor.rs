@@ -75,19 +75,42 @@ fn poll_cycle(ctx: &Context, runtime: &tokio::runtime::Runtime, client: &ApiClie
     // Active issue watches run on the foreground priority lane so background
     // account/metadata sweeps never starve tracked PRs.
     let watch_client = client.clone().foreground();
-    let (watched, metadata) = runtime.block_on(async {
-        tokio::join!(
-            watches::poll_once(ctx, &watch_client),
-            tokio::time::timeout(Duration::from_secs(40), poll_once(ctx, client))
-        )
+    let watched = runtime.block_on(async {
+        let finished = tokio::sync::Notify::new();
+        let (watched, ()) = tokio::join!(
+            async {
+                let result = watches::poll_once(ctx, &watch_client).await;
+                finished.notify_one();
+                result
+            },
+            async {
+                loop {
+                    let started = tokio::time::Instant::now();
+                    match tokio::time::timeout(Duration::from_secs(40), poll_once(ctx, client))
+                        .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => eprintln!("PR monitor: {error}"),
+                        Err(_) => eprintln!("PR monitor: metadata batch deadline reached"),
+                    }
+                    if ctx.stopped() {
+                        break;
+                    }
+                    // Keep draining the bounded metadata queue while a slow
+                    // required-check batch runs. Finish the current read before
+                    // returning; never overlap metadata batches or reset backoff.
+                    tokio::select! {
+                        biased;
+                        _ = finished.notified() => break,
+                        _ = tokio::time::sleep_until(started + INTERVAL) => {}
+                    }
+                }
+            }
+        );
+        watched
     });
     if let Err(error) = watched {
         eprintln!("GitHub PR watcher: {error}");
-    }
-    match metadata {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("PR monitor: {error}"),
-        Err(_) => eprintln!("PR monitor: metadata batch deadline reached"),
     }
 }
 

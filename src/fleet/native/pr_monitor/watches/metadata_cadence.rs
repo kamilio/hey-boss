@@ -82,6 +82,15 @@ fn an_ordinary_read_in_flight_cannot_stop_a_new_watcher() {
 
 #[test]
 fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
+    metadata_batches(false);
+}
+
+#[test]
+fn merge_metadata_keeps_polling_while_required_checks_wait() {
+    metadata_batches(true);
+}
+
+fn metadata_batches(repeat: bool) {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
         version: 1,
@@ -114,6 +123,10 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
+    let database = ctx.path.clone();
+    let add_later = request(
+        json!({"action":"add_pull_request","number":2,"url":"https://github.com/o/r/pull/3","purpose":"fix"}),
+    );
     let serving = std::thread::spawn(move || {
         let (ci, policy, metadata) = evidence(true, false);
         let mut ordinary_metadata = metadata.clone();
@@ -152,8 +165,46 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
                 )
                 .unwrap();
         };
-        respond(first);
-        respond(second);
+        if repeat {
+            let (held, ordinary) = if first.url().contains("required-checks") {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            Store::open(&database).unwrap().execute(&add_later).unwrap();
+            respond(ordinary);
+            // Added after the first selection: observe this merge on the next
+            // metadata tick, before the slow required-check response arrives.
+            let next = loop {
+                let next = server
+                    .recv_timeout(Duration::from_secs(35))
+                    .unwrap()
+                    .expect("Metadata must poll again while required checks are pending");
+                if next.url().starts_with("/v1/viewer?") {
+                    next.respond(tiny_http::Response::from_string(json!({"data":{"id":42},"validated_at_ms":123,"fetched_at_ms":123,"source":"cache"}).to_string()).with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap())).unwrap();
+                } else {
+                    break next;
+                }
+            };
+            assert!(next.url().ends_with("/3/metadata?max_age_seconds=300"));
+            let mut merged = metadata.clone();
+            merged["data"]["number"] = json!(3);
+            merged["data"]["state"] = json!("closed");
+            merged["data"]["merged"] = json!(true);
+            merged["data"]["user"] = json!({"id":42});
+            merged["data"]["title"] = json!("New merge");
+            merged["data"]["merged_at"] = json!("2026-10-05T21:04:49Z");
+            next.respond(
+                tiny_http::Response::from_string(merged.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap(),
+                ),
+            )
+            .unwrap();
+            respond(held);
+        } else {
+            respond(first);
+            respond(second);
+        }
         respond(receive());
         respond(receive());
         assert!(
@@ -176,5 +227,18 @@ fn watcher_and_general_metadata_reads_progress_without_serial_batches() {
     assert!(view["issue"]["assignee"].is_null());
     assert!(view["issue"]["github_status"]["event"].is_string());
     assert_eq!(view["issue"]["pull_requests"][0]["status"], "open");
+    if repeat {
+        let history = Store::open(&ctx.path)
+            .unwrap()
+            .execute(&request(
+                json!({"action":"merged_pull_requests","limit":100,"offset":0}),
+            ))
+            .unwrap();
+        assert_eq!(
+            history["pull_requests"][0]["url"],
+            "https://github.com/o/r/pull/3"
+        );
+        assert_eq!(history["pull_requests"][0]["title"], "New merge");
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
