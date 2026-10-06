@@ -947,7 +947,7 @@ impl Scheduler {
                             == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 };
                 let completing = |job: &Job| job.completion_validation.load(Ordering::Relaxed);
-                pending
+                let selected = pending
                     .iter()
                     .enumerate()
                     .find(|(index, job)| preferred(*index, job) && completing(job))
@@ -969,7 +969,34 @@ impl Scheduler {
                             .enumerate()
                             .find(|(index, job)| eligible(*index, job))
                     })
-                    .map(|(index, _)| index)
+                    .map(|(index, _)| index);
+                let proven_probe = |index: usize, job: &Job| {
+                    can_probe(index, job)
+                        && budgets
+                            .for_resource(&job.quota())
+                            .all(|budget| conditional_budget_exempt(job, budget))
+                };
+                selected.map(|index| {
+                    let selected = &pending[index];
+                    if !can_probe(index, selected) || proven_probe(index, selected) {
+                        return index;
+                    }
+                    // Spend this class's borrowed window on proven validators
+                    // before an unproven probe can charge and close it. Keep
+                    // ordinary turns, other quotas/classes, one active probe,
+                    // debt repayment, reserves and cooldowns unchanged.
+                    let quota = selected.quota();
+                    pending
+                        .iter()
+                        .enumerate()
+                        .find(|(candidate, job)| {
+                            job.quota() == quota
+                                && job.interactive() == selected.interactive()
+                                && eligible(*candidate, job)
+                                && proven_probe(*candidate, job)
+                        })
+                        .map_or(index, |(candidate, _)| candidate)
+                })
             };
             if active.len() < max_active
                 && let Some(index) = next
