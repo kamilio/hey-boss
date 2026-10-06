@@ -83,6 +83,8 @@ pub struct WatchStatus {
     /// is not refreshed or made complete by that ownership.
     #[serde(default)]
     pub delegated_to_supervisor: bool,
+    #[serde(default)]
+    pub polling_delegation: Option<crate::polling::PollingStatus>,
 }
 
 impl Api {
@@ -175,6 +177,7 @@ impl Api {
             discovery_last_error: discovery.and_then(|health| health.last_error),
             covered_by_account: false,
             delegated_to_supervisor: false,
+            polling_delegation: None,
         }));
         let (client, task_state, task_watch) =
             (self.0.client.clone(), state.clone(), watch.clone());
@@ -1265,6 +1268,7 @@ async fn watches(State(api): State<Api>) -> ApiResult<Json<Vec<WatchStatus>>> {
             status.ci_last_cycle = ci_last_cycle.clone();
             status.policy_last_cycle = policy_last_cycle.clone();
             status.delegated_to_supervisor = api.0.client.polling().active();
+            status.polling_delegation = Some(api.0.client.polling().health());
             let Some(health) = &health else { continue };
             status.discovery_last_success_at_ms = health.last_success_at_ms;
             if health.last_error.is_some()

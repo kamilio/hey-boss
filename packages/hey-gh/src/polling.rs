@@ -22,12 +22,23 @@ pub(crate) struct Coverage {
 struct State {
     lease: Option<(Instant, Coverage)>,
     local_until: Option<Instant>,
+    local_source: Option<&'static str>,
+    last_probe: Option<&'static str>,
 }
 
 #[derive(Default)]
 pub(crate) struct Polling {
     state: Mutex<State>,
     changed: [Notify; 3],
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PollingStatus {
+    pub state: String,
+    pub last_probe: String,
+    pub local_demand_seconds: u64,
+    pub local_demand_source: Option<String>,
+    pub covered_prs: usize,
 }
 
 pub(crate) fn row(node: &Value) -> Option<(String, String)> {
@@ -45,6 +56,34 @@ pub(crate) fn row(node: &Value) -> Option<(String, String)> {
 }
 
 impl Polling {
+    pub fn health(&self) -> PollingStatus {
+        let state = self.state.lock().unwrap();
+        let now = Instant::now();
+        let remaining = state
+            .local_until
+            .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        let active = state.lease.as_ref().filter(|(until, _)| *until > now);
+        let last_probe = state.last_probe.unwrap_or("not_started");
+        PollingStatus {
+            state: if active.is_some() {
+                "delegated"
+            } else if !remaining.is_zero() {
+                "local_demand"
+            } else if state.lease.is_some() {
+                "expired"
+            } else {
+                last_probe
+            }
+            .into(),
+            last_probe: last_probe.into(),
+            local_demand_seconds: remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0),
+            local_demand_source: (!remaining.is_zero())
+                .then_some(state.local_source)
+                .flatten()
+                .map(str::to_owned),
+            covered_prs: active.map_or(0, |(_, coverage)| coverage.rows.len()),
+        }
+    }
     pub fn renew(
         &self,
         local: &Identity,
@@ -72,9 +111,9 @@ impl Polling {
                     && value.bytes().all(|b| b.is_ascii_hexdigit())
             })
             && started <= now
-            && now < started + LEASE
-            && state.local_until.is_none_or(|until| until <= now);
-        if !valid {
+            && now < started + LEASE;
+        state.last_probe = Some(if valid { "covered" } else { "invalid_coverage" });
+        if !valid || state.local_until.is_some_and(|until| until > now) {
             if state.lease.take().is_some() {
                 self.wake();
             }
@@ -96,13 +135,19 @@ impl Polling {
         }
     }
     pub fn revoke(&self) {
-        if self.state.lock().unwrap().lease.take().is_some() {
+        self.probe_failed("unavailable");
+    }
+    pub fn probe_failed(&self, code: &'static str) {
+        let mut state = self.state.lock().unwrap();
+        state.last_probe = Some(code);
+        if state.lease.take().is_some() {
             self.wake();
         }
     }
-    pub fn demand(&self) {
+    pub fn demand(&self, source: &'static str) {
         let mut state = self.state.lock().unwrap();
         state.local_until = Some(Instant::now() + LOCAL_DEMAND);
+        state.local_source = Some(source);
         if state.lease.take().is_some() {
             self.wake();
         }
@@ -169,6 +214,30 @@ mod tests {
             modes: [true; 3],
             rows: BTreeMap::from([row(&node()).unwrap()]),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn health_distinguishes_local_demand_from_coverage_and_expiry() {
+        let polling = Polling::default();
+        assert_eq!(polling.health().state, "not_started");
+        assert!(polling.renew(&local(), 60, Instant::now(), coverage()));
+        assert_eq!(polling.health().state, "delegated");
+        assert_eq!(polling.health().covered_prs, 1);
+        polling.demand("source_feed");
+        assert_eq!(polling.health().state, "local_demand");
+        assert_eq!(polling.health().local_demand_seconds, 120);
+        assert_eq!(
+            polling.health().local_demand_source.as_deref(),
+            Some("source_feed")
+        );
+        assert!(!polling.renew(&local(), 60, Instant::now(), coverage()));
+        assert_eq!(polling.health().last_probe, "covered");
+        tokio::time::advance(LOCAL_DEMAND).await;
+        assert_eq!(polling.health().local_demand_seconds, 0);
+        assert!(polling.renew(&local(), 60, Instant::now(), coverage()));
+        tokio::time::advance(LEASE).await;
+        assert_eq!(polling.health().state, "expired");
+        assert_eq!(polling.health().covered_prs, 0);
     }
 
     #[tokio::test]
@@ -263,7 +332,7 @@ mod tests {
         for mode in ["ci", "details", "policy"] {
             polling.changed(mode).await;
         }
-        polling.demand();
+        polling.demand("source_feed");
         for mode in ["ci", "details", "policy"] {
             assert!(!polling.covers(mode, &node()));
             tokio::time::timeout(Duration::from_millis(1), polling.changed(mode))
