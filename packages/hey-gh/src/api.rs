@@ -862,6 +862,9 @@ async fn pr_lifecycles(
     let read = query.read();
     crate::client::lifecycle::numbers(&repository, &numbers)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = crate::client::READ_DEADLINE
+        .try_with(|caller| deadline.min(*caller))
+        .unwrap_or(deadline);
     Ok(Json(
         read.run(crate::client::READ_DEADLINE.scope(deadline, async {
             tokio::time::timeout_at(
@@ -885,6 +888,9 @@ async fn pr_metadata(
     // Honor the caller's priority without extending this lightweight read's
     // lifetime. Its wait is bounded even when a longer reader shares the job.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = crate::client::READ_DEADLINE
+        .try_with(|caller| deadline.min(*caller))
+        .unwrap_or(deadline);
     Ok(Json(
         query
             .run(crate::client::READ_DEADLINE.scope(deadline, async {
@@ -1354,15 +1360,21 @@ async fn local_requests(
         // another caller may join after dispatch and need that attempt longer.
         // Dropping this handler releases its waiters; the scheduler removes
         // unobserved queued work while active responses retain their own bound.
-        return tokio::time::timeout_at(deadline, next.run(request))
-            .await
-            .unwrap_or_else(|_| {
-                tracing::info!(
-                    budget_ms = budget,
-                    "Caller read budget elapsed; releasing daemon handler"
-                );
-                ApiError(Error::Deadline).into_response()
-            });
+        // Publish the same budget to request admission and queue scheduling.
+        // The outer timer alone cancels work too late to prioritize its caller
+        // or overlap confirmation within the time actually available.
+        return tokio::time::timeout_at(
+            deadline,
+            crate::client::READ_DEADLINE.scope(deadline, next.run(request)),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::info!(
+                budget_ms = budget,
+                "Caller read budget elapsed; releasing daemon handler"
+            );
+            ApiError(Error::Deadline).into_response()
+        });
     }
     next.run(request).await
 }

@@ -195,7 +195,7 @@ async fn pending_full_report(f: &Fixture) -> tokio::task::JoinHandle<Result<Repo
 }
 
 #[tokio::test]
-async fn short_full_report_overlaps_stale_metadata_with_all_pending_sources() {
+async fn short_http_report_overlaps_stale_metadata_with_all_pending_sources() {
     let f = Fixture::new().await;
     f.warm_metadata().await;
     f.age_metadata(60_000);
@@ -205,13 +205,16 @@ async fn short_full_report_overlaps_stale_metadata_with_all_pending_sources() {
     let lock = f.client.report_lock("acme/demo#7:ci");
     let guard = lock.lock().await;
     let before = f.metadata_calls();
-    let reader = f.client.clone();
+    let api = crate::api::Api::new(f.client.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, api.router()).await.unwrap() });
+    let reader = crate::ApiClient::new(url.parse().unwrap())
+        .unwrap()
+        .with_read_deadline(tokio::time::Instant::now() + Duration::from_secs(15));
     let task = tokio::spawn(async move {
-        crate::client::READ_DEADLINE
-            .scope(
-                tokio::time::Instant::now() + Duration::from_secs(15),
-                reader.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
-            )
+        reader
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30)))
             .await
     });
     let overlapped = tokio::time::timeout(Duration::from_secs(2), async {
@@ -230,6 +233,7 @@ async fn short_full_report_overlaps_stale_metadata_with_all_pending_sources() {
     f.mock.reviews_release.notify_one();
     f.mock.release.notify_one();
     let report = task.await.unwrap().unwrap();
+    server.abort();
     assert!(
         overlapped.is_ok(),
         "Stale metadata must start before CI and conversation sources finish"
