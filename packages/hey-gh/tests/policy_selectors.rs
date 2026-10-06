@@ -489,6 +489,7 @@ async fn terminal_policy_retains_forced_rest_and_offline_freshness() {
             .unwrap();
         assert_eq!(offline.state, "satisfied");
         assert_eq!(offline.oldest_validation_at_ms, Some(old));
+        assert!(offline.pull_request_confirmation.is_none());
         assert!(f.data.lock().unwrap().calls.is_empty());
         for freshness in [Freshness::Revalidate, Freshness::MaxAge(Duration::ZERO)] {
             f.data.lock().unwrap().calls.clear();
@@ -895,6 +896,14 @@ async fn standalone_policy_confirms_selectors_without_freshening_or_waiting_for_
     .expect("standalone selector validation waited for REST metadata")
     .unwrap();
     assert_eq!(report.state, "satisfied");
+    let confirmation = serde_json::to_value(&report).unwrap()["pull_request_confirmation"].clone();
+    assert_eq!(confirmation["selectors"]["mergeable"], true);
+    assert_eq!(confirmation["selectors"]["head"]["sha"], HEAD);
+    assert!(confirmation["validated_at_ms"].as_u64().unwrap() > old);
+    assert!(
+        confirmation["selectors"].get("title").is_none(),
+        "Selector confirmation is not a fresh REST body"
+    );
     assert!(report.errors.is_empty());
     assert!(
         report
@@ -1314,7 +1323,9 @@ async fn explicit_offline_native_and_already_fresh_rest_reads_keep_their_existin
             .required_checks_for_pr("acme/demo", 7, freshness)
             .await;
         if matches!(freshness, Freshness::CachedOnly) {
-            assert_eq!(result.unwrap().state, "satisfied");
+            let report = result.unwrap();
+            assert_eq!(report.state, "satisfied");
+            assert!(report.pull_request_confirmation.is_none());
         } else {
             assert!(result.is_err());
         }

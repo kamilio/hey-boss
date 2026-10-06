@@ -88,6 +88,14 @@ fn classic_checks_disabled(branch: &Value) -> bool {
         && (checks["strict"].is_null() || checks["strict"] == false)
 }
 
+/// Independently validated PR selectors, not a freshly fetched REST PR body.
+/// Unknown mergeability stays null even when the commit selectors are confirmed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PullRequestConfirmation {
+    pub selectors: Value,
+    pub validated_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RequiredChecksReport {
     pub repository: String,
@@ -124,6 +132,8 @@ pub struct RequiredChecksReport {
     pub oldest_validation_at_ms: Option<u64>,
     #[serde(default)]
     pub validations: Vec<crate::ResourceValidation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_confirmation: Option<PullRequestConfirmation>,
 }
 
 impl Client {
@@ -724,7 +734,7 @@ impl Client {
                     )
                 });
             let mut direct_result = None;
-            let (final_rest_pr, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
+            let (confirmation, confirmed_opt) = if matches!(freshness, Freshness::CachedOnly) {
                 (None, None)
             } else {
                 // Other readers may have refreshed these selectors while CI
@@ -765,7 +775,11 @@ impl Client {
                 } else {
                     primary.await
                 };
-                (pr_res?, Some(branch_res))
+                (Some(pr_res?), Some(branch_res))
+            };
+            let (final_rest_pr, pull_request_confirmation) = match confirmation {
+                Some(confirmation) => (confirmation.rest, Some(confirmation.selectors)),
+                None => (None, None),
             };
             let final_pr = final_rest_pr.as_ref().unwrap_or(&pr);
             if pr.data["node_id"] != final_pr.data["node_id"]
@@ -840,6 +854,7 @@ impl Client {
                 observed_at_ms: Some(observed_at_ms),
                 oldest_validation_at_ms: validations.iter().map(|r| r.validated_at_ms).min(),
                 validations,
+                pull_request_confirmation,
             };
             let value = json!({"repository":report.repository,"pull_number":number,"head_sha":report.head_sha,"base_branch":report.base_branch,"base_sha":report.base_sha,"policy_identity":report.policy_identity,"policy_sha":report.policy_sha,"pr_base_sha":report.pr_base_sha,"merge_sha":report.merge_sha,"state":report.state,"strict":strict,"up_to_date":up_to_date,"checks":report.checks,"rules":report.rules,"errors":report.errors});
             if value.to_string().len() > self.collection_limit() {

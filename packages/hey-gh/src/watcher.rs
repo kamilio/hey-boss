@@ -95,6 +95,42 @@ fn metadata_matches(
             .is_none_or(|(required, observed)| required == observed)
 }
 
+/// Select limited policy confirmation only when every watcher selector is
+/// explicit and agrees. The caller must enforce its read freshness separately.
+pub fn confirmed_metadata<'a>(
+    repository: &str,
+    number: u64,
+    policy: &'a RequiredChecksReport,
+) -> Option<&'a crate::PullRequestConfirmation> {
+    let proof = policy.pull_request_confirmation.as_ref()?;
+    let pr = &proof.selectors;
+    let nonempty = |value: &Value| value.as_str().is_some_and(|s| !s.is_empty());
+    let sha = |value: &Value| value.as_str().is_some_and(crate::repository::valid_sha);
+    (policy.policy_identity.is_some()
+        && policy.pull_request_state.as_deref() == Some("open")
+        && pr["state"] == "open"
+        && pr["merged"] == false
+        && pr["mergeable"].is_boolean()
+        && nonempty(&pr["node_id"])
+        && pr["number"] == number
+        && sha(&pr["head"]["sha"])
+        && sha(&pr["base"]["sha"])
+        && pr["base"]["ref"] == policy.base_branch
+        && policy.pr_base_sha.as_deref() == pr["base"]["sha"].as_str()
+        && pr["base"]["repo"]["id"].as_u64().is_some_and(|id| id > 0)
+        && nonempty(&pr["base"]["repo"]["node_id"])
+        && pr["base"]["repo"]["full_name"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        && pr.get("stack").is_some()
+        && match policy.merge_sha.as_deref() {
+            Some(merge) => crate::repository::valid_sha(merge) && pr["merge_commit_sha"] == merge,
+            None => pr.get("merge_commit_sha") == Some(&Value::Null),
+        }
+        && metadata_matches(repository, number, pr, policy))
+    .then_some(proof)
+}
+
 fn metadata_conflicts(pull_request: &Value) -> &'static str {
     match pull_request["mergeable"].as_bool() {
         Some(false) => "conflicting",

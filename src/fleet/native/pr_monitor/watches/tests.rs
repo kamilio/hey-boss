@@ -193,6 +193,47 @@ fn pending_optional_checks_do_not_require_review_collection() {
 
 #[test]
 fn conflict_releases_the_existing_item_before_optional_ci_returns() {
+    conflict_before_ci(ProofCase::Missing);
+}
+
+#[test]
+fn confirmed_policy_conflict_releases_work_without_another_metadata_read() {
+    conflict_before_ci(ProofCase::Current);
+}
+
+#[test]
+fn unusable_policy_confirmation_keeps_the_metadata_fallback() {
+    for case in [
+        ProofCase::Unknown,
+        ProofCase::Stale,
+        ProofCase::Future,
+        ProofCase::WrongHead,
+        ProofCase::ForceOld,
+    ] {
+        conflict_before_ci(case);
+    }
+}
+
+#[test]
+fn forced_fetch_reuses_only_confirmation_obtained_during_that_fetch() {
+    conflict_before_ci(ProofCase::ForceCurrent);
+}
+
+#[derive(Clone, Copy)]
+enum ProofCase {
+    Missing,
+    Current,
+    Unknown,
+    Stale,
+    Future,
+    WrongHead,
+    ForceOld,
+    ForceCurrent,
+}
+
+fn conflict_before_ci(case: ProofCase) {
+    let confirmed = matches!(case, ProofCase::Current | ProofCase::ForceCurrent);
+    let force = matches!(case, ProofCase::ForceOld | ProofCase::ForceCurrent);
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
     let request = |operation| crate::issues::Request {
         version: 1,
@@ -231,21 +272,65 @@ fn conflict_releases_the_existing_item_before_optional_ci_returns() {
     policy["checks"][0]["failure_key"] = Value::Null;
     metadata["data"]["mergeable"] = json!(false);
     metadata["data"]["base"]["ref"] = json!("main");
+    if !matches!(case, ProofCase::Missing) {
+        metadata["data"]["head"]["sha"] = json!("a".repeat(40));
+        policy["head_sha"] = metadata["data"]["head"]["sha"].clone();
+        metadata["data"]["node_id"] = json!("PR_1");
+        metadata["data"]["merged"] = json!(false);
+        metadata["data"]["merge_commit_sha"] = Value::Null;
+        metadata["data"]["stack"] = Value::Null;
+        metadata["data"]["base"]["sha"] = json!("b".repeat(40));
+        metadata["data"]["base"]["repo"]["node_id"] = json!("R_1");
+        metadata["data"]["base"]["repo"]["id"] = json!(1);
+        policy["pr_base_sha"] = metadata["data"]["base"]["sha"].clone();
+        policy["policy_identity"] = json!({"branch":"main","stack":null});
+        policy["pull_request_confirmation"] =
+            json!({"selectors":metadata["data"],"validated_at_ms":metadata["validated_at_ms"]});
+        let proof = &mut policy["pull_request_confirmation"];
+        match case {
+            ProofCase::Unknown => proof["selectors"]["mergeable"] = Value::Null,
+            ProofCase::Stale => {
+                proof["validated_at_ms"] = json!(crate::issues::worker::now() - 31_000)
+            }
+            ProofCase::Future => {
+                proof["validated_at_ms"] = json!(crate::issues::worker::now() + 30_000)
+            }
+            ProofCase::WrongHead => proof["selectors"]["head"]["sha"] = json!("c".repeat(40)),
+            ProofCase::ForceOld => {
+                proof["validated_at_ms"] = json!(crate::issues::worker::now() - 1000)
+            }
+            _ => {}
+        }
+    }
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let client =
         ApiClient::new(format!("http://{}/", server.server_addr()).parse().unwrap()).unwrap();
     let database = ctx.path.clone();
     let serving = std::thread::spawn(move || {
         let mut held_ci = None;
-        for _ in 0..3 {
+        for _ in 0..if confirmed { 2 } else { 3 } {
             let incoming = server
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .expect("watcher request");
             let path = incoming.url().split('?').next().unwrap();
+            assert!(incoming.url().ends_with(if force {
+                "?refresh=true"
+            } else {
+                "?max_age_seconds=30"
+            }));
             let value = if path.ends_with("required-checks") {
+                if matches!(case, ProofCase::ForceCurrent) {
+                    let now = crate::issues::worker::now();
+                    policy["pull_request_confirmation"]["validated_at_ms"] = json!(now);
+                    policy["observed_at_ms"] = json!(now);
+                }
                 &policy
             } else if path.ends_with("metadata") {
+                assert!(
+                    !confirmed,
+                    "Current personal policy confirmation must avoid another metadata read"
+                );
                 &metadata
             } else if path.ends_with("ci") {
                 held_ci = Some(incoming);
@@ -292,7 +377,7 @@ fn conflict_releases_the_existing_item_before_optional_ci_returns() {
         .unwrap();
     runtime.block_on(async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let required = poll_required(&ctx, &client, url, "o/r", 1, deadline, false)
+        let required = poll_required(&ctx, &client, url, "o/r", 1, deadline, force)
             .await
             .unwrap()
             .unwrap();
@@ -366,6 +451,9 @@ fn changed_review_head_preserves_the_validated_ci_failure() {
 #[derive(Clone, Copy)]
 enum Scenario {
     ReviewsDenied,
+    ConfirmedReviewsDenied,
+    ConfirmedHeadChanged,
+    ConfirmationAgedDuringCi,
     Pending,
     NativeStack,
     Stale,
@@ -382,6 +470,17 @@ enum Scenario {
     PolicyErrorStale,
     PolicyErrorDenied,
     PolicyErrorWrongIdentity,
+}
+
+#[test]
+fn confirmed_selectors_still_collect_reviews_and_reject_a_changed_ci_head() {
+    scenario(Scenario::ConfirmedReviewsDenied);
+    scenario(Scenario::ConfirmedHeadChanged);
+}
+
+#[test]
+fn confirmation_freshness_is_checked_again_after_slow_ci() {
+    scenario(Scenario::ConfirmationAgedDuringCi);
 }
 
 #[test]
@@ -418,6 +517,13 @@ fn disabled_link_auto_close_still_finishes_terminal_watch() {
 }
 
 fn scenario(scenario: Scenario) {
+    let confirmed = matches!(
+        scenario,
+        Scenario::ConfirmedReviewsDenied
+            | Scenario::ConfirmedHeadChanged
+            | Scenario::ConfirmationAgedDuringCi
+    );
+    let aged_confirmation = matches!(scenario, Scenario::ConfirmationAgedDuringCi);
     let policy_error = matches!(
         scenario,
         Scenario::PolicyErrorClosed
@@ -436,7 +542,10 @@ fn scenario(scenario: Scenario) {
     let stale = matches!(scenario, Scenario::Stale);
     let invalid_time = matches!(scenario, Scenario::InvalidTime);
     let ci_denied = matches!(scenario, Scenario::CiDenied);
-    let head_changed = matches!(scenario, Scenario::HeadChanged);
+    let head_changed = matches!(
+        scenario,
+        Scenario::HeadChanged | Scenario::ConfirmedHeadChanged
+    );
     let review_head_changed = matches!(scenario, Scenario::ReviewHeadChanged);
     let terminal = matches!(
         scenario,
@@ -481,6 +590,24 @@ fn scenario(scenario: Scenario) {
     }
     drop(store);
     let (mut ci, mut policy, mut metadata) = evidence(pending, stale);
+    if confirmed {
+        let head = "a".repeat(40);
+        metadata["data"]["head"]["sha"] = json!(head);
+        metadata["data"]["node_id"] = json!("PR_1");
+        metadata["data"]["merged"] = json!(false);
+        metadata["data"]["mergeable"] = json!(true);
+        metadata["data"]["merge_commit_sha"] = Value::Null;
+        metadata["data"]["stack"] = Value::Null;
+        metadata["data"]["base"] = json!({"ref":"main","sha":"b".repeat(40),"repo":{"full_name":"o/r","node_id":"R_1","id":1}});
+        ci["data"]["head_sha"] = json!(head);
+        ci["data"]["check_runs"][0]["head_sha"] = json!(head);
+        policy["head_sha"] = json!(head);
+        policy["checks"][0]["sha"] = json!(head);
+        policy["pr_base_sha"] = metadata["data"]["base"]["sha"].clone();
+        policy["policy_identity"] = json!({"branch":"main","stack":null});
+        policy["pull_request_confirmation"] =
+            json!({"selectors":metadata["data"],"validated_at_ms":metadata["validated_at_ms"]});
+    }
     if matches!(scenario, Scenario::NativeStack) {
         let trunk = "cccccccccccccccccccccccccccccccccccccccc";
         let stack =
@@ -538,7 +665,7 @@ fn scenario(scenario: Scenario) {
             3
         } else {
             4
-        };
+        } - usize::from(confirmed && !aged_confirmation);
         let mut requests = std::collections::BTreeSet::new();
         for _ in 0..expected {
             let request = server
@@ -557,6 +684,14 @@ fn scenario(scenario: Scenario) {
             let path = request.url().split('?').next().unwrap();
             let (body, code) = match path {
                 "/v1/prs/o/r/1/ci" => {
+                    if aged_confirmation {
+                        let expires = policy["pull_request_confirmation"]["validated_at_ms"]
+                            .as_i64()
+                            .unwrap()
+                            + 30_010;
+                        let remaining = expires.saturating_sub(crate::issues::worker::now());
+                        std::thread::sleep(Duration::from_millis(remaining.max(0) as u64));
+                    }
                     let db = Store::open_connection(&database).unwrap();
                     let assignee: Option<String> = db
                         .query_row("SELECT assignee FROM issues WHERE number=1", [], |r| {
@@ -576,6 +711,21 @@ fn scenario(scenario: Scenario) {
                 "/v1/prs/o/r/1/required-checks" if policy_error => (&policy_failure, 422),
                 "/v1/prs/o/r/1/required-checks" => (&policy, 200),
                 "/v1/prs/o/r/1/metadata" => {
+                    assert!(
+                        !confirmed || aged_confirmation,
+                        "Confirmed selectors must avoid the metadata RPC"
+                    );
+                    if aged_confirmation {
+                        assert!(requests.iter().any(|url| url.contains("/ci?")));
+                        assert!(
+                            crate::issues::worker::now()
+                                - policy["pull_request_confirmation"]["validated_at_ms"]
+                                    .as_i64()
+                                    .unwrap()
+                                >= 30_000
+                        );
+                        metadata["validated_at_ms"] = json!(crate::issues::worker::now());
+                    }
                     assert!(!policy_error || request.url().ends_with("?refresh=true"));
                     if matches!(scenario, Scenario::PolicyErrorDenied) {
                         (&Value::Null, 403)
@@ -657,7 +807,12 @@ fn scenario(scenario: Scenario) {
     }
     if head_changed || review_head_changed {
         assert_eq!(
-            status["head"], "head",
+            status["head"],
+            if confirmed {
+                "a".repeat(40)
+            } else {
+                "head".into()
+            },
             "Retain the independently validated early observation"
         );
         assert!(status["error"].as_str().unwrap().contains("changed"));
