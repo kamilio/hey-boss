@@ -12,6 +12,32 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_VISUAL"] {
+        app.setActivationPolicy(.regular)
+        let suite = "hey-boss-quick-visual"
+        let prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        let ui = NativeQuickIssue(preferences: prefs)
+        ui.runner = { _, reply in reply(.success(Data("{\"projects\":[{\"id\":\"named:Visual\",\"name\":\"Visual\"}]}".utf8))) }
+        ui.open(cli: nil); ui.current = ui.projects.first
+        ui.window.delegate = nil
+        ui.window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
+        ui.input.stringValue = "Fix the screenshot preview @Visual"; ui.changed()
+        if state.contains("images") || state.contains("saving") {
+            let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
+                NSColor.systemIndigo.setFill(); rect.fill()
+                NSColor.systemTeal.setFill(); NSBezierPath(roundedRect: rect.insetBy(dx: 30, dy: 25), xRadius: 12, yRadius: 12).fill(); return true
+            }
+            ui.images = (1...5).map { QuickIssueImage(name: "Screenshot \($0).png", data: Data(), thumbnail: image) }; ui.rebuildImages()
+        }
+        if state.contains("saving") { ui.saving = true; ui.context.stringValue = "Attaching image 2 of 5…" }
+        if state.contains("error") { ui.error.stringValue = "Cannot read this image. Choose an image up to 10 MiB." }
+        if state.contains("empty") { ui.input.stringValue = "" }
+        if state.contains("success") { ui.succeeded = true; ui.context.stringValue = "Created #42 in Visual" }
+        if state.contains("compact") { ui.window.setContentSize(NSSize(width: 520, height: ui.window.frame.height)) }
+        ui.updateEnabled(); ui.layout()
+        withExtendedLifetime(ui) { app.run() }; return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGENTS"] == "1" { auditNotificationAgents(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUIET_HOURS"] == "1" { auditQuietHours(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
@@ -275,6 +301,8 @@ func auditQuickIssue() {
     precondition(item.keyEquivalent == "i" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
     auditNativeQuickIssue()
+    auditQuickIssueMedia()
+    if ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_INTEGRATION"] == "1" { auditQuickIssueMediaIntegration() }
     var calls = 0
     let shortcut = QuickIssueShortcut { calls += 1 }
     withExtendedLifetime(shortcut) {
@@ -382,15 +410,27 @@ func auditNativeQuickIssue() {
     ui.input.stringValue = ""; ui.error.stringValue = ""; ui.changed()
     // Render real AppKit controls, not a mock. Screenshots are opt-in and the
     // caller owns cleanup; normal audits leave no visual artifacts behind.
-    if let output = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_SCREENSHOTS"] {
+    let renders = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_RENDERS"]
+    if let output = renders ?? ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_SCREENSHOTS"] {
         try! FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
         // Other running apps may take focus during capture; keep this synthetic
         // audit window visible rather than applying production blur dismissal.
         ui.window.delegate = nil
+        if renders != nil {
+            // Render our own native controls without reading the desktop. Glass
+            // needs the window server, so use a plain native surface for this audit.
+            ui.canvas.removeFromSuperview(); ui.window.contentView = ui.canvas
+            ui.canvas.wantsLayer = true
+        }
         ui.window.makeKeyAndOrderFront(nil)
         for dark in [false, true] {
             ui.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            for state in ["empty", "loading", "projects", "error", "long", "saving", "success"] {
+            ui.window.appearance?.performAsCurrentDrawingAppearance {
+                ui.canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            }
+            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "saving", "success", "compact"] {
+                ui.images = []; ui.rebuildImages()
+                ui.window.setContentSize(NSSize(width: state == "compact" ? 520 : 680, height: ui.window.frame.height))
                 ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
                 ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
                 ui.input.stringValue = state == "empty" ? "" : "Fix reconnect @po"
@@ -400,6 +440,16 @@ func auditNativeQuickIssue() {
                 if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.stringValue).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
                 if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.stringValue = "Fix reconnect @missing" }
                 if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30); ui.changed() }
+                if ["images", "image-error", "saving", "compact"].contains(state) {
+                    let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
+                        NSColor.systemIndigo.setFill(); rect.fill()
+                        NSColor.systemTeal.setFill(); NSBezierPath(roundedRect: rect.insetBy(dx: 30, dy: 25), xRadius: 12, yRadius: 12).fill()
+                        return true
+                    }
+                    ui.images = (1...5).map { QuickIssueImage(name: "Screenshot \($0).png", data: Data(), thumbnail: image) }; ui.rebuildImages()
+                    ui.input.stringValue = "Fix the screenshot preview @poe-code"
+                }
+                if state == "image-error" { ui.error.stringValue = "Cannot read this image. Choose an image up to 10 MiB." }
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
                 for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
                 ui.window.displayIfNeeded()
@@ -407,12 +457,18 @@ func auditNativeQuickIssue() {
                 let path = URL(fileURLWithPath: output).appendingPathComponent("\(dark ? "dark" : "light")-\(state).png")
                 // Capture the actual window: cacheDisplay omits the controls
                 // hosted inside NSGlassEffectView and disrupts its backing view.
-                let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-                capture.arguments = ["-x", "-o", "-l", String(ui.window.windowNumber), path.path]
-                try! capture.run(); capture.waitUntilExit()
-                precondition(capture.terminationStatus == 0, "Window screenshots require Screen Recording access")
+                if renders != nil {
+                    let bitmap = ui.canvas.bitmapImageRepForCachingDisplay(in: ui.canvas.bounds)!
+                    ui.canvas.cacheDisplay(in: ui.canvas.bounds, to: bitmap)
+                    try! bitmap.representation(using: .png, properties: [:])!.write(to: path)
+                } else {
+                    let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    capture.arguments = ["-x", "-o", "-l", String(ui.window.windowNumber), path.path]
+                    try! capture.run(); capture.waitUntilExit()
+                    precondition(capture.terminationStatus == 0, "Window screenshots require Screen Recording access")
+                }
                 let bitmap = NSBitmapImageRep(data: try! Data(contentsOf: path))!
-                for (x, y) in [(0, 0), (bitmap.pixelsWide - 1, 0), (0, bitmap.pixelsHigh - 1), (bitmap.pixelsWide - 1, bitmap.pixelsHigh - 1)] {
+                for (x, y) in renders != nil ? [] : [(0, 0), (bitmap.pixelsWide - 1, 0), (0, bitmap.pixelsHigh - 1), (bitmap.pixelsWide - 1, bitmap.pixelsHigh - 1)] {
                     precondition(bitmap.colorAt(x: x, y: y)!.alphaComponent == 0, "Panel corners must remain transparent")
                 }
             }
@@ -420,6 +476,133 @@ func auditNativeQuickIssue() {
     }
     ui.window.close()
     print("Passed: native quick-add parsing, Unicode, project matching, Boss identity, queue placement, in-flight guard, draft retention and idempotent retry")
+}
+
+final class QuickIssuePasteAuditText: NSTextView {
+    var pasteCalls = 0
+    override func paste(_ sender: Any?) { pasteCalls += 1 }
+}
+
+func auditQuickIssueMedia() {
+    let suite = "hey-boss-media-\(UUID().uuidString)"
+    let prefs = UserDefaults(suiteName: suite)!
+    defer { prefs.removePersistentDomain(forName: suite) }
+    let ui = NativeQuickIssue(present: false, preferences: prefs)
+    ui.ready = true; ui.current = QuickIssueProject(id: "named:Media", name: "Media")
+    ui.projects = [ui.current!]; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
+        NSColor.systemBlue.setFill(); rect.fill(); return true
+    }
+    let board = NSPasteboard.withUniqueName()
+    defer { board.releaseGlobally() }
+    board.writeObjects([image])
+    // Exercise the actual shortcut without touching the user's clipboard.
+    ui.window.pasteImage = { ui.pasteImages(board) }
+    let paste = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)!
+    ui.window.makeFirstResponder(ui.bottom)
+    precondition(ui.window.performKeyEquivalent(with: paste) && ui.images.count == 1, "Command-V attaches with button focus too")
+    precondition(ui.input.stringValue == "Fix screenshot", "Image paste preserves the title")
+    ui.window.makeFirstResponder(ui.input)
+    ui.window.sendEvent(paste)
+    precondition(ui.images.count == 2, "Command-V reaches images through the field editor")
+    let repeatPaste = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "v", charactersIgnoringModifiers: "v", isARepeat: true, keyCode: 9)!
+    ui.window.sendEvent(repeatPaste)
+    precondition(ui.images.count == 2, "Holding Command-V must not duplicate attachments")
+    let fallback = QuickIssuePasteAuditText(frame: .zero)
+    ui.canvas.addSubview(fallback); ui.window.makeFirstResponder(fallback)
+    board.clearContents(); board.setString("ordinary text", forType: .string)
+    ui.window.sendEvent(paste)
+    precondition(fallback.pasteCalls == 1, "Text-only paste reaches the native editor")
+    ui.window.makeFirstResponder(ui.input); fallback.removeFromSuperview()
+    board.clearContents(); board.writeObjects([image])
+    ui.images = []; ui.rebuildImages()
+    precondition(ui.pasteImages(board) && ui.images.count == 1)
+    precondition(ui.images[0].name.hasSuffix(".png"), "Clipboard TIFF is normalized for web preview")
+    ui.dismiss(); precondition(ui.images.count == 1, "Dismissal retains pasted images")
+    var calls: [[String]] = []; var reply: ((Result<Data, Error>) -> Void)?
+    ui.runner = { args, completion in calls.append(args); reply = completion }
+    ui.create(); precondition(calls.last!.contains("--draft"), "Workers cannot pick up an incomplete image issue")
+    ui.window.sendEvent(paste)
+    precondition(ui.images.count == 1, "Cannot add images during submission")
+    reply?(.success(Data("{\"issue\":{\"number\":42}}".utf8)))
+    precondition(calls.last!.first == "attachment" && calls.last!.contains("42"))
+    let upload = calls.last!
+    reply?(.failure(StorageError(description: "Upload interrupted")))
+    precondition(!ui.saving && !ui.input.isEnabled && ui.images.count == 1 && ui.error.stringValue.contains("42"))
+    precondition(!ui.pasteImages(board), "A partial submission stays immutable")
+    ui.create(); precondition(calls.last! == upload, "Retry resumes the same attachment without another issue")
+    reply?(.success(Data("{\"attachment\":{\"id\":\"f-test\"}}".utf8)))
+    precondition(calls.last!.first == "undraft")
+    let publish = calls.last!
+    reply?(.failure(StorageError(description: "Response lost")))
+    ui.create(); precondition(calls.last! == publish, "Publication retry reuses its receipt")
+    reply?(.success(Data("{\"issue\":{\"number\":42}}".utf8)))
+    precondition(ui.succeeded && ui.images.isEmpty && ui.mediaSubmission == nil)
+    precondition(!FileManager.default.fileExists(atPath: upload[2]), "Upload staging files are removed")
+    ui.succeeded = false; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    board.clearContents(); board.setString("ordinary text", forType: .string)
+    precondition(!ui.pasteImages(board), "Plain text keeps normal paste behavior")
+    board.clearContents(); board.setData(Data("broken".utf8), forType: .png)
+    precondition(ui.pasteImages(board) && ui.images.isEmpty && !ui.error.stringValue.isEmpty)
+    board.clearContents(); board.setData(Data(repeating: 0, count: 10 * 1024 * 1024 + 1), forType: .png)
+    precondition(ui.pasteImages(board) && ui.images.isEmpty && ui.error.stringValue.contains("10 MiB"))
+    let files = FileManager.default.temporaryDirectory.appendingPathComponent("hb-clipboard-files-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: files, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: files) }
+    let png = try! ArtifactImageInput(url: nil, bytes: image.tiffRepresentation!, name: "Screenshot.tiff").contents()
+    let first = files.appendingPathComponent("Screen one.png"), second = files.appendingPathComponent("Screen two.png")
+    try! png.data.write(to: first); try! png.data.write(to: second)
+    board.clearContents(); board.writeObjects([first as NSURL, second as NSURL])
+    precondition(ui.pasteImages(board) && ui.images.map(\.name) == ["Screen one.png", "Screen two.png"], "Copied Finder images retain filenames and order")
+    precondition(ui.images.allSatisfy { $0.data == png.data }, "Image contents survive paste")
+    ui.images = []; ui.rebuildImages()
+    board.clearContents(); board.writeObjects([image])
+    for _ in 0..<8 { precondition(ui.pasteImages(board)) }
+    precondition(ui.images.count == 8)
+    precondition(ui.pasteImages(board) && ui.images.count == 8 && !ui.error.stringValue.isEmpty)
+    let remove = ui.imageCanvas.subviews.compactMap { $0 as? NSButton }.first!
+    ui.removeImage(remove); precondition(ui.images.count == 7)
+    board.clearContents(); board.writeObjects([first as NSURL, second as NSURL])
+    precondition(ui.pasteImages(board) && ui.images.count == 7, "An over-limit batch is rejected without partially adding files")
+    while !ui.images.isEmpty {
+        ui.removeImage(ui.imageCanvas.subviews.compactMap { $0 as? NSButton }.first!)
+    }
+    precondition(ui.imageStrip.isHidden && ui.window.frame.height == 182, "Removing all images collapses the preview strip")
+    ui.window.pasteImage = nil
+    ui.window.close()
+    print("Passed: native pasted images, staged publication, safe retries, cleanup")
+}
+
+func auditQuickIssueMediaIntegration() {
+    precondition(ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"]?.hasPrefix("/tmp/") == true, "Use an isolated temporary issue store")
+    let suite = "hey-boss-quick-integration"; let prefs = UserDefaults(suiteName: suite)!
+    defer { prefs.removePersistentDomain(forName: suite) }
+    let ui = NativeQuickIssue(present: false, preferences: prefs)
+    ui.ready = true; ui.current = QuickIssueProject(id: "named:Native media test", name: "Native media test")
+    ui.projects = [ui.current!]; ui.input.stringValue = "Screenshot regression"; ui.changed()
+    let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+    let sample = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in NSColor.systemTeal.setFill(); rect.fill(); return true }
+    board.writeObjects([sample]); precondition(ui.pasteImages(board)); precondition(ui.pasteImages(board))
+    ui.create()
+    func wait(_ condition: () -> Bool) {
+        let deadline = Date(timeIntervalSinceNow: 45)
+        while !condition() && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
+        precondition(condition(), "Native CLI operation timed out")
+    }
+    wait { !ui.saving }
+    precondition(ui.succeeded, ui.error.stringValue)
+    var result: Result<Data, Error>?
+    ui.request(["view", "1", "--project", "Native media test", "--json"]) { result = $0 }; wait { result != nil }
+    let value = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]
+    let issue = value["issue"] as! [String: Any]
+    precondition(issue["draft"] as? Bool == false && issue["title"] as? String == "Screenshot regression")
+    result = nil
+    ui.request(["attachment", "list", "--issue", "1", "--project", "Native media test", "--json"]) { result = $0 }; wait { result != nil }
+    let listed = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]
+    let attachments = listed["attachments"] as! [[String: Any]]
+    precondition(attachments.count == 2 && attachments.allSatisfy { ($0["name"] as? String)?.hasSuffix(".png") == true })
+    ui.window.close()
+    print("Passed: real CLI creates a draft, stores two pasted images and publishes the complete issue")
 }
 
 func auditInbox(root: URL, sample: Record) {
