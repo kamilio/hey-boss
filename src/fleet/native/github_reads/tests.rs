@@ -150,6 +150,26 @@ fn slow_github_reads_overlap_without_blocking_control_and_keep_bounded_slots() {
 }
 
 #[test]
+fn completed_read_wakes_the_owner_without_an_incoming_peer_frame() {
+    let f = Fixture::new();
+    let backend = backend(f.client.clone());
+    assert!(backend.submit("1", read()).unwrap().is_none());
+    f.admitted(1);
+    let started = Instant::now();
+    f.release.send(()).unwrap();
+    // The connection thread has no further peer input while GitHub completes.
+    // A wake before park must also be retained, avoiding a lost-wakeup race.
+    std::thread::park_timeout(Duration::from_secs(2));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "completed response waited for the idle receive timeout"
+    );
+    let completed = backend.drain();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].id, "1");
+}
+
+#[test]
 fn cancelling_one_request_keeps_peers_and_disconnect_drops_pending_work() {
     let f = Fixture::new();
     let backend = backend(f.client.clone());
