@@ -118,7 +118,8 @@ impl ApiClient {
         .await
     }
 
-    /// Same cursor/event boundaries as a full read; only PR row fields change.
+    /// Same cursor scope and event semantics as a full read. Compact projections
+    /// may fit more rows in a page; drain `has_more` for either representation.
     pub async fn pr_status_selected(
         &self,
         selection: PrStatusSelection<'_>,
