@@ -960,6 +960,7 @@ All methods return Promises. Account PR pages use camelCase; other responses pre
 | GET | `/v1/prs/OWNER/REPO/NUMBER/ci` | CI-only report |
 | GET | `/v1/prs/OWNER/REPO/NUMBER/required-checks` | Required-check policy report |
 | GET | `/v1/repos/OWNER/REPO` | Branch reconciliation and commits |
+| GET | `/v1/repos/OWNER/REPO/pr-lifecycles?numbers=1,2` | Up to 25 personal-account PR lifecycle records; no CI or activity reads |
 | GET | `/v1/repos/OWNER/REPO/prs` | All authors’ PRs; `state=open/closed/all` |
 | GET | `/v1/snapshot` | Atomic bootstrap |
 | GET | `/v1/changes` | Cursor feed; optional long polling |
@@ -1013,3 +1014,5 @@ Package upgrades install/reload the service on companions and update the command
 card. Supervisors retain their existing PR monitor ownership unless a service was
 explicitly installed. Custom `serve --listen/--cache/--hostname` instances remain
 separately owned; the service command manages only the default local instance.
+
+`ApiClient::pr_lifecycles` batches up to 25 distinct PR numbers into one personal-account GraphQL read. It returns lifecycle, title, authorship, and the original source validation times. Scoped missing/denied PRs appear in `errors` with `complete=false`; other independently validated records remain usable. Global errors and rate limits fail the read. The endpoint uses the shared queue, read deadlines, and repository/PR identity fences. Its cache is separate from generic GraphQL and REST metadata; these records do not establish CI or merge readiness.

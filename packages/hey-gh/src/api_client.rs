@@ -74,6 +74,28 @@ impl ApiClient {
         .await
     }
 
+    /// Bounded personal-account lifecycle metadata, without CI or activity reads.
+    pub async fn pr_lifecycles(
+        &self,
+        repository: &str,
+        numbers: &[u64],
+        freshness: Freshness,
+    ) -> Result<crate::PrLifecycleBatch> {
+        let numbers = crate::client::lifecycle::numbers(repository, numbers)?;
+        let selected = numbers
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.read(
+            self.http
+                .get(self.url(&format!("v1/repos/{repository}/pr-lifecycles")))
+                .query(&self.pr_query(freshness)?)
+                .query(&[("numbers", selected)]),
+        )
+        .await
+    }
+
     pub async fn pr_status(
         &self,
         repository: Option<&str>,

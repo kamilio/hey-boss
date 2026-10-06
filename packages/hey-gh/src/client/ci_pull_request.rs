@@ -44,7 +44,7 @@ impl Client {
     }
 
     // Fixed CI-only endpoint. Generic PR metadata and activity stay personal.
-    async fn ci_pr_response(
+    pub(super) async fn ci_pr_response(
         &self,
         repository: &str,
         number: u64,
