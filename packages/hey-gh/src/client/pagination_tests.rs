@@ -311,29 +311,34 @@ async fn changed_chain_follows_actual_next_page() {
 
 #[tokio::test]
 async fn speculative_queue_rejection_retries_when_page_becomes_required() {
-    let f = Fixture::new().await;
-    let leave = f.client.interactive_reserved_slots() + 1;
-    let _held = f
-        .client
-        .0
-        .permits
-        .acquire_many((f.client.0.config.queue_capacity - leave) as u32)
+    for _ in 0..16 {
+        let f = Fixture::new().await;
+        let leave = f.client.interactive_reserved_slots() + 1;
+        let _held = f
+            .client
+            .0
+            .permits
+            .acquire_many((f.client.0.config.queue_capacity - leave) as u32)
+            .await
+            .unwrap();
+        let mut task = f.read();
+        tokio::select! {
+            _ = signal(&f.second_started) => {},
+            result = &mut task => panic!("Required page lost admission to speculation: {result:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().queue_full_rejections == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
-    let task = f.read();
-    signal(&f.second_started).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while f.client.status().queue_full_rejections == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    f.second_release.notify_one();
-    assert_eq!(
-        task.await.unwrap().unwrap(),
-        vec![json!(1), json!(2), json!(3)]
-    );
+        f.second_release.notify_one();
+        assert_eq!(
+            task.await.unwrap().unwrap(),
+            vec![json!(1), json!(2), json!(3)]
+        );
+    }
 }
 
 #[tokio::test]

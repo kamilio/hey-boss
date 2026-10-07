@@ -1006,6 +1006,7 @@ impl Client {
             deadline: Some(waiter_deadline),
             changed: self.0.queue_changed.clone(),
         };
+        pagination::admitted();
         let receiver = waiter.receiver.as_mut().expect("live request waiter");
         let mut wait = crate::collection_budget::Wait::current(true);
         loop {
