@@ -29,6 +29,7 @@ mod confirmation_tests;
 pub(crate) mod lifecycle;
 mod policy_ci;
 mod policy_retirement;
+pub(crate) mod source_completion;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -492,6 +493,10 @@ impl Client {
         )
     }
 
+    pub(crate) fn source_completion(&self) -> source_completion::SourceCompletion {
+        source_completion::SourceCompletion::new(self.0.queue_changed.clone())
+    }
+
     // Inspect cached evidence before deciding whether to consume its validation.
     pub(crate) async fn peek_get(&self, path: &str) -> Result<Response> {
         self.request(
@@ -756,7 +761,9 @@ impl Client {
             && CACHE_PROBE.try_with(|_| ()).is_err())
         .then(|| digest(&key));
         let mut queue_clock = None;
-        let (receiver, shared_deadline, caller_limit, waiter_deadline) = loop {
+        // Registration ends with this caller's wait, even when another reader
+        // keeps the shared job alive after a timeout or cancellation.
+        let (receiver, shared_deadline, caller_limit, waiter_deadline, _source_request) = loop {
             let observed_sequence = completion_fingerprint.as_ref().map(|_| {
                 self.0
                     .inflight
@@ -846,6 +853,9 @@ impl Client {
                 if required_read {
                     required.store(true, Ordering::Relaxed);
                 }
+                let source_request = required_read
+                    .then(|| source_completion::track(completion))
+                    .flatten();
                 if selector_validation {
                     track_pending_validation(completion);
                 }
@@ -864,6 +874,7 @@ impl Client {
                     shared_deadline.clone(),
                     caller_limit,
                     waiter_deadline,
+                    source_request,
                 );
             } else {
                 if completion_fingerprint
@@ -916,6 +927,9 @@ impl Client {
                 let waiter_deadline = waiting_deadlines.register(caller_deadline);
                 let completion = Arc::new(AtomicBool::new(completion_validation));
                 let required = Arc::new(AtomicBool::new(required_read));
+                let source_request = required_read
+                    .then(|| source_completion::track(&completion))
+                    .flatten();
                 if selector_validation {
                     track_pending_validation(&completion);
                 }
@@ -975,7 +989,13 @@ impl Client {
                         waiting_deadlines,
                     ),
                 );
-                break (receiver, deadline, caller_limit, waiter_deadline);
+                break (
+                    receiver,
+                    deadline,
+                    caller_limit,
+                    waiter_deadline,
+                    source_request,
+                );
             }
         };
         let mut waiter = RequestWaiter {
