@@ -1,10 +1,23 @@
 use super::{Client, Error, Freshness, Result, endpoint_class, next_link};
 use crate::Response;
 use serde_json::Value;
-use std::{collections::HashSet, future::Future, pin::Pin};
+use std::{collections::HashSet, future::Future, pin::Pin, sync::Arc};
+use tokio::sync::Notify;
 use url::Url;
 
-type PageRead<'a> = Pin<Box<dyn Future<Output = Result<Response>> + Send + 'a>>;
+struct PageRead<'a> {
+    future: Pin<Box<dyn Future<Output = Result<Response>> + Send + 'a>>,
+    admitted: Arc<Notify>,
+}
+
+tokio::task_local! { static PAGE_ADMISSION: Arc<Notify>; }
+
+// Polling the required future first is insufficient: its cache lookup yields
+// before queue admission. Start speculation only after that read owns or joins
+// a queue slot, so it cannot steal its predecessor's last available permit.
+pub(super) fn admitted() {
+    let _ = PAGE_ADMISSION.try_with(|ready| ready.notify_one());
+}
 
 struct Prefetch<'a> {
     url: String,
@@ -18,7 +31,8 @@ impl Client {
         freshness: Freshness,
         completed_version: Option<(&'a str, bool)>,
     ) -> PageRead<'a> {
-        Box::pin(async move {
+        let admitted = Arc::new(Notify::new());
+        let future = PAGE_ADMISSION.scope(admitted.clone(), async move {
             if let Some((version, allow_empty)) = completed_version {
                 self.completed_job_page(&url, version, allow_empty, freshness)
                     .await
@@ -27,7 +41,11 @@ impl Client {
                 // the preceding page actually includes it in this collection.
                 self.request(url, None, freshness).await
             }
-        })
+        });
+        PageRead {
+            future: Box::pin(future),
+            admitted,
+        }
     }
 
     pub(super) async fn collect_pages(
@@ -62,20 +80,24 @@ impl Client {
             let mut response = if let Some(ahead) = &mut ahead {
                 tokio::select! {
                     biased;
-                    response = &mut current => response,
-                    response = &mut ahead.read => {
-                        ahead.read = Box::pin(async move { response });
-                        current.await
+                    response = &mut current.future => response,
+                    response = async {
+                        current.admitted.notified().await;
+                        (&mut ahead.read.future).await
+                    } => {
+                        ahead.read.future = Box::pin(async move { response });
+                        current.future.await
                     }
                 }
             } else {
-                current.await
+                current.future.await
             };
             // Speculation can lose admission to its predecessor. Once this
             // page is required, retry normal admission after that page finishes.
             if prefetched && matches!(response, Err(Error::QueueFull)) {
                 response = self
                     .page_read(path.clone(), freshness, completed_version)
+                    .future
                     .await;
             }
             let response = response?;
