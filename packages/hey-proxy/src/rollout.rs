@@ -626,6 +626,7 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
             url,
             api_key: key.context("Host key not provisioned")?.into(),
         });
+        remote.accounts.clear();
         remote.api_keys.clear();
         remote.gemini = None;
         remote.claude = None;
@@ -642,7 +643,8 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
 /// A missing/unavailable 1Password source must fail before replacing a service.
 pub(crate) async fn check_credentials(config: &Config) -> Result<()> {
     use hey_proxy::{credentials::CredentialResolver, gemini::Auth};
-    if config.api_keys.is_empty()
+    if config.accounts.is_empty()
+        && config.api_keys.is_empty()
         && config.gemini.is_none()
         && config.claude.is_none()
         && config.codex.is_none()
@@ -652,6 +654,14 @@ pub(crate) async fn check_credentials(config: &Config) -> Result<()> {
     }
     let resolver = CredentialResolver::default();
     let ttl = std::time::Duration::from_secs(config.credential_cache_seconds);
+    for account in config.accounts.values() {
+        if let crate::config::accounts::AccountConfig::Openai { credential, .. } = account {
+            resolver
+                .resolve(credential, ttl)
+                .await
+                .context("Named API credential source unavailable")?;
+        }
+    }
     for source in config.api_keys.values() {
         resolver
             .resolve(source, ttl)
@@ -1466,6 +1476,22 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn named_accounts_stay_on_host_when_generating_a_client_config() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "listen":"127.0.0.1:8080", "account_schema_version":1,
+            "accounts":{"work":{"implementation":"codex","auth":"subscription","credentials_file":"work.json"}},
+            "ssh_hosts":[{"host":"host","mode":"host","url":"https://proxy.example"},{"host":"client","mode":"client","via":"host"}]
+        })).unwrap();
+        let remote =
+            remote_config_with_key(&config, &config.ssh_hosts[1], Some("synthetic-host-access"))
+                .unwrap();
+        assert!(remote.accounts.is_empty());
+        let value = serde_json::to_string(&remote).unwrap();
+        assert!(!value.contains("work.json"));
+        assert!(!value.contains("account_schema_version"));
+    }
+
     #[test]
     fn remote_sync_omits_host_inventory_and_preserves_routes() {
         let mut config = Config {

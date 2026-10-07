@@ -49,12 +49,18 @@ enum Command {
     CheckCredentials,
     /// Sign in to Claude; the proxy stores and refreshes its own OAuth tokens
     ClaudeLogin {
+        /// Named provider connection (credentials remain on this host)
+        #[arg(long)]
+        account: Option<String>,
         /// Print the authorization URL without opening a browser
         #[arg(long)]
         no_browser: bool,
     },
     /// Sign in with a Codex (ChatGPT) subscription and store proxy-owned OAuth credentials
     CodexLogin {
+        /// Named provider connection (credentials remain on this host)
+        #[arg(long)]
+        account: Option<String>,
         /// Print the authorization URL without opening a browser
         #[arg(long)]
         no_browser: bool,
@@ -222,15 +228,28 @@ async fn main() -> Result<()> {
     } else {
         config::load_or_create(&path)?
     };
-    if let Some(Command::ClaudeLogin { no_browser }) = &args.command {
+    if let Some(Command::ClaudeLogin {
+        account,
+        no_browser,
+    }) = &args.command
+    {
+        let config = match account {
+            Some(name) => config.select_account(name, "claude")?,
+            None => config.clone(),
+        };
         return claude_auth::login(&config, &path, *no_browser).await;
     }
     if let Some(Command::CodexLogin {
+        account,
         no_browser,
         device_code,
         import_codex_home,
     }) = &args.command
     {
+        let config = match account {
+            Some(name) => config.select_account(name, "codex")?,
+            None => config.clone(),
+        };
         return codex_auth::login(
             &config,
             &path,
@@ -272,6 +291,15 @@ async fn main() -> Result<()> {
                     &provider.token_url(),
                 )
                 .await?;
+        }
+        if !config.accounts.is_empty() {
+            let snapshot = proxy::local_snapshot(config.clone(), Some(path.clone()))?;
+            for name in config.accounts.keys() {
+                snapshot
+                    .select(name)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Named account is not ready"))?;
+            }
         }
         println!("Credential sources ready");
         return Ok(());

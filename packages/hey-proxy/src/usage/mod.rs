@@ -33,6 +33,23 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Versioned, allowlisted discovery. No credential paths or provider identities.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Connections {
+    pub schema_version: u32,
+    pub capabilities: Vec<String>,
+    pub connections: Vec<Connection>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Connection {
+    pub name: String,
+    pub implementation: String,
+    pub auth: String,
+    pub ready: bool,
+    /// Persist with the selected name; send both headers on every inference request.
+    pub account_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub provider: String,

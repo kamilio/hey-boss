@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 #[derive(Default)]
-pub(super) struct Cache {
+pub(in crate::proxy) struct Cache {
     identity: Option<[u8; 32]>,
     retry_at: Option<Instant>,
     updated_at: Option<u64>,
@@ -139,7 +139,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
     } else {
         return json!({"state":"disabled"});
     };
-    let path = match service
+    let path = match proxy
         .claude
         .paths
         .resolve(provider, service.source.as_deref())
@@ -150,16 +150,55 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             return json!({"state":"error","error":"Claude credential store is not configured"});
         }
     };
-    let token = match service.claude.tokens.token(&path, &proxy.client).await {
-        Ok(token) => token,
-        Err(error) => return json!({"state":"error","error":error.to_string()}),
+    let token = if let Some(binding) = &proxy.binding {
+        binding.token.clone()
+    } else {
+        match proxy.claude.tokens.token(&path, &proxy.client).await {
+            Ok(token) => token,
+            Err(error) => return json!({"state":"error","error":error.to_string()}),
+        }
     };
     let identity: [u8; 32] = Sha256::digest(
         format!("{}\0{}\0{}", path.display(), provider.upstream_url, token).as_bytes(),
     )
     .into();
     // This mutex coalesces polling across tabs. It never blocks model requests.
-    let mut cache = service.claude.usage.lock().await;
+    let legacy_quota = if proxy.binding.is_none() && !proxy.config.accounts.is_empty() {
+        let resolved = async {
+            let id = crate::claude_auth::account_identity(
+                &path,
+                &proxy.client,
+                &provider.upstream_url,
+                &token,
+            )
+            .await?;
+            proxy.quota_for("claude", &id).await
+        }
+        .await;
+        match resolved {
+            Ok(quota) => Some(quota),
+            Err(_) => return json!({"state":"error","error":"Subscription identity unavailable"}),
+        }
+    } else {
+        None
+    };
+    let identity = proxy
+        .binding
+        .as_ref()
+        .map(|b| Sha256::digest(b.reference.as_bytes()).into())
+        .or_else(|| {
+            legacy_quota
+                .as_ref()
+                .map(|(reference, _)| Sha256::digest(reference.as_bytes()).into())
+        })
+        .unwrap_or(identity);
+    let cache_mutex = proxy
+        .binding
+        .as_ref()
+        .map(|b| &b.quota.claude)
+        .or_else(|| legacy_quota.as_ref().map(|(_, quota)| &quota.claude))
+        .unwrap_or(&proxy.claude.usage);
+    let mut cache = cache_mutex.lock().await;
     if cache.identity != Some(identity) {
         *cache = Cache {
             identity: Some(identity),
@@ -176,6 +215,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             .header("user-agent", "hey-proxy/0.1.0").header("accept", "application/json").send().await
             .map_err(|_| anyhow::anyhow!("Cannot reach Claude usage endpoint"))?;
         let status = response.status();
+            if status == StatusCode::UNAUTHORIZED { proxy.rejected_binding().await; }
         if status == StatusCode::TOO_MANY_REQUESTS {
             delay = delay.max(retry_delay(response.headers()));
             anyhow::bail!("Claude usage is rate limited; waiting before retrying");

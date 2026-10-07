@@ -344,3 +344,39 @@ async fn concurrent_credential_timeouts_do_not_serialize_into_minutes() {
     .expect("waiters started serialized 30-second refresh commands");
     assert_eq!(std::fs::read_to_string(calls).unwrap(), "x");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn protected_file_references_require_private_regular_files_and_redact_errors() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key");
+    std::fs::write(&path, "synthetic-file-secret\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let resolver = hey_proxy::credentials::CredentialResolver::default();
+    let source = format!("file://{}", path.display());
+    let value = resolver
+        .resolve(&source, std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(value, "synthetic-file-secret");
+    assert!(value.is_sensitive());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let error = resolver
+        .resolve(&source, std::time::Duration::ZERO)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("synthetic-file-secret"));
+    let link = dir.path().join("linked");
+    symlink(&path, &link).unwrap();
+    assert!(
+        resolver
+            .resolve(
+                &format!("file://{}", link.display()),
+                std::time::Duration::ZERO
+            )
+            .await
+            .is_err()
+    );
+}

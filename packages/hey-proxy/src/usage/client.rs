@@ -105,6 +105,13 @@ impl Client {
         Ok(self)
     }
 
+    /// Discover named connections and opaque session pins on the credential-owning host.
+    pub async fn connections(&self) -> Result<super::Connections, Error> {
+        let result: super::Connections = self.get("providers/v1").await?;
+        check_version(result.schema_version)?;
+        Ok(result)
+    }
+
     /// List configured account aliases without fetching provider usage or resolving OAuth.
     pub async fn accounts(&self) -> Result<Accounts, Error> {
         let result: Accounts = self.get("usage/v1/accounts").await?;

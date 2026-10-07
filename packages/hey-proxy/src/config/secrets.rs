@@ -43,7 +43,7 @@ fn random<const N: usize>() -> Result<[u8; N]> {
     Ok(bytes)
 }
 
-fn key(config: &Path, create: bool) -> Result<[u8; 32]> {
+pub(super) fn key(config: &Path, create: bool) -> Result<[u8; 32]> {
     let path = config.with_extension("credentials.key");
     if create && !path.exists() {
         let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
@@ -138,9 +138,9 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
     let mut value: Value = serde_json::from_slice(&fs::read(&path)?)?;
     let mut needs_encryption = false;
     visit(&mut value, |v| {
-        needs_encryption |= v
-            .as_str()
-            .is_some_and(|s| !s.starts_with("sh://") && !s.starts_with("op://"));
+        needs_encryption |= v.as_str().is_some_and(|s| {
+            !s.starts_with("sh://") && !s.starts_with("op://") && !s.starts_with("file://")
+        });
         Ok(())
     })?;
     if !needs_encryption {
@@ -161,10 +161,9 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
     let mut value: Value = serde_json::from_slice(&original)?;
     let cipher = Aes256GcmSiv::new((&key(&path, true)?).into());
     visit(&mut value, |value| {
-        let Some(secret) = value
-            .as_str()
-            .filter(|s| !s.starts_with("sh://") && !s.starts_with("op://"))
-        else {
+        let Some(secret) = value.as_str().filter(|s| {
+            !s.starts_with("sh://") && !s.starts_with("op://") && !s.starts_with("file://")
+        }) else {
             return Ok(());
         };
         let nonce = random::<12>()?;

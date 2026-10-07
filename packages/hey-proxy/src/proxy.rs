@@ -1,3 +1,4 @@
+mod accounts;
 mod capacity;
 mod chat;
 pub(crate) mod claude;
@@ -51,10 +52,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Process-wide state shared by every request.
 struct Service {
+    accounts: accounts::Registry,
     credentials: hey_proxy::credentials::CredentialResolver,
     gemini: gemini::GeminiState,
-    claude: claude::ClaudeState,
-    codex: codex::CodexState,
     logs: Arc<logs::Store>,
     access_config: Option<PathBuf>,
     access_keys: RwLock<(Instant, Option<crate::access::Keys>)>,
@@ -68,6 +68,8 @@ struct Service {
 }
 
 struct Loaded {
+    claude: Arc<claude::ClaudeState>,
+    codex: Arc<codex::CodexState>,
     config: Arc<Config>,
     /// Rebuilt on reload because `ip_version` binds the client to an address family.
     client: reqwest::Client,
@@ -76,6 +78,9 @@ struct Loaded {
 
 /// A request-scoped view: the config and client in force when the request arrived.
 pub(crate) struct Proxy {
+    claude: Arc<claude::ClaudeState>,
+    codex: Arc<codex::CodexState>,
+    binding: Option<accounts::Binding>,
     fallback_attempt: bool,
     config: Arc<Config>,
     client: reqwest::Client,
@@ -148,15 +153,18 @@ fn router(config: Config) -> Result<Router> {
 pub(crate) fn local_snapshot(config: Config, source: Option<PathBuf>) -> Result<Proxy> {
     let client = build_client(&config)?;
     let fingerprint = source.as_ref().and_then(|p| crate::config::fingerprint(p));
+    let accounts = accounts::Registry::default();
+    let (claude, codex) = accounts.defaults(&config, source.as_deref());
     let service = Arc::new(Service {
+        accounts,
         credentials: Default::default(),
-        claude: Default::default(),
-        codex: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: Arc::new(logs::Store::memory(&config)),
         access_keys: RwLock::new((Instant::now(), None)),
         access_config: None,
         state: RwLock::new(Loaded {
+            claude,
+            codex,
             config: Arc::new(config.effective()),
             client,
             fingerprint,
@@ -179,10 +187,11 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     if config.mode == Mode::Host && options.access_config.is_none() {
         anyhow::bail!("Host mode requires an access key file");
     }
+    let accounts = accounts::Registry::default();
+    let (claude, codex) = accounts.defaults(&config, source.as_deref());
     let service = Arc::new(Service {
+        accounts,
         credentials: Default::default(),
-        claude: Default::default(),
-        codex: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: match options.logs {
             Some(logs) => logs,
@@ -201,6 +210,8 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         )),
         access_config: options.access_config,
         state: RwLock::new(Loaded {
+            claude,
+            codex,
             config: Arc::new(config.effective()),
             client,
             fingerprint,
@@ -213,6 +224,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     Service::watch(&service)?;
     Ok(Router::new()
         .route("/", axum::routing::get(logs::page))
+        .route("/providers/v1", axum::routing::get(accounts::catalog))
         .route("/apis", axum::routing::get(overview::page))
         .route("/overview.js", axum::routing::get(overview::script))
         .route("/overview/api", axum::routing::get(overview::data))
@@ -425,11 +437,14 @@ impl Service {
             } else {
                 build_client(&config)?
             };
-            Ok((config.effective(), client))
+            let (claude, codex) = self.accounts.defaults(&config, Some(path));
+            Ok((config.effective(), client, claude, codex))
         });
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         match loaded {
-            Ok((config, client)) => {
+            Ok((config, client, claude, codex)) => {
+                state.claude = claude;
+                state.codex = codex;
                 eprintln!("Config reloaded: {}", path.display());
                 if config.listen != previous.listen {
                     eprintln!(
@@ -449,6 +464,9 @@ impl Service {
     fn snapshot(self: &Arc<Self>) -> Proxy {
         let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         Proxy {
+            claude: state.claude.clone(),
+            codex: state.codex.clone(),
+            binding: None,
             fallback_attempt: false,
             config: state.config.clone(),
             client: state.client.clone(),
@@ -1065,8 +1083,18 @@ async fn prepare_body(
     Ok(ReplayBody::File(original))
 }
 
-async fn forward(State(service): State<Arc<Service>>, request: Request) -> Response {
+async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> Response {
     let mut snapshot = service.snapshot();
+    match accounts::bind(&snapshot, &mut request).await {
+        Ok(Some(selected)) => snapshot = selected,
+        Ok(None) => {}
+        Err(_) => {
+            return error(
+                StatusCode::CONFLICT,
+                "Named account unavailable or binding changed; select an account from /providers/v1",
+            );
+        }
+    }
     let websocket = request
         .headers()
         .get(header::UPGRADE)
@@ -1339,6 +1367,9 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
             }
         };
         let mut status = upstream.status();
+        if status == StatusCode::UNAUTHORIZED {
+            proxy.rejected_binding().await;
+        }
         let peer = upstream.remote_addr();
         let mut response_headers = upstream.headers().clone();
         let upstream_id = response_headers

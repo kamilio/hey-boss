@@ -706,6 +706,7 @@ pub(crate) async fn login(
         "Sign in on the proxy host, not a client relay"
     );
     let path = provider.credentials_path(Some(config_path))?;
+    crate::config::accounts::owned_store(&path)?;
     fs::create_dir_all(path.parent().context("Invalid Codex credential path")?)?;
     let client = crate::proxy::build_client(config)?;
     let tokens = if options.import_codex_home {
@@ -765,6 +766,7 @@ pub(crate) async fn login(
         .await?
     };
     let _lock = lock(&path).await?;
+    crate::config::accounts::owned_store(&path)?;
     save(&path, &tokens)?;
     println!("Codex subscription connected. hey-proxy owns and refreshes these credentials.");
     if config.codex.is_none() {
