@@ -75,8 +75,10 @@ impl AccountConfig {
                 issuer,
                 ..
             } => {
-                let mut p = crate::proxy::codex::ProviderConfig::default();
-                p.credentials_file = Some(credentials_file.clone());
+                let mut p = crate::proxy::codex::ProviderConfig {
+                    credentials_file: Some(credentials_file.clone()),
+                    ..Default::default()
+                };
                 if let Some(endpoint) = endpoint {
                     p.upstream_url = endpoint.clone();
                 }
@@ -90,8 +92,10 @@ impl AccountConfig {
                 endpoint,
                 ..
             } => {
-                let mut p = crate::proxy::claude::ProviderConfig::default();
-                p.credentials_file = Some(credentials_file.clone());
+                let mut p = crate::proxy::claude::ProviderConfig {
+                    credentials_file: Some(credentials_file.clone()),
+                    ..Default::default()
+                };
                 if let Some(endpoint) = endpoint {
                     p.upstream_url = endpoint.clone();
                 }
@@ -209,6 +213,35 @@ pub(crate) fn owned_store(path: &Path) -> Result<()> {
     Ok(())
 }
 
+impl Config {
+    pub(crate) fn validate_account_paths(&self, source: &Path) -> Result<()> {
+        let mut stores = BTreeMap::new();
+        for account in self.accounts.values() {
+            let selected = account.apply(self);
+            let path = if let Some(p) = selected.codex {
+                p.credentials_path(Some(source))?
+            } else if let Some(p) = selected.claude {
+                p.credentials_path(Some(source))?
+            } else {
+                continue;
+            };
+            let normalized = fs::canonicalize(&path).unwrap_or_else(|_| {
+                let parent = path.parent().unwrap_or(Path::new("."));
+                fs::canonicalize(parent)
+                    .unwrap_or_else(|_| parent.to_owned())
+                    .join(path.file_name().unwrap_or_default())
+            });
+            if let Some(previous) = stores.insert(normalized, account.implementation()) {
+                anyhow::ensure!(
+                    previous == account.implementation(),
+                    "Different implementations cannot share an OAuth store"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,34 +273,5 @@ mod tests {
                 .unwrap(),
             PathBuf::from("work.json")
         );
-    }
-}
-
-impl Config {
-    pub(crate) fn validate_account_paths(&self, source: &Path) -> Result<()> {
-        let mut stores = BTreeMap::new();
-        for account in self.accounts.values() {
-            let selected = account.apply(self);
-            let path = if let Some(p) = selected.codex {
-                p.credentials_path(Some(source))?
-            } else if let Some(p) = selected.claude {
-                p.credentials_path(Some(source))?
-            } else {
-                continue;
-            };
-            let normalized = fs::canonicalize(&path).unwrap_or_else(|_| {
-                let parent = path.parent().unwrap_or(Path::new("."));
-                fs::canonicalize(parent)
-                    .unwrap_or_else(|_| parent.to_owned())
-                    .join(path.file_name().unwrap_or_default())
-            });
-            if let Some(previous) = stores.insert(normalized, account.implementation()) {
-                anyhow::ensure!(
-                    previous == account.implementation(),
-                    "Different implementations cannot share an OAuth store"
-                );
-            }
-        }
-        Ok(())
     }
 }

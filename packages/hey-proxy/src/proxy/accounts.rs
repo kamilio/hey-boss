@@ -87,14 +87,15 @@ impl Proxy {
                     )
                     .await;
             }
-        } else if let Some(provider) = &self.config.claude {
-            if let Ok(path) = provider.credentials_path(self.service.source.as_deref()) {
-                let _ = self
-                    .claude
-                    .tokens
-                    .rejected(&path, &self.client, binding.token.clone())
-                    .await;
-            }
+        } else if let Some(provider) = &self.config.claude
+            && let Ok(path) = provider.credentials_path(self.service.source.as_deref())
+            && let Ok(path) = canonical(path).await
+        {
+            let _ = self
+                .claude
+                .tokens
+                .rejected(&path, &self.client, binding.token.clone())
+                .await;
         }
     }
     pub(super) async fn quota_for(
@@ -258,8 +259,8 @@ pub(super) async fn catalog(State(service): State<Arc<Service>>) -> Response {
                     .and_then(Result::ok);
                 hey_proxy::usage::Connection {
                     name,
-                    implementation: implementation.into(),
-                    auth: auth.into(),
+                    implementation,
+                    auth,
                     ready: selected.is_some(),
                     account_ref: selected.and_then(|s| s.binding.map(|b| b.reference)),
                 }
