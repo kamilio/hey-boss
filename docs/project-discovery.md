@@ -1,5 +1,17 @@
 # Project discovery
 
+Run `hey-boss project init` inside a checkout to choose pull requests and
+worktrees, preview the current Markdown prompts, and save the project in Builder.
+Enter keeps existing choices; `q` or Ctrl-C cancels before saving. Rerunning
+preserves custom prompts and checks for concurrent settings changes.
+For scripts, pass `--yes --prs true --worktree true` (use `false` for either
+choice); `--project` selects a name or full ID and `--json` returns settings.
+
+Builder lists initialized projects and projects with saved issues, artifacts,
+mindmap nodes, or worker settings. Empty discoveries and read-only visits stay
+out of the picker, including old test folders. Their identities are retained;
+initializing or saving work makes them visible. Hidden projects stay hidden.
+
 Project names are unique identifiers (case insensitive). A folder, repository,
 worktree, notification or explicit project selector with an existing name reuses
 that project's destination instead of creating another project. Quick Issue
@@ -37,11 +49,11 @@ work. Hidden destinations stay hidden when another identity is discovered.
 Automatic agent discovery ignores home directories and local temporary folders,
 including macOS per-user temporary directories. Live agent tests previously
 registered folders such as `hey-boss-live-controls-*` as permanent projects,
-which filled the project picker with test runs. Existing empty temporary entries
-are now omitted from project lists on desktop and paired devices. Registry rows
+which filled the project picker with test runs. Empty discovered entries
+are omitted from project lists on desktop and paired devices. Registry rows
 are retained, and temporary projects with any saved issues (including deleted
 issues), artifacts, mindmap nodes, project settings, or worker settings remain
-accessible. Named projects and repository origins are unaffected.
+accessible. The same visibility rule applies to named projects and repository origins.
 
 Worker project settings control whether agents create worktrees. For this project,
 keep `worktree_enabled` and `prs_enabled` disabled: work in the existing checkout,

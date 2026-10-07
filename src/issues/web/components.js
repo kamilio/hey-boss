@@ -275,7 +275,7 @@ function date(at) {
               `<div class="project-choice"><button class="project-option ${p.id === this.project?.id ? "selected" : ""}" data-project="${esc(p.id)}">${icon("folder")}<span class="project-option-info"><strong>${esc(p.name)}</strong><small class="project-activity">${p.activity_at ? `Active ${date(p.activity_at)}` : "No activity yet"}</small></span><span class="tab-count">${p.open ?? 0}</span>${p.id === this.project?.id ? `<span class="project-check">${icon("check")}</span>` : ""}</button>${this.onVisibility ? `<button class="icon-button project-visibility" data-project-visibility="${esc(p.id)}" aria-label="${p.hidden_at ? "Restore" : "Hide"} ${esc(p.name)}" title="${p.hidden_at ? "Restore project" : "Hide project"}">${icon(p.hidden_at ? "refresh" : "hide")}</button>` : ""}</div>`,
           )
           .join("") ||
-        `<div class="menu-empty">${query ? "No matching projects." : this.showHiddenProjects ? "No hidden projects." : "No active projects. Projects appear automatically when agents use them."}</div>`;
+        `<div class="menu-empty">${query ? "No matching projects." : this.showHiddenProjects ? "No hidden projects." : "No projects yet. Run <code>hey-boss project init</code> in your checkout."}</div>`;
       if (focusProject || focusVisibility) {
         const target = $$("#project-options button").find((b) =>
           focusProject

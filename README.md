@@ -628,6 +628,13 @@ saved locally before finalization; reconnection reconciles the atomic transactio
 so a lost commit reply cannot duplicate a handoff. Explicit approval decisions,
 manual blocks and human ownership remain respected. Retrying grants no permissions.
 
+## Initializing a project
+
+Run `hey-boss project init` in its checkout. Choose pull requests and worktrees,
+review the existing prompts, and confirm to add the project to Builder. Reruns
+preserve custom prompts. Empty discovered folders stay out of the project picker;
+projects with saved work remain available. See `hey-boss project init --help`.
+
 ## Upgrading every machine
 
 Boss can add **YOLO** in **Assign tags** in the issue web UI. The
