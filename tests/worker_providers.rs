@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::{agent_runtime::Provider, issues::worker::Settings};
 use serde_json::json;
 use std::{
@@ -35,6 +37,7 @@ impl Fixture {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Provider test"]);
         let mut f = Self { root, child: None };
         f.cli(&["issue", "create", "--title", "Provider worker"]);
         let mut c = f.command();

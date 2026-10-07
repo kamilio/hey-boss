@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -15,6 +17,7 @@ impl Fixture {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let store = Store::open(&root.join("issues.db")).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Subtask claims"]);
         Self { root, store }
     }
 

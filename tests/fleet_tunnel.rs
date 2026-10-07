@@ -1,4 +1,6 @@
 //! Ordinary draft edits must reach the authority without reverse SSH or a claim.
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -38,6 +40,7 @@ impl Fleet {
             .unwrap();
             fs::write(root.join(side).join("desired.json"), r#"{"machines":{}}"#).unwrap();
         }
+        projects::seed(&root.join("main/issues.db"), &["named:Tunnel QA"]);
         let mut fleet = Self {
             root,
             services: vec![],

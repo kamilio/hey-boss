@@ -439,6 +439,7 @@ mod tests {
     #[test]
     fn acknowledged_status_survives_ready_and_replica_sync() {
         let (root, ctx, mut main) = test_context();
+        crate::database::Connection::open(&ctx.path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Status handoff','Status handoff',1)", []).unwrap();
         let (peer_root, peer_ctx, mut peer) = test_context();
         let request = |operation: Value, key: Option<&str>| -> Request {
             serde_json::from_value(json!({"version":1,"project":{"id":"named:Status handoff","name":"Status handoff"},"actor":{"id":"codex:owner","kind":"codex","session_id":"owner","machine":"authority-test","host":"fixture","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},"operation":operation,"request_id":key})).unwrap()

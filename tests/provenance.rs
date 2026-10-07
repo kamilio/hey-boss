@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 
@@ -13,6 +15,7 @@ fn creation_origin_survives_retries_edits_reopen_and_project_moves() {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Origins", "named:Destination"]);
     let mut create = request(
         json!({"action":"create","title":"Found during another task","body":"Context","labels":[]}),
     );
@@ -70,6 +73,7 @@ fn artifact_origin_is_persistent_and_human_creation_has_no_invented_session() {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Origins", "named:Destination"]);
     let created = store.execute(&request(json!({"action":"artifact","operation":{"command":"create","title":"Investigation","body":"Findings"}}))).unwrap();
     let origin = created["artifact"]["origin"].clone();
     assert_eq!(origin["invocation"]["call_id"], "call-create");
@@ -78,6 +82,7 @@ fn artifact_origin_is_persistent_and_human_creation_has_no_invented_session() {
     assert_eq!(edited["artifact"]["origin"], origin);
     drop(store);
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Origins", "named:Destination"]);
     assert_eq!(
         store
             .execute(&request(
@@ -107,6 +112,7 @@ fn creation_links_the_actual_source_run_across_projects() {
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Origins", "named:Follow-ups"]);
     store
         .execute(&request(
             json!({"action":"create","title":"Original task","body":"","labels":[]}),

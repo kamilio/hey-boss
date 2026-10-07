@@ -457,6 +457,7 @@ mod tests {
             ));
             let path = root.join("issues.db");
             let mut store = Store::open(&path).unwrap();
+            crate::database::Connection::open(&path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Files','Files',1)", []).unwrap();
             let mut create =
                 request(json!({"action":"create","title":"Issue","body":"","labels":[]}));
             create.request_id = None;
@@ -552,6 +553,7 @@ mod tests {
             ));
             let path = root.join("issues.db");
             let mut store = Store::open(&path).unwrap();
+            crate::database::Connection::open(&path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Files','Files',1)", []).unwrap();
             let mut create =
                 request(json!({"action":"create","title":"Issue","body":"","labels":[]}));
             create.request_id = None;
@@ -605,6 +607,7 @@ mod tests {
             ));
             let path = root.join("issues.db");
             let mut store = Store::open(&path).unwrap();
+            crate::database::Connection::open(&path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Files','Files',1)", []).unwrap();
             let mut create =
                 request(json!({"action":"create","title":"Issue","body":"","labels":[]}));
             create.request_id = None;

@@ -4,6 +4,13 @@ use serde_json::{Value, json};
 #[test]
 fn one_lifecycle_batch_records_merges_for_ordinary_watched_and_closed_tasks() {
     let (root, ctx, mut store) = super::super::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {
@@ -114,6 +121,13 @@ pub(super) fn from_metadata(response: &Value, numbers: &[u64]) -> Value {
 
 fn linked_fixture(count: u64) -> (std::path::PathBuf, Context) {
     let (root, ctx, mut store) = super::super::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {

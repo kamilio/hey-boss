@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::{
     fs,
@@ -13,6 +15,7 @@ impl Fixture {
             std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();
+        projects::seed(&path.join("issues.db"), &["named:Revisions"]);
         Self(path)
     }
     fn run(&self, group: &str, args: &[&str], actor: &str) -> Output {

@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::Store;
 use rusqlite::{Connection, ErrorCode};
 use std::os::fd::AsRawFd;
@@ -328,6 +330,7 @@ fn reading_a_plan_alias_of_the_live_database_preserves_its_locks() {
     let root = temporary_directory();
     let path = root.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Locktest"]);
     let request = serde_json::from_value(serde_json::json!({
         "version":1,"project":{"id":"named:Locktest","name":"Locktest"},
         "operation":{"action":"read_plan","plan":{
@@ -392,6 +395,7 @@ fn downloading_an_attachment_alias_preserves_database_locks() {
     let root = temporary_directory();
     let path = root.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Locktest"]);
     let request = |operation| {
         serde_json::from_value(serde_json::json!({
         "version":1,"project":{"id":"named:Locktest","name":"Locktest"},

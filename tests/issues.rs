@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::fs;
@@ -338,6 +340,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        let f = Self::empty();
+        let id = format!(
+            "local:{}:{}",
+            hey_boss::issues::identity::machine().unwrap(),
+            f.cwd.canonicalize().unwrap().display()
+        );
+        projects::seed(&f.db, &[&id]);
+        f
+    }
+    fn empty() -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("out")
             .join(format!(
@@ -528,7 +540,8 @@ fn companion_metadata_without_allocation_fails_before_acceptance() {
 
 #[test]
 fn home_directory_does_not_create_a_project_but_explicit_projects_work() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
+    projects::seed(&f.db, &["named:Atlas"]);
     let mut list = f.cmd("session-a", &["projects"]);
     list.env("HOME", &f.cwd);
     let value = success(list.output().unwrap());
@@ -556,7 +569,7 @@ fn home_directory_does_not_create_a_project_but_explicit_projects_work() {
 
 #[test]
 fn discovery_and_notification_registration_skip_home_projects() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
     let home = std::env::var_os("HOME").unwrap();
     let project = hey_boss::issues::Project {
         id: format!(
@@ -574,6 +587,7 @@ fn discovery_and_notification_registration_skip_home_projects() {
             .unwrap(),
         0
     );
+    projects::seed(&f.db, &["named:Atlas"]);
     assert_eq!(
         store
             .notification_project(&project, Some("Atlas"))
@@ -914,6 +928,7 @@ fn batch_validates_limits_without_changes() {
 #[test]
 fn initialized_projects_sort_by_activity_and_stay_hidden() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["named:Alpha", "named:Beta"]);
     let a = f.run(
         "session-a",
         &["settings", "set", "--no-prs", "--project", "Alpha"],
@@ -1113,7 +1128,17 @@ fn git(cwd: &Path, args: &[&str]) {
 #[test]
 fn reopen_version_guard_is_atomic_and_retries_locally_and_on_the_authoritative_host() {
     for remote in [false, true] {
-        let f = Fixture::new();
+        let f = if remote {
+            Fixture::empty()
+        } else {
+            Fixture::new()
+        };
+        let id = format!(
+            "local:{}:{}",
+            hey_boss::issues::identity::machine().unwrap(),
+            f.cwd.canonicalize().unwrap().display()
+        );
+        projects::seed(&f.root.join("remote/issues.db"), &[&id]);
         let bin = f.root.join("bin");
         fs::create_dir(&bin).unwrap();
         let shim = bin.join("ssh");
@@ -1476,6 +1501,14 @@ fn retries_are_deduplicated_even_after_later_changes() {
 #[test]
 fn explicit_project_ids_skip_checkout_discovery_but_short_names_still_use_it() {
     let f = Fixture::new();
+    projects::seed(
+        &f.db,
+        &[
+            "github.com/example/selected",
+            "named:Selected project",
+            "github.com/example/checkout",
+        ],
+    );
     git(&f.cwd, &["init", "-q"]);
     git(
         &f.cwd,
@@ -1539,6 +1572,19 @@ fn project_identity_skips_git_outside_repositories_but_honors_explicit_git_dir()
         root,
         cwd,
     };
+    let id = format!(
+        "local:{}:{}",
+        hey_boss::issues::identity::machine().unwrap(),
+        f.cwd.canonicalize().unwrap().display()
+    );
+    projects::seed(
+        &f.db,
+        &[
+            &id,
+            "github.com/example/explicit-dir",
+            "github.com/example/metadata",
+        ],
+    );
     let created = f.create();
     let real_git = Command::new("sh")
         .args(["-c", "command -v git"])
@@ -1634,6 +1680,7 @@ fn project_identity_skips_git_outside_repositories_but_honors_explicit_git_dir()
 #[test]
 fn project_identity_does_not_read_branch_state() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["github.com/example/identity"]);
     git(&f.cwd, &["init", "-q"]);
     git(&f.cwd, &["commit", "--allow-empty", "-qm", "initial"]);
     git(
@@ -1700,6 +1747,7 @@ fn project_identity_does_not_read_branch_state() {
 #[test]
 fn project_identity_groups_worktrees_and_normalizes_origins() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["github.com/example/hey-boss"]);
     git(&f.cwd, &["init", "-q"]);
     git(&f.cwd, &["commit", "--allow-empty", "-qm", "initial"]);
     git(
@@ -1758,10 +1806,20 @@ fn project_identity_groups_worktrees_and_normalizes_origins() {
         ],
     );
     success(
-        f.cmd("session-a", &["create", "--at-bottom", "--title", "other"])
-            .current_dir(&second)
-            .output()
-            .unwrap(),
+        f.cmd(
+            "session-a",
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                "other",
+                "--project",
+                "hey-boss",
+            ],
+        )
+        .current_dir(&second)
+        .output()
+        .unwrap(),
     );
     assert_eq!(
         f.run("session-a", &["list", "--project", "hey-boss"])["project"],
@@ -1792,16 +1850,27 @@ fn project_identity_groups_worktrees_and_normalizes_origins() {
 }
 
 #[test]
-fn same_named_directories_share_a_destination_and_explicit_names_are_isolated() {
+fn unrelated_directories_need_an_explicit_project_and_named_projects_are_isolated() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["named:shared"]);
     let one = f.create();
     let second = f.root.join("different/project");
     fs::create_dir_all(&second).unwrap();
+    let rejected = f
+        .cmd("session-a", &["list"])
+        .current_dir(&second)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stdout).contains("project_not_initialized"));
     let two = success(
-        f.cmd("session-a", &["create", "--title", "other"])
-            .current_dir(&second)
-            .output()
-            .unwrap(),
+        f.cmd(
+            "session-a",
+            &["create", "--title", "other", "--project", "project"],
+        )
+        .current_dir(&second)
+        .output()
+        .unwrap(),
     );
     assert_eq!(one["project"]["id"], two["project"]["id"]);
     assert_eq!(two["issue"]["number"], 2);
@@ -1904,6 +1973,7 @@ fn issue_search_defaults_to_active_title_and_description_matches() {
 #[test]
 fn issue_search_preserves_literal_matching_filters_and_pagination() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["named:other"]);
     let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
     for title in ["100%_done 🦀", "Second 100%_done 🦀", "100 percent done"] {
         f.run(
@@ -2069,6 +2139,7 @@ fn session_environment_is_stable_and_overrides_are_explicit() {
 #[test]
 fn rpc_uses_callers_context_and_never_forwards_recursively() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["github.com/example/shared"]);
     let request = json!({"version":1,"project":{"id":"github.com/example/shared","name":"shared"},"project_override":null,
         "actor":{"id":"codex:remote-session","kind":"codex","session_id":"remote-session","machine":"remote-machine","host":"remote-host","pid":null,"process_start":null,"cwd":"/remote/repo","source":"CODEX_THREAD_ID"},
         "operation":{"action":"create","title":"Remote","body":"# Markdown\n$(not a shell command)","labels":[]},"request_id":"remote-once"});
@@ -2101,7 +2172,7 @@ fn rpc_uses_callers_context_and_never_forwards_recursively() {
 
 #[test]
 fn remote_transport_keeps_markdown_out_of_shell_and_has_no_local_fallback() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
     let bin = f.root.join("bin");
     fs::create_dir(&bin).unwrap();
     let shim = bin.join("ssh");
@@ -2109,6 +2180,12 @@ fn remote_transport_keeps_markdown_out_of_shell_and_has_no_local_fallback() {
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
     let args = f.root.join("ssh-args");
     let remote_db = f.root.join("remote/issues.db");
+    let id = format!(
+        "local:{}:{}",
+        hey_boss::issues::identity::machine().unwrap(),
+        f.cwd.canonicalize().unwrap().display()
+    );
+    projects::seed(&remote_db, &[&id]);
     let mut command = f.cmd(
         "caller",
         &[
@@ -2152,7 +2229,7 @@ fn remote_transport_keeps_markdown_out_of_shell_and_has_no_local_fallback() {
 
 #[test]
 fn existing_unrelated_and_future_databases_are_not_modified() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
     fs::create_dir_all(f.db.parent().unwrap()).unwrap();
     let db = f.sql();
     db.execute_batch("CREATE TABLE unrelated(data TEXT); INSERT INTO unrelated VALUES ('keep');")
@@ -2463,6 +2540,7 @@ fn schema_three_migration_preserves_legacy_independent_worker_settings() {
 #[test]
 fn worker_project_environment_routes_bare_commands_and_explicit_flag_wins() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["named:Worker route", "named:Other route"]);
     f.run(
         "session-a",
         &[
@@ -2905,7 +2983,7 @@ fn schema_five_migration_preserves_settings_order_claims_and_history() {
 
 #[test]
 fn global_profile_changes_every_project_without_changing_assignments_or_creating_projects() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
     let global = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&f.cwd)
@@ -2924,6 +3002,7 @@ fn global_profile_changes_every_project_without_changing_assignments_or_creating
             .unwrap(),
         0
     );
+    projects::seed(&f.db, &["named:Alpha", "named:Beta"]);
     for name in ["Alpha", "Beta"] {
         f.run(
             "session-a",
@@ -2992,6 +3071,7 @@ fn global_profile_changes_every_project_without_changing_assignments_or_creating
 #[test]
 fn schema_six_migration_preserves_latest_custom_boss_name_globally() {
     let f = Fixture::new();
+    projects::seed(&f.db, &["named:Alpha", "named:Beta"]);
     for (name, boss, activity) in [("Alpha", "Older", 100), ("Beta", "Latest", 200)] {
         f.run(
             "session-a",
@@ -3997,13 +4077,11 @@ fn explicit_database_override_survives_running_executable_replacement() {
 
 #[test]
 fn interactive_requires_a_human_terminal_before_creating_anything() {
-    let f = Fixture::new();
+    let f = Fixture::empty();
     f.fail("a", &["create", "--title", "Plan", "--interactive"], 2);
     assert!(
-        f.run("a", &["list"])["issues"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+        !f.db.exists(),
+        "Interactive refusal must not open or create a project"
     );
 }
 

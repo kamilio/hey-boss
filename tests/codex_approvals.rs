@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -31,6 +33,7 @@ impl Fixture {
         let serial = FIXTURE_SERIAL.fetch_add(1, Ordering::Relaxed);
         let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}-{serial}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Approval QA"]);
         // Pin the built inode across Cargo's atomic binary replacement. Unlike
         // copying in parallel tests, this opens no executable for writing that
         // another fork can briefly inherit and trigger Linux ETXTBSY.

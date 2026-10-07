@@ -143,6 +143,7 @@ impl Fixture {
         }
     }
     fn create(&self, title: &str) {
+        self.connection().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Database owner','Database owner',1)", []).unwrap();
         let output = self
             .command(&[
                 "issue",

@@ -349,6 +349,13 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
         };
         let mut store = Store::open(&ctx.path).unwrap();
+        crate::database::Connection::open(&ctx.path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+                [],
+            )
+            .unwrap();
         let mut request = Request {
             version: 1,
             project: Project {
@@ -432,6 +439,13 @@ mod tests {
         // A subsequent cycle needs no server: a confirmed merge is terminal.
         poll(&ctx, &runtime, &client).unwrap();
         let mut store = Store::open(&ctx.path).unwrap();
+        crate::database::Connection::open(&ctx.path)
+            .unwrap()
+            .execute(
+                "INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+                [],
+            )
+            .unwrap();
         request.operation = serde_json::from_value(json!({"action":"view","number":1})).unwrap();
         let value = store.execute(&request).unwrap();
         assert_eq!(

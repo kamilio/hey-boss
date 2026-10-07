@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::{
     fs,
@@ -17,6 +19,7 @@ impl Fixture {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
+        projects::seed(&path.join("issues.db"), &["named:Settings QA"]);
         let owner = hey_boss::database::Owner::start(&path.join("issues.db"))
             .unwrap()
             .unwrap();

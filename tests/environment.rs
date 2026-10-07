@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use std::{fs, os::unix::fs::PermissionsExt};
 #[path = "support/environment.rs"]
 mod support;
@@ -127,6 +129,7 @@ fn quota_pool_startup_releases_five_issues_and_recovers_with_one_identity_check(
     f.git(&["init", "--quiet"]);
     f.git(&["commit", "--quiet", "--allow-empty", "-m", "Fixture"]);
     let db_path = f.root.join("issues.db");
+    projects::seed(&db_path, &["named:Worker fixture"]);
     let cli = |args: &[&str]| -> Value {
         let output = f
             .command(env!("CARGO_BIN_EXE_hey-boss"))

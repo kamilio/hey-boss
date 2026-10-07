@@ -3956,6 +3956,7 @@ mod tests {
                 crate::issues::worker::random_id().unwrap()
             ));
             let mut store = Store::open(&path).unwrap();
+            Connection::open(&path).unwrap().execute("INSERT INTO projects(id,name,next_number) VALUES('named:Native fleet','Native fleet',1)", []).unwrap();
             store
                 .execute(&Request {
                     version: 1,
@@ -4791,6 +4792,7 @@ mod tests {
             model: None,
         };
         let mut store = Store::open(&main.path).unwrap();
+        main.db.execute("INSERT INTO projects(id,name,next_number) VALUES('named:Destination','Destination',1)", []).unwrap();
         let mut call = |project: &str, operation: Value| {
             store
                 .execute(&Request {

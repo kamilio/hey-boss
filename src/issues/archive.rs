@@ -514,6 +514,13 @@ mod tests {
             "actor":{"id":"human:boss","kind":"human","session_id":null,"machine":"test","host":"test","pid":null,"process_start":null,"cwd":f.0,"source":"test"},
             "request_id":"create-once","operation":{"action":"create","title":"Keep exactly once","body":"Body preserved","labels":[],"draft":true}
         })).unwrap();
+        Connection::open(&hot)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:Archive','Archive',1)",
+                [],
+            )
+            .unwrap();
         let created = store.execute(&request).unwrap();
         let original_operation = serde_json::to_value(&request.operation).unwrap();
         let db = Store::open(&hot).unwrap().into_database();

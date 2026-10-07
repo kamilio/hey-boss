@@ -20,6 +20,12 @@ fn equivalent_policy_refresh_propagates_without_rescheduling_ready_dependencies(
     Store::open(&root.join("peer.db")).unwrap();
     let main_db = crate::database::Connection::open(root.join("main.db")).unwrap();
     let peer_db = crate::database::Connection::open(root.join("peer.db")).unwrap();
+    main_db
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+            ["named:Policy fleet", "Policy fleet"],
+        )
+        .unwrap();
     let mut request = Request {
         version: 1,
         project: Project {

@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -18,6 +20,7 @@ impl Fixture {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Chief QA"]);
         Self(root)
     }
     fn command(&self) -> Command {

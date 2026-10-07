@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -33,6 +35,7 @@ impl Fixture {
         ));
         std::fs::create_dir(&root).unwrap();
         let store = Store::open(&root.join("issues.db")).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Ready QA"]);
         let mut f = Self { root, store };
         f.run(json!({"action":"configure_project","prs_enabled":true,"subtask_scheduling":"explicit"}));
         f.run(json!({"action":"create","title":"Source","body":"","labels":[]}));

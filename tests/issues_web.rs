@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -63,6 +65,12 @@ impl Web {
                 SERIAL.fetch_add(1, Ordering::Relaxed)
             ));
         fs::create_dir_all(&root).unwrap();
+        let project = hey_boss::issues::identity::project(
+            &root,
+            &hey_boss::issues::identity::machine().unwrap(),
+        )
+        .unwrap();
+        projects::seed(&root.join("issues.db"), &[&project.id]);
         let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&root)
             .env("HEY_BOSS_ISSUE_DB", root.join("issues.db"))

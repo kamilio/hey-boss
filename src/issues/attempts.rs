@@ -941,6 +941,13 @@ mod tests {
             )
             .unwrap();
             let store = Store::open(&root.join("issues.db")).unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                    params![project.id, project.name],
+                )
+                .unwrap();
             let child = Command::new("/bin/sh")
                 .args(["-c", "read outcome; exit \"$outcome\""])
                 .process_group(0)

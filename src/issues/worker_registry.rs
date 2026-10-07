@@ -2259,6 +2259,13 @@ mod tests {
         fs::create_dir(&root).unwrap();
         {
             let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,next_number) VALUES('named:Slots','Slots',1)",
+                    [],
+                )
+                .unwrap();
             for title in ["Retained attempt", "Other active job", "Waiting job"] {
                 let request: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Slots","name":"Slots"},"actor":{"id":"codex:slots","kind":"codex","session_id":"slots","machine":"unit","host":"test","pid":null,"process_start":null,"cwd":root,"source":"test"},"operation":{"action":"create","title":title,"body":"","labels":[]}})).unwrap();
                 store.execute(&request).unwrap();
@@ -2355,6 +2362,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         {
             let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute("INSERT INTO projects(id,name,next_number) VALUES('named:Recovery','Recovery',1)", []).unwrap();
             let request = |operation: Value| -> Request {
                 serde_json::from_value(json!({"version":1,
                     "project":{"id":"named:Recovery","name":"Recovery"},
@@ -2483,6 +2491,7 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         {
             let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute("INSERT INTO projects(id,name,next_number) VALUES('named:Sequence','Sequence',1)", []).unwrap();
             let request = |operation: Value| -> Request {
                 serde_json::from_value(json!({"version":1,
                     "project":{"id":"named:Sequence","name":"Sequence"},

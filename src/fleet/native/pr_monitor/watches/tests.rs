@@ -29,6 +29,13 @@ fn slow_required_policy_does_not_starve_other_pr_details() {
 
 fn queue_scenario(hold_details: bool) {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {
@@ -235,6 +242,13 @@ fn conflict_before_ci(case: ProofCase) {
     let confirmed = matches!(case, ProofCase::Current | ProofCase::ForceCurrent);
     let force = matches!(case, ProofCase::ForceOld | ProofCase::ForceCurrent);
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {
@@ -560,6 +574,13 @@ fn scenario(scenario: Scenario) {
         Scenario::Merged | Scenario::KeepMergedOpen | Scenario::PolicyErrorMerged
     );
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {

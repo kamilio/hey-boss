@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 
@@ -7,6 +9,7 @@ fn compact_reads_skip_history_preserve_health_and_paginate() {
     fs::create_dir_all(&root).unwrap();
     let db_path = root.join("issues.db");
     drop(hey_boss::issues::Store::open(&db_path).unwrap());
+    projects::seed(&db_path, &["named:Compact"]);
     let mut owner = hey_boss::database::Owner::start(&db_path).unwrap().unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_hey-boss"))

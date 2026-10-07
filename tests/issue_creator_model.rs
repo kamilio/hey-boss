@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command};
 
@@ -11,6 +13,7 @@ impl Fixture {
             std::process::id()
         ));
         fs::create_dir_all(root.join("codex/sessions")).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Model QA"]);
         Self(root)
     }
     fn transcript(&self, events: &[Value]) {

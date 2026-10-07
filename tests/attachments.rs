@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
@@ -21,6 +23,10 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        projects::seed(
+            &dir.join("issues.db"),
+            &["named:Files", "named:Other", "named:Destination"],
+        );
         Self(dir)
     }
     fn store(&self) -> Store {

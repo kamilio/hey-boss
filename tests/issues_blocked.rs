@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::process::Command;
 
@@ -12,6 +14,7 @@ fn blocked_lifecycle_preserves_history_and_requires_reopening() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&root).unwrap();
+    projects::seed(&root.join("issues.db"), &["named:Blocked QA"]);
     let run = |agent: &str, args: &[&str], code: i32| -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&root)

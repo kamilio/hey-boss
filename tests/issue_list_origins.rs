@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -17,6 +19,7 @@ impl Fixture {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("issues.db");
+        projects::seed(&path, &["named:List origins"]);
         Self {
             store: Store::open(&path).unwrap(),
             db: Connection::open(path).unwrap(),
