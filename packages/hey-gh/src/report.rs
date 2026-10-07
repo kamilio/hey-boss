@@ -31,15 +31,20 @@ mod timing_tests;
 struct ReportTail {
     finished: AtomicUsize,
     ready: tokio::sync::Notify,
+    collected: tokio::sync::Notify,
     sources: crate::client::source_completion::SourceCompletion,
 }
 
 impl ReportTail {
     async fn collect<T>(&self, read: impl std::future::Future<Output = T>) -> T {
         let result = self.sources.collect(read).await;
-        if self.finished.fetch_add(1, Ordering::Relaxed) == 4 {
+        let finished = self.finished.fetch_add(1, Ordering::Relaxed) + 1;
+        if finished == 5 {
             self.sources.promote();
             self.ready.notify_one();
+        }
+        if finished == 6 {
+            self.collected.notify_one();
         }
         result
     }
@@ -1132,29 +1137,44 @@ impl Client {
             let tail = ReportTail {
                 finished: AtomicUsize::new(0),
                 ready: tokio::sync::Notify::new(),
+                collected: tokio::sync::Notify::new(),
                 sources: self.source_completion(),
             };
             let confirmation_age = std::time::Duration::from_secs(15);
             let overlap = self.status().queue_capacity >= 32
                 && matches!(freshness, Freshness::MaxAge(age) if age >= confirmation_age);
-            let early = crate::client::READ_DEADLINE
+            let early_after = crate::client::READ_DEADLINE
                 .try_with(|deadline| {
                     let now = tokio::time::Instant::now();
-                    *deadline > now && *deadline <= now + confirmation_age
+                    if *deadline <= now || *deadline > now + confirmation_age {
+                        return None;
+                    }
+                    let age =
+                        std::time::Duration::from_millis(now_ms().checked_sub(pr.validated_at_ms)?);
+                    let delay = confirmation_age
+                        .saturating_sub(age)
+                        .saturating_add(std::time::Duration::from_millis(1));
+                    (now.checked_add(delay)? < *deadline).then_some(delay)
                 })
-                .unwrap_or(false)
-                && now_ms()
-                    .checked_sub(pr.validated_at_ms)
-                    .is_some_and(|age| u128::from(age) >= confirmation_age.as_millis());
+                .ok()
+                .flatten();
+            let early = early_after.is_some();
             let prefetch = async {
                 if !overlap {
                     return Ok(None);
                 }
-                // Stale metadata already requires a request. For a short read,
-                // its new validation cannot expire before the caller deadline,
-                // so let it queue alongside all sources. Longer reads retain
-                // the tail overlap to avoid aging speculative confirmations.
-                if !early {
+                // A short read can outlive metadata that is fresh at entry.
+                // Queue its confirmation once that evidence expires, while
+                // other sources are still loading. Fast reads finish without
+                // waiting for expiry or making an unnecessary request. Longer
+                // reads retain tail overlap to avoid aging confirmations.
+                if let Some(delay) = early_after {
+                    tokio::select! {
+                        biased;
+                        () = tail.collected.notified() => return Ok(None),
+                        () = tokio::time::sleep(delay) => {},
+                    }
+                } else {
                     tail.ready.notified().await;
                 }
                 let started = tokio::time::Instant::now();
@@ -1179,6 +1199,7 @@ impl Client {
                     })
                     .await?;
                 tracing::info!(repository, number, early, source=?response.source,
+                    expiry_delay_ms=early_after.map(|delay| delay.as_millis() as u64),
                     elapsed_ms=started.elapsed().as_millis() as u64,
                     "Full PR report metadata overlap finished");
                 Ok::<_, Error>(Some(response))

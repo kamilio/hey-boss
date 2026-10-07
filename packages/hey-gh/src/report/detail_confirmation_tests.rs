@@ -388,6 +388,75 @@ async fn fresh_or_long_full_reports_do_not_start_early_metadata_work() {
 }
 
 #[tokio::test]
+async fn short_report_refreshes_expiring_metadata_while_sources_are_pending() {
+    let f = Fixture::new().await;
+    f.warm_metadata().await;
+    f.age_metadata(14_000);
+    f.mock.pause_reviews.store(true, Ordering::Relaxed);
+    f.mock.pause_graph.store(true, Ordering::Relaxed);
+    // Prevent nested CI from refreshing the personal metadata incidentally.
+    let lock = f.client.report_lock("acme/demo#7:ci");
+    let guard = lock.lock().await;
+    let before = f.metadata_calls();
+    let reader = f.client.clone();
+    let task = tokio::spawn(async move {
+        crate::client::READ_DEADLINE
+            .scope(
+                tokio::time::Instant::now() + Duration::from_secs(15),
+                reader.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        f.metadata_calls(),
+        before,
+        "Still-fresh metadata must not trigger an eager network request"
+    );
+    let refreshed = tokio::time::timeout(Duration::from_secs(3), async {
+        while f.metadata_calls() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let pending = !task.is_finished();
+    drop(guard);
+    f.mock.pause_reviews.store(false, Ordering::Relaxed);
+    f.mock.pause_graph.store(false, Ordering::Relaxed);
+    f.mock.reviews_release.notify_one();
+    f.mock.release.notify_one();
+    let report = task.await.unwrap().unwrap();
+    assert!(
+        refreshed.is_ok(),
+        "Expired metadata waited for unrelated pending sources before refreshing"
+    );
+    assert!(pending);
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(f.metadata_calls(), before + 1);
+}
+
+#[tokio::test]
+async fn short_report_does_not_wait_for_metadata_expiry_after_sources_finish() {
+    let f = Fixture::new().await;
+    f.warm_metadata().await;
+    f.age_metadata(10_000);
+    let before = f.metadata_calls();
+    let report = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::client::READ_DEADLINE.scope(
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            f.client
+                .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+        ),
+    )
+    .await
+    .expect("A completed report must not wait for still-fresh metadata to expire")
+    .unwrap();
+    assert!(report.complete);
+    assert_eq!(f.metadata_calls(), before);
+}
+
+#[tokio::test]
 async fn full_report_confirms_metadata_while_its_last_source_is_pending() {
     for expire in [false, true] {
         let f = Fixture::new().await;
