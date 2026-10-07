@@ -24,17 +24,19 @@ mod detail_confirmation_tests;
 #[cfg(test)]
 mod timing_tests;
 
-// The full report joins six independent source groups. Start its final
-// metadata read once five finish, while the last slow source is still pending.
+// Once five of the six source groups finish, give the remaining required
+// requests completion turns and overlap the final metadata confirmation.
 struct ReportTail {
     finished: AtomicUsize,
     ready: tokio::sync::Notify,
+    sources: crate::client::source_completion::SourceCompletion,
 }
 
 impl ReportTail {
     async fn collect<T>(&self, read: impl std::future::Future<Output = T>) -> T {
-        let result = read.await;
+        let result = self.sources.collect(read).await;
         if self.finished.fetch_add(1, Ordering::Relaxed) == 4 {
+            self.sources.promote();
             self.ready.notify_one();
         }
         result
@@ -1085,6 +1087,7 @@ impl Client {
             let tail = ReportTail {
                 finished: AtomicUsize::new(0),
                 ready: tokio::sync::Notify::new(),
+                sources: self.source_completion(),
             };
             let confirmation_age = std::time::Duration::from_secs(15);
             let overlap = self.status().queue_capacity >= 32

@@ -20,6 +20,8 @@ struct Mock {
     release: Notify,
     core_release: Notify,
     ordinary_release: Notify,
+    detail_release: Notify,
+    ordinary_detail_release: Notify,
 }
 async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     let path = uri.path();
@@ -33,6 +35,12 @@ async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     }
     if path.ends_with("/pulls/9") {
         mock.ordinary_release.notified().await;
+    }
+    if path.ends_with("/issues/8/comments") {
+        mock.detail_release.notified().await;
+    }
+    if path.ends_with("/issues/9/comments") {
+        mock.ordinary_detail_release.notified().await;
     }
     if path.ends_with("/pulls/7") {
         if mock.pause_metadata.load(Ordering::Relaxed) {
@@ -115,6 +123,8 @@ impl Fixture {
             release: Notify::new(),
             core_release: Notify::new(),
             ordinary_release: Notify::new(),
+            detail_release: Notify::new(),
+            ordinary_detail_release: Notify::new(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -1266,4 +1276,100 @@ async fn offline_detail_confirmation_preserves_old_validation_without_network_io
             .iter()
             .any(|v| v.resource.ends_with("/pulls/7") && v.validated_at_ms == at)
     );
+}
+
+#[tokio::test]
+async fn last_report_detail_takes_a_completion_turn_before_unrelated_slow_details() {
+    for coalesced in [false, true] {
+        let f = Fixture::new().await;
+        let freshness = Freshness::MaxAge(Duration::from_secs(30));
+        assert!(
+            f.client
+                .pr_report("acme/demo", 7, freshness)
+                .await
+                .unwrap()
+                .complete
+        );
+        rusqlite::Connection::open(f.dir.path().join("cache.sqlite"))
+            .unwrap()
+            .execute(
+                "DELETE FROM cache WHERE key LIKE '%/issues/7/timeline%'",
+                [],
+            )
+            .unwrap();
+        let read = |path: &'static str| {
+            let client = f.client.clone();
+            tokio::spawn(async move {
+                crate::client::INTERACTIVE_READ
+                    .scope(
+                        Arc::new(AtomicBool::new(true)),
+                        client.get(path, Freshness::Revalidate),
+                    )
+                    .await
+            })
+        };
+        let gate = read("repos/acme/demo/issues/8/comments");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("/issues/8/comments"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ordinary = read("repos/acme/demo/issues/9/comments");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let shared = coalesced.then(|| read("repos/acme/demo/issues/7/timeline?per_page=100"));
+        let before = f.client.status().coalesced_requests;
+        let reader = f.client.clone();
+        let report = tokio::spawn(async move {
+            crate::client::INTERACTIVE_READ
+                .scope(
+                    Arc::new(AtomicBool::new(true)),
+                    reader.pr_report("acme/demo", 7, freshness),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 3
+                || (coalesced && f.client.status().coalesced_requests == before)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Let the remaining cached groups finish while the detail socket is held.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        f.mock.detail_release.notify_one();
+        let mut report = report;
+        let completed = tokio::time::timeout(Duration::from_millis(500), &mut report).await;
+        f.mock.ordinary_detail_release.notify_one();
+        gate.await.unwrap().unwrap();
+        ordinary.await.unwrap().unwrap();
+        if let Some(shared) = shared {
+            shared.await.unwrap().unwrap();
+        }
+        let (finished_early, result) = match completed {
+            Ok(result) => (true, result),
+            Err(_) => (false, report.await),
+        };
+        assert!(result.unwrap().unwrap().complete);
+        assert!(
+            finished_early,
+            "The final timeline remained behind an unrelated blocked detail read (coalesced={coalesced})"
+        );
+    }
 }
