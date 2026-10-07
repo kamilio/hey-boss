@@ -11,11 +11,6 @@ pub(in crate::proxy) struct Cache {
     error: Option<String>,
 }
 impl Cache {
-    pub(in crate::proxy) fn expire_before(&mut self, observed: u64) {
-        if self.error.is_none() && self.updated_at.is_none_or(|t| t <= observed) {
-            self.retry_at = None;
-        }
-    }
     fn value(&self) -> Value {
         json!({
             "state": if self.error.is_some() {
@@ -422,11 +417,6 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             identity: Some(identity),
             ..Default::default()
         };
-    }
-    if cache.error.is_none()
-        && super::super::routes::quota::crossed_reset(cache.data.as_ref(), cache.updated_at)
-    {
-        cache.retry_at = None;
     }
     if cache.retry_at.is_some_and(|t| t > Instant::now()) {
         return cache.value();
