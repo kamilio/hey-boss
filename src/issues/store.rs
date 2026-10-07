@@ -1988,27 +1988,16 @@ impl Store {
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                // Older discovery registered temporary and Git metadata directories.
-                // Omit only empty entries, without deleting data or changing the
-                // user's visibility choices. Indexed lookups run only for local
-                // excluded local identities; repository listings need no filesystem IO.
-                let legacy_ids: Vec<_> = projects
-                    .iter()
-                    .filter_map(|p| p["id"].as_str())
-                    .filter(|id| {
-                        super::identity::is_temporary_project(id)
-                            || super::identity::is_git_metadata_project(id)
-                    })
-                    .collect();
-                let saved_work = project_names::saved_work(&tx, &legacy_ids)?;
+                // Discovery and read-only commands do not enroll a project in
+                // Builder. Explicit settings or saved work do, without deleting
+                // legacy identities. Check all IDs in one indexed batch.
+                let ids: Vec<_> = projects.iter().filter_map(|p| p["id"].as_str()).collect();
+                let saved_work = project_names::saved_work(&tx, &ids)?;
                 let mut listed_projects = Vec::with_capacity(projects.len());
                 let warnings = project_names::warnings(&tx, None)?;
                 for mut p in projects {
                     let id = p["id"].as_str().unwrap();
-                    if !(super::identity::is_temporary_project(id)
-                        || super::identity::is_git_metadata_project(id))
-                        || saved_work.contains(id)
-                    {
+                    if saved_work.contains(id) {
                         p["name_collisions"] = json!(
                             warnings
                                 .as_array()

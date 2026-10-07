@@ -192,7 +192,7 @@ pub(super) fn pending_discoveries(
         .collect())
 }
 
-/// Batch legacy visibility checks while preserving every kind of saved work.
+/// Batch visibility checks while preserving saved work and explicit worker setup.
 pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<String>> {
     if projects.is_empty() {
         return Ok(BTreeSet::new());
@@ -203,7 +203,8 @@ pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<
         OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=selected.value)
         OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=selected.value)
         OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=selected.value)
-        OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=selected.value)",
+        OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=selected.value)
+        OR selected.value IN (SELECT assigned.value FROM issue_workers w,json_each(w.config,'$.projects') assigned)",
     )?;
     Ok(query
         .query_map([serde_json::to_string(projects)?], |r| {

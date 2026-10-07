@@ -83,8 +83,8 @@ fn an_empty_metadata_name_slot_promotes_the_existing_workspace_without_data_loss
     let first = project("local:remote:/workspace/hey-gh", "hey-gh");
     let mut store = f.store();
     let value = registry(&mut store, &first);
-    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
-    assert_eq!(value["projects"][0]["id"], first.id);
+    assert_eq!(value["projects"].as_array().unwrap().len(), 0);
+    assert_eq!(value["project"]["id"], first.id);
     assert!(value["project_warnings"].as_array().unwrap().is_empty());
     assert_eq!(
         store.notification_project(&first, Some("HEY-GH")).unwrap(),
@@ -98,10 +98,7 @@ fn an_empty_metadata_name_slot_promotes_the_existing_workspace_without_data_loss
         2
     );
     drop(store);
-    assert_eq!(
-        registry(&mut f.store(), &first)["projects"][0]["id"],
-        first.id
-    );
+    assert_eq!(registry(&mut f.store(), &first)["project"]["id"], first.id);
 }
 
 #[test]
@@ -125,7 +122,7 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
     );
     let value = registry(&mut store, &other);
     assert_eq!(value["project"]["id"], first.id);
-    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(value["projects"].as_array().unwrap().len(), 0);
     assert!(value["project_warnings"].as_array().unwrap().is_empty());
     // Normal name reuse must not create a warning queue.
     assert_eq!(
@@ -169,7 +166,7 @@ fn upgrade_discards_reuse_warnings_without_touching_saved_history() {
     drop(db);
     let value = registry(&mut f.store(), &first);
     assert!(value["project_warnings"].as_array().unwrap().is_empty());
-    assert_eq!(value["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(value["projects"].as_array().unwrap().len(), 0);
 }
 
 #[test]

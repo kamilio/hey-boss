@@ -130,7 +130,7 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn notifications_hide_empty_temporary_projects_and_register_custom_projects() {
+fn notifications_register_identities_without_enrolling_empty_builder_projects() {
     let f = Fixture::new();
     let notice = f.notify(&mut f.alert(&f.cwd));
     assert_eq!(notice["project"], "project");
@@ -139,13 +139,7 @@ fn notifications_hide_empty_temporary_projects_and_register_custom_projects() {
     let notice = f.notify(f.alert(&f.cwd).args(["--project", "Atlas"]));
     assert_eq!(notice["project"], "Atlas");
     let projects = f.projects();
-    assert!(
-        projects["projects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["id"] == "named:Atlas")
-    );
+    assert!(projects["projects"].as_array().unwrap().is_empty());
     // A temporary checkout with saved user work must still remain discoverable.
     let created = f
         .command(&f.cwd)
@@ -199,8 +193,8 @@ fn notifications_share_git_project_across_subdirectories_and_worktrees() {
     );
     assert_eq!(f.notify(&mut f.alert(&linked))["project"], "Atlas");
     let projects = f.projects();
-    assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
-    assert_eq!(projects["projects"][0]["id"], "github.com/example/Atlas");
+    assert!(projects["projects"].as_array().unwrap().is_empty());
+    assert_eq!(projects["project"]["id"], "github.com/example/Atlas");
 }
 
 #[test]
