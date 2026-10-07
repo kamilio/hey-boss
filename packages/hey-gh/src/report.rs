@@ -26,8 +26,9 @@ mod detail_confirmation_tests;
 #[cfg(test)]
 mod timing_tests;
 
-// Once five of the six source groups finish, give the remaining required
-// requests completion turns and overlap the final metadata confirmation.
+// Promote the last two source groups together. Waiting for one to finish can
+// leave both paginated collections behind unrelated reads.
+// Metadata confirmation overlaps once five groups finish (or its cache expires).
 struct ReportTail {
     finished: AtomicUsize,
     ready: tokio::sync::Notify,
@@ -39,8 +40,10 @@ impl ReportTail {
     async fn collect<T>(&self, read: impl std::future::Future<Output = T>) -> T {
         let result = self.sources.collect(read).await;
         let finished = self.finished.fetch_add(1, Ordering::Relaxed) + 1;
-        if finished == 5 {
+        if finished == 4 {
             self.sources.promote();
+        }
+        if finished == 5 {
             self.ready.notify_one();
         }
         if finished == 6 {
