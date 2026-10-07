@@ -885,7 +885,8 @@ impl Client {
                 let Some(item) = work.next() else {
                     break;
                 };
-                if !seed_only && tokio::time::Instant::now() >= deadline {
+                let admitted_at = tokio::time::Instant::now();
+                if !seed_only && admitted_at >= deadline {
                     let remaining = 1 + work.len();
                     deferred += remaining;
                     retry.insert(item.key, item.node);
@@ -938,7 +939,10 @@ impl Client {
                 attempted += 1;
                 // Caller-owned futures retain publication, priority and entity
                 // scopes; each PR gets its own independent stall allowance.
-                active.push(Box::pin(cycle.refresh(item, disappeared)));
+                let cycle = cycle.admitted_at(admitted_at);
+                active.push(Box::pin(
+                    async move { cycle.refresh(item, disappeared).await },
+                ));
             }
             if active.is_empty() {
                 break;
@@ -1000,7 +1004,7 @@ impl Client {
                 }
             }
             let error = if cycle_interrupted {
-                Some(if tokio::time::Instant::now() < deadline {
+                Some(if background || tokio::time::Instant::now() < deadline {
                     "PR refresh budget exhausted; retry queued; prior evidence retained".into()
                 } else {
                     "refresh cycle budget exhausted; retry queued; prior evidence retained".into()

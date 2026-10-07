@@ -377,7 +377,11 @@ feed as `required_checks_changed` activity.
 
 The account watch survives daemon restarts. A bounded cycle persists its next
 PR so slow PRs cannot repeatedly starve later ones. Unvisited PRs remain queued;
-exhausting a cycle does not add timeout errors to their rows. Normal cursor reads
+exhausting a cycle does not add timeout errors to their rows. Background cycles
+stop admitting PRs after one report budget, then drain at most two active
+collections within their individual report budgets. Total network work is bounded
+by two report budgets; caller deadlines and the five-second stall limit still apply.
+Explicit refreshes keep their original total deadline. Normal cursor reads
 consume the local feed without starting discovery or detail refreshes; use
 `--refresh` to explicitly request upstream work. Discovery failures preserve
 known PRs and allow REST CI polling to continue. Default discovery allows cached

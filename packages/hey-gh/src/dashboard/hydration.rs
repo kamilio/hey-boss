@@ -45,6 +45,29 @@ pub(super) async fn next(active: &mut Vec<Read<'_>>) -> Result<Completed> {
 }
 
 impl Cycle<'_> {
+    pub fn admitted_at(self, at: Instant) -> Self {
+        // The cycle stops admitting work at its deadline. An admitted background
+        // PR owns a full collection budget, even when its turn starts late.
+        // Capturing admission before checkpoint I/O bounds the complete cycle
+        // to two report budgets, with at most its existing width left to drain.
+        let mut deadline = if self.background && self.refresh != Refresh::Discovery {
+            at + self.client.report_timeout()
+        } else {
+            self.deadline
+        };
+        if let Some(caller) = crate::client::REQUEST_DEADLINE
+            .try_with(|v| *v)
+            .ok()
+            .flatten()
+        {
+            deadline = deadline.min(caller);
+        }
+        if let Ok(caller) = crate::client::READ_DEADLINE.try_with(|v| *v) {
+            deadline = deadline.min(caller);
+        }
+        Self { deadline, ..self }
+    }
+
     pub async fn refresh(&self, item: Work, disappeared: bool) -> Result<Completed> {
         let Self {
             client,
@@ -250,6 +273,62 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+
+    #[tokio::test(start_paused = true)]
+    async fn admission_preserves_each_callers_deadline_and_the_collection_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::with_token(
+            crate::Config {
+                cache_path: dir.path().join("cache.sqlite"),
+                report_timeout: Duration::from_secs(10),
+                ..Default::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let start = Instant::now();
+        let admitted = start + Duration::from_secs(9);
+        tokio::time::advance(Duration::from_secs(9)).await;
+        for refresh in [
+            Refresh::Ci,
+            Refresh::Details,
+            Refresh::Policy,
+            Refresh::Combined,
+            Refresh::Discovery,
+        ] {
+            for background in [false, true] {
+                let cycle = Cycle {
+                    client: &client,
+                    freshness: Freshness::Revalidate,
+                    refresh,
+                    background,
+                    authoritative_roster: true,
+                    deadline: start + Duration::from_secs(10),
+                };
+                let expected = if background && refresh != Refresh::Discovery {
+                    start + Duration::from_secs(19)
+                } else {
+                    cycle.deadline
+                };
+                // Checkpoint delays count against the admitted PR's allowance.
+                tokio::time::advance(Duration::from_millis(100)).await;
+                assert_eq!(cycle.admitted_at(admitted).deadline, expected);
+                for (read, request) in [(12, 11), (11, 12), (8, 30), (30, 8), (30, 30)] {
+                    let read = start + Duration::from_secs(read);
+                    let request = start + Duration::from_secs(request);
+                    let deadline = crate::client::READ_DEADLINE
+                        .scope(
+                            read,
+                            crate::client::REQUEST_DEADLINE.scope(Some(request), async {
+                                cycle.admitted_at(admitted).deadline
+                            }),
+                        )
+                        .await;
+                    assert_eq!(deadline, expected.min(read).min(request));
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn expired_discovery_metadata_releases_the_transport_lane() {
