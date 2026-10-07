@@ -88,9 +88,12 @@ impl Cycle<'_> {
         let mut cycle_interrupted = false;
         let refresh = async {
             if seed_only && authoritative_roster && (disappeared || previously_terminal) {
+                let deadline = deadline.min(Instant::now() + Duration::from_secs(5));
                 tokio::time::timeout_at(
-                    deadline.min(tokio::time::Instant::now() + Duration::from_secs(5)),
-                    async {
+                    deadline,
+                    // Stop the shared transport when this lifecycle read expires,
+                    // unless another live caller extends the same request.
+                    crate::client::REQUEST_DEADLINE.scope(Some(deadline), async {
                         let response = client
                             .pull_request(
                                 repo,
@@ -114,7 +117,7 @@ impl Cycle<'_> {
                             )
                             .await?;
                         Ok(())
-                    },
+                    }),
                 )
                 .await
                 .unwrap_or(Err(Error::Deadline))
@@ -239,5 +242,144 @@ impl Cycle<'_> {
             cycle_interrupted,
             retained_progress,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn expired_discovery_metadata_releases_the_transport_lane() {
+        for cycle_budget in [Duration::from_millis(200), Duration::from_secs(30)] {
+            discovery_deadline(cycle_budget, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_expiry_preserves_a_coalesced_metadata_reader() {
+        discovery_deadline(Duration::from_millis(200), true).await;
+    }
+
+    async fn discovery_deadline(cycle_budget: Duration, shared: bool) {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap());
+        let router = axum::Router::new().fallback({
+            let entered = entered.clone();
+            let release = release.clone();
+            move |uri: axum::http::Uri| {
+                let entered = entered.clone();
+                let release = release.clone();
+                async move {
+                    if uri.path() == "/repos/acme/demo/pulls/7" {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    axum::Json(json!({"ok":true}))
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::with_token(
+            crate::Config {
+                cache_path: dir.path().join("cache.sqlite"),
+                rest_url: origin.parse().unwrap(),
+                graphql_url: format!("{origin}graphql").parse().unwrap(),
+                min_spacing: Duration::ZERO,
+                ..Default::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let nodes = BTreeMap::from([(("acme/demo".into(), 7), json!({"id":"PR_7"}))]);
+        let item = super::super::schedule::Schedule::baseline(&nodes, None, false)
+            .order(nodes)
+            .pop()
+            .unwrap();
+        let refresh = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                crate::client::BACKGROUND_READ
+                    .scope(
+                        (),
+                        Cycle {
+                            client: &client,
+                            freshness: Freshness::Revalidate,
+                            refresh: Refresh::Discovery,
+                            background: false,
+                            authoritative_roster: true,
+                            deadline: Instant::now() + cycle_budget,
+                        }
+                        .refresh(item, true),
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        let reader = shared.then(|| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .pull_request("acme/demo", 7, Freshness::Revalidate)
+                    .await
+            })
+        });
+        if shared {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while client.status().coalesced_requests == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let completed = tokio::time::timeout(Duration::from_secs(6), refresh)
+            .await
+            .expect("discovery exceeded its five-second lifecycle cap")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(completed.result, Err(Error::Deadline)));
+        assert!(
+            client
+                .stored_snapshot("metadata://github.com/acme/demo/7")
+                .await
+                .unwrap()
+                .is_none(),
+            "expired metadata must not publish lifecycle evidence"
+        );
+        if let Some(reader) = reader {
+            assert!(
+                !reader.is_finished(),
+                "discovery expiry cancelled a live shared reader"
+            );
+            release.notify_one();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), reader)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .data["ok"],
+                true
+            );
+        }
+        let neighbor = tokio::time::timeout(
+            Duration::from_millis(500),
+            client.get("neighbor", Freshness::Revalidate),
+        )
+        .await;
+        server.abort();
+        assert!(
+            neighbor.is_ok(),
+            "expired discovery read retained the only core transport lane"
+        );
+        assert_eq!(neighbor.unwrap().unwrap().data["ok"], true);
     }
 }
