@@ -160,13 +160,15 @@ fn demand_scope(request: &axum::extract::Request) -> DemandScope {
             };
             match (*kind, tail) {
                 (_, []) | ("repos", ["prs" | "pr-lifecycles"]) => DemandScope::Repository(repo),
-                ("prs", [number] | [number, "ci" | "metadata" | "required-checks"]) => number
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|n| *n > 0)
-                    .map_or(DemandScope::Global, |n| {
-                        DemandScope::PullRequest(format!("{repo}/{n}"))
-                    }),
+                ("prs", [number] | [number, "ci" | "metadata" | "required-checks" | "reviews"]) => {
+                    number
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .map_or(DemandScope::Global, |n| {
+                            DemandScope::PullRequest(format!("{repo}/{n}"))
+                        })
+                }
                 _ => DemandScope::Global,
             }
         }
@@ -222,6 +224,12 @@ mod tests {
     async fn http_demand_is_scoped_only_when_the_selector_is_unambiguous() {
         for (path, local_node, local_sibling, local_other) in [
             ("/v1/prs/acme/repo/7?cached_only=true", true, false, false),
+            (
+                "/v1/prs/acme/repo/7/reviews?cached_only=true",
+                true,
+                false,
+                false,
+            ),
             (
                 "/v1/prs/acme/repo/7/ci?cached_only=true",
                 true,

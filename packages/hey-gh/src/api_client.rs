@@ -272,6 +272,21 @@ impl ApiClient {
         )
         .await
     }
+    pub async fn pr_review_report(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+    ) -> Result<crate::ReviewReport> {
+        validate_repository(repository)?;
+        self.read(
+            self.http
+                .get(self.url(&format!("v1/prs/{repository}/{number}/reviews")))
+                .query(&self.report_query(freshness)?),
+        )
+        .await
+    }
+
     pub async fn ci_for_pr(
         &self,
         repository: &str,

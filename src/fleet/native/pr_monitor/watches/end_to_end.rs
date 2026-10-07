@@ -244,6 +244,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
                 } else if path.ends_with("ci") {
                     ci
                 } else {
+                    assert_eq!(path, "/v1/prs/o/r/1/reviews");
                     let now = crate::issues::worker::now();
                     let finding = if completed_review {
                         format!("Synthetic review finding, edit {}", phase - 2)

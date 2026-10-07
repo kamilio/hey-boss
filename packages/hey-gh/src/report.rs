@@ -15,6 +15,8 @@ mod policy_ci;
 pub(crate) use ci_metadata::discovery::scope as ci_discovery_scope;
 mod review_activity;
 mod review_events;
+mod review_report;
+pub use review_report::{PrReviewReport, ReviewReport};
 mod timings;
 use timings::{Phase, Timings};
 #[cfg(test)]
@@ -230,6 +232,21 @@ pub struct Report {
     pub complete: bool,
     pub oldest_validation_at_ms: u64,
     pub validations: Vec<ResourceValidation>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReportScope {
+    Full,
+    Reviews,
+}
+
+impl ReportScope {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Full => "pr",
+            Self::Reviews => "pr_reviews",
+        }
+    }
 }
 
 impl Client {
@@ -854,17 +871,33 @@ impl Client {
         number: u64,
         freshness: Freshness,
     ) -> Result<Report> {
+        self.scoped_pr_report(repository, number, freshness, ReportScope::Full)
+            .await
+    }
+
+    async fn scoped_pr_report(
+        &self,
+        repository: &str,
+        number: u64,
+        freshness: Freshness,
+        scope: ReportScope,
+    ) -> Result<Report> {
         validate_repository(repository)?;
         let priority = if matches!(freshness, Freshness::CachedOnly) {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
         } else {
-            self.report_priority("pr", repository, number, crate::client::interactive_read())
+            self.report_priority(
+                scope.name(),
+                repository,
+                number,
+                crate::client::interactive_read(),
+            )
         };
         crate::client::INTERACTIVE_READ
             .scope(
                 priority,
                 crate::entity::scope(Box::pin(
-                    self.pr_report_inner(repository, number, freshness),
+                    self.pr_report_inner(repository, number, freshness, scope),
                 )),
             )
             .await
@@ -875,10 +908,15 @@ impl Client {
         repository: &str,
         number: u64,
         freshness: Freshness,
+        scope: ReportScope,
     ) -> Result<Report> {
         validate_repository(repository)?;
-        let mut timings = Timings::new("pr", repository, number, freshness);
-        let lock = self.report_lock(&format!("{}#{number}", repository.to_ascii_lowercase()));
+        let mut timings = Timings::new(scope.name(), repository, number, freshness);
+        let key = format!("{}#{number}", repository.to_ascii_lowercase());
+        let lock = self.report_lock(&match scope {
+            ReportScope::Full => key,
+            ReportScope::Reviews => format!("{key}:reviews"),
+        });
         let result = PUBLICATION_READ_ONLY
             .scope(
                 publication_scope(),
@@ -892,7 +930,13 @@ impl Client {
                         VALIDATIONS
                             .scope(std::cell::RefCell::new(Vec::new()), async {
                                 let mut report = self
-                                    .build_report(repository, number, freshness, &mut timings)
+                                    .build_report(
+                                        repository,
+                                        number,
+                                        freshness,
+                                        &mut timings,
+                                        scope,
+                                    )
                                     .await?;
                                 report.validations =
                                     VALIDATIONS.with(|records| records.borrow().clone());
@@ -1042,6 +1086,7 @@ impl Client {
         number: u64,
         freshness: Freshness,
         timings: &mut Timings,
+        scope: ReportScope,
     ) -> Result<Report> {
         timings.enter(Phase::Prepare);
         let repository_spelling = self.pr_repository_spelling(repository, number).await?;
@@ -1170,6 +1215,13 @@ impl Client {
                             }),
                             tail.collect(self.pages(&reviews_path, None, freshness)),
                             tail.collect(async {
+                                // Review decisions do not consume timeline or
+                                // review-request history. Their public response
+                                // has a distinct type and cannot publish a full
+                                // report or certify unrelated source recovery.
+                                if scope == ReportScope::Reviews {
+                                    return (Ok(Vec::new()), Ok(Vec::new()));
+                                }
                                 let timeline = self.pages(&timeline_path, None, freshness).await;
                                 // The full report already needs the complete REST timeline.
                                 // Reuse its event identities and validation clocks where it
@@ -1295,50 +1347,50 @@ impl Client {
             let complete = report.errors.is_empty() && report.ci.errors.is_empty();
             // Incomplete observations are explicit and are not appended as a
             // replacement for a previously complete snapshot.
-            let suffix = format!("{}/{repository}/{number}", self.hostname());
-            let mut observations = vec![(
-                format!("metadata://{suffix}"),
-                json!({"pull_request":report.pull_request,"conflicts":report.conflicts}),
-            )];
-            for (field, data) in [
-                ("comments", json!({"comments":report.comments})),
-                (
-                    "review_comments",
-                    json!({"review_comments":report.review_comments}),
-                ),
-                ("reviews", json!({"reviews":report.reviews})),
-                ("timeline", json!({"timeline":report.timeline})),
-                (
-                    "review_events",
-                    json!({"review_events":report.review_events}),
-                ),
-                (
-                    "review_threads",
-                    json!({"review_threads":report.review_threads}),
-                ),
-            ] {
-                if !report.errors.iter().any(|e| e.source == field) {
-                    observations.push((format!("{field}://{suffix}"), data));
+            let cursor = if can_publish() && scope == ReportScope::Full {
+                let suffix = format!("{}/{repository}/{number}", self.hostname());
+                let mut observations = vec![(
+                    format!("metadata://{suffix}"),
+                    json!({"pull_request":report.pull_request,"conflicts":report.conflicts}),
+                )];
+                for (field, data) in [
+                    ("comments", json!({"comments":report.comments})),
+                    (
+                        "review_comments",
+                        json!({"review_comments":report.review_comments}),
+                    ),
+                    ("reviews", json!({"reviews":report.reviews})),
+                    ("timeline", json!({"timeline":report.timeline})),
+                    (
+                        "review_events",
+                        json!({"review_events":report.review_events}),
+                    ),
+                    (
+                        "review_threads",
+                        json!({"review_threads":report.review_threads}),
+                    ),
+                ] {
+                    if !report.errors.iter().any(|e| e.source == field) {
+                        observations.push((format!("{field}://{suffix}"), data));
+                    }
                 }
-            }
-            if !report
-                .errors
-                .iter()
-                .any(|e| matches!(e.source.as_str(), "reviews" | "review_threads"))
-            {
-                observations.push((
-                    format!("review_status://{suffix}"),
-                    serde_json::to_value(&report.review_status)
-                        .map_err(|e| Error::Invalid(e.to_string()))?,
-                ));
-            }
-            if complete {
-                observations.push((
-                    format!("pr://{suffix}"),
-                    serde_json::to_value(&report).map_err(|e| Error::Invalid(e.to_string()))?,
-                ));
-            }
-            let cursor = if can_publish() {
+                if !report
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e.source.as_str(), "reviews" | "review_threads"))
+                {
+                    observations.push((
+                        format!("review_status://{suffix}"),
+                        serde_json::to_value(&report.review_status)
+                            .map_err(|e| Error::Invalid(e.to_string()))?,
+                    ));
+                }
+                if complete {
+                    observations.push((
+                        format!("pr://{suffix}"),
+                        serde_json::to_value(&report).map_err(|e| Error::Invalid(e.to_string()))?,
+                    ));
+                }
                 timings.enter(Phase::Publication);
                 let head = self.observe_many(&observations).await?;
                 let mut health = vec![("details", source_error_message(&report.errors))];

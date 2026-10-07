@@ -7,6 +7,8 @@ use axum::{
 };
 use std::{sync::Mutex, time::Duration};
 use tokio::sync::Notify;
+#[path = "review_report_tests.rs"]
+mod review_report_tests;
 
 struct Mock {
     calls: Mutex<Vec<String>>,
@@ -15,6 +17,10 @@ struct Mock {
     pause_graph: AtomicBool,
     pause_metadata: AtomicBool,
     deny_metadata: AtomicBool,
+    deny_timeline: AtomicBool,
+    deny_path: Mutex<Option<String>>,
+    pause_timeline: AtomicBool,
+    timeline_release: Notify,
     metadata_release: Notify,
     reviews_release: Notify,
     release: Notify,
@@ -26,6 +32,23 @@ struct Mock {
 async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     let path = uri.path();
     mock.calls.lock().unwrap().push(path.into());
+    if mock.deny_path.lock().unwrap().as_deref() == Some(path) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message":"source denied"})),
+        )
+            .into_response();
+    }
+    if path.ends_with("/timeline") && mock.pause_timeline.load(Ordering::Relaxed) {
+        mock.timeline_release.notified().await;
+    }
+    if path.ends_with("/timeline") && mock.deny_timeline.load(Ordering::Relaxed) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message":"timeline denied"})),
+        )
+            .into_response();
+    }
     if path.ends_with("/access_tokens") {
         return (StatusCode::CREATED, Json(json!({"token":"synthetic-app-token", "expires_at":
             chrono::DateTime::from_timestamp((now_ms()/1000 + 3600) as i64, 0).unwrap().to_rfc3339()}))).into_response();
@@ -118,6 +141,10 @@ impl Fixture {
             pause_graph: AtomicBool::new(false),
             pause_metadata: AtomicBool::new(false),
             deny_metadata: AtomicBool::new(false),
+            deny_timeline: AtomicBool::new(false),
+            deny_path: Mutex::new(None),
+            pause_timeline: AtomicBool::new(false),
+            timeline_release: Notify::new(),
             metadata_release: Notify::new(),
             reviews_release: Notify::new(),
             release: Notify::new(),
@@ -190,6 +217,29 @@ impl Fixture {
             })
             .await
     }
+}
+
+#[tokio::test]
+async fn review_evidence_does_not_require_or_fetch_the_rest_timeline() {
+    let f = Fixture::new().await;
+    f.mock.deny_timeline.store(true, Ordering::Relaxed);
+    let report = f
+        .client
+        .pr_review_report("acme/demo", 7, Freshness::Revalidate)
+        .await
+        .unwrap();
+    assert!(
+        report.complete,
+        "Review evidence must not depend on unused timeline access"
+    );
+    assert!(
+        !f.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with("/timeline"))
+    );
 }
 
 async fn pending_full_report(f: &Fixture) -> tokio::task::JoinHandle<Result<Report>> {

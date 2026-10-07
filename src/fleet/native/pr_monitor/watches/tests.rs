@@ -733,7 +733,7 @@ fn scenario(scenario: Scenario) {
                         (&metadata, 200)
                     }
                 }
-                "/v1/prs/o/r/1" => {
+                "/v1/prs/o/r/1/reviews" => {
                     let db = Store::open_connection(&database).unwrap();
                     let assignee: Option<String> = db
                         .query_row("SELECT assignee FROM issues WHERE number=1", [], |r| {

@@ -537,9 +537,69 @@ pub fn observe_ci(
 /// edited reviews change identities; rereading the same evidence does not.
 pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
     let pr = &report.data;
-    let ci = &pr.ci;
-    let mut observation = ci_signals(&pr.repository, pr.number, &pr.pull_request, ci, policy);
-    if report.complete
+    observe_review_evidence(
+        ReviewEvidence {
+            repository: &pr.repository,
+            number: pr.number,
+            pull_request: &pr.pull_request,
+            conflicts: &pr.conflicts,
+            comments: &pr.comments,
+            review_comments: &pr.review_comments,
+            reviews: &pr.reviews,
+            review_threads: &pr.review_threads,
+            review_status: &pr.review_status,
+            ci: &pr.ci,
+            errors: &pr.errors,
+            complete: report.complete,
+        },
+        policy,
+    )
+}
+
+/// The watcher consumes the same evidence without requiring unused history.
+pub fn observe_review_report(
+    report: &crate::ReviewReport,
+    policy: &RequiredChecksReport,
+) -> Observation {
+    let pr = &report.data;
+    observe_review_evidence(
+        ReviewEvidence {
+            repository: &pr.repository,
+            number: pr.number,
+            pull_request: &pr.pull_request,
+            conflicts: &pr.conflicts,
+            comments: &pr.comments,
+            review_comments: &pr.review_comments,
+            reviews: &pr.reviews,
+            review_threads: &pr.review_threads,
+            review_status: &pr.review_status,
+            ci: &pr.ci,
+            errors: &pr.errors,
+            complete: report.complete,
+        },
+        policy,
+    )
+}
+
+struct ReviewEvidence<'a> {
+    repository: &'a str,
+    number: u64,
+    pull_request: &'a Value,
+    conflicts: &'a str,
+    comments: &'a [Value],
+    review_comments: &'a [Value],
+    reviews: &'a [Value],
+    review_threads: &'a [Value],
+    review_status: &'a crate::ReviewStatus,
+    ci: &'a crate::CiReport,
+    errors: &'a [crate::SourceError],
+    complete: bool,
+}
+
+fn observe_review_evidence(pr: ReviewEvidence<'_>, policy: &RequiredChecksReport) -> Observation {
+    let ci = pr.ci;
+    let mut observation = ci_signals(pr.repository, pr.number, pr.pull_request, ci, policy);
+    if pr.complete
         && pr.errors.is_empty()
         && policy.errors.is_empty()
         && ci.errors.is_empty()
@@ -553,16 +613,16 @@ pub fn observe(report: &Report, policy: &RequiredChecksReport) -> Observation {
         }
     }
     let complete =
-        observation.evidence["ci_settled"] == true && report.complete && pr.errors.is_empty();
+        observation.evidence["ci_settled"] == true && pr.complete && pr.errors.is_empty();
     if !complete {
         observation.completed = None;
     }
     let reviews = selected(
-        &pr.reviews,
+        pr.reviews,
         &["id", "state", "body", "commit_id", "html_url"],
     );
     let comments = selected(
-        &pr.review_comments,
+        pr.review_comments,
         &["id", "body", "commit_id", "path", "line", "html_url"],
     );
     let mut feedback = Vec::new();
@@ -674,6 +734,57 @@ mod tests {
         })).unwrap();
         let policy = serde_json::from_value(json!({"repository":"o/r","pull_number":1,"head_sha":"head","base_branch":"main","state":"failure","strict":false,"up_to_date":true,"checks":[{"context":"test","app_id":1,"state":"failure","sha":"head","url":"https://github.com/o/r/actions/runs/1"}],"rules":[],"errors":[],"cursor":"unused"})).unwrap();
         (report, policy)
+    }
+
+    #[test]
+    fn review_report_preserves_watcher_signals_without_timeline_history() {
+        for case in [
+            "feedback",
+            "incomplete",
+            "unknown_policy",
+            "changed_head",
+            "conflict",
+        ] {
+            let (mut full, mut policy) = fixture();
+            full.data.ci.summary.pending = 0;
+            full.data.pull_request["user"] = json!({"login":"author"});
+            full.data.reviews.push(json!({"id":2,"state":"CHANGES_REQUESTED","body":"Fix race","user":{"login":"reviewer"}}));
+            full.data
+                .comments
+                .push(json!({"id":3,"body":"Still broken","user":{"login":"reviewer"}}));
+            full.data.review_threads.push(json!({"id":"thread","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"id":"comment","body":"Unsafe","author":{"login":"reviewer"}}]}}));
+            full.data
+                .timeline
+                .push(json!({"event":"unrelated history"}));
+            match case {
+                "incomplete" => full.complete = false,
+                "unknown_policy" => policy.errors.push(crate::SourceError {
+                    source: "policy".into(),
+                    message: "unavailable".into(),
+                }),
+                "changed_head" => policy.head_sha = "previous".into(),
+                "conflict" => {
+                    full.data.conflicts = "conflicting".into();
+                    full.data.pull_request["mergeable"] = json!(false);
+                }
+                _ => {}
+            }
+            let expected = observe(&full, &policy);
+            let review = crate::ReviewReport::from(full);
+            let actual = observe_review_report(&review, &policy);
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "{case}"
+            );
+            if case == "feedback" {
+                assert_eq!(actual.feedback.len(), 3);
+            }
+            if matches!(case, "incomplete" | "unknown_policy" | "changed_head") {
+                assert!(actual.completed.is_none(), "{case}");
+                assert!(actual.feedback.is_empty(), "{case}");
+            }
+        }
     }
     #[test]
     fn metadata_conflicts_do_not_wait_for_optional_ci_or_reviews() {

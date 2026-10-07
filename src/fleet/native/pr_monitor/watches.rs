@@ -379,14 +379,14 @@ async fn poll_details(
     let read_client = client.clone().with_read_deadline(deadline);
     let result = tokio::time::timeout_at(
         deadline,
-        read_client.pr_report(repository, number, freshness),
+        read_client.pr_review_report(repository, number, freshness),
     )
     .await
     .unwrap_or(Err(hey_gh::Error::Deadline));
     let mut store = Store::open(&ctx.path).map_err(storage)?;
     match result {
         Ok(report) if fresh(report.oldest_validation_at_ms) && timestamp(report.observed_at_ms).is_ok() => {
-            let observation = hey_gh::watcher::observe(&report, &policy);
+            let observation = hey_gh::watcher::observe_review_report(&report, &policy);
             if observation.evidence["sources_match"] == false {
                 store.record_github_error(url, "reviews", "Pull request changed during review collection; refreshing again. Last validated status retained.").map_err(storage)?;
             } else {
