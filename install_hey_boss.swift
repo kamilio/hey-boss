@@ -1,36 +1,13 @@
 import Foundation
 import Darwin
 
-func status(_ executable: String, _ arguments: [String]) -> Int32 {
+func run(_ executable: String, _ arguments: [String]) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     try! process.run()
     process.waitUntilExit()
-    return process.terminationStatus
-}
-
-func run(_ executable: String, _ arguments: [String]) {
-    precondition(status(executable, arguments) == 0)
-}
-
-// launchd pins each agent to the code signature it was registered with and
-// refuses to spawn a replaced binary (EX_CONFIG) until the agent re-registers.
-func reregisterAgents(in agents: URL, running replaced: Set<String>) {
-    let domain = "gui/\(getuid())"
-    for plist in try! FileManager.default.contentsOfDirectory(at: agents, includingPropertiesForKeys: nil) where plist.pathExtension == "plist" {
-        guard let content = NSDictionary(contentsOf: plist),
-              let program = (content["ProgramArguments"] as? [String])?.first ?? content["Program"] as? String,
-              replaced.contains(program) else { continue }
-        _ = status("/bin/launchctl", ["bootout", domain, plist.path])
-        // bootstrap can fail with EIO while the bootout is still settling.
-        var attempts = 0
-        while status("/bin/launchctl", ["bootstrap", domain, plist.path]) != 0 {
-            attempts += 1
-            precondition(attempts < 5, "Cannot re-register \(plist.path)")
-            sleep(1)
-        }
-    }
+    precondition(process.terminationStatus == 0)
 }
 
 func installHeyBoss() -> [String: String] {
@@ -54,7 +31,6 @@ func installHeyBoss() -> [String: String] {
     try! Data(contentsOf: root.appendingPathComponent("target/release/hey-boss")).write(to: binary, options: .atomic)
     run("/usr/bin/swift", [root.appendingPathComponent("package_hey_boss.swift").path, staging.path, app.path])
     for executable in [binary, daemon] { try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path) }
-    var replaced = Set<String>()
     for name in ["hey-gh", "hey-harvester", "hey-proxy"] {
         let binary = binaries.appendingPathComponent(name)
         var paths = [binary]
@@ -63,10 +39,8 @@ func installHeyBoss() -> [String: String] {
         for destination in paths {
             try! Data(contentsOf: root.appendingPathComponent("target/release/\(name)")).write(to: destination, options: .atomic)
             try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destination.path)
-            replaced.insert(destination.path)
         }
     }
-    reregisterAgents(in: agents, running: replaced)
     let shortcut = binaries.appendingPathComponent("hb")
     if !files.fileExists(atPath: shortcut.path) && (try? files.destinationOfSymbolicLink(atPath: shortcut.path)) == nil {
         try! files.createSymbolicLink(atPath: shortcut.path, withDestinationPath: "hey-boss")
