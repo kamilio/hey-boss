@@ -1,4 +1,5 @@
 //! Direct Messages transport for Gemini; no Responses conversion is involved.
+use super::super::gemini::continuation::Continuation;
 use super::*;
 use gemini_stream::NativeStream;
 
@@ -104,21 +105,46 @@ pub(super) async fn forward(
             ),
         };
     }
+    let mut continuation = Continuation::new(request, input["max_tokens"].as_u64());
     let mut state = NativeStream::new(input["model"].as_str().unwrap_or(&model));
     if !converted.stream {
-        return match body(upstream).await.and_then(|v| {
-            state.feed(&v, &converted)?;
-            state.end(&converted, &proxy.service.gemini.codec)?;
-            Ok(())
-        }) {
-            Ok(()) => {
-                state.log_usage(&proxy);
-                proxy.service.logs.first_output(proxy.log_id);
-                axum::Json(state.message).into_response()
+        loop {
+            let result = async {
+                let mut native = body(upstream).await?;
+                continuation.feed(&mut native)?;
+                state.feed(&native, &converted)?;
+                if let Some(next) = continuation.next()? {
+                    return Ok(Some(next));
+                }
+                state.feed(&continuation.terminal(), &converted)?;
+                state.end(&converted, &proxy.service.gemini.codec)?;
+                Ok::<_, anyhow::Error>(None)
             }
-            Err(e) => error(StatusCode::BAD_GATEWAY, &e.to_string()),
-        };
+            .await;
+            match result {
+                Ok(Some(next)) => {
+                    upstream = match super::super::gemini::send_native(&proxy, config, &url, &next)
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => {
+                            return error(
+                                StatusCode::BAD_GATEWAY,
+                                "Gemini follow-up request failed",
+                            );
+                        }
+                    };
+                }
+                Ok(None) => {
+                    state.log_usage(&proxy);
+                    proxy.service.logs.first_output(proxy.log_id);
+                    return axum::Json(state.message).into_response();
+                }
+                Err(e) => return error(StatusCode::BAD_GATEWAY, &e.to_string()),
+            }
+        }
     }
+
     if !upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -127,17 +153,21 @@ pub(super) async fn forward(
     {
         return error(StatusCode::BAD_GATEWAY, "Expected native Gemini SSE");
     }
+    let config = config.clone();
     let body = Body::from_stream(async_stream::stream! {
         let mut decoder=sse::SseDecoder::default();
         let mut heartbeat=tokio::time::interval(Duration::from_secs(15));heartbeat.tick().await;
         'read: loop {
             // Keep the pending native read alive across heartbeat ticks.
-            let read=upstream.chunk();tokio::pin!(read);
-            let chunk=loop {tokio::select!{chunk=&mut read=>break chunk,_=heartbeat.tick()=>{yield Ok::<Bytes,std::io::Error>(frame(&json!({"type":"ping"})));}}};
+            let chunk = {
+                let read=upstream.chunk();tokio::pin!(read);
+                loop {tokio::select!{chunk=&mut read=>break chunk,_=heartbeat.tick()=>{yield Ok::<Bytes,std::io::Error>(frame(&json!({"type":"ping"})));}}}
+            };
             let eof=matches!(&chunk,Ok(None));
             let events=match chunk{Ok(Some(bytes))=>decoder.feed(&bytes,false),Ok(None)=>decoder.feed(&[],true),Err(_)=>{yield Ok(failed(&proxy,"Native Gemini stream disconnected"));break;}};
             match events {
-                Ok(events)=>for event in events {
+                Ok(events)=>for mut event in events {
+                    if let Err(e) = continuation.feed(&mut event) { yield Ok(failed(&proxy, &e.to_string())); break 'read; }
                     match state.feed(&event,&converted){Ok(events)=>for event in events{
                         if event["type"] == "content_block_delta" { proxy.service.logs.first_output(proxy.log_id); }
                         yield Ok(frame(&event));
@@ -147,6 +177,25 @@ pub(super) async fn forward(
                 Err(_)=>{yield Ok(failed(&proxy,"Invalid or oversized native Gemini SSE"));break;}
             }
             if eof {
+                match continuation.next() {
+                    Ok(Some(next)) => {
+                        let send = super::super::gemini::send_native(&proxy, &config, &url, &next);
+                        tokio::pin!(send);
+                        let response = loop { tokio::select! {
+                            result = &mut send => break result,
+                            _ = heartbeat.tick() => yield Ok(frame(&json!({"type":"ping"}))),
+                        }};
+                        match response {
+                            Ok(response) if response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("text/event-stream")) => {
+                                upstream = response; decoder = sse::SseDecoder::default(); continue;
+                            }
+                            _ => { yield Ok(failed(&proxy, "Gemini follow-up request failed")); break; }
+                        }
+                    }
+                    Ok(None) => {},
+                    Err(e) => { yield Ok(failed(&proxy, &e.to_string())); break; }
+                }
+                if let Err(e) = state.feed(&continuation.terminal(), &converted) { yield Ok(failed(&proxy, &e.to_string())); break; }
                 match state.end(&converted,&proxy.service.gemini.codec){Ok(events)=>for event in events{yield Ok(frame(&event));},Err(e)=>yield Ok(failed(&proxy,&e.to_string()))}
                 state.log_usage(&proxy);break;
             }

@@ -1,10 +1,17 @@
 //! Transport adapter; conversion lives in the reusable hey_proxy library.
 use super::*;
+#[cfg(test)]
+use hey_proxy::gemini::convert_response;
 use hey_proxy::gemini::{
     Auth, ConvertedRequest, HostedSearch, ProviderConfig, ReasoningCodec, ResponseError,
-    ResponseStream, convert_request, convert_response,
+    ResponseStream, convert_request,
 };
 use std::path::Path;
+pub(super) mod continuation;
+use continuation::Continuation;
+
+#[cfg(test)]
+mod continuation_tests;
 
 pub(super) struct GeminiState {
     pub codec: ReasoningCodec,
@@ -250,77 +257,17 @@ pub(super) async fn forward(
     };
     let id = format!("{:032x}", rand::random::<u128>());
     if !converted.stream {
-        let native = match bounded_body(upstream, MAX_NATIVE_RESPONSE)
-            .await
-            .and_then(|bytes| Ok(serde_json::from_slice::<Value>(&bytes)?))
-        {
-            Ok(v) => v,
-            Err(_) => {
-                return transport_error(
-                    "Invalid Gemini JSON response; retry the request",
-                    "gemini_response_read_failed",
-                );
-            }
-        };
-        let mut converter = ResponseStream::new(converted.clone(), id.clone());
-        if converter.feed(&native).is_ok()
-            && !converter.is_finished()
-            && let Some(mut retry_body) = converter.prepare_tool_recovery()
-        {
-            let terminal = loop {
-                proxy.service.logs.update(
-                    proxy.log_id,
-                    "gemini_tool_call_recovery",
-                    json!({"attempt": converter.recovery_attempts()}),
-                    |_| true,
-                );
-                let retry_upstream = match send_native(&proxy, &config, &url, &retry_body).await {
-                    Ok(response) => response,
-                    Err(response) => return *response,
-                };
-                let retry_native = match bounded_body(retry_upstream, MAX_NATIVE_RESPONSE)
-                    .await
-                    .and_then(|bytes| Ok(serde_json::from_slice::<Value>(&bytes)?))
-                {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return transport_error(
-                            "Invalid Gemini JSON response; retry the request",
-                            "gemini_response_read_failed",
-                        );
-                    }
-                };
-                let mut events = match converter.feed(&retry_native) {
-                    Ok(events) => events,
-                    Err(e) => return transport_error(&e.to_string(), "gemini_conversion_error"),
-                };
-                if converter.is_finished() {
-                    break events.pop().unwrap()["response"].take();
-                }
-                if let Some(next_body) = converter.prepare_tool_recovery() {
-                    retry_body = next_body;
-                    continue;
-                }
-                break match converter.finish(&proxy.service.gemini.codec) {
-                    Ok(mut finished) => finished.pop().unwrap()["response"].take(),
-                    Err(e) => return transport_error(&e.to_string(), "gemini_conversion_error"),
-                };
-            };
-            if !proxy.fallback_attempt {
-                proxy.service.logs.observe(proxy.log_id, &terminal);
-            }
-            return axum::Json(terminal).into_response();
-        }
-        return match convert_response(&native, &converted, &proxy.service.gemini.codec, &id) {
-            Ok(response) => {
+        return match unary_turn(&proxy, &config, &url, &converted, &id, upstream).await {
+            Ok((response, _)) => {
                 if !proxy.fallback_attempt {
                     proxy.service.logs.observe(proxy.log_id, &response);
                 }
                 axum::Json(response).into_response()
             }
-            Err(e) => transport_error(&e.to_string(), "gemini_conversion_error"),
+            Err(response) => *response,
         };
     }
+
     let content_type = upstream
         .headers()
         .get(header::CONTENT_TYPE)
@@ -333,6 +280,8 @@ pub(super) async fn forward(
         );
     }
     let body = Body::from_stream(async_stream::stream! {
+        let budget = converted.response_fields.get("max_output_tokens").and_then(Value::as_u64);
+        let mut continuation = Continuation::new(converted.body.clone(), budget);
         let mut parser=NativeSse::default();let mut converter=ResponseStream::new(converted,id);
         let mut usage=logs::UsageReader::new(true);
         let mut received = 0usize;
@@ -360,7 +309,8 @@ pub(super) async fn forward(
             let frame_events=(||->Result<Vec<Value>> {
                 received = received.saturating_add(bytes.len());
                 anyhow::ensure!(received <= MAX_NATIVE_RESPONSE, "Gemini stream exceeds 64 MiB");
-                let mut events=Vec::new();for native in parser.feed(&bytes,eof)?{
+                let mut events=Vec::new();for mut native in parser.feed(&bytes,eof)?{
+                    continuation.feed(&mut native)?;
                     events.extend(converter.feed(&native)?);
                     if converter.is_finished() { break; }
                 }
@@ -386,13 +336,27 @@ pub(super) async fn forward(
                 break;
             }
             if eof {
-                if let Some(retry_body) = converter.prepare_tool_recovery() {
-                    proxy.service.logs.update(
-                        proxy.log_id,
-                        "gemini_tool_call_recovery",
-                        json!({"attempt": converter.recovery_attempts()}),
-                        |_| true,
-                    );
+                let next = match continuation.next() {
+                    Ok(next) => next,
+                    Err(e) => {
+                        let event = converter.fail("server_error", &e.to_string());
+                        if !proxy.fallback_attempt { usage.observe_value(&event, &proxy.service.logs, proxy.log_id); }
+                        yield Ok(sse_bytes(&event)); break;
+                    }
+                };
+                let next = if next.is_some() { next } else {
+                    match converter.feed(&continuation.terminal()) {
+                        Ok(events) => for event in events { yield Ok(sse_bytes(&event)); },
+                        Err(e) => { yield Ok(sse_bytes(&converter.fail("server_error", &e.to_string()))); break; }
+                    }
+                    let retry = converter.prepare_tool_recovery();
+                    if let Some(body) = &retry {
+                        proxy.service.logs.update(proxy.log_id, "gemini_tool_call_recovery", json!({"attempt": converter.recovery_attempts()}), |_| true);
+                        continuation = Continuation::new(body.clone(), budget);
+                    }
+                    retry
+                };
+                if let Some(retry_body) = next {
                     let send = send_native(&proxy, &config, &url, &retry_body);
                     tokio::pin!(send);
                     let next_upstream = loop {
@@ -420,7 +384,7 @@ pub(super) async fn forward(
                         }
                         Err(_) => {
                             proxy.service.logs.complete(proxy.log_id,"failed","transport",Some("gemini_stream_error"),0);
-                            yield Ok(sse_bytes(&converter.fail("server_error", "Gemini tool-call recovery failed; retry the request")));
+                            yield Ok(sse_bytes(&converter.fail("server_error", "Gemini follow-up request failed; retry the request")));
                             break;
                         }
                     }
@@ -465,6 +429,81 @@ pub(super) async fn forward(
     response
 }
 
+// Unary and hosted turns use the same incremental converter as SSE, retaining
+// signed parts and partial tool calls across native continuation boundaries.
+async fn unary_turn(
+    proxy: &Arc<Proxy>,
+    config: &ProviderConfig,
+    url: &str,
+    converted: &ConvertedRequest,
+    id: &str,
+    mut upstream: reqwest::Response,
+) -> std::result::Result<(Value, Vec<Value>), Box<Response>> {
+    let mut converter = ResponseStream::new(converted.clone(), id);
+    let budget = converted
+        .response_fields
+        .get("max_output_tokens")
+        .and_then(Value::as_u64);
+    let mut continuation = Continuation::new(converted.body.clone(), budget);
+    let mut events = Vec::new();
+    let mut received = 0usize;
+    loop {
+        let result = async {
+            let bytes = bounded_body(upstream, MAX_NATIVE_RESPONSE - received).await?;
+            received += bytes.len();
+            let mut native: Value = serde_json::from_slice(&bytes)?;
+            continuation.feed(&mut native)?;
+            events.extend(converter.feed(&native)?);
+            if converter.is_finished() {
+                return Ok(None);
+            }
+            if let Some(body) = continuation.next()? {
+                return Ok(Some(body));
+            }
+            events.extend(converter.feed(&continuation.terminal())?);
+            if let Some(body) = converter.prepare_tool_recovery() {
+                proxy.service.logs.update(
+                    proxy.log_id,
+                    "gemini_tool_call_recovery",
+                    json!({"attempt": converter.recovery_attempts()}),
+                    |_| true,
+                );
+                continuation = Continuation::new(body.clone(), budget);
+                return Ok(Some(body));
+            }
+            events.extend(converter.finish(&proxy.service.gemini.codec)?);
+            Ok::<_, anyhow::Error>(None)
+        }
+        .await;
+        match result {
+            Ok(Some(body)) => {
+                upstream = match send_native(proxy, config, url, &body).await {
+                    Ok(upstream) => upstream,
+                    Err(response) => return Err(response),
+                };
+            }
+            Ok(None) => break,
+            Err(_) => {
+                return Err(Box::new(transport_error(
+                    "Gemini response could not be completed; retry the request",
+                    "gemini_conversion_error",
+                )));
+            }
+        }
+    }
+    let response = events
+        .last()
+        .and_then(|e| e.get("response"))
+        .cloned()
+        .ok_or_else(|| {
+            Box::new(transport_error(
+                "Gemini turn has no terminal response",
+                "gemini_conversion_error",
+            ))
+        })?;
+    Ok((response, events))
+}
+
 // Hosted discovery uses bounded unary native turns. The Responses stream emits
 // each completed discovery turn and keeps the connection alive while Google is
 // generating. Client-executed search retains the normal incremental SSE path.
@@ -478,23 +517,7 @@ async fn hosted_turn(
         .endpoint(&converted.model, false)
         .map_err(|e| Box::new(transport_error(&e.to_string(), "gemini_conversion_error")))?;
     let upstream = send_native(proxy, config, &url, &converted.body).await?;
-    let result = async {
-        let bytes = bounded_body(upstream, MAX_NATIVE_RESPONSE).await?;
-        let native: Value = serde_json::from_slice(&bytes)?;
-        let mut stream = ResponseStream::new(converted.clone(), id);
-        let mut events = stream.feed(&native)?;
-        if !stream.is_finished() {
-            events.extend(stream.finish(&proxy.service.gemini.codec)?);
-        }
-        let response = events
-            .last()
-            .and_then(|e| e.get("response"))
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Gemini turn has no terminal response"))?;
-        Ok::<_, anyhow::Error>((response, events))
-    }
-    .await;
-    result.map_err(|e| Box::new(transport_error(&e.to_string(), "gemini_conversion_error")))
+    unary_turn(proxy, config, &url, converted, id, upstream).await
 }
 
 async fn forward_hosted(
