@@ -12,6 +12,7 @@ mod issue_cli;
 mod lookup_cli;
 mod mindmap_cli;
 mod notif_cli;
+mod project_cli;
 mod secret_cli;
 mod upgrade_cli;
 mod upgrade_provenance;
@@ -190,6 +191,8 @@ enum Command {
         #[command(subcommand)]
         action: hey_boss::fleet::Action,
     },
+    /// Initialize a project and choose its workflow.
+    Project(project_cli::Options),
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
@@ -512,6 +515,17 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss artifact: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Project(options) => {
+            if let Err(error) = project_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss project: {error}");
                 }
                 std::process::exit(error.exit_code());
             }
