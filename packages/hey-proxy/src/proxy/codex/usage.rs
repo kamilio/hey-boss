@@ -209,6 +209,15 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
                     }
                 }
             }
+            // A reported scope with no numeric window is unknown, never absent.
+            if windows.len() == start {
+                let id = if is_spark {
+                    "codex-spark".to_owned()
+                } else {
+                    format!("codex_extra_{index}")
+                };
+                windows.push(json!({"id":id,"label":name,"group":"model"}));
+            }
             let model = bounded(&entry["model"])
                 .or_else(|| feature.starts_with("gpt-").then(|| feature.clone()));
             for window in &mut windows[start..] {
@@ -218,6 +227,9 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
                 if rl["limit_reached"] == true {
                     window["used_percent"] = json!(100);
                     window["remaining_percent"] = json!(0);
+                } else if rl["allowed"] == false {
+                    window["used_percent"] = Value::Null;
+                    window["remaining_percent"] = Value::Null;
                 }
             }
         }

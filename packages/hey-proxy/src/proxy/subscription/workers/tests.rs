@@ -205,3 +205,18 @@ fn normalized_provider_denials_and_both_model_limits_reach_the_evaluator() {
         assert!(included_quota(&u, "gpt-6.1-sol", 1000).is_err());
     }
 }
+
+#[test]
+fn scoped_denials_without_numeric_windows_cannot_establish_included_capacity() {
+    for flags in [
+        json!({"limit_reached":true}),
+        json!({"allowed":false}),
+        json!({"allowed":false,"primary_window":{"used_percent":20}}),
+    ] {
+        let normalized = codex::usage::normalize(&json!({"rate_limit":{"primary_window":{"used_percent":20}},
+            "additional_rate_limits":[{"model":"gpt-6.1-sol","metered_feature":"gpt-6.1-sol","rate_limit":flags}]})).unwrap();
+        let usage: AccountUsage = serde_json::from_value(json!({"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"ok","updated_at":1000,"data":normalized})).unwrap();
+        assert!(included_quota(&usage, "gpt-6.1-sol", 1000).is_err());
+        assert!(included_quota(&usage, "gpt-6-astra", 1000).is_ok());
+    }
+}
