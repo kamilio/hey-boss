@@ -19,6 +19,7 @@ const PATH: &str = "repos/acme/demo/issues/7/timeline?per_page=100";
 struct Data {
     calls: Vec<(String, u64)>,
     links: HashMap<u64, String>,
+    pause_first: bool,
     pause_second: bool,
     pause_third: bool,
     deny_third: bool,
@@ -27,6 +28,7 @@ struct Data {
 struct Fixture {
     client: Client,
     data: Arc<Mutex<Data>>,
+    first_release: Arc<Notify>,
     second_started: Arc<Notify>,
     third_started: Arc<Notify>,
     second_release: Arc<Notify>,
@@ -78,126 +80,139 @@ impl Fixture {
                     format!("<{}>; rel=\"next\", <{}>; rel=\"last\"", page(3), page(3)),
                 ),
             ]),
+            pause_first: false,
             pause_second: true,
             pause_third: false,
             deny_third: false,
         }));
         let second_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
         let third_started = Arc::new(Notify::new());
         let second_release = Arc::new(Notify::new());
         let third_release = Arc::new(Notify::new());
-        let server =
-            tokio::spawn({
-                let (data, second_started, third_started, second_release, third_release) = (
-                    data.clone(),
-                    second_started.clone(),
-                    third_started.clone(),
-                    second_release.clone(),
-                    third_release.clone(),
-                );
-                async move {
-                    let mut tasks = tokio::task::JoinSet::new();
-                    loop {
-                        let (socket, _) = listener.accept().await.unwrap();
-                        let (
-                            acceptor,
-                            data,
-                            second_started,
-                            third_started,
-                            second_release,
-                            third_release,
-                        ) = (
-                            acceptor.clone(),
-                            data.clone(),
-                            second_started.clone(),
-                            third_started.clone(),
-                            second_release.clone(),
-                            third_release.clone(),
-                        );
-                        tasks.spawn(async move {
-                            let stream = acceptor.accept(socket).await.unwrap();
-                            let service = service_fn(
-                                move |request: hyper::Request<hyper::body::Incoming>| {
-                                    let (
-                                        data,
-                                        second_started,
-                                        third_started,
-                                        second_release,
-                                        third_release,
-                                    ) = (
-                                        data.clone(),
-                                        second_started.clone(),
-                                        third_started.clone(),
-                                        second_release.clone(),
-                                        third_release.clone(),
+        let server = tokio::spawn({
+            let (data, first_release, second_started, third_started, second_release, third_release) = (
+                data.clone(),
+                first_release.clone(),
+                second_started.clone(),
+                third_started.clone(),
+                second_release.clone(),
+                third_release.clone(),
+            );
+            async move {
+                let mut tasks = tokio::task::JoinSet::new();
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let (
+                        acceptor,
+                        data,
+                        first_release,
+                        second_started,
+                        third_started,
+                        second_release,
+                        third_release,
+                    ) = (
+                        acceptor.clone(),
+                        data.clone(),
+                        first_release.clone(),
+                        second_started.clone(),
+                        third_started.clone(),
+                        second_release.clone(),
+                        third_release.clone(),
+                    );
+                    tasks.spawn(async move {
+                        let stream = acceptor.accept(socket).await.unwrap();
+                        let service =
+                            service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+                                let (
+                                    data,
+                                    first_release,
+                                    second_started,
+                                    third_started,
+                                    second_release,
+                                    third_release,
+                                ) = (
+                                    data.clone(),
+                                    first_release.clone(),
+                                    second_started.clone(),
+                                    third_started.clone(),
+                                    second_release.clone(),
+                                    third_release.clone(),
+                                );
+                                async move {
+                                    assert_eq!(
+                                        request.headers()["authorization"],
+                                        "Bearer synthetic-token"
                                     );
-                                    async move {
-                                        assert_eq!(
-                                            request.headers()["authorization"],
-                                            "Bearer synthetic-token"
-                                        );
-                                        let url = Url::parse(&format!(
-                                            "https://api.github.com{}",
-                                            request.uri().path_and_query().unwrap()
-                                        ))
-                                        .unwrap();
-                                        let page = url
-                                            .query_pairs()
-                                            .find(|(k, _)| k == "page")
-                                            .map(|(_, v)| v.parse::<u64>().unwrap())
-                                            .unwrap_or(1);
-                                        let (link, pause, deny) = {
-                                            let mut data = data.lock().unwrap();
-                                            data.calls.push((url.path().into(), page));
-                                            (
-                                                data.links.get(&page).cloned(),
-                                                if page == 2 {
-                                                    data.pause_second
-                                                } else {
-                                                    page == 3 && data.pause_third
-                                                },
-                                                page == 3 && data.deny_third,
-                                            )
-                                        };
-                                        if page == 2 {
-                                            second_started.notify_one();
-                                            if pause {
-                                                second_release.notified().await;
-                                            }
-                                        }
-                                        if page == 3 {
-                                            third_started.notify_one();
-                                            if pause {
-                                                third_release.notified().await;
-                                            }
-                                        }
-                                        let mut response = HttpResponse::builder()
-                                            .status(if deny { 403 } else { 200 });
-                                        if let Some(link) = link {
-                                            response = response.header("link", link);
-                                        }
-                                        Ok::<_, Infallible>(
-                                            response
-                                                .body(Body::from(
-                                                    if deny {
-                                                        json!({"message":"denied"})
-                                                    } else {
-                                                        json!([page])
-                                                    }
-                                                    .to_string(),
-                                                ))
-                                                .unwrap(),
+                                    let url = Url::parse(&format!(
+                                        "https://api.github.com{}",
+                                        request.uri().path_and_query().unwrap()
+                                    ))
+                                    .unwrap();
+                                    let page = url
+                                        .query_pairs()
+                                        .find(|(k, _)| k == "page")
+                                        .map(|(_, v)| v.parse::<u64>().unwrap())
+                                        .unwrap_or(1);
+                                    let (link, pause, deny) = {
+                                        let mut data = data.lock().unwrap();
+                                        data.calls.push((url.path().into(), page));
+                                        (
+                                            data.links.get(&page).cloned(),
+                                            if page == 1 {
+                                                data.pause_first
+                                            } else if page == 2 {
+                                                data.pause_second
+                                            } else {
+                                                page == 3 && data.pause_third
+                                            },
+                                            page == 3 && data.deny_third,
                                         )
+                                    };
+                                    if page == 1 && pause {
+                                        first_release.notified().await;
                                     }
-                                },
-                            );
-                            let _ = Builder::new(TokioExecutor::new())
-                                .serve_connection(TokioIo::new(stream), service)
-                                .await;
-                        });
-                    }
+                                    if page == 2 {
+                                        second_started.notify_one();
+                                        if pause {
+                                            second_release.notified().await;
+                                        }
+                                    }
+                                    if page == 3 {
+                                        third_started.notify_one();
+                                        if pause {
+                                            third_release.notified().await;
+                                        }
+                                    }
+                                    let mut response = HttpResponse::builder().status(if deny {
+                                        403
+                                    } else {
+                                        200
+                                    });
+                                    if let Some(link) = link {
+                                        response = response.header("link", link);
+                                    }
+                                    Ok::<_, Infallible>(
+                                        response
+                                            .body(Body::from(
+                                                if deny {
+                                                    json!({"message":"denied"})
+                                                } else {
+                                                    json!([page])
+                                                }
+                                                .to_string(),
+                                            ))
+                                            .unwrap(),
+                                    )
+                                }
+                            });
+                        let _ = Builder::new(TokioExecutor::new())
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
                 }
-            });
+            }
+        });
         let dir = tempfile::tempdir().unwrap();
         let client = Client::with_http(
             Config {
@@ -219,6 +234,7 @@ impl Fixture {
         Self {
             client,
             data,
+            first_release,
             second_started,
             third_started,
             second_release,
@@ -238,6 +254,98 @@ async fn signal(notify: &Notify) {
     tokio::time::timeout(Duration::from_secs(2), notify.notified())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn cached_next_page_starts_before_first_page_finishes_without_growing_the_window() {
+    let f = Fixture::new().await;
+    f.client.get(PATH, Freshness::Revalidate).await.unwrap();
+    {
+        let mut data = f.data.lock().unwrap();
+        data.calls.clear();
+        data.pause_first = true;
+        data.pause_second = false;
+    }
+    let task = f.read();
+    let started =
+        tokio::time::timeout(Duration::from_millis(500), f.second_started.notified()).await;
+    let calls = f.data.lock().unwrap().calls.clone();
+    f.first_release.notify_one();
+    assert_eq!(
+        task.await.unwrap().unwrap(),
+        vec![json!(1), json!(2), json!(3)]
+    );
+    assert!(
+        started.is_ok(),
+        "known next page waited for the first page's network response"
+    );
+    assert_eq!(
+        calls.iter().map(|(_, page)| *page).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(f.data.lock().unwrap().calls.len(), 3);
+}
+
+#[tokio::test]
+async fn changed_first_page_discards_cached_hint_without_cancelling_its_other_reader() {
+    for next in [None, Some(4)] {
+        let f = Fixture::new().await;
+        f.client.get(PATH, Freshness::Revalidate).await.unwrap();
+        {
+            let mut data = f.data.lock().unwrap();
+            data.calls.clear();
+            data.pause_first = true;
+            data.links.remove(&1);
+            if let Some(next) = next {
+                data.links
+                    .insert(1, format!("<{}>; rel=\"next\"", f.page(next)));
+            }
+        }
+        let client = f.client.clone();
+        let task = tokio::spawn(async move {
+            crate::report::VALIDATIONS
+                .scope(std::cell::RefCell::new(Vec::new()), async {
+                    let result = client.pages(PATH, None, Freshness::Revalidate).await;
+                    (result, crate::report::VALIDATIONS.with(|v| v.take()))
+                })
+                .await
+        });
+        signal(&f.second_started).await;
+        let client = f.client.clone();
+        let second = f.page(2);
+        let waiter = tokio::spawn(async move { client.get(&second, Freshness::Revalidate).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().coalesced_requests == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        f.first_release.notify_one();
+        let (result, validations) = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("discarded hint delayed the actual page chain")
+            .unwrap();
+        let expected = std::iter::once(json!(1))
+            .chain(next.map(|page| json!(page)))
+            .collect::<Vec<_>>();
+        assert_eq!(result.unwrap(), expected);
+        assert_eq!(validations.len(), expected.len());
+        assert!(validations.iter().all(|v| !v.resource.contains("page=2")));
+        assert!(!waiter.is_finished());
+        f.second_release.notify_one();
+        assert_eq!(waiter.await.unwrap().unwrap().data, json!([2]));
+        assert_eq!(
+            f.data
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|(_, page)| *page == 2)
+                .count(),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -311,8 +419,11 @@ async fn changed_chain_follows_actual_next_page() {
 
 #[tokio::test]
 async fn speculative_queue_rejection_retries_when_page_becomes_required() {
-    for _ in 0..16 {
+    for attempt in 0..16 {
         let f = Fixture::new().await;
+        if attempt % 2 == 0 {
+            f.client.get(PATH, Freshness::Revalidate).await.unwrap();
+        }
         let leave = f.client.interactive_reserved_slots() + 1;
         let _held = f
             .client
@@ -338,6 +449,46 @@ async fn speculative_queue_rejection_retries_when_page_becomes_required() {
             task.await.unwrap().unwrap(),
             vec![json!(1), json!(2), json!(3)]
         );
+    }
+}
+
+#[tokio::test]
+async fn cached_next_hint_cannot_change_endpoint_filters_or_origin() {
+    let f = Fixture::new().await;
+    let next = f.page(2);
+    let hints = [
+        next.replace("/issues/7/", "/issues/8/"),
+        format!("{next}&since=changed"),
+        format!("{next}&page=3"),
+        next.replace("per_page=100", "per_page=99"),
+        "https://example.invalid/repos/acme/demo/issues/7/timeline?per_page=100&page=2".into(),
+    ];
+    for hint in hints {
+        {
+            let mut data = f.data.lock().unwrap();
+            data.pause_first = false;
+            data.links.insert(
+                1,
+                format!("<{hint}>; rel=\"next\", <{}>; rel=\"last\"", f.page(3)),
+            );
+        }
+        f.client.get(PATH, Freshness::Revalidate).await.unwrap();
+        {
+            let mut data = f.data.lock().unwrap();
+            data.calls.clear();
+            data.pause_first = true;
+            data.links.remove(&1);
+        }
+        let task = f.read();
+        let speculative =
+            tokio::time::timeout(Duration::from_millis(100), f.second_started.notified()).await;
+        f.first_release.notify_one();
+        assert_eq!(task.await.unwrap().unwrap(), vec![json!(1)]);
+        assert!(
+            speculative.is_err(),
+            "untrusted cached next link was requested: {hint}"
+        );
+        assert_eq!(f.data.lock().unwrap().calls.len(), 1);
     }
 }
 

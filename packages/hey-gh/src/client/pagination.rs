@@ -61,7 +61,31 @@ impl Client {
         let mut values = Vec::new();
         let mut bytes = 0usize;
         let mut pending: Option<Prefetch<'_>> = None;
-        let mut lookahead: Option<String> = None;
+        let detail_prefetch = completed_version.is_none()
+            && field.is_none()
+            && !matches!(freshness, Freshness::CachedOnly)
+            && self.0.config.queue_capacity >= 32
+            && matches!(
+                endpoint_class(&first, false, &self.0.config.rest_url),
+                "comments" | "review_comments" | "reviews" | "timeline"
+            );
+        // A previous first-page link is only a scheduling hint. Revalidate its
+        // next page alongside the first, then consume it only if the returned
+        // link confirms it. The same two-page window and admission order apply.
+        let mut lookahead = if detail_prefetch
+            && self.0.config.max_collection_bytes >= self.0.config.max_body_bytes.saturating_mul(2)
+        {
+            match self.peek_get(&first).await {
+                Ok(cached) => cached
+                    .link
+                    .as_deref()
+                    .and_then(|links| self.cached_detail_next(&first, links)),
+                Err(Error::CacheMiss) => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
         for index in 0..1000 {
             if !seen.insert(path.clone()) {
                 return Err(Error::Invalid("pagination link cycle".into()));
@@ -128,10 +152,7 @@ impl Client {
             // Keep at most two page bodies in flight/buffered, within the same
             // collection byte bound. Tiny queues and immutable job retention
             // keep their existing sequential admission/cancellation behavior.
-            if completed_version.is_none()
-                && field.is_none()
-                && !matches!(freshness, Freshness::CachedOnly)
-                && self.0.config.queue_capacity >= 32
+            if detail_prefetch
                 && index + 2 < 1000
                 && self.0.config.max_collection_bytes.saturating_sub(bytes)
                     >= self.0.config.max_body_bytes.saturating_mul(2)
@@ -142,6 +163,18 @@ impl Client {
             }
         }
         Err(Error::Invalid("pagination exceeds 1000 pages".into()))
+    }
+
+    fn cached_detail_next(&self, first: &str, links: &str) -> Option<String> {
+        let mut current = self.rest_url(first).ok()?;
+        // Only the ordinary first page can use this cached-chain hint.
+        if current.query_pairs().any(|(key, _)| key == "page") {
+            return None;
+        }
+        current.query_pairs_mut().append_pair("page", "1");
+        let predicted = self.detail_page_ahead(first, current.as_str(), links)?;
+        let next = self.pagination_path(first, &next_link(links)?).ok()?;
+        (next == predicted).then_some(next)
     }
 
     // Offset lookahead is limited to familiar personal detail endpoints. A
