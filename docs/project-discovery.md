@@ -7,16 +7,23 @@ preserves custom prompts and checks for concurrent settings changes.
 For scripts, pass `--yes --prs true --worktree true` (use `false` for either
 choice); `--project` selects a name or full ID and `--json` returns settings.
 
-Builder lists initialized projects and projects with saved issues, artifacts,
-mindmap nodes, or worker settings. Empty discoveries and read-only visits stay
-out of the picker, including old test folders. Their identities are retained;
-initializing or saving work makes them visible. Hidden projects stay hidden.
+Only `hey-boss project init` registers new projects. Cancelling initialization,
+reading project data, sending notifications, and observing running agents never
+create registry entries. Existing registry rows remain usable.
 
-Project names are unique identifiers (case insensitive). A folder, repository,
-worktree, notification or explicit project selector with an existing name reuses
-that project's destination instead of creating another project. Quick Issue
-submissions use names. Git origins and local paths remain compatibility storage
-IDs, not separate destinations with the same name.
+Commands resolve the current Git repository (including subdirectories and linked
+worktrees) or the nearest registered local parent directory. Unrelated folders
+with the same basename do not select each other's project. When no registered
+project matches, the command fails: use `--project <name-or-id>` to select an
+existing project, or run `hey-boss project init` in the project directory.
+
+Builder lists initialized projects and projects with saved issues, artifacts,
+mindmap nodes, or worker settings. Empty legacy discoveries stay out of the
+picker. Their identities and all saved data are retained. Hidden projects stay hidden.
+
+Project names are unique identifiers (case insensitive). Explicit selectors can
+use an existing name or compatibility storage ID. Quick Issue submissions use
+existing names. Git origins and local paths remain compatibility storage IDs.
 Worker dashboards, terminal titles and plain-text status show project names;
 JSON retains the storage keys for compatibility.
 
@@ -46,7 +53,8 @@ retain legacy history warnings; web pages show only the selected destination.
 They are not silently merged, renumbered or deleted. Use the project name for new
 work. Hidden destinations stay hidden when another identity is discovered.
 
-Automatic agent discovery ignores home directories and local temporary folders,
+Automatic agent discovery only refreshes activity for registered projects. It
+ignores home directories and local temporary folders,
 including macOS per-user temporary directories. Live agent tests previously
 registered folders such as `hey-boss-live-controls-*` as permanent projects,
 which filled the project picker with test runs. Empty discovered entries

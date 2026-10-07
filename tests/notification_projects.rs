@@ -48,6 +48,32 @@ impl Fixture {
             .env_remove("CODEX_THREAD_ID");
         c
     }
+    fn register(&self, id: Option<&str>) {
+        let project = match id {
+            Some(id) => hey_boss::issues::Project {
+                id: id.into(),
+                name: id
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .trim_start_matches("named:")
+                    .into(),
+            },
+            None => hey_boss::issues::identity::project(
+                &self.cwd,
+                &hey_boss::issues::identity::machine().unwrap(),
+            )
+            .unwrap(),
+        };
+        drop(hey_boss::issues::Store::open(&self.db).unwrap());
+        Connection::open(&self.db)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                [&project.id, &project.name],
+            )
+            .unwrap();
+    }
     fn notify(&self, command: &mut Command) -> Value {
         let socket = self.root.join("daemon.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -130,8 +156,10 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
-fn notifications_register_identities_without_enrolling_empty_builder_projects() {
+fn notifications_reuse_registered_identities_without_enrolling_empty_builder_projects() {
     let f = Fixture::new();
+    f.register(None);
+    f.register(Some("named:Atlas"));
     let notice = f.notify(&mut f.alert(&f.cwd));
     assert_eq!(notice["project"], "project");
     let projects = f.projects();
@@ -183,6 +211,7 @@ fn notifications_share_git_project_across_subdirectories_and_worktrees() {
             "git@github.com:example/Atlas.git",
         ],
     );
+    f.register(None);
     let nested = f.cwd.join("nested");
     fs::create_dir(&nested).unwrap();
     assert_eq!(f.notify(&mut f.alert(&nested))["project"], "Atlas");
@@ -200,6 +229,8 @@ fn notifications_share_git_project_across_subdirectories_and_worktrees() {
 #[test]
 fn overrides_reuse_unique_names_silently_and_preserve_hidden_state() {
     let f = Fixture::new();
+    f.register(Some("github.com/example/Atlas"));
+    f.register(Some("named:Other"));
     f.notify(
         f.alert(&f.cwd)
             .args(["--project", "github.com/example/Atlas"]),
@@ -279,6 +310,7 @@ fn overrides_reuse_unique_names_silently_and_preserve_hidden_state() {
 #[test]
 fn notifications_capture_the_sending_session_before_transport() {
     let fixture = Fixture::new();
+    fixture.register(Some("named:Trace"));
     let mut command = fixture.command(&fixture.cwd);
     command
         .env("CODEX_THREAD_ID", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")

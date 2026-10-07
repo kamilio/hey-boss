@@ -86,6 +86,12 @@ fn cached_response(
         "SELECT payload,response,archive_key,payload_hash FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
         params![project.id, actor.id, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?))).optional()?;
     let Some((old, response, archive_key, payload_hash)) = previous else {
+        if matches!(
+            request.operation,
+            Operation::ConfigureWorker { .. } | Operation::ControlWorker { .. }
+        ) {
+            return super::global_settings::cached_response(db, request, payload);
+        }
         return Ok(None);
     };
     let matches = if archive_key.is_some() {
@@ -924,6 +930,52 @@ fn resolve_project(
     detected: &Project,
     override_id: Option<&str>,
 ) -> Result<Project> {
+    let project = project_candidate(db, detected, override_id)?;
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+        [&project.id],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Err(Error::new(
+            "project_not_initialized",
+            format!(
+                "Project {:?} is not initialized. Use --project <name-or-id> to select an existing project, or run `hey-boss project init` in the project directory.",
+                project.name
+            ),
+        ));
+    }
+    Ok(project)
+}
+
+fn request_project(db: &Connection, r: &Request) -> Result<Project> {
+    if matches!(
+        r.operation,
+        Operation::ProjectInit { .. }
+            | Operation::Projects { .. }
+            | Operation::GlobalSettings
+            | Operation::ConfigureGlobal { .. }
+            | Operation::Whoami
+            | Operation::Workers { .. }
+            | Operation::WorkerStatus
+            | Operation::ControlWorker { .. }
+            | Operation::ConfigureWorker { .. }
+    ) || matches!(
+        r.operation,
+        Operation::Mindmap {
+            operation: crate::mindmap::Operation::Projects
+        }
+    ) {
+        project_candidate(db, &r.project, r.project_override.as_deref())
+    } else {
+        resolve_project(db, &r.project, r.project_override.as_deref())
+    }
+}
+
+fn project_candidate(
+    db: &Connection,
+    detected: &Project,
+    override_id: Option<&str>,
+) -> Result<Project> {
     let Some(value) = override_id else {
         if let Some(existing) = db
             .query_row(
@@ -940,7 +992,14 @@ fn resolve_project(
         {
             return project_names::canonical(db, existing);
         }
-        return project_names::canonical(db, detected.clone());
+        if let Some(legacy) = project_names::saved_metadata(db, detected)? {
+            return Ok(legacy);
+        }
+        if let Some(parent) = project_names::parent(db, detected)? {
+            return Ok(parent);
+        }
+        // An unrelated directory with the same basename is not this project.
+        return Ok(detected.clone());
     };
     if let Some(project) = project_names::by_name(db, value)? {
         return Ok(project);
@@ -1419,7 +1478,7 @@ impl Store {
     }
 
     /// Resolve notification headings through the same project registry as issues.
-    /// Register first use without changing issue ownership or hidden-project state.
+    /// Unknown directories must be initialized before sending a notification.
     pub fn notification_project(
         &mut self,
         detected: &Project,
@@ -1443,8 +1502,10 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3)
-            ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)", params![project.id,project.name,now])?;
+        tx.execute(
+            "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
+            params![project.id, now],
+        )?;
         tx.commit()?;
         Ok(project)
     }
@@ -1670,11 +1731,21 @@ impl Store {
         validate(r)?;
         if let Operation::RequestStatus { id } = &r.operation {
             let snapshot = self.db.read_transaction()?;
-            let project = resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
+            let project = project_candidate(&snapshot, &r.project, r.project_override.as_deref())?;
             let actor = &r.actor.as_ref().unwrap().id;
             let saved: Option<(String, String, Option<String>)> = snapshot.query_row(
                 "SELECT payload,response,archive_key FROM requests WHERE project_id=?1 AND actor=?2 AND request_id=?3",
                 params![project.id, actor, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+            let saved = match saved {
+    Some(saved) => Some(saved),
+    None => snapshot.query_row(
+        "SELECT payload,response,NULL FROM global_settings_requests WHERE actor=?1 AND request_id=?2",
+        params![actor,id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional()?,
+};
+            if saved.is_none() {
+                resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
+            }
             let (operation, response) = match saved {
                 Some((payload, response, archive_key)) => super::archive::receipt_contents(
                     &snapshot,
@@ -1718,15 +1789,15 @@ impl Store {
         let write = r.operation.writes();
         // Existing-project reads use a WAL snapshot and do not compete with
         // worker reservations, event writes, or replica synchronization.
-        let detected = retry_contention(deadline, || {
-            resolve_project(&self.db, &r.project, r.project_override.as_deref())
-        })?;
+        let detected = retry_contention(deadline, || request_project(&self.db, r))?;
         let home = r.project_override.is_none() && super::identity::is_home_project(&r.project);
         if write
             && home
             && !matches!(
                 r.operation,
-                Operation::ConfigureGlobal { .. } | Operation::ControlWorker { .. }
+                Operation::ConfigureGlobal { .. }
+                    | Operation::ControlWorker { .. }
+                    | Operation::ConfigureWorker { .. }
             )
         {
             return Err(Error::invalid(
@@ -1737,8 +1808,7 @@ impl Store {
             && r.actor.is_some()
             && let Some(response) = retry_contention(deadline, || {
                 let snapshot = self.db.read_transaction()?;
-                let project =
-                    resolve_project(&snapshot, &r.project, r.project_override.as_deref())?;
+                let project = request_project(&snapshot, r)?;
                 cached_response(&snapshot, &project, r, &payload)
             })?
         {
@@ -1748,10 +1818,8 @@ impl Store {
         for number in &archive_targets {
             super::archive::restore_issue(&self.db, &detected.id, *number, super::worker::now())?;
         }
-        let register = !matches!(
-            r.operation,
-            Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
-        ) && !home
+        let register = matches!(r.operation, Operation::ProjectInit { settings: Some(_) })
+            && !home
             && !retry_contention(deadline, || {
                 Ok(self.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
@@ -1845,7 +1913,7 @@ impl Store {
             tx.commit()?;
             return Ok(result);
         }
-        let mut project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
+        let mut project = request_project(&tx, r)?;
         identifier(&project.id, "project ID", 8192)?;
         identifier(&project.name, "project name", 1024)?;
         let actor = r.actor.as_ref();
@@ -1885,7 +1953,7 @@ impl Store {
             tx.commit()?;
             let stopped = prepared.stop_worker(evidence);
             tx = begin()?;
-            project = resolve_project(&tx, &r.project, r.project_override.as_deref())?;
+            project = request_project(&tx, r)?;
             if let Some(response) = cached_response(&tx, &project, r, &payload)? {
                 drop(tx);
                 return self.finish_replay(r, response);
@@ -1899,7 +1967,7 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
-        if (write || register) && !home {
+        if register {
             tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3) ON CONFLICT(id) DO NOTHING", params![project.id,project.name,now])?;
         }
         if write {
@@ -1908,6 +1976,16 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::ProjectInit { settings } => {
+                let operation = match settings {
+                    None => Operation::ProjectSettings,
+                    Some(settings) => serde_json::from_value(json!({
+                        "action":"configure_project", "prs_enabled":settings.prs_enabled,
+                        "worktree_enabled":settings.worktree_enabled, "if_version":settings.if_version
+                    }))?,
+                };
+                registry::execute(&tx, &project, &operation, actor)?
+            }
             Operation::RefreshGithub { number } => {
                 assignments::fetch::request(&tx, &project, *number, now)?
             }
@@ -2524,8 +2602,15 @@ impl Store {
             }
         }
         if let (Some(key), Some(actor)) = (&r.request_id, actor) {
-            tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            if matches!(
+                r.operation,
+                Operation::ConfigureWorker { .. } | Operation::ControlWorker { .. }
+            ) {
+                tx.execute("INSERT INTO global_settings_requests(actor,request_id,payload,response) VALUES(?1,?2,?3,?4)", params![actor.id,key,payload,serde_json::to_string(&result)?])?;
+            } else {
+                tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?,now])?;
+            }
         }
         tx.commit()?;
         attachment_files.new.clear();
@@ -2549,7 +2634,7 @@ impl Store {
         Ok(result)
     }
 
-    /// Register observed projects without undoing a user's hidden-project choice.
+    /// Update activity only for projects already registered by explicit setup.
     /// Repeated observations use the source's event time, never polling time.
     pub fn discover_projects(&mut self, projects: &[(Project, i64)]) -> Result<()> {
         let now = SystemTime::now()
@@ -2585,9 +2670,10 @@ impl Store {
             // Another poll may have registered this name after the snapshot.
             // Resolve it under the writer; the update also rechecks activity.
             let project = project_names::canonical(&tx, project)?;
-            tx.execute("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?4)
-                ON CONFLICT(id) DO UPDATE SET activity_at=max(projects.activity_at,excluded.activity_at)
-                WHERE excluded.activity_at>projects.activity_at",params![project.id,project.name,now,at])?;
+            tx.execute(
+                "UPDATE projects SET activity_at=?2 WHERE id=?1 AND activity_at<?2",
+                params![project.id, at],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -3343,6 +3429,7 @@ mod contention_tests {
         ));
         let path = root.join("issues.db");
         let mut store = Store::open(&path).unwrap();
+        store.db.execute_batch("INSERT INTO projects(id,name,next_number,activity_at) VALUES('named:Winner','SHARED',1,0),('named:Future','Future',1,0),('named:Negative','Negative',1,0)").unwrap();
         let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
         let (entered, waiting) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -3368,7 +3455,11 @@ mod contention_tests {
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
         let db = Connection::connect(&path).unwrap();
-        db.execute("INSERT INTO projects(id,name,next_number,activity_at,hidden_at) VALUES('named:Winner','SHARED',1,300,42)", []).unwrap();
+        db.execute(
+            "UPDATE projects SET activity_at=300,hidden_at=42 WHERE id='named:Winner'",
+            [],
+        )
+        .unwrap();
         release.send(()).unwrap();
         observing.join().unwrap();
         transport.join().unwrap();
@@ -3755,7 +3846,7 @@ mod contention_tests {
         }
         for (count, commands) in measurements {
             assert!(
-                commands <= 25,
+                commands <= 26,
                 "{count} listed issues used {commands} owner RPCs"
             );
         }
@@ -3994,7 +4085,7 @@ mod contention_tests {
             ")).unwrap();
             let listing: Request = serde_json::from_value(json!({"version":1,"project":{"id":"named:Visibility","name":"Visibility"},"actor":null,"operation":{"action":"projects","include_hidden":true}})).unwrap();
             let expected = store.execute(&listing).unwrap();
-            assert_eq!(expected["projects"].as_array().unwrap().len(), count + 1);
+            assert_eq!(expected["projects"].as_array().unwrap().len(), count);
             assert_eq!(
                 expected["project_warnings"].as_array().unwrap().len(),
                 count

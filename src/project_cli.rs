@@ -20,7 +20,7 @@ enum Action {
         after_help = "Run inside a checkout to detect its project, or select one with --project.\nExisting custom prompts are preserved. Ctrl-C or q cancels before saving.\nFor scripts: --yes --prs <true|false> --worktree <true|false>."
     )]
     Init {
-        /// Existing project name or full ID; defaults to this checkout.
+        /// Project name or full ID; defaults to this checkout.
         #[arg(long)]
         project: Option<String>,
         /// Authoritative SSH host (also HEY_BOSS_ISSUE_HOST).
@@ -68,7 +68,7 @@ pub fn run(options: &Options) -> Result<()> {
             &machine,
             &cwd,
         )?),
-        operation: Operation::ProjectSettings,
+        operation: Operation::ProjectInit { settings: None },
         request_id: None,
     };
     let host = host.clone().or_else(|| {
@@ -130,8 +130,8 @@ pub fn run(options: &Options) -> Result<()> {
         }
     }
     request.operation = serde_json::from_value(json!({
-        "action":"configure_project", "prs_enabled":prs, "worktree_enabled":worktree,
-        "if_version":current["version"],
+        "action":"project_init", "settings": { "prs_enabled":prs, "worktree_enabled":worktree,
+        "if_version":current["version"] },
     }))?;
     let result = crate::cli_request::execute(&request, host.as_deref(), false)?;
     if options.json {

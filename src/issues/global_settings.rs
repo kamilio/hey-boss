@@ -82,7 +82,7 @@ pub(super) fn cached_response(
         if let Some((old, response)) = previous {
             if old != payload {
                 return Err(Error::conflict(
-                    "Request ID was already used for a different global settings operation",
+                    "Request ID was already used for a different global operation",
                 ));
             }
             return Ok(Some(serde_json::from_str(&response)?));
@@ -210,6 +210,13 @@ mod tests {
             operation: serde_json::from_value(operation).unwrap(),
             request_id: None,
         };
+        crate::database::Connection::open(&root.join("issues.db"))
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:Audit','Audit',1)",
+                [],
+            )
+            .unwrap();
         let mut counts = Vec::new();
         for operation in [
             json!({"action":"create","title":"Task","body":"","labels":[],"at_top":false,"draft":false}),

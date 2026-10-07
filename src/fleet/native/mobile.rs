@@ -51,7 +51,8 @@ impl Mobile {
             Err(e)
                 if matches!(
                     e.code.as_str(),
-                    "invalid_input"
+                    "project_not_initialized"
+                        | "invalid_input"
                         | "not_found"
                         | "conflict"
                         | "fleet_reserved"
@@ -625,6 +626,16 @@ mod web_tests {
         let projects = BTreeMap::from([("named:Phone".to_owned(), project.clone())]);
         let visible = BTreeSet::from(["named:Phone".to_owned()]);
         let creation = json!({"kind":"action","payload":{"project":"named:Phone","request_id":"stable-key","operation":{"action":"create","title":"Phone issue","body":"**Private content**","labels":[]}}});
+        let uninitialized = mobile.web_request(&creation, &projects, &visible).unwrap();
+        assert_eq!(uninitialized["error"]["code"], "project_not_initialized");
+        assert!(
+            uninitialized["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("hey-boss project init")
+        );
+        drop(Store::open(&mobile.ctx.path).unwrap());
+        crate::database::Connection::open(&mobile.ctx.path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Phone','Phone',1)", []).unwrap();
         let first = mobile.web_request(&creation, &projects, &visible).unwrap();
         assert_eq!(first["issue"]["created_by"], "human:boss");
         assert!(
