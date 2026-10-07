@@ -2,6 +2,7 @@ pub mod accounts;
 mod json;
 pub mod routes;
 mod secrets;
+mod workers;
 pub(crate) fn account_key(path: &Path) -> Result<[u8; 32]> {
     secrets::key(&fs::canonicalize(path)?, true)
 }
@@ -22,6 +23,7 @@ use std::{
 pub struct Config {
     pub revision: String,
     pub routes: Vec<routes::Route>,
+    pub worker_candidates: Vec<hey_proxy::usage::WorkerCandidate>,
     pub overrides: routes::Overrides,
     pub accounts: BTreeMap<String, accounts::AccountConfig>,
     pub model_registry: Option<crate::model_registry::ModelRegistry>,
@@ -65,6 +67,8 @@ pub struct Config {
 struct ConfigFile {
     #[serde(default)]
     routes: Vec<routes::Route>,
+    #[serde(default)]
+    worker_candidates: Vec<hey_proxy::usage::WorkerCandidate>,
     #[serde(default)]
     overrides: routes::Overrides,
     #[serde(default)]
@@ -165,6 +169,7 @@ impl TryFrom<ConfigFile> for Config {
         Ok(Self {
             revision: format!("{:032x}", rand::random::<u128>()),
             routes: file.routes,
+            worker_candidates: file.worker_candidates,
             overrides: file.overrides,
             accounts: file.accounts,
             model_registry: file.model_registry,
@@ -210,6 +215,10 @@ impl Serialize for Config {
         };
         let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
         if self.mode != Mode::Client {
+            if !self.worker_candidates.is_empty() {
+                value["worker_candidates"] = serde_json::to_value(&self.worker_candidates)
+                    .map_err(serde::ser::Error::custom)?;
+            }
             if !self.routes.is_empty() {
                 value["routes"] =
                     serde_json::to_value(&self.routes).map_err(serde::ser::Error::custom)?;
@@ -489,6 +498,7 @@ impl Default for Config {
         Self {
             revision: format!("{:032x}", rand::random::<u128>()),
             routes: Vec::new(),
+            worker_candidates: Vec::new(),
             overrides: BTreeMap::new(),
             accounts: BTreeMap::new(),
             model_registry: None,
@@ -587,6 +597,7 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         self.validate_routes()?;
+        self.validate_workers()?;
         anyhow::ensure!(self.accounts.len() <= 128, "Too many named accounts");
         anyhow::ensure!(
             self.mode != Mode::Client || self.accounts.is_empty(),

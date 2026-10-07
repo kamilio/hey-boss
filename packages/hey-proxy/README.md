@@ -87,7 +87,9 @@ hey-proxy usage --json                  # Versioned, machine-readable reading
 hey-proxy usage --accounts              # Configured provider/account aliases
 ```
 
-The recommender evaluates both `codex` and `claude` subscription quotas without altering proxy model routing:
+For worker assignments, use the versioned [named-model recommendation API](docs/routes.md#worker-recommendations) and `Client::recommend_workers`. It follows a separate ordered candidate list, filters machine runtimes, and returns only fresh verified included subscription capacity. Paid overage, credits, stale readings, and unknown applicable limits never establish eligibility.
+
+The legacy provider-only recommender evaluates both `codex` and `claude` subscription quotas without altering proxy model routing:
 - If a provider is completely out of quota (`0%` remaining on either its 5-hour session or 7-day weekly window), it is skipped so you only use an available provider.
 - When both providers have remaining quota, it recommends whichever provider's active quota window is **expiring earliest** (use-it-before-reset), breaking ties by higher effective remaining headroom.
 

@@ -17,5 +17,10 @@
     "ultima": {
       "astra": {"from": "gpt-6-astra", "to": "ultima-alpha"}
     }
-  }
+  },
+  "worker_candidates": [
+    {"provider":"codex-personal","model":"gpt-6.1-sol","runtime":"codex"},
+    {"provider":"codex-work","model":"gpt-6.1-sol","runtime":"codex"},
+    {"provider":"claude-personal","model":"claude-sonnet-5-5","runtime":"claude"}
+  ]
 }
