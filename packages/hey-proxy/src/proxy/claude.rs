@@ -347,6 +347,7 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         let mut response = Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
+        response.extensions_mut().insert(fallback::Upstream { gemini: false });
         return response;
     }
     unreachable!()

@@ -11,6 +11,11 @@ pub(in crate::proxy) struct Cache {
     error: Option<String>,
 }
 impl Cache {
+    pub(in crate::proxy) fn expire_before(&mut self, observed: u64) {
+        if self.error.is_none() && self.updated_at.is_none_or(|t| t <= observed) {
+            self.retry_at = None;
+        }
+    }
     fn value(&self) -> Value {
         json!({"state":if self.error.is_some() { if self.data.is_some() {"stale"} else {"error"} } else {"ok"},
             "updated_at":self.updated_at,"data":self.data,"error":self.error,
@@ -68,7 +73,8 @@ fn normalize(value: &Value) -> Result<Value> {
         !windows.is_empty() || extra.is_some(),
         "Claude did not report any subscription limits"
     );
-    Ok(json!({"windows":windows,"extra_usage":extra}))
+    Ok(json!({"windows":windows,"extra_usage":extra,
+        "availability_unknown":value["limits"].as_array().is_some_and(|limits|limits.len()>64)}))
 }
 // OAuth extra_usage uses hundredths of the currency unit, USD when omitted.
 // Keep legacy raw fields above; expose explicit major-unit amounts for all clients.
@@ -204,6 +210,11 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             identity: Some(identity),
             ..Default::default()
         };
+    }
+    if cache.error.is_none()
+        && super::super::routes::quota::crossed_reset(cache.data.as_ref(), cache.updated_at)
+    {
+        cache.retry_at = None;
     }
     if cache.retry_at.is_some_and(|t| t > Instant::now()) {
         return cache.value();

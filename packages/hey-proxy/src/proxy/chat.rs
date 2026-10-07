@@ -82,7 +82,7 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         client: proxy.client.clone(),
         service: proxy.service.clone(),
         log_id: proxy.log_id,
-        fallback_attempt: false,
+        fallback_attempt: proxy.fallback_attempt,
     });
     parts.uri = "/v1/responses".parse().unwrap();
     parts.headers.remove(header::CONTENT_LENGTH);

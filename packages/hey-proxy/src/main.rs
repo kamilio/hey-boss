@@ -33,7 +33,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect the staged routing contract without credentials, requests or profile changes
+    /// Inspect configured provider routes without credentials, requests or profile changes
     ResolveRoute {
         model: String,
         #[arg(long, default_value = "/v1/responses")]
@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
             let legs = (0..plan.len())
                 .map(|i| plan.select(i).map(|(_, metadata)| metadata))
                 .collect::<Result<Vec<_>>>()?;
-            serde_json::json!({"policy":"routes", "forwarding":"staged", "legs":legs})
+            serde_json::json!({"policy":"routes", "forwarding":"active", "legs":legs})
         } else {
             serde_json::json!({"policy":if config.mode == config::Mode::Client { "relay" } else { "legacy" }, "config_revision":config.revision, "source_model":model})
         };
