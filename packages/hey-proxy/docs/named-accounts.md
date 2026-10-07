@@ -1,5 +1,7 @@
 # Named provider accounts
 
+See [ordered provider routes](routes.md) for the staged top-level routing contract, provider-scoped overrides, precedence and safe resolution diagnostics.
+
 Agent runtimes (Codex, Claude Code, Pi) are clients. A connection selects a provider implementation and its billing/authentication mode; its name is a local alias, not a subscription identity. No account priority or paid-capacity policy is implied.
 
 ```json

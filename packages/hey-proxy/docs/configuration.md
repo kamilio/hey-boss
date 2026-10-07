@@ -1,5 +1,7 @@
 # Configuration
 
+See [ordered provider routes](routes.md) for the staged top-level routing contract, provider-scoped overrides, precedence and safe resolution diagnostics.
+
 The default file is `~/.hey-proxy/config.json`. Use `--config PATH` for another file. First run and `--init` create a missing minimal file with private permissions on Unix. `--init` validates an existing config without changing it; starting the proxy also encrypts literal credentials as described below.
 
 OpenAI is the default provider for unprefixed model names on `/v1/responses`. Prefix a model with `gemini/` to use Gemini conversion. `openai/` is an optional explicit prefix. Gemini's native endpoints use the configured Gemini provider directly.
