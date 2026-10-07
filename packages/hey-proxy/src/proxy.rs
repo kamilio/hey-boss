@@ -738,16 +738,13 @@ fn rewrite_value<'a>(
     {
         aliased = true;
         let effort = requested_effort(path, value);
-        let route = effort.and_then(|effort| alias.reasoning_routes.get(effort));
-        if let Some(key) = route
-            .and_then(|route| route.api_key.as_ref())
-            .or(alias.api_key.as_ref())
-        {
+        let (model, key) = alias.destination(effort);
+        if let Some(key) = key {
             project = key;
         }
-        if let Some(model) = route.map(|route| &route.to).or(alias.to.as_ref()) {
+        if let Some(model) = model {
             *value.pointer_mut(model_pointer).expect("matched model") =
-                Value::String(model.clone());
+                Value::String(model.to_owned());
         }
         if let Some(effort) = &alias.reasoning {
             if path.trim_end_matches('/').ends_with("/responses") {

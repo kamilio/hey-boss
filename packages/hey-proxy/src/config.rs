@@ -1,4 +1,6 @@
 pub mod accounts;
+mod json;
+pub mod routes;
 mod secrets;
 pub(crate) fn account_key(path: &Path) -> Result<[u8; 32]> {
     secrets::key(&fs::canonicalize(path)?, true)
@@ -18,6 +20,9 @@ use std::{
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "ConfigFile")]
 pub struct Config {
+    pub revision: String,
+    pub routes: Vec<routes::Route>,
+    pub overrides: routes::Overrides,
     pub accounts: BTreeMap<String, accounts::AccountConfig>,
     pub model_registry: Option<crate::model_registry::ModelRegistry>,
     pub fallbacks: hey_proxy::fallback::Fallbacks,
@@ -58,6 +63,10 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    #[serde(default)]
+    routes: Vec<routes::Route>,
+    #[serde(default)]
+    overrides: routes::Overrides,
     #[serde(default)]
     account_schema_version: Option<u32>,
     #[serde(default)]
@@ -154,6 +163,9 @@ impl TryFrom<ConfigFile> for Config {
             file.gemini = Some(gemini);
         }
         Ok(Self {
+            revision: format!("{:032x}", rand::random::<u128>()),
+            routes: file.routes,
+            overrides: file.overrides,
             accounts: file.accounts,
             model_registry: file.model_registry,
             fallbacks: file.fallbacks,
@@ -198,6 +210,14 @@ impl Serialize for Config {
         };
         let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
         if self.mode != Mode::Client {
+            if !self.routes.is_empty() {
+                value["routes"] =
+                    serde_json::to_value(&self.routes).map_err(serde::ser::Error::custom)?;
+            }
+            if !self.overrides.is_empty() {
+                value["overrides"] =
+                    serde_json::to_value(&self.overrides).map_err(serde::ser::Error::custom)?;
+            }
             if !self.fallbacks.is_empty() {
                 value["fallbacks"] =
                     serde_json::to_value(&self.fallbacks).map_err(serde::ser::Error::custom)?;
@@ -342,6 +362,8 @@ pub enum ApiShape {
     ChatCompletions,
     Messages,
     Completions,
+    Gemini,
+    Realtime,
 }
 
 impl ApiShape {
@@ -363,7 +385,43 @@ impl ApiShape {
     }
 }
 
+impl ApiShape {
+    /// The top-level contract covers native endpoints too. Preserve the narrower
+    /// legacy alias matcher above for existing configurations.
+    pub fn from_route_path(path: &str) -> Option<Self> {
+        Self::from_path(path).or_else(|| match path.trim_end_matches('/') {
+            "/v1/messages"
+            | "/messages"
+            | "/v1/messages/count_tokens"
+            | "/messages/count_tokens" => Some(Self::Messages),
+            "/v1/realtime"
+            | "/realtime"
+            | "/v1/realtime/sessions"
+            | "/v1/realtime/transcription_sessions" => Some(Self::Realtime),
+            p if (p.starts_with("/v1beta/models/") || p.starts_with("/v1/models/"))
+                && [":generateContent", ":streamGenerateContent", ":countTokens"]
+                    .iter()
+                    .any(|suffix| p.ends_with(suffix)) =>
+            {
+                Some(Self::Gemini)
+            }
+            _ => None,
+        })
+    }
+}
+
 impl Alias {
+    /// One-shot resolution shared by legacy aliases and provider-scoped overrides.
+    pub fn destination(&self, effort: Option<&str>) -> (Option<&str>, Option<&str>) {
+        let route = effort.and_then(|effort| self.reasoning_routes.get(effort));
+        (
+            route.map(|r| r.to.as_str()).or(self.to.as_deref()),
+            route
+                .and_then(|r| r.api_key.as_deref())
+                .or(self.api_key.as_deref()),
+        )
+    }
+
     pub fn matches_shape(&self, path: &str) -> bool {
         self.api_shape
             .is_none_or(|shape| Some(shape) == ApiShape::from_path(path))
@@ -429,6 +487,9 @@ impl Default for Retry {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            revision: format!("{:032x}", rand::random::<u128>()),
+            routes: Vec::new(),
+            overrides: BTreeMap::new(),
             accounts: BTreeMap::new(),
             model_registry: None,
             fallbacks: BTreeMap::new(),
@@ -516,6 +577,8 @@ impl Config {
             config.upstream_url = connection.url.trim_end_matches('/').into();
             config.api_keys = BTreeMap::from([("host".into(), connection.api_key.clone())]);
             config.default.api_key = "host".into();
+            config.routes.clear();
+            config.overrides.clear();
             config.aliases.clear();
             config.fallbacks.clear();
             config.retry.max_retries = 0; // The host owns upstream retries.
@@ -523,6 +586,7 @@ impl Config {
         config
     }
     pub fn validate(&self) -> Result<()> {
+        self.validate_routes()?;
         anyhow::ensure!(self.accounts.len() <= 128, "Too many named accounts");
         anyhow::ensure!(
             self.mode != Mode::Client || self.accounts.is_empty(),
@@ -818,7 +882,7 @@ pub fn protect(path: &Path) -> Result<Config> {
 }
 
 fn parse(content: &[u8], path: &Path) -> Result<Config> {
-    let mut value: serde_json::Value = serde_json::from_slice(content).map_err(|e| {
+    let json::UniqueValue(mut value) = serde_json::from_slice(content).map_err(|e| {
         anyhow::anyhow!(
             "Invalid config JSON at line {}, column {}",
             e.line(),

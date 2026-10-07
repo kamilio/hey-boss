@@ -560,3 +560,53 @@ fn configure_pi_registry_rejects_invalid_budgets_before_writes() {
         assert_eq!(std::fs::read_dir(home).unwrap().count(), 3);
     }
 }
+
+#[test]
+fn routing_diagnostic_is_offline_redacted_and_does_not_rewrite_profiles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("routes.json");
+    let raw = include_bytes!("../examples/routes.config.json");
+    std::fs::write(&path, raw).unwrap();
+    let codex = dir.path().join("codex");
+    std::fs::create_dir(&codex).unwrap();
+    let sentinel = b"model = 'unchanged'\n";
+    std::fs::write(codex.join("config.toml"), sentinel).unwrap();
+    let output = cli(dir.path())
+        .arg("--config")
+        .arg(&path)
+        .args(["resolve-route", "gpt-6-astra"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["policy"], "routes");
+    assert_eq!(value["forwarding"], "staged");
+    assert_eq!(value["legs"][0]["provider"], "ultima");
+    assert_eq!(value["legs"][0]["upstream_model"], "ultima-alpha");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !text.contains("op://")
+            && !text.contains("example.com")
+            && !text.contains("credentials_file")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), raw);
+    assert_eq!(std::fs::read(codex.join("config.toml")).unwrap(), sentinel);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    let missing = dir.path().join("absent.json");
+    assert!(
+        !cli(dir.path())
+            .arg("--config")
+            .arg(&missing)
+            .args(["resolve-route", "logical"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!missing.exists());
+}

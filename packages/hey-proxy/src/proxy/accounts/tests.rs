@@ -368,3 +368,48 @@ async fn claude_identity_is_private_persistent_and_shared_across_aliases() {
     assert!(!stored.contains("sk-ant-oat"));
     server.abort();
 }
+
+#[test]
+fn route_plans_keep_provider_overrides_and_revision_across_atomic_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let raw = json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"paid":{"implementation":"openai","auth":"api","endpoint":"https://before.example","credential":"op://Private/Before/key"}},
+        "routes":[{"model":"logical","legs":[{"provider":"paid","override":"mapping"}]}],
+        "overrides":{"paid":{"mapping":{"from":"logical","to":"before"}}}
+    });
+    std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+    let proxy = local_snapshot(crate::config::load(&path).unwrap(), Some(path.clone())).unwrap();
+    let old = proxy
+        .config
+        .route_plan("logical", "/v1/responses", None)
+        .unwrap();
+    let (_, old_leg) = old.select(0).unwrap();
+    let mut next = raw.clone();
+    next["routes"][0]["legs"][0]["override"] = json!("missing");
+    std::fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+    proxy.service.refresh_files();
+    assert_eq!(
+        proxy.service.snapshot().config.revision,
+        old_leg.config_revision
+    );
+    next = raw;
+    next["accounts"]["paid"]["endpoint"] = json!("https://after.example");
+    next["overrides"]["paid"]["mapping"]["to"] = json!("after-reload");
+    std::fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+    proxy.service.refresh_files();
+    let new = proxy
+        .service
+        .snapshot()
+        .config
+        .route_plan("logical", "/v1/responses", None)
+        .unwrap();
+    let (old_config, old_again) = old.select(0).unwrap();
+    let (new_config, new_leg) = new.select(0).unwrap();
+    assert_eq!(old_config.upstream_url, "https://before.example");
+    assert_eq!(old_again.upstream_model, "before");
+    assert_eq!(old_again.config_revision, old_leg.config_revision);
+    assert_eq!(new_config.upstream_url, "https://after.example");
+    assert_eq!(new_leg.upstream_model, "after-reload");
+    assert_ne!(new_leg.config_revision, old_leg.config_revision);
+}
