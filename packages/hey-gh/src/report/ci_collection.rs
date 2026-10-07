@@ -29,20 +29,32 @@ enum Target {
     Jobs(usize),
 }
 
-type Read<'a> = Pin<Box<dyn Future<Output = (Target, Result<Vec<Value>>)> + Send + 'a>>;
+type ReadFuture<'a> = Pin<Box<dyn Future<Output = (Target, Result<Vec<Value>>)> + Send + 'a>>;
 
-async fn next(active: &mut Vec<Read<'_>>) -> (Target, Result<Vec<Value>>) {
-    let (index, result) = poll_fn(|cx| {
+struct Read<'a> {
+    future: ReadFuture<'a>,
+    admission: Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    admitted: bool,
+}
+
+async fn next(active: &mut Vec<Read<'_>>) -> Option<(Target, Result<Vec<Value>>)> {
+    let completed = poll_fn(|cx| {
         for (index, read) in active.iter_mut().enumerate() {
-            if let Poll::Ready(result) = read.as_mut().poll(cx) {
-                return Poll::Ready((index, result));
+            if let Poll::Ready(result) = read.future.as_mut().poll(cx) {
+                return Poll::Ready(Some((index, result)));
+            }
+            if !read.admitted && read.admission.as_mut().poll(cx).is_ready() {
+                read.admitted = true;
+                return Poll::Ready(None);
             }
         }
         Poll::Pending
     })
     .await;
-    drop(active.swap_remove(index));
-    result
+    completed.map(|(index, result)| {
+        drop(active.remove(index));
+        result
+    })
 }
 
 fn latest_workflows(mut runs: Vec<Value>) -> Vec<Value> {
@@ -149,7 +161,6 @@ impl Client {
         let mut workflows = Vec::new();
         let mut job_results: Vec<Option<Result<Vec<Value>>>> = Vec::new();
         let mut active: Vec<Read<'_>> = Vec::new();
-        let mut active_jobs = 0;
         let width = if self.status().queue_capacity >= 32 {
             3
         } else {
@@ -157,48 +168,57 @@ impl Client {
         };
         while !pending.is_empty() || !active.is_empty() {
             while active.len() < width {
-                // A job may still be preparing its request in the cache. Do
-                // not let later commit reads overtake it in the HTTP queue.
-                if active_jobs > 0 && matches!(pending.front(), Some(Task::Source(..))) {
+                // Cache preparation can yield before the shared HTTP queue.
+                // Preserve source order through admission, while overlapping
+                // responses and leaving cached-only completions network-free.
+                if active.iter().any(|read| !read.admitted) {
                     break;
                 }
                 let Some(task) = pending.pop_front() else {
                     break;
                 };
-                if matches!(&task, Task::Jobs(..)) {
-                    active_jobs += 1;
-                }
                 // Poll in the caller's task so validation, entity fences and
                 // collection budgets remain shared. No private request queue.
-                active.push(Box::pin(async move {
-                    match task {
-                        Task::Source(index, source) => (
-                            Target::Source(index),
-                            self.ci_source(
-                                repository,
-                                &source.sha,
-                                source.name,
-                                &source.path,
-                                source.field,
-                                freshness,
-                            )
-                            .await,
-                        ),
-                        Task::Jobs(index, run) => (
-                            Target::Jobs(index),
-                            self.workflow_jobs(
-                                repository,
-                                run["id"].as_u64().unwrap(),
-                                run["run_attempt"].as_u64().unwrap(),
-                                &run,
-                                freshness,
-                            )
-                            .await,
-                        ),
-                    }
-                }));
+                let (admission, mut admitted) = tokio::sync::watch::channel(false);
+                let future =
+                    crate::client::CI_SOURCE_ADMISSION.scope(admission.clone(), async move {
+                        match task {
+                            Task::Source(index, source) => (
+                                Target::Source(index),
+                                self.ci_source(
+                                    repository,
+                                    &source.sha,
+                                    source.name,
+                                    &source.path,
+                                    source.field,
+                                    freshness,
+                                )
+                                .await,
+                            ),
+                            Task::Jobs(index, run) => (
+                                Target::Jobs(index),
+                                self.workflow_jobs(
+                                    repository,
+                                    run["id"].as_u64().unwrap(),
+                                    run["run_attempt"].as_u64().unwrap(),
+                                    &run,
+                                    freshness,
+                                )
+                                .await,
+                            ),
+                        }
+                    });
+                active.push(Read {
+                    future: Box::pin(future),
+                    admission: Box::pin(async move {
+                        let _ = admitted.wait_for(|ready| *ready).await;
+                    }),
+                    admitted: false,
+                });
             }
-            let (target, mut result) = next(&mut active).await;
+            let Some((target, mut result)) = next(&mut active).await else {
+                continue;
+            };
             let workflows_ready = match target {
                 Target::Source(index) => {
                     if sources[index].name == "commit_statuses"
@@ -218,7 +238,6 @@ impl Client {
                     }
                 }
                 Target::Jobs(index) => {
-                    active_jobs -= 1;
                     job_results[index] = Some(result);
                     false
                 }

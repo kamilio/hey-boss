@@ -16,6 +16,7 @@ struct Collection {
     requested: OnceCell<(Freshness, tokio::time::Instant)>,
     wake: Notify,
     ready: watch::Sender<bool>,
+    admission: watch::Sender<bool>,
 }
 
 tokio::task_local! { static COLLECTION: Arc<Collection>; }
@@ -39,18 +40,23 @@ pub(in crate::report) async fn scope<T>(
         requested: OnceCell::new(),
         wake: Notify::new(),
         ready: watch::channel(false).0,
+        admission: watch::channel(false).0,
     });
     COLLECTION
         .scope(collection.clone(), async {
             let fetch = async {
                 collection.wake.notified().await;
-                let response = crate::client::retained_selector_read(client.commit_lists_response(
-                    repository,
-                    head,
-                    merge,
-                    collection.requested.get().expect("requested proof").0,
-                ))
-                .await;
+                let response = crate::client::CI_SOURCE_ADMISSION
+                    .scope(
+                        collection.admission.clone(),
+                        crate::client::retained_selector_read(client.commit_lists_response(
+                            repository,
+                            head,
+                            merge,
+                            collection.requested.get().expect("requested proof").0,
+                        )),
+                    )
+                    .await;
                 let response = match response {
                     Ok(response) => Ok(Some(response)),
                     Err(error) if required_error(&error) => Err(error),
@@ -196,7 +202,22 @@ pub(super) async fn evidence(
             // All list consumers share one fallback clock; later REST waves
             // must not wait another two seconds for the same pending query.
             let fallback_at = collection.requested.get().expect("requested proof").1;
-            let _ = tokio::time::timeout_at(fallback_at, ready.wait_for(|done| *done)).await;
+            let mut admission = collection.admission.subscribe();
+            let _ = tokio::time::timeout_at(fallback_at, async {
+                let admitted = tokio::select! {
+                    biased;
+                    _ = ready.wait_for(|done| *done) => false,
+                    _ = admission.wait_for(|admitted| *admitted) => true,
+                };
+                if admitted {
+                    // This source joined the collection's shared proof.
+                    // Let siblings prepare once that proof owns a queue
+                    // slot, without waiting for its HTTP response/fallback.
+                    crate::client::ci_source_admitted();
+                    let _ = ready.wait_for(|done| *done).await;
+                }
+            })
+            .await;
             collection.response.get().cloned().unwrap_or(Ok(None))?
         }
     };
