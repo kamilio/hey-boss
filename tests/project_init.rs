@@ -128,6 +128,19 @@ fn builder_omits_empty_discoveries_but_keeps_saved_and_initialized_projects() {
         ])
         .unwrap();
     drop(store);
+    let db = Connection::open(f.db()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // Existing empty registry entries remain hidden; saved legacy work stays visible.
+    db.execute_batch(
+        "INSERT INTO projects(id,name,next_number) VALUES
+    ('local:remote:/workspace/lab/run-27','run-27',1),
+    ('github.com/example/unused','unused',1),('named:Saved','Saved',1)",
+    )
+    .unwrap();
     f.json(&[
         "issue",
         "--project",

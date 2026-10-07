@@ -24,6 +24,19 @@ impl Fixture {
     fn db(&self) -> PathBuf {
         self.0.join("issues.db")
     }
+    fn legacy_project(&self, id: &str) {
+        drop(Store::open(&self.db()).unwrap());
+        Connection::open(self.db())
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                [
+                    id,
+                    id.rsplit('/').next().unwrap().trim_start_matches("named:"),
+                ],
+            )
+            .unwrap();
+    }
     fn run(&self, project: &str, args: &[&str]) -> Value {
         let (command, args) = if args.first().is_some_and(|c| *c == "artifact" || *c == "mm") {
             (args[0], &args[1..])
@@ -62,7 +75,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn automatic_discovery_rejects_git_metadata_before_registering_the_workspace() {
+fn automatic_discovery_does_not_register_metadata_or_workspaces() {
     let f = Fixture::new();
     let mut store = Store::open(&f.db()).unwrap();
     for path in [
@@ -98,6 +111,14 @@ fn automatic_discovery_rejects_git_metadata_before_registering_the_workspace() {
             .is_empty()
     );
     assert_eq!(
+        Connection::open(f.db())
+            .unwrap()
+            .query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    f.legacy_project(&real.id);
+    assert_eq!(
         f.run("hey-gh", &["settings", "show"])["project"]["id"],
         real.id
     );
@@ -122,6 +143,7 @@ fn legacy_empty_git_metadata_releases_its_name_but_preserves_saved_work() {
             .iter()
             .any(|p| p["id"] == empty)
     );
+    f.legacy_project("local:remote:/home/dev/workspace/hey-gh");
     f.run(
         "local:remote:/home/dev/workspace/hey-gh",
         &["create", "--title", "Real workspace"],
@@ -161,6 +183,7 @@ fn legacy_empty_git_metadata_releases_its_name_but_preserves_saved_work() {
         ("deleted", vec!["create", "--title", "Restorable"]),
     ] {
         let id = format!("local:remote:/home/dev/.git/{path}");
+        f.legacy_project(&id);
         f.run(&id, &args);
         if path == "deleted" {
             f.run(&id, &["delete", "1"]);
@@ -237,7 +260,7 @@ fn automatic_discovery_does_not_register_temporary_agent_folders() {
     assert_eq!(
         db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1
+        0
     );
     store
         .discover_projects(&[(
@@ -251,7 +274,7 @@ fn automatic_discovery_does_not_register_temporary_agent_folders() {
     assert_eq!(
         db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        0
     );
 }
 
@@ -264,6 +287,9 @@ fn legacy_empty_temporary_projects_are_omitted_but_saved_work_remains_accessible
     let map = "local:remote:/tmp/hey-boss-map";
     let settings = "local:remote:/tmp/hey-boss-settings";
     let deleted = "local:remote:/tmp/hey-boss-deleted";
+    for id in [empty, saved, artifact, map, settings, deleted] {
+        f.legacy_project(id);
+    }
     f.run(empty, &["list"]);
     f.run(saved, &["create", "--title", "Keep my issue"]);
     f.run(
@@ -359,6 +385,12 @@ fn worktrees_share_the_repository_queue_even_when_their_names_differ() {
             );
             serde_json::from_slice::<Value>(&output.stdout).unwrap()
         };
+        let project = hey_boss::issues::identity::project(
+            &f.0,
+            &hey_boss::issues::identity::machine().unwrap(),
+        )
+        .unwrap();
+        f.legacy_project(&project.id);
         let primary = run(&f.0, &["create", "--title", "One repository queue"]);
         let linked = f.0.join("feature-checkout");
         git(&[

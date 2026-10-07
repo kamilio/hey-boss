@@ -271,7 +271,6 @@ fn select(
             return Ok(node);
         }
         if create {
-            db.execute("INSERT OR IGNORE INTO projects(id,name,next_number,created_at,activity_at) VALUES(?1,?2,1,?3,?3)",params![p.id,p.name,now])?;
             let title = match kind {
                 "issue" => format!("Issue #{reference}"),
                 "pr" => reference.clone(),

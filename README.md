@@ -632,8 +632,9 @@ manual blocks and human ownership remain respected. Retrying grants no permissio
 
 Run `hey-boss project init` in its checkout. Choose pull requests and worktrees,
 review the existing prompts, and confirm to add the project to Builder. Reruns
-preserve custom prompts. Empty discovered folders stay out of the project picker;
-projects with saved work remain available. See `hey-boss project init --help`.
+preserve custom prompts. Only `project init` creates projects. Other commands use
+the registered checkout or nearest registered parent; otherwise specify an existing
+project with `--project` or initialize it. Empty legacy folders stay out of the picker. See `hey-boss project init --help`.
 
 ## Upgrading every machine
 

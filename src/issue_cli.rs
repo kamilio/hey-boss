@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 #[command(
-    after_help = "Project defaults to the Git repository (shared by worktrees), or current directory.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions use the supervisor tunnel for status updates, assignment and drafting.\nUse --supervisor for remote metadata edits; no SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
+    after_help = "Project defaults to the registered Git repository (shared by worktrees), or nearest registered parent directory.\nIf none exists, use --project <name-or-id> or run `hey-boss project init`.\nMarkdown bodies and comments are stored in SQLite. Use --body - for stdin.\nUse --agent ID or HEY_BOSS_AGENT_ID if your session cannot be detected.\nConnected companions use the supervisor tunnel for status updates, assignment and drafting.\nUse --supervisor for remote metadata edits; no SSH hostname or work claim is needed.\nRun `hey-boss issue <command> --help` for details."
 )]
 pub struct Options {
     /// Full project ID or an unambiguous short name; defaults to this checkout.

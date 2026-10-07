@@ -475,7 +475,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
                 | "fleet_reserved"
                 | "fleet_allocation_missing"
                 | "fleet_allocation_expired" => 409,
-                "invalid_input" | "identity_unavailable" => 400,
+                "invalid_input" | "identity_unavailable" | "project_not_initialized" => 400,
                 _ => 503,
             };
             (

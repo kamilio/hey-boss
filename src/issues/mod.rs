@@ -291,6 +291,10 @@ pub enum Operation {
         sync_skills: bool,
         if_version: Option<i64>,
     },
+    /// Preview with no settings; only an explicit save may register a project.
+    ProjectInit {
+        settings: Option<ProjectInitSettings>,
+    },
     ProjectSettings,
     ConfigureProject {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -614,8 +618,19 @@ pub enum Operation {
         number: i64,
     },
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectInitSettings {
+    pub prs_enabled: bool,
+    pub worktree_enabled: bool,
+    pub if_version: i64,
+}
+
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::ProjectInit { settings } = self {
+            return settings.is_some();
+        }
         if let Self::Attachment { operation } = self {
             return operation.writes();
         }
@@ -678,6 +693,7 @@ impl Operation {
             | Self::GlobalSettings
             | Self::RequestStatus { .. }
             | Self::ConfigureGlobal { .. }
+            | Self::ProjectInit { .. }
             | Self::ProjectSettings
             | Self::ConfigureProject { .. }
             | Self::WorkerStatus

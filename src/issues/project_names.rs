@@ -186,7 +186,7 @@ pub(super) fn pending_discoveries(
             };
             let observation = &observations[index];
             activity
-                .is_none_or(|at| observation.1 > at)
+                .is_some_and(|at| observation.1 > at)
                 .then(|| observation.clone())
         })
         .collect())
@@ -254,4 +254,48 @@ pub(super) fn warnings(db: &Connection, project: Option<&str>) -> Result<Value> 
         }
     }
     Ok(json!(visible))
+}
+
+/// Find the closest registered local ancestor in one indexed query. Never use
+/// home/root entries left over from old discovery as catch-all destinations.
+pub(super) fn parent(db: &Connection, detected: &Project) -> Result<Option<Project>> {
+    let Some((machine, directory)) = detected
+        .id
+        .strip_prefix("local:")
+        .and_then(|id| id.split_once(':'))
+    else {
+        return Ok(None);
+    };
+    let candidates: Vec<_> = Path::new(directory)
+        .ancestors()
+        .skip(1)
+        .filter(|path| path.parent().is_some())
+        .map(|path| Project {
+            id: format!("local:{machine}:{}", path.display()),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        })
+        .filter(|p| !super::super::identity::is_home_project(p))
+        .map(|p| p.id)
+        .collect();
+    Ok(db.query_row("SELECT p.id,p.name FROM json_each(?1) candidate JOIN projects p ON p.id=candidate.value ORDER BY candidate.key LIMIT 1", [serde_json::to_string(&candidates)?], |r| Ok(Project { id:r.get(0)?, name:r.get(1)? })).optional()?)
+}
+
+/// Match only the same repository's legacy metadata identity, never its basename.
+pub(super) fn saved_metadata(db: &Connection, detected: &Project) -> Result<Option<Project>> {
+    if !detected.id.starts_with("local:") {
+        return Ok(None);
+    }
+    let id = format!("{}/.git", detected.id.trim_end_matches('/'));
+    let project = db
+        .query_row("SELECT id,name FROM projects WHERE id=?1", [&id], |r| {
+            Ok(Project {
+                id: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })
+        .optional()?;
+    match project {
+        Some(project) if !empty_git_metadata(db, &project.id)? => Ok(Some(project)),
+        _ => Ok(None),
+    }
 }

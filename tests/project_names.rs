@@ -107,9 +107,18 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
     let mut store = f.store();
     let first = project("github.com/poe-internal/poe2", "poe2");
     let other = project("github.com/another/poe2", "poe2");
-    store.notification_project(&first, None).unwrap();
+    Connection::open(&f.0)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+            [&first.id, &first.name],
+        )
+        .unwrap();
     store.discover_projects(&[(other.clone(), 10)]).unwrap();
-    assert_eq!(store.notification_project(&other, None).unwrap(), first);
+    assert_eq!(
+        store.notification_project(&other, None).unwrap_err().code,
+        "project_not_initialized"
+    );
     assert_eq!(
         store.notification_project(&other, Some("POE2")).unwrap(),
         first
@@ -121,7 +130,7 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
         first
     );
     let value = registry(&mut store, &other);
-    assert_eq!(value["project"]["id"], first.id);
+    assert_eq!(value["project"]["id"], other.id);
     assert_eq!(value["projects"].as_array().unwrap().len(), 0);
     assert!(value["project_warnings"].as_array().unwrap().is_empty());
     // Normal name reuse must not create a warning queue.
@@ -153,9 +162,15 @@ fn names_reuse_the_first_project_across_discovery_notifications_and_overrides() 
 #[test]
 fn upgrade_discards_reuse_warnings_without_touching_saved_history() {
     let f = Fixture::new();
-    let mut store = f.store();
+    let store = f.store();
     let first = project("github.com/first/poe2", "poe2");
-    store.notification_project(&first, None).unwrap();
+    Connection::open(&f.0)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+            [&first.id, &first.name],
+        )
+        .unwrap();
     drop(store);
     let db = Connection::open(&f.0).unwrap();
     db.execute(
