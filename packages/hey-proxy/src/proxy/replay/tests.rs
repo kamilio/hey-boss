@@ -241,19 +241,32 @@ async fn native_replay_stays_authenticated_and_fallback_keeps_the_original_carri
             .iter()
             .any(|p| p["thoughtSignature"] == "synthetic-text")
     );
-    for alteration in ["carrier", "visible", "model"] {
+    for alteration in ["carrier", "visible"] {
         let mut invalid = request.clone();
         invalid["model"] = json!("gemini/test");
         match alteration {
             "carrier" => invalid["input"][1]["encrypted_content"] = json!("hey_gemini_v1.altered"),
             "visible" => invalid["input"][2]["content"][0]["text"] = json!("Changed signed output"),
-            _ => invalid["model"] = json!("gemini/another"),
+            _ => unreachable!(),
         }
         let response = post(&proxy, &invalid).await;
         assert_eq!(response.status(), 400, "{alteration}");
         let _ = response.bytes().await.unwrap();
         assert_eq!(seen.lock().unwrap().len(), 3);
     }
+    // Model changes already recover visible history after codec authentication
+    // fails. The original model's private signatures must not cross that boundary.
+    let mut switched = request.clone();
+    switched["model"] = json!("gemini/another");
+    let response = post(&proxy, &switched).await;
+    assert_eq!(response.status(), 200);
+    let _ = response.bytes().await.unwrap();
+    let records = seen.lock().unwrap();
+    assert_eq!(records.len(), 4);
+    let body = &records.last().unwrap().2;
+    assert!(body.to_string().contains("I will inspect git status."));
+    assert!(!body.to_string().contains("synthetic-thought"));
+    assert!(!body.to_string().contains("synthetic-text"));
 }
 
 #[tokio::test]

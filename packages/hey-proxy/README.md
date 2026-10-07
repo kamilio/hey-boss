@@ -379,3 +379,13 @@ For SSH deployment, add hosts to `ssh_hosts` and run `hey-proxy rollout`. This i
 - **Gemini rejects a request:** check [API compatibility](docs/compatibility.md), your model's capabilities, and Google project access.
 
 Run `hey-proxy --help` for commands. Use `--config /path/to/config.json` to keep multiple proxy configurations separate.
+
+## Workspace provenance
+
+Imported from [kamilio/hey-proxy](https://github.com/kamilio/hey-proxy) at
+`dbd41b6`, with the original commits retained as ancestry of the import. Pending
+OAuth, quota/recommender and spend source changes were preserved separately
+before workspace integration. Build from this workspace with
+`cargo build --locked -p hey-proxy`; the public `hey_proxy::usage` SDK and the
+`hey-proxy` executable remain available. `hey-boss proxy` forwards to that same
+executable without starting a Boss service.

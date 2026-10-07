@@ -31,7 +31,7 @@ func installHeyBoss() -> [String: String] {
     try! Data(contentsOf: root.appendingPathComponent("target/release/hey-boss")).write(to: binary, options: .atomic)
     run("/usr/bin/swift", [root.appendingPathComponent("package_hey_boss.swift").path, staging.path, app.path])
     for executable in [binary, daemon] { try! files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path) }
-    for name in ["hey-gh", "hey-harvester"] {
+    for name in ["hey-gh", "hey-harvester", "hey-proxy"] {
         let binary = binaries.appendingPathComponent(name)
         var paths = [binary]
         let cargo = files.homeDirectoryForCurrentUser.appendingPathComponent(".cargo/bin/\(name)")

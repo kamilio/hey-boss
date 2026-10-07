@@ -31,22 +31,23 @@ elif command.startswith('tar '):
 elif command.startswith('exec '):
     args = shlex.split(shlex.split(command)[-1])
     stage = pathlib.Path(args[2])
+    package = pathlib.Path(args[1]).parent.parent
     config = json.loads((stage / 'remote-config.json').read_text())
     assert config.get('ssh_hosts', []) == []
     assert config['providers']['openai']['api_keys']['default'] == 'op://Agents/hey-proxy/codex'
-    assert 'check-credentials' in (stage / 'src/remote_service.py').read_text()
+    assert 'check-credentials' in (package / 'src/remote_service.py').read_text()
     assert config['aliases'][0]['to'] == 'gpt-4.1-mini'
     assert config['fallbacks'] == {'gpt-4.1':['gpt-4.1-mini']}
     assert (stage / 'README.md').is_file() and (stage / 'LICENSE').is_file()
-    assert (stage / 'src/rollout.rs').is_file()
-    assert (stage / 'src/proxy/logs.html').is_file()
-    assert (stage / 'tests/gemini_conversion.rs').is_file()
-    assert (stage / 'tests/credential_sources.rs').is_file()
-    assert (stage / 'tests/gemini_regression.rs').is_file()
-    assert (stage / 'tests/gemini_hardening.rs').is_file()
-    assert (stage / 'src/proxy/gemini/hardening_tests.rs').is_file()
-    assert (stage / 'src/gemini/validate.rs').is_file()
-    assert (stage / 'tests/gemini_stream_partitions.rs').is_file()
+    assert (package / 'src/rollout.rs').is_file()
+    assert (package / 'src/proxy/logs.html').is_file()
+    assert (package / 'tests/gemini_conversion.rs').is_file()
+    assert (package / 'tests/credential_sources.rs').is_file()
+    assert (package / 'tests/gemini_regression.rs').is_file()
+    assert (package / 'tests/gemini_hardening.rs').is_file()
+    assert (package / 'src/proxy/gemini/hardening_tests.rs').is_file()
+    assert (package / 'src/gemini/validate.rs').is_file()
+    assert (package / 'tests/gemini_stream_partitions.rs').is_file()
     assert args[3] == 'http://127.0.0.1:8080/v1'
     if host == 'fixture-fail': sys.exit(1)
 elif command.startswith('rm '):

@@ -4,11 +4,12 @@ stage=$1
 base_url=$2
 codex_home=$3
 model=$4
+source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 umask 077
 export TMPDIR="$stage"
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 command -v python3 >/dev/null || { echo 'Remote host needs Python 3 for service setup' >&2; exit 1; }
-python3 "$stage/src/remote_service.py" preflight
+python3 "$source_dir/remote_service.py" preflight
 mkdir -p "$HOME/.hey-proxy"
 lock="$HOME/.hey-proxy/rollout.lock"
 mkdir "$lock" || { echo 'Another rollout is active (or left a stale ~/.hey-proxy/rollout.lock)' >&2; exit 1; }
@@ -23,7 +24,7 @@ fi
 # Reuse build artifacts between rollouts.
 export CARGO_TARGET_DIR="$HOME/.hey-proxy/build"
 export CARGO_INCREMENTAL=0
-cargo build --release --locked --manifest-path "$stage/Cargo.toml"
+cargo build --release --locked -p hey-proxy --manifest-path "$stage/Cargo.toml"
 built="$CARGO_TARGET_DIR/release/hey-proxy"
 "$built" --config "$stage/remote-config.json" --init
-python3 "$stage/src/remote_service.py" install "$built" "$stage/remote-config.json" "$base_url" "$codex_home" "$model"
+python3 "$source_dir/remote_service.py" install "$built" "$stage/remote-config.json" "$base_url" "$codex_home" "$model"

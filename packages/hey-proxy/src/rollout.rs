@@ -687,7 +687,7 @@ pub(crate) async fn check_credentials(config: &Config) -> Result<()> {
 }
 fn source_bundle(dir: &Path) -> Result<()> {
     // Embedded sources make the installed CLI independent of the checkout and remote architecture.
-    // build.rs lists every file under src/ and tests/, so new modules ship automatically.
+    // build.rs retains the workspace and lists source trees so new modules ship automatically.
     const FILES: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/bundle_files.rs"));
     for (name, content) in FILES {
         let path = dir.join(name);
@@ -747,7 +747,11 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
     if tunneled {
         checked(
             Command::new("python3")
-                .arg(temp.path().join("src/controller_tunnel.py"))
+                .arg(
+                    temp.path()
+                        .join(env!("HEY_PROXY_BUNDLE_PACKAGE"))
+                        .join("src/controller_tunnel.py"),
+                )
                 .arg(host.host())
                 .arg(config.local_address().to_string()),
             "Gemini controller tunnel",
@@ -801,17 +805,11 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
             .arg(&archive)
             .arg("-C")
             .arg(temp.path())
-            .args([
-                "Cargo.toml",
-                "Cargo.lock",
-                "README.md",
-                "LICENSE",
-                "build.rs",
-                "src",
-                "tests",
-                "remote-config.json",
-                "deployment.json",
-            ]),
+            .args(
+                fs::read_dir(temp.path())?
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<std::io::Result<Vec<_>>>()?,
+            ),
         "source archive",
     )
     .await?;
@@ -847,8 +845,9 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
         let home = settings.and_then(|s| s.codex_home.as_deref()).unwrap_or("");
         let model = settings.and_then(|s| s.model.as_deref()).unwrap_or("");
         let script = format!(
-            "sh {}/src/rollout.sh {} {} {} {}",
+            "sh {}/{}/src/rollout.sh {} {} {} {}",
             quote(&stage),
+            env!("HEY_PROXY_BUNDLE_PACKAGE"),
             quote(&stage),
             quote(&base_url),
             quote(home),
@@ -1486,10 +1485,11 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         source_bundle(dir.path()).unwrap();
-        assert!(dir.path().join("src/remote_service.py").exists());
-        assert!(dir.path().join("src/rollout.rs").exists());
-        assert!(dir.path().join("src/proxy/dashboard.js").exists());
-        assert!(dir.path().join("src/proxy/recovery.rs").exists());
+        let package = dir.path().join(env!("HEY_PROXY_BUNDLE_PACKAGE"));
+        assert!(package.join("src/remote_service.py").exists());
+        assert!(package.join("src/rollout.rs").exists());
+        assert!(package.join("src/proxy/dashboard.js").exists());
+        assert!(package.join("src/proxy/recovery.rs").exists());
         for file in [
             "src/fallback.rs",
             "src/proxy/fallback.rs",
@@ -1509,14 +1509,40 @@ mod tests {
             "src/proxy/messages.rs",
             "src/proxy/messages/gemini.rs",
             "build.rs",
-            "Cargo.lock",
+            "examples/minimal.config.json",
         ] {
             assert!(
-                dir.path().join(file).exists(),
+                package.join(file).exists(),
                 "Missing rollout source: {file}"
             );
         }
     }
+    #[test]
+    fn embedded_source_builds_with_the_workspace_lockfile() {
+        let dir = tempfile::tempdir().unwrap();
+        source_bundle(dir.path()).unwrap();
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/proxy-bundle-check");
+        let output = std::process::Command::new("cargo")
+            .args([
+                "check",
+                "--locked",
+                "--offline",
+                "-p",
+                "hey-proxy",
+                "--all-targets",
+                "--manifest-path",
+            ])
+            .arg(dir.path().join("Cargo.toml"))
+            .env("CARGO_TARGET_DIR", target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[tokio::test]
     async fn invalid_selection_does_not_require_ssh() {
         let config = Config {

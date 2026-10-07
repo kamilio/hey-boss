@@ -1,0 +1,17 @@
+name: Proxy compatibility
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: cargo test --locked -p hey-proxy
+      - run: cargo test --locked -p hey-boss --test proxy_dispatch
+      - run: node --test packages/hey-proxy/tests/dashboard.cjs
+      - run: cargo clippy --locked -p hey-proxy --all-targets -- -D warnings
+      - run: cargo package --locked -p hey-proxy

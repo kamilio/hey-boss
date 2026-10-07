@@ -538,10 +538,7 @@ fn extended_model_rates(model: &str) -> (String, [f64; 6]) {
         "gpt-5.1" | "gpt-5.1-codex" | "gpt-5" | "gpt-5-codex" => {
             ("gpt-5.1".into(), [1.25, 0.125, 10.0, 1.25, 0.0, 1.25])
         }
-        "gemini-early-exp"
-        | "gemini-3.1-pro-preview"
-        | "gemini-2.5-pro"
-        | "gemini-test" => (
+        "gemini-early-exp" | "gemini-3.1-pro-preview" | "gemini-2.5-pro" | "gemini-test" => (
             "gemini-3.1-pro-preview".into(),
             [2.0, 0.2, 12.0, 2.0, 200_000.0, 2.0],
         ),
@@ -781,7 +778,9 @@ pub fn sync_local_sources(db_path: &Path, cutoff_ms: Option<i64>) -> Result<usiz
             primary_codex_home.join("sessions"),
             primary_codex_home.join("archived_sessions"),
             home.join(".poe-code").join("codex").join("sessions"),
-            home.join(".poe-code").join("codex").join("archived_sessions"),
+            home.join(".poe-code")
+                .join("codex")
+                .join("archived_sessions"),
         ];
         let mut codex_jsonl_files = Vec::new();
         for dir in &codex_dirs {
@@ -1515,11 +1514,7 @@ pub fn render_spend_report(report: &SpendReport) -> String {
         "Spend Monitor ({}) · DB: {}",
         report.window_label, report.database_path
     );
-    let _ = writeln!(
-        out,
-        "Total Spend: ${:.2}",
-        report.total_cost_usd
-    );
+    let _ = writeln!(out, "Total Spend: ${:.2}", report.total_cost_usd);
     let _ = writeln!(
         out,
         "Volume: {} turns/requests · {} tokens ({} in, {} cache read, {} cache write, {} out)",
