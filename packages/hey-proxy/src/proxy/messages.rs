@@ -64,6 +64,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             );
         }
     };
+    if let Some(response) = probe::parsed(&proxy.config, &mut parts, &input) {
+        return response;
+    }
     let Some(requested_model) = input
         .get("model")
         .and_then(Value::as_str)

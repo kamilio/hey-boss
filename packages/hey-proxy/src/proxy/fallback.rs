@@ -103,7 +103,7 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
     {
         return forward_request(proxy, request).await;
     }
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -117,6 +117,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         Ok(value) => value,
         Err(_) => return error(StatusCode::BAD_REQUEST, "Request body must be valid JSON"),
     };
+    if let Some(response) = probe::parsed(config, &mut parts, &value) {
+        return response;
+    }
     let fallback_payload: Value = match rewrite(config, parts.uri.path(), bytes.clone()) {
         Ok((bytes, _)) => serde_json::from_slice(&bytes).expect("rewritten JSON"),
         Err(message) => return error(StatusCode::BAD_REQUEST, message),

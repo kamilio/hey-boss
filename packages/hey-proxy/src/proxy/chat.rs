@@ -51,6 +51,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         Ok(value) => value,
         Err(_) => return error(StatusCode::BAD_REQUEST, "Request body must be valid JSON"),
     };
+    if let Some(response) = probe::parsed(&proxy.config, &mut parts, &input) {
+        return response;
+    }
     // Select by the caller's API shape before translating. The resulting per-request
     // config keeps fallback candidates on that same shape and never double-applies aliases.
     let mut config = (*proxy.config).clone();

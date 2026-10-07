@@ -9,6 +9,7 @@ mod guidance;
 pub(crate) mod logs;
 mod messages;
 mod overview;
+mod probe;
 mod recovery;
 mod replay;
 mod sse;
@@ -947,6 +948,11 @@ fn rewrite_uri(config: &Config, uri: &axum::http::Uri, project: &mut String) -> 
     path
 }
 
+enum PreparedBody {
+    Forward(ReplayBody),
+    Probe(Response),
+}
+
 async fn prepare_body(
     config: &Config,
     path: &str,
@@ -954,7 +960,8 @@ async fn prepare_body(
     body: Body,
     project: &mut String,
     log: (&logs::Store, u64),
-) -> Result<ReplayBody> {
+    inspect_probe: bool,
+) -> Result<PreparedBody> {
     let kind = content_type
         .split(';')
         .next()
@@ -968,6 +975,9 @@ async fn prepare_body(
         } else {
             serde_json::from_slice(&bytes)?
         };
+        if inspect_probe && let Some(response) = probe::response(config, path, &value) {
+            return Ok(PreparedBody::Probe(response));
+        }
         let incoming = logs::value_model(&value);
         log.0.routing_value_decision(log.1, config, path, &value);
         let (mut changed, key) =
@@ -1002,7 +1012,10 @@ async fn prepare_body(
                 .get("model")
                 .and_then(Value::as_str)
                 .is_some_and(|m| m.starts_with("gemini/"));
-        return Ok(ReplayBody::Memory(rewritten, native.then_some(value)));
+        return Ok(PreparedBody::Forward(ReplayBody::Memory(
+            rewritten,
+            native.then_some(value),
+        )));
     }
 
     let mut original = FileBody::new().await?;
@@ -1076,11 +1089,11 @@ async fn prepare_body(
             .await?;
         if changed {
             output.0.flush().await?;
-            return Ok(ReplayBody::File(output));
+            return Ok(PreparedBody::Forward(ReplayBody::File(output)));
         }
     }
     original.0.flush().await?;
-    Ok(ReplayBody::File(original))
+    Ok(PreparedBody::Forward(ReplayBody::File(original)))
 }
 
 async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> Response {
@@ -1119,17 +1132,16 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
     }
     let guard = logs::RequestGuard::new(service.logs.clone(), id);
     let proxy = Arc::new(snapshot);
-    let response = if claude::is_path(request.uri().path())
-        && proxy.config.mode != Mode::Client
-        && proxy.config.claude.as_ref().is_some_and(|c| c.routing)
+    let response = if gemini::native_path(request.uri().path())
+        || request.uri().path().trim_end_matches('/') == "/v1/messages"
     {
-        claude::forward(proxy, request).await
-    } else if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
-        chat::forward(proxy, request).await
-    } else if messages::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
-        messages::forward(proxy, request).await
+        // Native pass-through routes do not otherwise parse message content.
+        match probe::intercept(&proxy.config, request).await {
+            Ok(request) => forward_api(proxy, request).await,
+            Err(response) => response,
+        }
     } else {
-        fallback::forward(proxy, request).await
+        forward_api(proxy, request).await
     };
     service.logs.finish(id, response.status().as_u16());
     if response.extensions().get::<recovery::Timeout>().is_some() {
@@ -1152,6 +1164,21 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
         .and_then(|v| v.parse().ok());
     let (parts, body) = response.into_parts();
     Response::from_parts(parts, guard.wrap(body, length, is_sse))
+}
+
+async fn forward_api(proxy: Arc<Proxy>, request: Request) -> Response {
+    if claude::is_path(request.uri().path())
+        && proxy.config.mode != Mode::Client
+        && proxy.config.claude.as_ref().is_some_and(|c| c.routing)
+    {
+        claude::forward(proxy, request).await
+    } else if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
+        chat::forward(proxy, request).await
+    } else if messages::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {
+        messages::forward(proxy, request).await
+    } else {
+        fallback::forward(proxy, request).await
+    }
 }
 
 async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
@@ -1190,10 +1217,13 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
         body,
         &mut project,
         (&proxy.service.logs, proxy.log_id),
+        parts.method == axum::http::Method::POST
+            && parts.extensions.get::<probe::Checked>().is_none(),
     )
     .await
     {
-        Ok(body) => body,
+        Ok(PreparedBody::Forward(body)) => body,
+        Ok(PreparedBody::Probe(response)) => return response,
         Err(_) => {
             return error(
                 StatusCode::BAD_REQUEST,

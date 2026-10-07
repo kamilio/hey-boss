@@ -42,6 +42,16 @@ Multiple subscriptions and API connections use [named provider accounts](docs/na
 
 **Installing or running hey-proxy never changes your Codex configuration.** Codex setup is a separate, optional command.
 
+## Verify proxy routing
+
+Send exactly `hello-hey-proxy` as the entire latest user message to receive `hello-dude`. Send `hello-hey-proxy-model` to see the requested model, configured destination, API path, matched rule, reasoning override, upstream endpoint, and credential alias. Credential values are never included. Both probes reply locally with zero token usage and an `x-hey-proxy-probe: true` response header.
+
+For example, a `gpt-6-astra` alias targeting `ultima-alpha` reports `Route: gpt-6-astra -> openai/ultima-alpha`. Fallbacks are labeled as configured candidates, not attempted routes. Client relays report their next host; the final model is resolved by that host.
+
+Matching is exact and case-sensitive: whitespace, extra text, attachments, multiple content blocks, and tool results do not trigger probes. Earlier history and system instructions are allowed. HTTP JSON and SSE are supported on Responses, Chat Completions, Messages (including custom adapters), and native Gemini generation endpoints. Authentication still applies. WebSockets are forwarded normally. Synthetic Responses IDs are local; include history instead of referencing them through `previous_response_id` later.
+
+Responses, Chat Completions, and custom Messages check the JSON already parsed by their handlers; ordinary requests get no extra body buffering or history parse. Native pass-through endpoints use bounded inspection (64 MiB), forwarding larger bodies normally.
+
 ## Connect your Claude subscription
 
 Add `"claude": {}` under `providers` in your proxy config, then run `hey-proxy claude-login` and start the proxy. hey-proxy owns the OAuth tokens and refreshes them automatically; Claude Code needs only these overrides:
