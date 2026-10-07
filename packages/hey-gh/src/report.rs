@@ -1162,6 +1162,22 @@ impl Client {
                 .ok()
                 .flatten();
             let early = early_after.is_some();
+            // Timeline pagination is also a dependency of review history.
+            // Admit it before independent REST details, despite yielding cache
+            // preparation. Admission (including joining a peer), not HTTP
+            // completion, releases siblings. Cached-only reads, tiny queues,
+            // and review-only reads retain independent collection.
+            let (timeline_admission, timeline_ready) = tokio::sync::watch::channel(
+                scope == ReportScope::Reviews
+                    || matches!(freshness, Freshness::CachedOnly)
+                    || self.status().queue_capacity < 32,
+            );
+            let wait_timeline = || {
+                let mut ready = timeline_ready.clone();
+                async move {
+                    let _ = ready.wait_for(|ready| *ready).await;
+                }
+            };
             let prefetch = async {
                 if !overlap {
                     return Ok(None);
@@ -1227,6 +1243,7 @@ impl Client {
                                 if comments_empty {
                                     Ok(Vec::new())
                                 } else {
+                                    wait_timeline().await;
                                     self.pages(&comments_path, None, freshness).await
                                 }
                             }),
@@ -1234,10 +1251,14 @@ impl Client {
                                 if review_comments_empty {
                                     Ok(Vec::new())
                                 } else {
+                                    wait_timeline().await;
                                     self.pages(&review_comments_path, None, freshness).await
                                 }
                             }),
-                            tail.collect(self.pages(&reviews_path, None, freshness)),
+                            tail.collect(async {
+                                wait_timeline().await;
+                                self.pages(&reviews_path, None, freshness).await
+                            }),
                             tail.collect(async {
                                 // Review decisions do not consume timeline or
                                 // review-request history. Their public response
@@ -1246,7 +1267,15 @@ impl Client {
                                 if scope == ReportScope::Reviews {
                                     return (Ok(Vec::new()), Ok(Vec::new()));
                                 }
-                                let timeline = self.pages(&timeline_path, None, freshness).await;
+                                let timeline = crate::client::SOURCE_ADMISSION
+                                    .scope(
+                                        timeline_admission.clone(),
+                                        self.pages(&timeline_path, None, freshness),
+                                    )
+                                    .await;
+                                // Cache hits and early errors never enter the
+                                // queue, but must also unblock independent reads.
+                                timeline_admission.send_replace(true);
                                 // The full report already needs the complete REST timeline.
                                 // Reuse its event identities and validation clocks where it
                                 // carries all GraphQL fields. Otherwise keep the independent

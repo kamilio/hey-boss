@@ -46,7 +46,7 @@ pub(in crate::report) async fn scope<T>(
         .scope(collection.clone(), async {
             let fetch = async {
                 collection.wake.notified().await;
-                let response = crate::client::CI_SOURCE_ADMISSION
+                let response = crate::client::SOURCE_ADMISSION
                     .scope(
                         collection.admission.clone(),
                         crate::client::retained_selector_read(client.commit_lists_response(
@@ -213,7 +213,7 @@ pub(super) async fn evidence(
                     // This source joined the collection's shared proof.
                     // Let siblings prepare once that proof owns a queue
                     // slot, without waiting for its HTTP response/fallback.
-                    crate::client::ci_source_admitted();
+                    crate::client::source_admitted();
                     let _ = ready.wait_for(|done| *done).await;
                 }
             })

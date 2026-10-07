@@ -220,6 +220,183 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn full_report_admits_timeline_before_other_rest_details_without_waiting_for_http() {
+    for shared in [false, true] {
+        timeline_admission_scenario(shared, false).await;
+    }
+}
+
+#[tokio::test]
+async fn cancelling_timeline_preparation_does_not_start_waiting_details() {
+    timeline_admission_scenario(false, true).await;
+}
+
+#[tokio::test]
+async fn invalid_timeline_before_admission_keeps_other_sources_and_its_error() {
+    let f = Fixture::new().await;
+    assert!(
+        f.client
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    // A cached malformed next link fails before any request is admitted.
+    // Independent detail errors must still be collected, without deadlock.
+    rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap().execute(
+        "UPDATE cache SET response=json_set(response,'$.link','<https://foreign.invalid/page>; rel=\"next\"') WHERE key LIKE '%/timeline?%'", [],
+    ).unwrap();
+    rusqlite::Connection::open(f.dir.path().join("cache.sqlite"))
+        .unwrap()
+        .execute("DELETE FROM cache WHERE key LIKE '%/reviews?%'", [])
+        .unwrap();
+    f.mock
+        .deny_path
+        .lock()
+        .unwrap()
+        .replace("/repos/acme/demo/pulls/7/reviews".into());
+    let report = tokio::time::timeout(
+        Duration::from_secs(3),
+        f.client
+            .pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!report.complete);
+    assert!(
+        report
+            .data
+            .errors
+            .iter()
+            .any(|error| error.source == "timeline")
+    );
+    assert!(
+        report
+            .data
+            .errors
+            .iter()
+            .any(|error| error.source == "reviews")
+    );
+}
+
+async fn timeline_admission_scenario(shared: bool, cancel: bool) {
+    let f = Fixture::new().await;
+    assert!(
+        f.client
+            .pr_report("acme/demo", 7, Freshness::Revalidate)
+            .await
+            .unwrap()
+            .complete
+    );
+    // Keep CI, GraphQL, and metadata warm so only the four REST detail
+    // collections can contribute outstanding requests below.
+    rusqlite::Connection::open(f.dir.path().join("cache.sqlite")).unwrap().execute(
+        "DELETE FROM cache WHERE key LIKE '%/timeline?%' OR key LIKE '%/comments?%' OR key LIKE '%/reviews?%'", [],
+    ).unwrap();
+    f.mock.calls.lock().unwrap().clear();
+    f.mock.pause_timeline.store(true, Ordering::Relaxed);
+    let path = "repos/acme/demo/issues/7/timeline?per_page=100";
+    let peer = shared.then(|| {
+        let client = f.client.clone();
+        tokio::spawn(async move { client.get(path, Freshness::Revalidate).await })
+    });
+    if shared {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("/timeline"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let read = tokio::spawn({
+        let (client, entered, resume) = (f.client.clone(), entered.clone(), resume.clone());
+        async move {
+            crate::client::CACHE_LOOKUP_PATH_GATE
+                .scope(
+                    std::cell::RefCell::new(Some((path.into(), entered, resume))),
+                    client.pr_report("acme/demo", 7, Freshness::MaxAge(Duration::from_secs(30))),
+                )
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let is_detail = |p: &str| p.ends_with("/comments") || p.ends_with("/reviews");
+    let overtook = tokio::time::timeout(Duration::from_millis(250), async {
+        while !f.mock.calls.lock().unwrap().iter().any(|p| is_detail(p)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        overtook.is_err(),
+        "REST details overtook timeline preparation: {:?}",
+        f.mock.calls.lock().unwrap()
+    );
+    if cancel {
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        resume.notify_one();
+        assert!(!f.mock.calls.lock().unwrap().iter().any(|p| is_detail(p)));
+        return;
+    }
+    resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        // The HTTP/1 fixture serializes detail dispatch. All siblings must
+        // nevertheless enter the queue while the timeline response is held.
+        while f.client.status().outstanding_requests < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("details must overlap the admitted timeline's HTTP response");
+    assert!(!read.is_finished());
+    f.mock.pause_timeline.store(false, Ordering::Relaxed);
+    f.mock.timeline_release.notify_one();
+    let report = tokio::time::timeout(Duration::from_secs(3), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(report.complete, "{:?}", report.data.errors);
+    if let Some(peer) = peer {
+        assert!(peer.await.unwrap().is_ok());
+    }
+    let before = f.mock.calls.lock().unwrap().len();
+    assert_eq!(
+        f.mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.ends_with("/timeline"))
+            .count(),
+        1
+    );
+    let cached = tokio::time::timeout(
+        Duration::from_secs(3),
+        f.client.pr_report("acme/demo", 7, Freshness::CachedOnly),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(cached.complete);
+    assert_eq!(f.mock.calls.lock().unwrap().len(), before);
+}
+
+#[tokio::test]
 async fn review_evidence_does_not_require_or_fetch_the_rest_timeline() {
     let f = Fixture::new().await;
     f.mock.deny_timeline.store(true, Ordering::Relaxed);

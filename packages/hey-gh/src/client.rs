@@ -44,12 +44,12 @@ tokio::task_local! {
 // minting credentials or joining an in-flight request when evidence is missing.
 tokio::task_local! { pub(crate) static CACHE_PROBE: (); }
 
-// Ordered CI sources may prepare their cache asynchronously. Signal only once
+// Ordered sources may prepare their cache asynchronously. Signal only once
 // the request owns or joins a shared queue slot, not when its future is polled.
-tokio::task_local! { pub(crate) static CI_SOURCE_ADMISSION: watch::Sender<bool>; }
+tokio::task_local! { pub(crate) static SOURCE_ADMISSION: watch::Sender<bool>; }
 
-pub(crate) fn ci_source_admitted() {
-    let _ = CI_SOURCE_ADMISSION.try_with(|ready| ready.send_replace(true));
+pub(crate) fn source_admitted() {
+    let _ = SOURCE_ADMISSION.try_with(|ready| ready.send_replace(true));
 }
 
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
@@ -1035,7 +1035,7 @@ impl Client {
             changed: self.0.queue_changed.clone(),
         };
         pagination::admitted();
-        ci_source_admitted();
+        source_admitted();
         let receiver = waiter.receiver.as_mut().expect("live request waiter");
         let mut wait = crate::collection_budget::Wait::current(true);
         loop {

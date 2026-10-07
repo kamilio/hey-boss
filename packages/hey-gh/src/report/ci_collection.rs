@@ -180,34 +180,33 @@ impl Client {
                 // Poll in the caller's task so validation, entity fences and
                 // collection budgets remain shared. No private request queue.
                 let (admission, mut admitted) = tokio::sync::watch::channel(false);
-                let future =
-                    crate::client::CI_SOURCE_ADMISSION.scope(admission.clone(), async move {
-                        match task {
-                            Task::Source(index, source) => (
-                                Target::Source(index),
-                                self.ci_source(
-                                    repository,
-                                    &source.sha,
-                                    source.name,
-                                    &source.path,
-                                    source.field,
-                                    freshness,
-                                )
-                                .await,
-                            ),
-                            Task::Jobs(index, run) => (
-                                Target::Jobs(index),
-                                self.workflow_jobs(
-                                    repository,
-                                    run["id"].as_u64().unwrap(),
-                                    run["run_attempt"].as_u64().unwrap(),
-                                    &run,
-                                    freshness,
-                                )
-                                .await,
-                            ),
-                        }
-                    });
+                let future = crate::client::SOURCE_ADMISSION.scope(admission.clone(), async move {
+                    match task {
+                        Task::Source(index, source) => (
+                            Target::Source(index),
+                            self.ci_source(
+                                repository,
+                                &source.sha,
+                                source.name,
+                                &source.path,
+                                source.field,
+                                freshness,
+                            )
+                            .await,
+                        ),
+                        Task::Jobs(index, run) => (
+                            Target::Jobs(index),
+                            self.workflow_jobs(
+                                repository,
+                                run["id"].as_u64().unwrap(),
+                                run["run_attempt"].as_u64().unwrap(),
+                                &run,
+                                freshness,
+                            )
+                            .await,
+                        ),
+                    }
+                });
                 active.push(Read {
                     future: Box::pin(future),
                     admission: Box::pin(async move {
