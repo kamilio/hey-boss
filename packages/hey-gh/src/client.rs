@@ -37,11 +37,20 @@ pub(crate) mod source_completion;
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static CACHE_LOOKUP_GATE: std::cell::RefCell<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
+    pub(crate) static CACHE_LOOKUP_PATH_GATE: std::cell::RefCell<Option<(String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>;
 }
 
 // Admission probes apply ordinary freshness/version rules without dispatching,
 // minting credentials or joining an in-flight request when evidence is missing.
 tokio::task_local! { pub(crate) static CACHE_PROBE: (); }
+
+// Ordered CI sources may prepare their cache asynchronously. Signal only once
+// the request owns or joins a shared queue slot, not when its future is polled.
+tokio::task_local! { pub(crate) static CI_SOURCE_ADMISSION: watch::Sender<bool>; }
+
+pub(crate) fn ci_source_admitted() {
+    let _ = CI_SOURCE_ADMISSION.try_with(|ready| ready.send_replace(true));
+}
 
 // Background per-PR budgets also bound newly scheduled work. Otherwise an
 // abandoned socket can occupy its lane long after hydration has moved on.
@@ -788,6 +797,25 @@ impl Client {
                 entered.notify_one();
                 resume.notified().await;
             }
+            #[cfg(test)]
+            if let Some((_, entered, resume)) = CACHE_LOOKUP_PATH_GATE
+                .try_with(|gate| {
+                    let mut gate = gate.borrow_mut();
+                    if gate
+                        .as_ref()
+                        .is_some_and(|(path, _, _)| url.ends_with(path))
+                    {
+                        gate.take()
+                    } else {
+                        None
+                    }
+                })
+                .ok()
+                .flatten()
+            {
+                entered.notify_one();
+                resume.notified().await;
+            }
             if let Some(mut response) = cached.clone() {
                 let fresh = match freshness {
                     Freshness::CachedOnly => true,
@@ -1007,6 +1035,7 @@ impl Client {
             changed: self.0.queue_changed.clone(),
         };
         pagination::admitted();
+        ci_source_admitted();
         let receiver = waiter.receiver.as_mut().expect("live request waiter");
         let mut wait = crate::collection_budget::Wait::current(true);
         loop {

@@ -3388,18 +3388,28 @@ async fn ci_queues_ready_merge_sources_and_jobs_while_an_unrelated_check_is_stal
                 .any(|call| call.path == format!("/repos/acme/demo/commits/{HEAD}/check-runs"))
         })
         .await;
-        // The synthetic origin has one REST socket. Independent work should
-        // already be queued behind it, even while this check holds that socket.
-        // With both workflow lists cached, that ready work is the jobs read.
+        // The synthetic origin has one REST socket. Independent work must be
+        // queued behind this check or already completed ahead of it. Cached
+        // workflow lists can now admit and finish jobs before the check starts.
+        let finished_jobs = c
+            .ci_report("acme/demo", HEAD, Some(MERGE), Freshness::CachedOnly)
+            .await
+            .unwrap()
+            .jobs
+            .len();
+        assert!(finished_jobs <= 1);
+        let pending = if warm_merge { 2 } else { 3 } - finished_jobs;
         let ready = tokio::time::timeout(Duration::from_secs(1), async {
-            while c.status().outstanding_requests < if warm_merge { 2 } else { 3 } {
+            while c.status().outstanding_requests < pending {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await;
         assert!(
             ready.is_ok(),
-            "ready CI work waited for an unrelated check (warm_merge={warm_merge})"
+            "ready CI work waited for an unrelated check (warm_merge={warm_merge}); outstanding={}; calls={:?}",
+            c.status().outstanding_requests,
+            h.calls().iter().map(|call| &call.path).collect::<Vec<_>>()
         );
         assert!(c.status().outstanding_requests <= 3);
         let competitor = if warm_merge {
@@ -3411,7 +3421,7 @@ async fn ci_queues_ready_merge_sources_and_jobs_while_an_unrelated_check_is_stal
             None
         };
         if competitor.is_some() {
-            until(|| c.status().outstanding_requests == 3).await;
+            until(|| c.status().outstanding_requests == pending + 1).await;
         }
         h.mock.release.notify_one();
         // Jobs were ready before this later contender. The report must finish
