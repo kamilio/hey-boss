@@ -12,6 +12,7 @@ mod overview;
 mod probe;
 mod recovery;
 mod replay;
+mod routes;
 mod sse;
 pub(crate) mod subscription;
 mod websocket;
@@ -1165,7 +1166,13 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
 }
 
 async fn forward_api(proxy: Arc<Proxy>, request: Request) -> Response {
-    if claude::is_path(request.uri().path())
+    routes::forward(proxy, request).await
+}
+
+async fn forward_selected(proxy: Arc<Proxy>, request: Request) -> Response {
+    if proxy.binding.as_ref().is_some_and(|b| b.implementation == "codex") {
+        codex::inference::forward(proxy, request).await
+    } else if claude::is_path(request.uri().path())
         && proxy.config.mode != Mode::Client
         && proxy.config.claude.as_ref().is_some_and(|c| c.routing)
     {

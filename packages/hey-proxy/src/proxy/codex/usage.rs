@@ -11,6 +11,11 @@ pub(in crate::proxy) struct Cache {
     error: Option<String>,
 }
 impl Cache {
+    pub(in crate::proxy) fn expire_before(&mut self, observed: u64) {
+        if self.error.is_none() && self.updated_at.is_none_or(|t| t <= observed) {
+            self.retry_at = None;
+        }
+    }
     fn value(&self) -> Value {
         json!({
             "state": if self.error.is_some() {
@@ -112,12 +117,12 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
     ensure!(value.is_object(), "Codex usage response is invalid");
     let mut windows = Vec::new();
     let rate_limit = &value["rate_limit"];
-    if rate_limit.is_object() {
-        let primary = &rate_limit["primary_window"];
-        let secondary = &rate_limit["secondary_window"];
     if rate_limit["limit_reached"] == true {
         windows.push(json!({"id":"codex_included_limit","label":"Included quota","used_percent":100,"remaining_percent":0}));
     }
+    if rate_limit.is_object() {
+        let primary = &rate_limit["primary_window"];
+        let secondary = &rate_limit["secondary_window"];
         // Normalize session (300m / 18000s) vs weekly (10080m / 604800s) lanes like CodexBar.
         let primary_is_weekly = window_seconds(primary) == Some(604_800);
         let secondary_is_session = window_seconds(secondary) == Some(18_000);
@@ -159,10 +164,10 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
             let is_spark = name.to_ascii_lowercase().contains("spark")
                 || feature.to_ascii_lowercase().contains("spark");
             let rl = &entry["rate_limit"];
+            let start = windows.len();
             if is_spark {
                 if rl["primary_window"].is_object() {
                     push_window(
-            let start = windows.len();
                         &mut windows,
                         "codex-spark",
                         "Codex Spark · 5 hours",
@@ -193,19 +198,31 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
                         format!("codex-{s}")
                     };
                     push_window(&mut windows, &id, &name, Some("model"), target);
+                    if rl["primary_window"].is_object() && rl["secondary_window"].is_object() {
+                        push_window(
+                            &mut windows,
+                            &format!("{id}-weekly"),
+                            &name,
+                            Some("model"),
+                            &rl["secondary_window"],
+                        );
+                    }
+                }
+            }
+            let model = bounded(&entry["model"])
+                .or_else(|| feature.starts_with("gpt-").then(|| feature.clone()));
+            for window in &mut windows[start..] {
+                if let Some(model) = &model {
+                    window["model"] = json!(model);
+                }
+                if rl["limit_reached"] == true {
+                    window["used_percent"] = json!(100);
+                    window["remaining_percent"] = json!(0);
                 }
             }
         }
-                    if rl["primary_window"].is_object() && rl["secondary_window"].is_object() {
-                        push_window(&mut windows, &format!("{id}-weekly"), &name, Some("model"), &rl["secondary_window"]);
-                    }
     }
 
-            let model = bounded(&entry["model"]).or_else(|| feature.starts_with("gpt-").then(||feature.clone()));
-            for window in &mut windows[start..] {
-                if let Some(model) = &model { window["model"] = json!(model); }
-                if rl["limit_reached"] == true { window["used_percent"] = json!(100); window["remaining_percent"] = json!(0); }
-            }
     let individual = [&value["individual_limit"], &rate_limit["individual_limit"]]
         .into_iter()
         .find(|v| v.is_object())
@@ -279,10 +296,11 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
     Ok(json!({
         "windows": windows,
         "extra_usage": extra,
+        "availability_unknown": (rate_limit["allowed"] == false && rate_limit["limit_reached"] != true)
+            || value["additional_rate_limits"].as_array().is_some_and(|limits|limits.len()>64),
     }))
 }
 
-        "availability_unknown": rate_limit["allowed"] == false && rate_limit["limit_reached"] != true,
 fn retry_delay(headers: &HeaderMap) -> Duration {
     let raw = headers
         .get(header::RETRY_AFTER)
@@ -404,6 +422,11 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             identity: Some(identity),
             ..Default::default()
         };
+    }
+    if cache.error.is_none()
+        && super::super::routes::quota::crossed_reset(cache.data.as_ref(), cache.updated_at)
+    {
+        cache.retry_at = None;
     }
     if cache.retry_at.is_some_and(|t| t > Instant::now()) {
         return cache.value();

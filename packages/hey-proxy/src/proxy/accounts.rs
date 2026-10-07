@@ -14,6 +14,7 @@ pub(super) struct Registry {
 pub(super) struct Quota {
     pub codex: tokio::sync::Mutex<codex::usage::Cache>,
     pub claude: tokio::sync::Mutex<claude::usage::Cache>,
+    pub exhausted: tokio::sync::Mutex<HashMap<String, (tokio::time::Instant, u64)>>,
 }
 #[derive(Clone)]
 pub(super) struct Binding {

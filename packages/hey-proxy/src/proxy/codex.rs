@@ -1,4 +1,5 @@
-//! Codex subscription usage adapter; never alters OpenAI/Chat/Responses proxy routing.
+//! Codex subscription usage and pinned OAuth Responses transport.
+pub(super) mod inference;
 mod paths;
 #[cfg(test)]
 mod tests;
