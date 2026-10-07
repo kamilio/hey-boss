@@ -295,3 +295,165 @@ async fn shorter_read_deadlines_get_bounded_turns_without_starving_older_reads()
         assert_eq!(order, expected, "completion={completion}, {scenario}");
     }
 }
+
+#[tokio::test]
+async fn borrowed_validation_slots_honor_short_deadlines_and_then_yield_to_fifo() {
+    use axum::response::IntoResponse;
+    for proven in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let live = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reset = now_ms() / 1000 + 3600;
+        let router = axum::Router::new().fallback({
+            let calls = calls.clone();
+            let live = live.clone();
+            let release = release.clone();
+            move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
+                let calls = calls.clone();
+                let live = live.clone();
+                let release = release.clone();
+                async move {
+                    let number = uri
+                        .path()
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap();
+                    let live = live.load(Ordering::Relaxed);
+                    if live {
+                        calls.lock().unwrap().push(number);
+                        if number == 1 {
+                            release.notified().await;
+                        }
+                        if number == 2 {
+                            tokio::time::sleep(Duration::from_millis(1100)).await;
+                        }
+                    }
+                    let mut response = if headers.contains_key("if-none-match") {
+                        axum::http::StatusCode::NOT_MODIFIED.into_response()
+                    } else {
+                        axum::Json(json!({"number":number})).into_response()
+                    };
+                    let headers = response.headers_mut();
+                    headers.insert("etag", "\"synthetic\"".parse().unwrap());
+                    if live {
+                        headers.insert("x-ratelimit-resource", "core".parse().unwrap());
+                        headers.insert("x-ratelimit-remaining", "1000".parse().unwrap());
+                        headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+                    }
+                    response
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::with_token(
+            Config {
+                rest_url: url.parse().unwrap(),
+                graphql_url: format!("{url}graphql").parse().unwrap(),
+                cache_path: dir.path().join("cache.sqlite"),
+                min_spacing: Duration::ZERO,
+                queue_timeout: Duration::from_secs(20),
+                ..Config::default()
+            },
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        for number in 2..=5 {
+            for _ in 0..if proven { 2 } else { 1 } {
+                client
+                    .get(
+                        &format!("repos/acme/demo/pulls/{number}"),
+                        Freshness::Revalidate,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        if proven {
+            client
+                .get("repos/acme/demo/pulls/6", Freshness::Revalidate)
+                .await
+                .unwrap();
+        }
+        // Three foreground turns owe the next paced turn to the background.
+        for number in [100, 101] {
+            INTERACTIVE_READ
+                .scope(
+                    foreground_priority(),
+                    client.get(
+                        &format!("repos/acme/demo/pulls/{number}"),
+                        Freshness::Revalidate,
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        live.store(true, Ordering::Relaxed);
+        let start = tokio::time::Instant::now();
+        let read = |number, seconds, foreground, completing| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                let path = format!("repos/acme/demo/pulls/{number}");
+                let read = READ_DEADLINE.scope(
+                    start + Duration::from_secs(seconds),
+                    INTERACTIVE_READ.scope(
+                        Arc::new(AtomicBool::new(foreground)),
+                        client.get(&path, Freshness::Revalidate),
+                    ),
+                );
+                if completing {
+                    COMPLETION_VALIDATION.scope((), read).await
+                } else {
+                    read.await
+                }
+            })
+        };
+        let mut tasks = vec![read(1, 20, true, false)];
+        until(|| calls.lock().unwrap().len() == 1).await;
+        for (number, seconds, foreground, completing) in [
+            (99, 20, false, false),
+            (2, 15, true, !proven),
+            (3, 16, true, !proven),
+            (4, 1, true, !proven),
+            (5, 3, true, !proven),
+        ] {
+            tasks.push(read(number, seconds, foreground, completing));
+            until(|| client.status().outstanding_requests == tasks.len()).await;
+            if number == 99 && proven {
+                // Prefer the proven validators before this unproven completion,
+                // but retain deadline/FIFO ordering within those validators.
+                tasks.push(read(6, 15, true, true));
+                until(|| client.status().outstanding_requests == tasks.len()).await;
+            }
+        }
+        if proven {
+            // A longer coalescing read must not erase the urgent borrower's
+            // deadline, even though it extends the shared request's lifetime.
+            tasks.push(read(4, 10, true, false));
+            until(|| client.status().coalesced_requests == 1).await;
+        }
+        release.notify_one();
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        server.abort();
+        assert!(
+            results.iter().all(Result::is_ok),
+            "proven={proven}: {results:?}"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            if proven {
+                vec![1, 4, 2, 5, 3, 6, 99]
+            } else {
+                vec![1, 4, 2, 5, 3, 99]
+            },
+            "short deadlines must borrow first, then repay FIFO; proven={proven}"
+        );
+    }
+}
