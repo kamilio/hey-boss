@@ -27,6 +27,9 @@ mod commit_summaries;
 #[cfg(test)]
 mod confirmation_tests;
 pub(crate) mod lifecycle;
+mod pagination;
+#[cfg(test)]
+mod pagination_tests;
 mod policy_ci;
 mod policy_retirement;
 pub(crate) mod source_completion;
@@ -1245,51 +1248,6 @@ impl Client {
         }
         crate::report::record_validation(&url, &response);
         Ok(response)
-    }
-
-    async fn collect_pages(
-        &self,
-        path: &str,
-        field: Option<&str>,
-        freshness: Freshness,
-        completed_version: Option<(&str, bool)>,
-    ) -> Result<Vec<Value>> {
-        let first = path.to_owned();
-        let mut path = path.to_owned();
-        let mut seen = std::collections::HashSet::new();
-        let mut values = Vec::new();
-        let mut bytes = 0usize;
-        for _ in 0..1000 {
-            if !seen.insert(self.rest_url(&path)?.to_string()) {
-                return Err(Error::Invalid("pagination link cycle".into()));
-            }
-            let response = if let Some((version, allow_empty)) = completed_version {
-                self.completed_job_page(&path, version, allow_empty, freshness)
-                    .await?
-            } else {
-                self.get(&path, freshness).await?
-            };
-            bytes = bytes.saturating_add(response.data.to_string().len());
-            if bytes > self.0.config.max_collection_bytes {
-                return Err(Error::Invalid(
-                    "pagination exceeds configured collection byte limit".into(),
-                ));
-            }
-            let page = field
-                .map_or(&response.data, |field| &response.data[field])
-                .as_array()
-                .ok_or_else(|| Error::Invalid("expected a paginated GitHub array".into()))?;
-            values.extend(page.iter().cloned());
-            if values.len() > 100_000 {
-                return Err(Error::Invalid("pagination exceeds 100,000 items".into()));
-            }
-            let next = response.link.as_deref().and_then(next_link);
-            match next {
-                Some(next) => path = self.pagination_path(&first, &next)?,
-                None => return Ok(values),
-            }
-        }
-        Err(Error::Invalid("pagination exceeds 1000 pages".into()))
     }
 
     pub async fn bootstrap(&self) -> Result<crate::SnapshotPage> {
