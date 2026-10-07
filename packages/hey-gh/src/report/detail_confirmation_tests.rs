@@ -18,10 +18,22 @@ struct Mock {
     metadata_release: Notify,
     reviews_release: Notify,
     release: Notify,
+    core_release: Notify,
+    ordinary_release: Notify,
 }
 async fn handler(State(mock): State<Arc<Mock>>, uri: Uri) -> Response {
     let path = uri.path();
     mock.calls.lock().unwrap().push(path.into());
+    if path.ends_with("/access_tokens") {
+        return (StatusCode::CREATED, Json(json!({"token":"synthetic-app-token", "expires_at":
+            chrono::DateTime::from_timestamp((now_ms()/1000 + 3600) as i64, 0).unwrap().to_rfc3339()}))).into_response();
+    }
+    if path.ends_with("/pulls/8") {
+        mock.core_release.notified().await;
+    }
+    if path.ends_with("/pulls/9") {
+        mock.ordinary_release.notified().await;
+    }
     if path.ends_with("/pulls/7") {
         if mock.pause_metadata.load(Ordering::Relaxed) {
             mock.metadata_release.notified().await;
@@ -85,6 +97,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_app(false).await
+    }
+    async fn with_app(installation: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mock = Arc::new(Mock {
             calls: Mutex::new(Vec::new()),
@@ -98,6 +113,8 @@ impl Fixture {
             metadata_release: Notify::new(),
             reviews_release: Notify::new(),
             release: Notify::new(),
+            core_release: Notify::new(),
+            ordinary_release: Notify::new(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -109,6 +126,15 @@ impl Fixture {
                 graphql_url: format!("{url}graphql").parse().unwrap(),
                 cache_path: dir.path().join("cache.sqlite"),
                 min_spacing: Duration::ZERO,
+                installation: installation.then(|| {
+                    crate::AppInstallation::new(
+                        "synthetic-client".into(),
+                        42,
+                        vec!["acme/demo".into()],
+                        include_str!("../../tests/fixtures/github-app-test-key.pem"),
+                    )
+                    .unwrap()
+                }),
                 ..crate::Config::default()
             },
             "synthetic-token".into(),
@@ -360,6 +386,229 @@ async fn full_report_confirms_metadata_while_its_last_source_is_pending() {
             1,
             "Only the final REST observation contributes this confirmation's clock"
         );
+    }
+}
+
+#[tokio::test]
+async fn full_report_tail_confirmation_takes_a_reserved_turn_before_unrelated_slow_reads() {
+    let f = Fixture::new().await;
+    let report = pending_full_report(&f).await;
+    let read = |number| {
+        let client = f.client.clone();
+        tokio::spawn(async move {
+            crate::client::INTERACTIVE_READ
+                .scope(
+                    Arc::new(AtomicBool::new(true)),
+                    client.get(
+                        &format!("repos/acme/demo/pulls/{number}"),
+                        Freshness::Revalidate,
+                    ),
+                )
+                .await
+        })
+    };
+    let gate = read(8);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !f
+            .mock
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.ends_with("/pulls/8"))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending = f.client.status().outstanding_requests;
+    let ordinary = read(9);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.client.status().outstanding_requests != pending + 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = f.metadata_calls();
+    f.age_metadata(60_000);
+    // An existing ordinary reader must be promoted, not duplicated, when the
+    // report has collected five groups and needs its final personal metadata.
+    let shared = read(7);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.client.status().outstanding_requests != pending + 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let coalesced = f.client.status().coalesced_requests;
+    f.mock.reviews_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while f.client.status().coalesced_requests == coalesced {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    f.mock.core_release.notify_one();
+    let confirmed = tokio::time::timeout(Duration::from_millis(500), async {
+        while f.metadata_calls() == before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let still_collecting = !report.is_finished();
+    f.mock.ordinary_release.notify_one();
+    f.mock.release.notify_one();
+    gate.await.unwrap().unwrap();
+    ordinary.await.unwrap().unwrap();
+    shared.await.unwrap().unwrap();
+    let report = report.await.unwrap().unwrap();
+    assert!(
+        confirmed.is_ok(),
+        "Required metadata stayed behind an unrelated blocked read"
+    );
+    assert!(
+        still_collecting,
+        "The final conversation source must remain required"
+    );
+    assert!(report.complete, "{:?}", report.data.errors);
+    assert_eq!(f.metadata_calls(), before + 1);
+}
+
+#[tokio::test]
+async fn early_personal_confirmation_is_promoted_when_app_ci_and_four_details_finish() {
+    for progressed in [false, true] {
+        let f = Fixture::with_app(true).await;
+        assert!(
+            f.client
+                .ci_for_pr("acme/demo", 7, Freshness::Revalidate)
+                .await
+                .unwrap()
+                .complete
+        );
+        f.warm_metadata().await;
+        f.age_metadata(60_000);
+        f.mock.pause_reviews.store(true, Ordering::Relaxed);
+        f.mock.pause_graph.store(true, Ordering::Relaxed);
+        let read = |number| {
+            let client = f.client.clone();
+            tokio::spawn(async move {
+                crate::client::READ_DEADLINE
+                    .scope(
+                        tokio::time::Instant::now() + Duration::from_secs(15),
+                        crate::client::INTERACTIVE_READ.scope(
+                            Arc::new(AtomicBool::new(true)),
+                            client.get(
+                                &format!("repos/acme/demo/pulls/{number}"),
+                                Freshness::Revalidate,
+                            ),
+                        ),
+                    )
+                    .await
+            })
+        };
+        let gate = read(8);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("/pulls/8"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ordinary = read(9);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let shared = read(7);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let before = f.metadata_calls();
+        let coalesced = f.client.status().coalesced_requests;
+        let reader = f.client.clone();
+        let report = tokio::spawn(async move {
+            crate::client::READ_DEADLINE
+                .scope(
+                    tokio::time::Instant::now() + Duration::from_secs(15),
+                    reader.pr_report("acme/demo", 7, Freshness::default()),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let calls = f.mock.calls.lock().unwrap().clone();
+                if calls.iter().any(|p| p.ends_with("/reviews"))
+                    && calls.iter().any(|p| p == "/graphql")
+                    && f.client.status().coalesced_requests > coalesced
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // All three core requests are still queued/held. The early request must
+        // only gain completion priority after the fifth source group finishes.
+        if progressed {
+            f.mock.reviews_release.notify_one();
+            assert!(
+                f.client
+                    .ci_for_pr("acme/demo", 7, Freshness::default())
+                    .await
+                    .unwrap()
+                    .complete
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while f.client.status().outstanding_requests != 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        tokio::task::yield_now().await;
+        f.mock.core_release.notify_one();
+        let confirmed = tokio::time::timeout(Duration::from_millis(500), async {
+            while f.metadata_calls() == before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let still_collecting = !report.is_finished();
+        f.mock.reviews_release.notify_one();
+        f.mock.ordinary_release.notify_one();
+        f.mock.release.notify_one();
+        gate.await.unwrap().unwrap();
+        ordinary.await.unwrap().unwrap();
+        shared.await.unwrap().unwrap();
+        let report = report.await.unwrap().unwrap();
+        assert_eq!(
+            confirmed.is_ok(),
+            progressed,
+            "Early personal confirmation must gain a completion turn only after five groups finish"
+        );
+        assert!(still_collecting);
+        assert!(report.complete, "{:?}", report.data.errors);
+        assert_eq!(f.metadata_calls(), before + 1);
     }
 }
 

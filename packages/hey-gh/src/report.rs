@@ -1110,14 +1110,25 @@ impl Client {
                     tail.ready.notified().await;
                 }
                 let started = tokio::time::Instant::now();
-                // Speculation only warms the ordinary personal cache. The
-                // final read below still enforces freshness and all selectors;
-                // only that read contributes metadata validation evidence.
+                // The overlap warms the personal cache. After five source
+                // groups finish it is a completion dependency, even while the
+                // last source waits. Final validation still checks freshness
+                // and selectors and contributes the metadata evidence.
                 let response = VALIDATIONS
-                    .scope(
-                        std::cell::RefCell::new(Vec::new()),
-                        self.pull_request(repository, number, Freshness::MaxAge(confirmation_age)),
-                    )
+                    .scope(std::cell::RefCell::new(Vec::new()), async {
+                        let read = self.pull_request(
+                            repository,
+                            number,
+                            Freshness::MaxAge(confirmation_age),
+                        );
+                        if early {
+                            self.collect_with_pending_validation(read, tail.ready.notified())
+                                .await
+                                .0
+                        } else {
+                            crate::client::COMPLETION_VALIDATION.scope((), read).await
+                        }
+                    })
                     .await?;
                 tracing::info!(repository, number, early, source=?response.source,
                     elapsed_ms=started.elapsed().as_millis() as u64,
