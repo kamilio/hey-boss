@@ -2,7 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   let catalog, selected, timer;
-  let usageBusy = false;
+  let usageBusy = false, usageAccount = null, usageGeneration = 0, accountsBusy = false;
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -90,7 +90,7 @@
       $('relay-note').hidden = !catalog.relay;
       $('catalog').hidden = false;
       selectApi();
-      $('claude-usage').hidden = !catalog.relay && !catalog.apis.some(api => api.id === 'claude' && api.configured);
+      $('claude-usage').hidden = !usageAccount && !catalog.relay && !catalog.apis.some(api => api.id === 'claude' && api.configured);
       if (!$('claude-usage').hidden) loadUsage();
     } catch (error) {
       $('error').textContent = error.message;
@@ -100,15 +100,66 @@
       $('refresh').disabled = false;
     }
   }
+  async function loadAccounts() {
+    if (accountsBusy) return;
+    accountsBusy = true;
+    $('refresh-accounts').disabled = true;
+    try {
+      const response = await fetch('/providers/v1', {cache: 'no-store'});
+      if (!response.ok) throw new Error(response.status === 404 ? 'Named accounts require an updated proxy host.' : 'Account status unavailable. Refresh to try again.');
+      const data = await response.json();
+      if (data.schema_version !== 1 || !Array.isArray(data.connections)) throw new Error('Update this client to read the host’s account format.');
+      $('connections').replaceChildren();
+      const counts = new Map();
+      for (const account of data.connections) if (account.account_ref) counts.set(account.account_ref, (counts.get(account.account_ref) || 0) + 1);
+      for (const account of data.connections) {
+        const card = node('article', undefined, 'connection-card');
+        card.append(node('h3', account.name));
+        const meta = node('div', undefined, 'connection-meta');
+        meta.append(node('span', account.implementation === 'openai' ? 'OpenAI compatible' : account.implementation === 'codex' ? 'Codex' : 'Claude'));
+        meta.append(node('span', account.auth === 'subscription' ? 'Subscription' : 'API billing'));
+        meta.append(node('span', account.ready ? 'Ready' : 'Needs sign-in or credentials', account.ready ? 'badge' : 'badge off'));
+        card.append(meta);
+        if (counts.get(account.account_ref) > 1) card.append(node('p', 'Shared subscription · limits also apply to its other aliases.', 'note'));
+        const actions = node('div', undefined, 'connection-actions');
+        if (account.auth === 'subscription') {
+          const limits = node('button', 'View limits'); limits.type = 'button'; limits.disabled = !account.ready;
+          limits.setAttribute('aria-label', 'View limits for ' + account.name);
+          limits.addEventListener('click', () => {
+            usageAccount = account; usageGeneration++; usageBusy = false;
+            $('claude-usage').hidden = false;
+            $('claude-usage-title').textContent = account.name + ' · subscription limits';
+            $('usage-windows').replaceChildren(); $('extra-usage').hidden = true; $('usage-error').hidden = true;
+            $('usage-status').textContent = 'Loading limits…';
+            loadUsage();
+            $('claude-usage').scrollIntoView({behavior:'smooth', block:'start'});
+          });
+          actions.append(limits);
+        }
+        const connection = node('button', 'Copy connection'); connection.type = 'button'; connection.disabled = !account.ready;
+        connection.setAttribute('aria-label', 'Copy connection for ' + account.name);
+        connection.addEventListener('click', () => copy(JSON.stringify({provider:account.name, account_ref:account.account_ref})));
+        actions.append(connection); card.append(actions); $('connections').append(card);
+      }
+      $('connection-status').textContent = data.connections.length ? data.connections.length + ' connections · credentials stay on the host.' : 'No named accounts configured. Default connections remain available below.';
+    } catch (error) {
+      $('connections').replaceChildren();
+      $('connection-status').textContent = error.message;
+    } finally { accountsBusy = false; $('refresh-accounts').disabled = false; }
+  }
+  $('refresh-accounts').addEventListener('click', loadAccounts);
+  loadAccounts();
   async function loadUsage() {
     if (usageBusy || document.hidden || $('claude-usage').hidden) return;
     usageBusy = true;
+    const generation = usageGeneration;
     $('refresh-usage').disabled = true;
     try {
-      const response = await fetch('/claude/usage', {cache: 'no-store'});
+      const response = await fetch(usageAccount ? '/usage/v1/' + encodeURIComponent(usageAccount.implementation) + '/' + encodeURIComponent(usageAccount.name) : '/claude/usage', {cache: 'no-store'});
       if (response.status === 401) throw new Error('Your session expired. Reload the page to sign in.');
       if (!response.ok) throw new Error(`Could not load limits (HTTP ${response.status}).`);
       const usage = await response.json();
+      if (generation !== usageGeneration) return;
       $('usage-windows').replaceChildren();
       $('extra-usage').hidden = true;
       $('usage-error').hidden = !usage.error;
@@ -118,7 +169,7 @@
         return;
       }
       const fetched = usage.updated_at ? new Date(usage.updated_at * 1000).toLocaleString() : null;
-      $('usage-status').textContent = fetched ? `${usage.state === 'stale' ? 'Stale · last updated' : 'Updated'} ${fetched}` : 'No subscription reading available yet. Run hey-proxy claude-login on the proxy host.';
+      $('usage-status').textContent = fetched ? `${usage.state === 'stale' ? 'Stale · last updated' : 'Updated'} ${fetched}` : 'No subscription reading available yet. Check this account’s sign-in on the proxy host.';
       for (const window of usage.data?.windows || []) {
         const card = node('article', undefined, 'usage-card');
         card.append(node('h3', window.label));
@@ -150,10 +201,12 @@
         }
       }
     } catch (error) {
+      if (generation !== usageGeneration) return;
       $('usage-error').hidden = false;
       $('usage-error').textContent = error.message;
       $('usage-status').textContent = 'Refresh failed · any displayed limits are stale.';
     } finally {
+      if (generation !== usageGeneration) return;
       usageBusy = false;
       $('refresh-usage').disabled = false;
     }

@@ -38,6 +38,8 @@ Point your client's base URL at **`http://127.0.0.1:8080/v1`**. Open **`http://1
 
 The overview lists API routes, copyable client base URLs, and model names from your configured aliases, reasoning routes, and fallbacks. It respects API-specific overwrite rules and separates native Gemini model names from Responses model names. It never fetches an upstream model catalog. Click **Refresh config** after editing your config. Host mode uses the same access-key login as the dashboard; client relays show that model configuration belongs to their host.
 
+Multiple subscriptions and API connections use [named provider accounts](docs/named-accounts.md), with independent credentials, shared subscription identity, and explicit session binding. The API setup page shows account readiness and limits.
+
 **Installing or running hey-proxy never changes your Codex configuration.** Codex setup is a separate, optional command.
 
 ## Connect your Claude subscription
