@@ -821,6 +821,7 @@ impl Scheduler {
         let mut interactive_streaks = HashMap::<String, usize>::new();
         let mut completion_yields = std::collections::HashSet::<(String, bool)>::new();
         let mut deadline_yields = std::collections::HashSet::<(String, bool, bool)>::new();
+        let mut borrowed_deadline_yields = std::collections::HashSet::<(String, bool, bool)>::new();
         let mut quota_order = QuotaOrder::default();
         let mut blocked_probes = ProbeBlocks::default();
         let mut budgets = Budgets::default();
@@ -1095,34 +1096,30 @@ impl Scheduler {
                 // separate socket lanes. GraphQL keeps its own counter.
                 // Quotas, lane limits,
                 // retries, cooldowns and expiry remain unchanged.
-                let preferred = |index: usize, job: &Job| {
-                    eligible(index, job)
-                        && job.interactive()
-                            == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
+                let preferred = |job: &Job| {
+                    job.interactive()
+                        == (interactive_streaks.get(&job.quota()).copied().unwrap_or(0) < 3)
                 };
                 let completing = |job: &Job| job.completion_validation.load(Ordering::Relaxed);
+                let candidate_order = |index: usize, job: &Job| {
+                    // Eligible non-owners can only be borrowing a paced slot.
+                    let borrowed = turns
+                        .get(&job.quota())
+                        .is_some_and(|(_, turn)| *turn != index);
+                    let deadline = (borrowed
+                        && !borrowed_deadline_yields.contains(&(
+                            job.quota(),
+                            job.interactive(),
+                            completing(job),
+                        )))
+                    .then(|| job.scheduling_deadline());
+                    (!preferred(job), !completing(job), deadline, index)
+                };
                 let selected = pending
                     .iter()
                     .enumerate()
-                    .find(|(index, job)| preferred(*index, job) && completing(job))
-                    .or_else(|| {
-                        pending
-                            .iter()
-                            .enumerate()
-                            .find(|(index, job)| preferred(*index, job))
-                    })
-                    .or_else(|| {
-                        pending
-                            .iter()
-                            .enumerate()
-                            .find(|(index, job)| eligible(*index, job) && completing(job))
-                    })
-                    .or_else(|| {
-                        pending
-                            .iter()
-                            .enumerate()
-                            .find(|(index, job)| eligible(*index, job))
-                    })
+                    .filter(|(index, job)| eligible(*index, job))
+                    .min_by_key(|(index, job)| candidate_order(*index, job))
                     .map(|(index, _)| index);
                 let proven_probe = |index: usize, job: &Job| {
                     can_probe(index, job)
@@ -1130,30 +1127,56 @@ impl Scheduler {
                             .for_resource(&job.quota())
                             .all(|budget| conditional_budget_exempt(job, budget))
                 };
-                selected.map(|index| {
-                    let selected = &pending[index];
-                    if !can_probe(index, selected) || proven_probe(index, selected) {
-                        return index;
-                    }
-                    // Spend this class's borrowed window on proven validators
-                    // before an unproven probe can charge and close it. Keep
-                    // ordinary turns, other quotas/classes, one active probe,
-                    // debt repayment, reserves and cooldowns unchanged.
-                    let quota = selected.quota();
-                    pending
-                        .iter()
-                        .enumerate()
-                        .find(|(candidate, job)| {
-                            job.quota() == quota
-                                && job.interactive() == selected.interactive()
-                                && eligible(*candidate, job)
-                                && proven_probe(*candidate, job)
-                        })
-                        .map_or(index, |(candidate, _)| candidate)
-                })
+                selected
+                    .map(|index| {
+                        let selected = &pending[index];
+                        if !can_probe(index, selected) || proven_probe(index, selected) {
+                            return index;
+                        }
+                        // Spend this class's borrowed window on proven validators
+                        // before an unproven probe can charge and close it. Keep
+                        // ordinary turns, other quotas/classes, one active probe,
+                        // debt repayment, reserves and cooldowns unchanged.
+                        let quota = selected.quota();
+                        pending
+                            .iter()
+                            .enumerate()
+                            .filter(|(candidate, job)| {
+                                job.quota() == quota
+                                    && job.interactive() == selected.interactive()
+                                    && eligible(*candidate, job)
+                                    && proven_probe(*candidate, job)
+                            })
+                            .min_by_key(|(candidate, job)| candidate_order(*candidate, job))
+                            .map_or(index, |(candidate, _)| candidate)
+                    })
+                    .map(|index| {
+                        let selected = &pending[index];
+                        let quota = selected.quota();
+                        if turns.get(&quota).is_none_or(|(_, turn)| *turn == index) {
+                            return (index, false);
+                        }
+                        let proven = proven_probe(index, selected);
+                        // Borrowed slots have their own bounded deadline ordering:
+                        // one urgent read, then the oldest equivalent borrower.
+                        // This never consumes or changes the exact owed quota turn.
+                        let overtook =
+                            pending
+                                .iter()
+                                .enumerate()
+                                .take(index)
+                                .any(|(candidate, job)| {
+                                    job.quota() == quota
+                                        && job.interactive() == selected.interactive()
+                                        && completing(job) == completing(selected)
+                                        && eligible(candidate, job)
+                                        && proven_probe(candidate, job) == proven
+                                });
+                        (index, overtook)
+                    })
             };
             if active.len() < max_active
-                && let Some(index) = next
+                && let Some((index, borrowed_overtake)) = next
             {
                 let probe = can_probe(index, &pending[index]).then(|| {
                     let quota = pending[index].quota();
@@ -1209,6 +1232,18 @@ impl Scheduler {
                 // Borrowing another request's wait cannot advance its turn.
                 // A selected validator consumes its own turn even when early.
                 let consumes_turn = probe.as_ref().is_none_or(|turn| turn.owns_turn);
+                if !job.minting && !consumes_turn {
+                    let class = (
+                        job.quota(),
+                        job.interactive(),
+                        job.completion_validation.load(Ordering::Relaxed),
+                    );
+                    if borrowed_overtake {
+                        borrowed_deadline_yields.insert(class);
+                    } else {
+                        borrowed_deadline_yields.remove(&class);
+                    }
+                }
                 if consumes_turn {
                     let streak = interactive_streaks.entry(job.quota()).or_default();
                     *streak = if job.interactive() {
@@ -1257,6 +1292,7 @@ impl Scheduler {
                     foreground=job.interactive(),
                     completion_validation=job.completion_validation.load(Ordering::Relaxed),
                     deadline_overtake=overtook && consumes_turn && !job.minting,
+                    borrowed_deadline_overtake=borrowed_overtake && !consumes_turn && !job.minting,
                     pacing_probe=probe.is_some(),
                     selected_probe=probe.as_ref().is_some_and(|turn| turn.owns_turn),
                     conditional=!job.minting && job.body.is_none() && job.cached.as_ref().is_some_and(|c| c.etag.is_some() || c.last_modified.is_some()),
