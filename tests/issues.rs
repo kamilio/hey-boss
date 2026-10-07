@@ -912,13 +912,19 @@ fn batch_validates_limits_without_changes() {
 }
 
 #[test]
-fn projects_register_on_first_use_sort_by_activity_and_stay_hidden() {
+fn initialized_projects_sort_by_activity_and_stay_hidden() {
     let f = Fixture::new();
-    let a = f.run("session-a", &["list", "--project", "Alpha"])["project"]["id"]
+    let a = f.run(
+        "session-a",
+        &["settings", "set", "--no-prs", "--project", "Alpha"],
+    )["project"]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let b = f.run("session-a", &["list", "--project", "Beta"])["project"]["id"]
+    let b = f.run(
+        "session-a",
+        &["settings", "set", "--no-prs", "--project", "Beta"],
+    )["project"]["id"]
         .as_str()
         .unwrap()
         .to_owned();

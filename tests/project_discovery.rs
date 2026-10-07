@@ -91,7 +91,16 @@ fn automatic_discovery_rejects_git_metadata_before_registering_the_workspace() {
         name: "hey-gh".into(),
     };
     store.discover_projects(&[(real.clone(), 100)]).unwrap();
-    assert_eq!(f.run("hey-gh", &["projects"])["projects"][0]["id"], real.id);
+    assert!(
+        f.run("hey-gh", &["projects"])["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.run("hey-gh", &["settings", "show"])["project"]["id"],
+        real.id
+    );
 }
 
 #[test]
