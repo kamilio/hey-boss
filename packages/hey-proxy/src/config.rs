@@ -30,6 +30,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<hey_proxy::gemini::ProviderConfig>,
     pub claude: Option<crate::proxy::claude::ProviderConfig>,
+    pub codex: Option<crate::proxy::codex::ProviderConfig>,
     #[serde(default)]
     pub default: DefaultRoute,
     #[serde(default = "default_credential_cache_seconds")]
@@ -96,6 +97,8 @@ struct Providers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claude: Option<crate::proxy::claude::ProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex: Option<crate::proxy::codex::ProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     openai: Option<OpenAiProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     gemini: Option<hey_proxy::gemini::ProviderConfig>,
@@ -144,6 +147,7 @@ impl TryFrom<ConfigFile> for Config {
             api_keys: file.api_keys,
             gemini: file.gemini,
             claude: file.providers.claude,
+            codex: file.providers.codex,
             default: file.default,
             credential_cache_seconds: file.credential_cache_seconds,
             aliases: file.aliases,
@@ -171,6 +175,7 @@ impl Serialize for Config {
                 }),
                 gemini: self.gemini.clone(),
                 claude: self.claude.clone(),
+                codex: self.codex.clone(),
             }
         };
         let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
@@ -405,6 +410,7 @@ impl Default for Config {
             fallbacks: BTreeMap::new(),
             gemini: None,
             claude: None,
+            codex: None,
             credential_cache_seconds: 2400,
             ssh_hosts: Vec::new(),
             mode: Mode::Standalone,
@@ -530,6 +536,7 @@ impl Config {
                 || !self.fallbacks.is_empty()
                 || self.gemini.is_some()
                 || self.claude.is_some()
+                || self.codex.is_some()
             {
                 bail!(
                     "Client config must not contain upstream API keys, aliases or fallback rules"
@@ -629,6 +636,9 @@ impl Config {
         }
         if let Some(claude) = &self.claude {
             claude.validate(self.mode)?;
+        }
+        if let Some(codex) = &self.codex {
+            codex.validate(self.mode)?;
         }
         if let Some(gemini) = &self.gemini {
             gemini.validate()?;
