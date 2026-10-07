@@ -126,6 +126,57 @@ impl Client {
         Ok(result)
     }
 
+    /// Included-quota worker selection, independent of inference routes. Empty capabilities
+    /// intentionally produce no recommendation. This endpoint requires schema version 2.
+    pub async fn recommend_workers(
+        &self,
+        runtimes: &[super::Runtime],
+    ) -> Result<super::WorkerRecommendation, Error> {
+        let mut runtimes = runtimes.to_vec();
+        runtimes.sort();
+        runtimes.dedup();
+        let path = format!(
+            "usage/v2/recommend?runtimes={}",
+            runtimes
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let value: serde_json::Value = self.get(&path).await?;
+        let version = value["schema_version"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(Error::InvalidResponse)?;
+        if version != super::WORKER_SCHEMA_VERSION {
+            return Err(Error::UnsupportedSchema(version));
+        }
+        let result: super::WorkerRecommendation =
+            serde_json::from_value(value).map_err(|_| Error::InvalidResponse)?;
+        if result.candidates.len() > super::MAX_WORKER_CANDIDATES
+            || result.config_revision.is_empty()
+            || (result.status == super::RecommendationStatus::Recommended)
+                != result.selected.is_some()
+            || result.selected.as_ref().is_some_and(|s| {
+                !runtimes.contains(&s.candidate.runtime)
+                    || s.candidate.provider != s.account.id
+                    || s.quota.reading_updated_at > result.generated_at
+                    || s.quota.expires_at <= result.generated_at
+                    || s.quota.expires_at != result.expires_at
+                    || !s.quota.remaining_percent.is_finite()
+                    || !(0.0..=100.0).contains(&s.quota.remaining_percent)
+                    || s.quota.remaining_percent == 0.0
+                    || !result
+                        .candidates
+                        .iter()
+                        .any(|c| c.skip_reason.is_none() && c.evidence.as_ref() == Some(s))
+            })
+        {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(result)
+    }
+
     /// Fetch remaining quota and extra spend for one provider/account. Inspect `state`
     /// before using the data: stale/disabled/provider errors are successful HTTP readings.
     pub async fn usage(&self, provider: &str, account: &str) -> Result<AccountUsage, Error> {
