@@ -184,6 +184,9 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "tests",
                     "skills/hey-boss",
                     "packages/hey-gh",
+                    "packages/hey-harvester",
+                    "packages/hey-boss-http",
+                    "packages/hey-proxy",
                     "README.md",
                     "LICENSE",
                     "tools/upgrade_hey_boss.py",
@@ -210,14 +213,16 @@ cargo test --locked --manifest-path "$stage/Cargo.toml" --bin hey-boss --test se
 cargo build --locked --release --manifest-path "$stage/Cargo.toml"
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/hey-boss" "$HOME/.codex/skills/hey-boss"
 chmod 700 "$HOME/.local/share/hey-boss"
-cp "$stage/target/release/hey-gh" "$HOME/.local/bin/hey-gh.new"
-chmod 755 "$HOME/.local/bin/hey-gh.new"
-mv "$HOME/.local/bin/hey-gh.new" "$HOME/.local/bin/hey-gh"
-if [ -e "$HOME/.cargo/bin/hey-gh" ]; then
-cp "$stage/target/release/hey-gh" "$HOME/.cargo/bin/hey-gh.new"
-chmod 755 "$HOME/.cargo/bin/hey-gh.new"
-mv "$HOME/.cargo/bin/hey-gh.new" "$HOME/.cargo/bin/hey-gh"
+for name in hey-gh hey-harvester hey-proxy; do
+cp "$stage/target/release/$name" "$HOME/.local/bin/$name.new"
+chmod 755 "$HOME/.local/bin/$name.new"
+mv "$HOME/.local/bin/$name.new" "$HOME/.local/bin/$name"
+if [ -e "$HOME/.cargo/bin/$name" ]; then
+cp "$stage/target/release/$name" "$HOME/.cargo/bin/$name.new"
+chmod 755 "$HOME/.cargo/bin/$name.new"
+mv "$HOME/.cargo/bin/$name.new" "$HOME/.cargo/bin/$name"
 fi
+done
 cp "$stage/target/release/hey-boss" "$HOME/.local/bin/hey-boss.new"
 mv "$HOME/.local/bin/hey-boss.new" "$HOME/.local/bin/hey-boss"
 if [ ! -e "$HOME/.local/bin/hb" ] && [ ! -L "$HOME/.local/bin/hb" ]; then

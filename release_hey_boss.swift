@@ -12,7 +12,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
     let path = root.appendingPathComponent("out/\(archive)")
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-    process.arguments = ["--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root", "-czf", path.path, "-C", root.path, "Cargo.toml", "Cargo.lock", "build.rs", "src", "tests", "hey_boss_daemon.swift", "setup_hey_boss.swift", "install_hey_boss.swift", "package_hey_boss.swift", "assets", "test_hey_boss.swift", "release_hey_boss.swift", "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "skills", "docs", "tools/soak_daemon.py", "tools/upgrade_hey_boss.py", "tools/drain_github_issues.py"]
+    process.arguments = ["--uid", "0", "--gid", "0", "--uname", "root", "--gname", "root", "-czf", path.path, "-C", root.path, "Cargo.toml", "Cargo.lock", "build.rs", "src", "tests", "packages", "hey_boss_daemon.swift", "setup_hey_boss.swift", "install_hey_boss.swift", "package_hey_boss.swift", "assets", "test_hey_boss.swift", "release_hey_boss.swift", "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "skills", "docs", "tools/soak_daemon.py", "tools/upgrade_hey_boss.py", "tools/drain_github_issues.py"]
     process.environment = ProcessInfo.processInfo.environment.merging(["COPYFILE_DISABLE": "1"]) { _, replacement in replacement }
     try! process.run()
     process.waitUntilExit()
@@ -31,6 +31,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
 
       def install
         system "cargo", "install", *std_cargo_args(root: libexec)
+        system "cargo", "install", "--locked", "--path", "packages/hey-proxy", "--root", libexec
         system "xcrun", "swiftc", "-O", "-whole-module-optimization", "-parse-as-library",
                "hey_boss_daemon.swift", "-o", "hey-boss-daemon"
         system "xcrun", "swiftc", "-O", "setup_hey_boss.swift", "-o", "hey-boss-setup"
@@ -38,6 +39,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
         libexec.install "Hey Boss.app", "hey-boss-setup"
         bin.install_symlink libexec/"bin/hey-boss"
         bin.install_symlink libexec/"bin/hb"
+        bin.install_symlink libexec/"bin/hey-proxy"
         pkgshare.install "skills"
       end
 

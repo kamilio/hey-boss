@@ -1369,3 +1369,15 @@ status polling continues. The supervisor uses its existing `gh auth login`.
 The standalone `hey-gh` CLI remains available. Source and companion upgrades
 install it beside `hey-boss` and update an existing `~/.cargo/bin/hey-gh`. To
 install it alone, run `cargo install --path packages/hey-gh --locked`.
+
+### Proxy
+
+`hey-proxy` is built and installed alongside `hey-boss`. `hey-boss proxy …`
+passes every argument to that executable; existing standalone installations on
+`PATH` also work during upgrades. The proxy remains a separately supervised
+service with its existing `~/.hey-proxy` configuration, credentials and data.
+See [proxy setup and usage SDK](packages/hey-proxy/README.md).
+
+Build and test with `cargo build --locked -p hey-proxy` and
+`cargo test --locked -p hey-proxy`. Proxy rollouts carry the workspace source and
+its single lockfile, and compile only `hey-proxy` on the destination architecture.

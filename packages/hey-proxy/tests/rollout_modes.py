@@ -70,6 +70,7 @@ elif command.startswith('tar ') or command.startswith('rm '):
 elif command.startswith('exec '):
     args = shlex.split(shlex.split(command)[-1])
     stage = pathlib.Path(args[2])
+    package = pathlib.Path(args[1]).parent.parent
     config = json.loads((stage / 'remote-config.json').read_text())
     assert config.get('ssh_hosts', []) == []
     if config['mode'] == 'client':
@@ -86,7 +87,7 @@ elif command.startswith('exec '):
             existing_path.write_text(json.dumps(existing))
     # Exercise the real installer; fake only the OS service-manager commands.
     import importlib.util, plistlib, types
-    spec = importlib.util.spec_from_file_location('fixture_service', stage/'src/remote_service.py')
+    spec = importlib.util.spec_from_file_location('fixture_service', package/'src/remote_service.py')
     service = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(service)
     os.environ['HOME'] = str(home)

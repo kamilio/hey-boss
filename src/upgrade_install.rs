@@ -158,7 +158,7 @@ fn shortcut(binary: &Path) -> io::Result<()> {
 
 fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for name in ["hey-gh", "hey-harvester"] {
+    for name in ["hey-gh", "hey-harvester", "hey-proxy"] {
         paths.push(binary.with_file_name(name));
         for directory in [".cargo/bin", ".local/bin"] {
             let existing = home.join(directory).join(name);
@@ -574,6 +574,7 @@ esac
         let homebrew = temp.0.join("homebrew/bin/hey-boss");
         let destinations = companion_bins(&homebrew, &home);
         assert!(destinations.contains(&homebrew.with_file_name("hey-harvester")));
+        assert!(destinations.contains(&homebrew.with_file_name("hey-proxy")));
         assert!(
             destinations.contains(&standalone),
             "scheduled standalone binary must be upgraded"

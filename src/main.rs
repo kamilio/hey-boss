@@ -13,6 +13,7 @@ mod lookup_cli;
 mod mindmap_cli;
 mod notif_cli;
 mod project_cli;
+mod proxy_cli;
 mod secret_cli;
 mod upgrade_cli;
 mod upgrade_provenance;
@@ -164,6 +165,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the separately installed proxy (all arguments pass through to hey-proxy).
+    Proxy,
     /// Configure or diagnose this machine's Git identity and commit signing.
     Environment(hey_boss::environment::Options),
     /// Git shortcuts and your connected main Mac's clipboard.
@@ -428,6 +431,11 @@ fn main() {
 }
 
 fn run() -> std::io::Result<()> {
+    // Dispatch before Clap or database initialization, preserving even non-UTF-8
+    // paths, `--`, proxy help, signals, and the proxy's original exit status.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "proxy") {
+        return proxy_cli::run(std::env::args_os().skip(2));
+    }
     let (args, git_args) = utils_cli::cli_args();
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.

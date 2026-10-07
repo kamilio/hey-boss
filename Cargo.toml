@@ -11,12 +11,12 @@ description = "Native macOS notifications, Markdown updates, and agent questions
 readme = "README.md"
 keywords = ["macos", "notifications", "cli", "agents"]
 categories = ["command-line-utilities"]
-include = ["packages/hey-boss-http/**", "packages/hey-harvester/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "tools/poe-markdown-tests/*.json", "tools/poe-markdown-tests/*.mjs", "tools/poe-markdown-tests/*.ts", "tools/poe-markdown-tests/.npmrc", "tools/poe-markdown-tests/upstream/**", "tools/poe-markdown-tests/frontmatter/**", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**", "!tools/poe-markdown-tests/node_modules/**", "!tools/poe-markdown-tests/captured/**", "!tools/poe-markdown-tests/report.json"]
+include = ["packages/hey-proxy/**", "packages/hey-boss-http/**", "packages/hey-harvester/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "tools/poe-markdown-tests/*.json", "tools/poe-markdown-tests/*.mjs", "tools/poe-markdown-tests/*.ts", "tools/poe-markdown-tests/.npmrc", "tools/poe-markdown-tests/upstream/**", "tools/poe-markdown-tests/frontmatter/**", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**", "!tools/poe-markdown-tests/node_modules/**", "!tools/poe-markdown-tests/captured/**", "!tools/poe-markdown-tests/report.json"]
 
 [workspace]
 exclude = ["worker-tui"]
-members = ["packages/hey-boss-http", "packages/hey-harvester", "packages/hey-gh", "packages/hey-gh/bindings/node"]
-default-members = ["packages/hey-harvester", ".", "packages/hey-gh", "packages/hey-boss-http"]
+members = ["packages/hey-proxy", "packages/hey-boss-http", "packages/hey-harvester", "packages/hey-gh", "packages/hey-gh/bindings/node"]
+default-members = ["packages/hey-proxy", "packages/hey-harvester", ".", "packages/hey-gh", "packages/hey-boss-http"]
 resolver = "3"
 
 [dependencies]
