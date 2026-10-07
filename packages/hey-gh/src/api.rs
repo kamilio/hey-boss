@@ -120,6 +120,7 @@ impl Api {
             .route("/v1/pr-status", get(pr_status))
             .route("/v1/prs/{owner}/{repo}", get(my_prs))
             .route("/v1/prs/{owner}/{repo}/{number}", get(pr))
+            .route("/v1/prs/{owner}/{repo}/{number}/reviews", get(pr_reviews))
             .route("/v1/prs/{owner}/{repo}/{number}/metadata", get(pr_metadata))
             .route("/v1/prs/{owner}/{repo}/{number}/ci", get(ci))
             .route(
@@ -815,6 +816,22 @@ async fn shared_identity(State(api): State<Api>) -> ApiResult<Json<crate::shared
     };
     identity.validate()?;
     Ok(Json(identity))
+}
+
+async fn pr_reviews(
+    State(api): State<Api>,
+    Path((owner, repo, number)): Path<(String, String, u64)>,
+    Query(query): Query<ReportReadQuery>,
+) -> ApiResult<Json<crate::ReviewReport>> {
+    Ok(Json(
+        query
+            .run(api.0.client.pr_review_report(
+                &format!("{owner}/{repo}"),
+                number,
+                query.freshness()?,
+            ))
+            .await?,
+    ))
 }
 
 async fn viewer(

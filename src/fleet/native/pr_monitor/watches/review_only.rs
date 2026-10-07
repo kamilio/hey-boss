@@ -79,7 +79,7 @@ fn checkless_pr_waits_for_feedback_and_repeated_reviews_do_not_repeat_work() {
                     "/v1/prs/o/r/1/required-checks" => &policy,
                     "/v1/prs/o/r/1/metadata" => &metadata,
                     "/v1/prs/o/r/1/ci" => &ci,
-                    "/v1/prs/o/r/1" => {
+                    "/v1/prs/o/r/1/reviews" => {
                         if cycle <= 1 {
                             let db = Store::open_connection(&database).unwrap();
                             let assignee: Option<String> = db

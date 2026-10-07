@@ -33,8 +33,8 @@ pub use policy::{PolicyIdentity, PullRequestConfirmation, RequiredCheck, Require
 pub use polling::PollingStatus;
 pub use pr_fields::PR_STATUS_FIELDS;
 pub use report::{
-    CiObservation, CiReport, CiSummary, FailedResult, PrReport, Report, ResourceValidation,
-    ReviewStatus, SourceError,
+    CiObservation, CiReport, CiSummary, FailedResult, PrReport, PrReviewReport, Report,
+    ResourceValidation, ReviewReport, ReviewStatus, SourceError,
 };
 pub use repository::{BranchReport, BranchTransition, RepositoryReport};
 pub use scheduler::{RateLimit, Status};
