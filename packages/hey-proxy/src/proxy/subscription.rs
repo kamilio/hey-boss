@@ -1,8 +1,10 @@
 //! On-demand management API. No startup hooks, inference accounting, or model-path locks.
 use super::*;
+mod workers;
 use hey_proxy::usage::{Account, AccountUsage, Accounts, Reading, Recommendation, SCHEMA_VERSION};
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
+pub(super) use workers::recommend_workers;
 
 fn reply<T: Serialize>(value: T) -> Response {
     ([(header::CACHE_CONTROL, "no-store")], axum::Json(value)).into_response()

@@ -59,6 +59,13 @@ impl Plan {
     /// The returned config has no aliases, routes, overrides or legacy fallbacks;
     /// adapters must send upstream_model and reasoning from the returned metadata.
     pub fn select(&self, index: usize) -> Result<(Config, ResolvedLeg)> {
+        let resolved = self.resolve(index)?;
+        let account = &self.config.accounts[&resolved.provider];
+        Ok((account.apply(&self.config), resolved))
+    }
+
+    /// Resolve safe route metadata without copying credentials or selecting a transport.
+    pub fn resolve(&self, index: usize) -> Result<ResolvedLeg> {
         let route = &self.config.routes[self.route];
         let leg = route.legs.get(index).context("Unknown route leg")?;
         let account = self
@@ -66,7 +73,6 @@ impl Plan {
             .accounts
             .get(&leg.provider)
             .context("Unknown route provider")?;
-        let selected = account.apply(&self.config);
         let model = leg.model.as_deref().unwrap_or(&route.model);
         let rewrite = leg
             .override_name
@@ -98,7 +104,7 @@ impl Plan {
             },
             reasoning: reasoning.map(str::to_owned),
         };
-        Ok((selected, resolved))
+        Ok(resolved)
     }
 }
 

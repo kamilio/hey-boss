@@ -66,6 +66,7 @@ impl AccountConfig {
         selected.api_keys.clear();
         // Explicit account selection cannot fall through to another credential.
         selected.routes.clear();
+        selected.worker_candidates.clear();
         selected.overrides.clear();
         selected.aliases.clear();
         selected.fallbacks.clear();

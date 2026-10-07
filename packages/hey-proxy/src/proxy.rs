@@ -236,6 +236,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
             axum::routing::get(subscription::recommend),
         )
         .route("/usage/v1/spend", axum::routing::get(subscription::spend))
+        .route("/usage/v2/recommend", axum::routing::get(subscription::recommend_workers))
         .route(
             "/usage/v1/accounts",
             axum::routing::get(subscription::accounts),
