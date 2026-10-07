@@ -405,6 +405,13 @@ mod tests {
                 operation: Operation::View { number: 1 },
                 request_id: None,
             };
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                    params![request.project.id, request.project.name],
+                )
+                .unwrap();
             let mut f = Self {
                 store,
                 request,

@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 use std::process::{Command, Output};
@@ -8,6 +10,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new(name: &str) -> Self {
+        let f = Self::empty(name);
+        projects::seed(&f.db, &["github.com/poe-platform/poe-code"]);
+        f
+    }
+    fn empty(name: &str) -> Self {
         let directory =
             std::env::temp_dir().join(format!("hey-boss-lookup-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
@@ -328,7 +335,7 @@ fn lookup_agent_links_load_real_saved_conversation_and_filter_overview() {
 #[test]
 fn lookup_remote_host_uses_existing_rpc_and_never_falls_back() {
     use std::os::unix::fs::PermissionsExt;
-    let f = Fixture::new("remote");
+    let f = Fixture::empty("remote");
     let bin = f.directory.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let ssh = bin.join("ssh");

@@ -580,6 +580,7 @@ mod tests {
     #[test]
     fn resolved_checkout_status_is_scoped_to_the_current_saved_settings() {
         let (root, ctx, store) = super::super::context::tests::test_context();
+        crate::database::Connection::open(&ctx.path).unwrap().execute("INSERT INTO projects(id,name,next_number) VALUES('github.com/acme/right','right',1)", []).unwrap();
         let target = root.join("right");
         fs::create_dir_all(&target).unwrap();
         git(&target, &["init", "--quiet"]);
@@ -677,6 +678,7 @@ mod tests {
     #[test]
     fn machine_checkouts_resolve_on_owning_home_and_preserve_worker_overrides() {
         let (root, ctx, store) = super::super::context::tests::test_context();
+        crate::database::Connection::open(&ctx.path).unwrap().execute("INSERT INTO projects(id,name,next_number) VALUES('github.com/acme/right','right',1)", []).unwrap();
         let target = root.join("Workspace/right");
         fs::create_dir_all(&target).unwrap();
         git(&target, &["init", "--quiet"]);

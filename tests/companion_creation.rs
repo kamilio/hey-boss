@@ -1,4 +1,6 @@
 //! Real fleet transport, private stores, no worker or production queue changes.
+#[path = "support/projects.rs"]
+mod projects;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::{
@@ -22,6 +24,14 @@ impl Fixture {
                 .as_nanos()
         ));
         fs::create_dir(&path).unwrap();
+        projects::seed(
+            &path.join("issues.db"),
+            &[
+                "named:Creation QA",
+                "named:Unstaffed creation QA",
+                "named:No reservation",
+            ],
+        );
         fs::write(path.join("inventory.json"), r#"{"ssh_hosts":[]}"#).unwrap();
         fs::write(path.join("desired.json"), r#"{"machines":{}}"#).unwrap();
         // Fleet services reload when their executable changes. Other checks
@@ -124,7 +134,7 @@ fn connected_creation_refreshes_numbers_and_keeps_offline_creation_safe() {
     // after its capture is installed, before creating any history.
     main.issue(&["create", "--title", "Existing"]);
     Connection::open(main.0.join("issues.db")).unwrap().execute_batch(
-        "DELETE FROM events; INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('named:Creation QA',1099,'Recent','','open','human:fixture',0,0,1,'[]',2); UPDATE projects SET next_number=1100;").unwrap();
+        "DELETE FROM events; INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('named:Creation QA',1099,'Recent','','open','human:fixture',0,0,1,'[]',2); UPDATE projects SET next_number=1100 WHERE id='named:Creation QA';").unwrap();
     fs::write(
         main.0.join("inventory.json"),
         r#"{"ssh_hosts":["fixture.test"]}"#,
@@ -189,7 +199,7 @@ fn connected_creation_refreshes_numbers_and_keeps_offline_creation_safe() {
             [],
         )
         .unwrap();
-    // No worker and no prior project/range: creation must reserve on demand,
+    // Registered project with no worker or number range: reserve on demand,
     // not require a worker configuration or a pre-existing offline block.
     let unstaffed = peer.cli(&[
         "issue",

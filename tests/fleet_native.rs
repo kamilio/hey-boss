@@ -1,4 +1,6 @@
 //! Fleet migration and shutdown tests run only against private fixture databases.
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::{
     fs,
@@ -27,6 +29,7 @@ impl Fixture {
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Worker fixture"]);
         fs::write(root.join("inventory.json"), "{\"ssh_hosts\":[]}").unwrap();
         fs::write(root.join("desired.json"), "{\"machines\":{}}").unwrap();
         Self { root }

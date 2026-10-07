@@ -1163,6 +1163,13 @@ mod tests {
                 operation: Operation::View { number: 1 },
                 request_id: None,
             };
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                    params![request.project.id, request.project.name],
+                )
+                .unwrap();
             let mut f = Self {
                 store,
                 request,
@@ -2149,6 +2156,7 @@ mod tests {
     #[test]
     fn transferring_a_waiting_watcher_preserves_subscription_and_deduplication() {
         let mut f = Fixture::new();
+        f.store.db.execute("INSERT INTO projects(id,name,next_number) VALUES('named:Destination','Destination',1)", []).unwrap();
         f.request.project_override = Some("Destination".into());
         f.call(json!({"action":"create","title":"Other","body":"","labels":[]}))
             .unwrap();

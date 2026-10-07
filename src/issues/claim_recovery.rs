@@ -86,6 +86,13 @@ mod tests {
             id: "named:Claim recovery".into(),
             name: "Claim recovery".into(),
         };
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                params![project.id, project.name],
+            )
+            .unwrap();
         let clock = 200_000;
         for (index, (id, machine, pid, start, seen)) in [
             ("codex:dead", "local", Some(999_999), Some("dead".into()), 0),

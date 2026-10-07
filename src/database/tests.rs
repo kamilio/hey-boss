@@ -338,6 +338,7 @@ fn dependent_issue_requests_recover_on_the_same_service_connection() {
     let fixture = Fixture::new();
     let path = fixture.directory.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    crate::database::Connection::open(&path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Recovery','Recovery',1)", []).unwrap();
     store.replace_connection_for_test(fixture.connect());
     let request = |operation, key: &str| -> Request {
         serde_json::from_value(json!({"version":1,
@@ -384,6 +385,7 @@ fn creation_receipts_reconcile_lost_commits_and_simultaneous_retries() {
         let fixture = Fixture::new();
         let path = fixture.directory.join("issues.db");
         let mut store = Store::open(&path).unwrap();
+        crate::database::Connection::open(&path).unwrap().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Recovery','Recovery',1)", []).unwrap();
         store.replace_connection_for_test(fixture.connect());
         let request = |operation, key: Option<&str>| -> Request {
             serde_json::from_value(json!({"version":1,
@@ -461,8 +463,8 @@ fn creation_receipts_reconcile_lost_commits_and_simultaneous_retries() {
         other_project.project.id = "named:Other".into();
         other_project.project.name = "Other".into();
         assert_eq!(
-            store.execute(&other_project).unwrap()["request"]["state"],
-            "not_recorded"
+            store.execute(&other_project).unwrap_err().code,
+            "project_not_initialized"
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM projects", [], |r| r.get::<_, i64>(0))

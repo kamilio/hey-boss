@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Actor, Operation, Project, Request, Store};
 use serde_json::{Value, json};
 
@@ -10,6 +12,10 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     let root = std::env::temp_dir().join(format!("hey-boss-transfer-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let mut store = Store::open(&root.join("issues.db")).unwrap();
+    projects::seed(
+        &root.join("issues.db"),
+        &["named:Source", "named:Destination"],
+    );
     let actor = Actor {
         id: "human:boss".into(),
         kind: "human".into(),
@@ -146,7 +152,7 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     .unwrap();
     for (destination, version, code) in [
         ("Destination", 99, "conflict"),
-        ("Missing", 1, "not_found"),
+        ("Missing", 1, "project_not_initialized"),
         ("Source", 1, "invalid_input"),
     ] {
         let error = call(

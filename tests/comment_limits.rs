@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 
@@ -17,6 +19,7 @@ fn agent_comment_limits_apply_before_mutations_and_offer_an_override() {
     let dir = std::env::temp_dir().join(format!("hey-boss-comment-limits-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut store = Store::open(&dir.join("issues.db")).unwrap();
+    projects::seed(&dir.join("issues.db"), &["named:Comments"]);
     store
         .execute(&request(
             json!({"action":"create", "title":"Comments", "body":"", "labels":[]}),

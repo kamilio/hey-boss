@@ -95,6 +95,14 @@ impl Fixture {
         std::fs::create_dir(&root).unwrap();
         let machine = identity::machine().unwrap();
         let project = identity::project(&root, &machine).unwrap();
+        Store::open(&root.join("issues.db"))
+            .unwrap()
+            .into_database()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                rusqlite::params![project.id, project.name],
+            )
+            .unwrap();
         let servers = (0..2)
             .map(|_| Server::http(("127.0.0.1", 0)).unwrap())
             .collect::<Vec<_>>();

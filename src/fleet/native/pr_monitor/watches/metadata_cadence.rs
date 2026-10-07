@@ -44,6 +44,13 @@ fn receive_metadata_request(server: &tiny_http::Server) -> tiny_http::Request {
 #[test]
 fn stale_lifecycle_batch_in_flight_cannot_stop_a_new_watcher() {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {
@@ -120,6 +127,13 @@ fn merge_metadata_keeps_polling_while_required_checks_wait() {
 
 fn metadata_batches(repeat: bool) {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {

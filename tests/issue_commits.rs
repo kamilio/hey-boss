@@ -1,4 +1,6 @@
 //! Commit ownership follows the checkout; issue ownership follows the worker.
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::database::Connection;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -112,6 +114,7 @@ impl Fixture {
         ]);
         fixture.git(&["commit", "--allow-empty", "-m", "Upstream fix"]);
         for project in [CONSUMER, UPSTREAM] {
+            projects::seed(&fixture.root.join("issues.db"), &[project]);
             fixture.issue(
                 project,
                 &["create", "--title", "Commit provenance QA"],

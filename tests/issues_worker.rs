@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::{
     fs,
@@ -21,6 +23,7 @@ impl Fixture {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("mode.txt"), mode).unwrap();
         let db = root.join("issues.db");
+        projects::seed(&db, &["named:Worker fixture"]);
         Self { root, db }
     }
     fn command(&self, args: &[&str]) -> Command {

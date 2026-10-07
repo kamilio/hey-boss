@@ -67,6 +67,13 @@ mod tests {
     #[test]
     fn cancelled_scan_resumes_after_admitted_urls_then_wraps() {
         let (root, ctx, mut store) = super::super::super::context::tests::test_context();
+        crate::database::Connection::open(&ctx.path)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+                [],
+            )
+            .unwrap();
         let request = |operation| crate::issues::Request {
             version: 1,
             project: crate::issues::Project {
@@ -208,6 +215,13 @@ mod tests {
 
     fn scenario(evidence: Evidence) {
         let (root, ctx, mut store) = super::super::super::context::tests::test_context();
+        crate::database::Connection::open(&ctx.path)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+                [],
+            )
+            .unwrap();
         let request = |operation| crate::issues::Request {
             version: 1,
             project: crate::issues::Project {

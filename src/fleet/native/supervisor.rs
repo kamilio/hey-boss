@@ -2952,6 +2952,13 @@ mod tests {
             serde_json::from_value(json!({"version":1,"project":{"id":"named:Test","name":"Test"},"actor":actor,"operation":operation,"request_id":key})).unwrap()
         };
         let mut store = crate::issues::Store::open(&app.ctx.path).unwrap();
+        crate::database::Connection::open(&app.ctx.path)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES('named:Test','Test',1)",
+                [],
+            )
+            .unwrap();
         for title in ["Closed cleanup", "Live assignment"] {
             store
                 .execute(&request(

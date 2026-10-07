@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{fs, process::Command};
 
@@ -6,6 +8,7 @@ fn compact_detail_preserves_requirements_and_guards_without_hydrating_history() 
     let root = std::env::temp_dir().join(format!("hb-compact-detail-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let path = root.join("issues.db");
+    projects::seed(&path, &["named:Detail"]);
     drop(hey_boss::issues::Store::open(&path).unwrap());
     let mut owner = hey_boss::database::Owner::start(&path).unwrap().unwrap();
     let run = |args: &[&str]| {

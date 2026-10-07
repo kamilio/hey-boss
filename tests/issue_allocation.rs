@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::{
@@ -14,6 +16,7 @@ impl Fixture {
         let root =
             std::env::temp_dir().join(format!("hey-boss-allocation-{}-{name}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
+        projects::seed(&root.join("issues.db"), &["named:Allocation fixture"]);
         let f = Self(root);
         f.json(&["create", "--title", "Resume safely"]);
         f

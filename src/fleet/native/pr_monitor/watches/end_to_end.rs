@@ -106,6 +106,13 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         .join("hey-boss");
     assert!(binary.is_file(), "Run cargo build --bin hey-boss first");
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let binary = if real_cadence {
         let isolated = root.join("hey-boss");
         fs::copy(binary, &isolated).unwrap();

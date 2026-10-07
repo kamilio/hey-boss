@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::process::Command;
 
@@ -195,6 +197,7 @@ fn review_http_preview_is_csrf_guarded_and_keeps_live_issues_unchanged() {
     use std::process::Stdio;
     let directory = hey_boss::admin::Temporary::new().unwrap();
     let db = directory.0.join("issues.db");
+    projects::seed(&db, &["named:Review API"]);
     let created = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
         .current_dir(&directory.0)
         .env("HEY_BOSS_ISSUE_DB", &db)

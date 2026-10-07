@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use hey_boss::issues::{Request, Store};
 use serde_json::{Value, json};
 
@@ -18,6 +20,7 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("issues.db");
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     store
         .execute(&request(
             json!({"action":"create","title":"Keep issue","body":"","labels":[]}),
@@ -89,6 +92,7 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
     }
     drop(store);
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     assert_eq!(store.execute(&deletion).unwrap(), result);
     assert_eq!(store.execute(&creation).unwrap_err().code, "not_found");
     for file in &files {
@@ -157,6 +161,7 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
 fn guarded_edits_bound_contention_and_preserve_concurrent_versions() {
     let path = std::env::temp_dir().join(format!("hey-boss-contention-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     let created = run(
         &mut store,
         json!({"command":"create","title":"Contention","body":"Original"}),
@@ -237,6 +242,7 @@ fn store_open_retries_transient_read_locks() {
     ready_rx.recv().unwrap();
     let started = std::time::Instant::now();
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     store
         .execute(&request(
             json!({"action":"projects","include_hidden":false}),
@@ -252,6 +258,7 @@ fn store_open_retries_transient_read_locks() {
 fn artifacts_keep_comments_links_and_conflicted_edits() {
     let path = std::env::temp_dir().join(format!("hey-boss-artifacts-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     store
         .execute(&request(
             json!({"action":"create","title":"Issue","body":"","labels":[]}),
@@ -292,6 +299,7 @@ fn artifacts_keep_comments_links_and_conflicted_edits() {
     assert_eq!(issue["artifacts"][0]["archived"], true);
     drop(store);
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     let view = run(&mut store, json!({"command":"view","id":id}));
     assert_eq!(view["comments"][0]["resolved"], true);
     run(&mut store, json!({"command":"unlink","id":id,"issue":1}));
@@ -325,6 +333,7 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
     let path =
         std::env::temp_dir().join(format!("hey-boss-artifact-links-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     for alias in ["first", "second"] {
         store.execute(&request(json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":alias,"body":"","alias":alias}}))).unwrap();
     }
@@ -394,6 +403,7 @@ fn selection_anchors_use_the_readers_markdown_dialect() {
         std::process::id()
     ));
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     let text =
         "It's a \"quoted\" plan with literal $dollars$ and ~~changes~~.\n\n<mark>literal</mark>";
     let created = run(
@@ -426,6 +436,7 @@ fn selection_context_matches_rendered_table_cells_and_footnotes() {
         std::process::id()
     ));
     let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts", "named:Other"]);
     let created = run(
         &mut store,
         json!({"command":"create","title":"Context","body":"| Left | Right |\n| --- | --- |\n| Row | Keep **context** |\n\nA final **selected passage** with a footnote.[^note]\n\n[^note]: Keep explanation."}),

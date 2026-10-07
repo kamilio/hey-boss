@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fs, path::PathBuf, process::Command};
@@ -13,6 +15,7 @@ impl Fixture {
         ));
         fs::create_dir_all(&path).unwrap();
         let database = path.join("issues.db");
+        projects::seed(&database, &["named:Status QA"]);
         drop(hey_boss::issues::Store::open(&database).unwrap());
         let owner = hey_boss::database::Owner::start(&database)
             .unwrap()

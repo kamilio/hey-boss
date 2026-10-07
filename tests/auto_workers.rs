@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 #[path = "support/environment.rs"]
 mod signing;
 use serde_json::{Value, json};
@@ -139,6 +141,12 @@ impl Drop for Fixture {
 #[test]
 fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
     let f = Fixture::new("drain");
+    let project = hey_boss::issues::identity::project(
+        &f.root,
+        &hey_boss::issues::identity::machine().unwrap(),
+    )
+    .unwrap();
+    projects::seed(&f.root.join("issues.db"), &[&project.id]);
     f.cli(&[
         "issue",
         "--json",

@@ -3,6 +3,13 @@ use super::*;
 #[test]
 fn checkless_pr_waits_for_feedback_and_repeated_reviews_do_not_repeat_work() {
     let (root, ctx, mut store) = crate::fleet::native::context::tests::test_context();
+    crate::database::Connection::open(&ctx.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:test','test',1)",
+            [],
+        )
+        .unwrap();
     let request = |operation| crate::issues::Request {
         version: 1,
         project: crate::issues::Project {

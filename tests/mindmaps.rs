@@ -1,3 +1,5 @@
+#[path = "support/projects.rs"]
+mod projects;
 use serde_json::{Value, json};
 use std::{
     io::Write,
@@ -19,6 +21,20 @@ impl Fixture {
                 SERIAL.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir_all(&root).unwrap();
+        projects::seed(
+            &root.join("issues.db"),
+            &[
+                "named:Atlas",
+                "named:Platform",
+                "named:Delivery",
+                "named:Client",
+                "named:Other",
+                "named:WorkerProject",
+                "named:ExplicitProject",
+                "github.com/first/shared",
+                "github.com/example/mindmap-default",
+            ],
+        );
         Self { root }
     }
     fn cmd(&self, project: &str, command: &str, args: &[&str]) -> Command {
@@ -1572,6 +1588,7 @@ fn mirrored_issue_views_identify_the_resource_project_and_preserve_unavailable_r
 fn markdown_export_keeps_relationship_labels_and_descriptions_literal() {
     let f = Fixture::new();
     let project = "Atlas **release**";
+    projects::seed(&f.root.join("issues.db"), &["named:Atlas **release**"]);
     let source = f.run(project, &["add", "Topic *literal* [draft]"]);
     let target = f.run(project, &["add", "Review <scope> & `plan`"]);
     f.run(
