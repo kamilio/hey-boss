@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1:8080",
+  "account_schema_version": 1,
+  "accounts": {
+    "codex-personal": {"implementation": "codex", "auth": "subscription", "credentials_file": "personal.codex.json"},
+    "codex-work": {"implementation": "codex", "auth": "subscription", "credentials_file": "work.codex.json"},
+    "claude-personal": {"implementation": "claude", "auth": "subscription", "credentials_file": "personal.claude.json"},
+    "ultima": {"implementation": "openai", "auth": "api", "endpoint": "https://ultima.example.com", "credential": "op://Example/Ultima/key"},
+    "sonnet-api": {"implementation": "openai", "auth": "api", "endpoint": "https://gateway.example.com", "credential": "op://Example/Sonnet/key"}
+  },
+  "routes": [
+    {"model": "gpt-6-astra", "legs": [{"provider": "ultima", "override": "astra"}]},
+    {"model": "gpt-6.1-sol", "legs": [{"provider": "codex-personal"}, {"provider": "codex-work"}, {"provider": "ultima"}]},
+    {"model": "claude-sonnet-5-5", "legs": [{"provider": "claude-personal"}, {"provider": "sonnet-api"}]}
+  ],
+  "overrides": {
+    "ultima": {
+      "astra": {"from": "gpt-6-astra", "to": "ultima-alpha"}
+    }
+  }
+}

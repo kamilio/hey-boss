@@ -33,6 +33,14 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect the staged routing contract without credentials, requests or profile changes
+    ResolveRoute {
+        model: String,
+        #[arg(long, default_value = "/v1/responses")]
+        path: String,
+        #[arg(long)]
+        effort: Option<String>,
+    },
     /// Check remaining subscription quota and provider-reported extra spend
     Usage(usage_cli::Args),
     /// Recommend the best subscription provider (codex or claude) based on earliest expiring usage and remaining quota
@@ -223,11 +231,32 @@ async fn main() -> Result<()> {
     let path = config_path(args.config)?;
     // Fingerprint before loading so an edit racing startup is picked up by the first request.
     let fingerprint = config::fingerprint(&path);
-    let config = if matches!(args.command, Some(Command::Rollout { .. })) {
+    let config = if matches!(
+        args.command,
+        Some(Command::Rollout { .. } | Command::ResolveRoute { .. })
+    ) {
         config::load(&path)?
     } else {
         config::load_or_create(&path)?
     };
+    if let Some(Command::ResolveRoute {
+        model,
+        path,
+        effort,
+    }) = &args.command
+    {
+        let config = std::sync::Arc::new(config);
+        let result = if let Some(plan) = config.route_plan(model, path, effort.as_deref()) {
+            let legs = (0..plan.len())
+                .map(|i| plan.select(i).map(|(_, metadata)| metadata))
+                .collect::<Result<Vec<_>>>()?;
+            serde_json::json!({"policy":"routes", "forwarding":"staged", "legs":legs})
+        } else {
+            serde_json::json!({"policy":if config.mode == config::Mode::Client { "relay" } else { "legacy" }, "config_revision":config.revision, "source_model":model})
+        };
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
     if let Some(Command::ClaudeLogin {
         account,
         no_browser,

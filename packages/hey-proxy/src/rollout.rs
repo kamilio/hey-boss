@@ -626,6 +626,8 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
             url,
             api_key: key.context("Host key not provisioned")?.into(),
         });
+        remote.routes.clear();
+        remote.overrides.clear();
         remote.accounts.clear();
         remote.api_keys.clear();
         remote.gemini = None;
@@ -1481,12 +1483,16 @@ mod tests {
         let config: Config = serde_json::from_value(serde_json::json!({
             "listen":"127.0.0.1:8080", "account_schema_version":1,
             "accounts":{"work":{"implementation":"codex","auth":"subscription","credentials_file":"work.json"}},
+            "routes":[{"model":"logical","legs":[{"provider":"work","override":"mapping"}]}],
+            "overrides":{"work":{"mapping":{"from":"logical","to":"upstream"}}},
             "ssh_hosts":[{"host":"host","mode":"host","url":"https://proxy.example"},{"host":"client","mode":"client","via":"host"}]
         })).unwrap();
         let remote =
             remote_config_with_key(&config, &config.ssh_hosts[1], Some("synthetic-host-access"))
                 .unwrap();
         assert!(remote.accounts.is_empty());
+        assert!(remote.routes.is_empty());
+        assert!(remote.overrides.is_empty());
         let value = serde_json::to_string(&remote).unwrap();
         assert!(!value.contains("work.json"));
         assert!(!value.contains("account_schema_version"));
