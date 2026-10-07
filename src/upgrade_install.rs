@@ -70,49 +70,19 @@ fn restart_desktop(binary: &Path) -> io::Result<()> {
         binary,
         &home()?.join("Library/LaunchAgents/local.hey-boss-fleet-controller.plist"),
     )?;
-    reload_registration(
+    reload_desktop_registration(
         Path::new("/bin/launchctl"),
-        "local.hey-boss",
         &home()?.join("Library/LaunchAgents/local.hey-boss.plist"),
     )?;
     Ok(())
 }
-/// Re-registers launch agents (such as the separately supervised hey-proxy)
-/// whose program is one of the just replaced companion binaries.
-fn reload_replaced_agents(launchctl: &Path, agents: &Path, replaced: &[PathBuf]) -> io::Result<()> {
-    for entry in fs::read_dir(agents)? {
-        let plist = entry?.path();
-        if plist.extension().is_none_or(|e| e != "plist") {
-            continue;
-        }
-        let Ok(job) = output(
-            Command::new("/usr/bin/plutil")
-                .args(["-convert", "json", "-o", "-"])
-                .arg(&plist),
-        )
-        .and_then(|bytes| {
-            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(io::Error::other)
-        }) else {
-            continue;
-        };
-        let program = job["ProgramArguments"][0]
-            .as_str()
-            .or(job["Program"].as_str());
-        if let Some(label) = job["Label"].as_str()
-            && program.is_some_and(|p| replaced.iter().any(|r| r == Path::new(p)))
-        {
-            reload_registration(launchctl, label, &plist)?;
-        }
-    }
-    Ok(())
-}
-fn reload_registration(launchctl: &Path, label: &str, registration: &Path) -> io::Result<()> {
+fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Result<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    // An atomically replaced ad-hoc signed binary needs a fresh launch registration.
-    // kickstart retains launchd's old constraints and can reject the new binary.
+    // An atomically replaced ad-hoc signed app needs a fresh launch registration.
+    // kickstart retains launchd's old constraints and can reject the new bundle.
     // The job may already be unloaded after a failed upgrade; still bootstrap it.
     let _ = Command::new(launchctl)
-        .args(["bootout", &format!("{domain}/{label}")])
+        .args(["bootout", &format!("{domain}/local.hey-boss")])
         .output();
     let mut last = None;
     for delay in [0, 100, 200, 400, 800, 1000, 2000, 2000, 2000] {
@@ -134,7 +104,7 @@ fn reload_registration(launchctl: &Path, label: &str, registration: &Path) -> io
     }
     let failure = last.unwrap();
     Err(error(format!(
-        "Launch agent {label} reload failed ({}): {}",
+        "Desktop service reload failed ({}): {}",
         failure.status,
         String::from_utf8_lossy(&failure.stderr)
     )))
@@ -224,8 +194,6 @@ pub(super) fn publish(
             companion,
             skills,
             companion_bins: companion_bins(binary, &home()?),
-            launch_agents: Some(home()?.join("Library/LaunchAgents"))
-                .filter(|agents| cfg!(target_os = "macos") && agents.is_dir()),
             harvester: if cfg!(target_os = "macos") {
                 let standalone = home()?.join(".local/bin/hey-harvester");
                 Some(if standalone.exists() {
@@ -246,7 +214,6 @@ struct Services {
     companion: bool,
     skills: Vec<PathBuf>,
     companion_bins: Vec<PathBuf>,
-    launch_agents: Option<PathBuf>,
     harvester: Option<PathBuf>,
 }
 
@@ -264,7 +231,6 @@ fn publish_to(
         companion,
         skills,
         companion_bins,
-        launch_agents,
         harvester,
     } = services;
     let companion = *companion;
@@ -356,9 +322,6 @@ fn publish_to(
                 0o755,
             )?;
         }
-        if let Some(agents) = launch_agents {
-            reload_replaced_agents(Path::new("/bin/launchctl"), agents, companion_bins)?;
-        }
         if let (Some(app), Some(adjacent), Some(app_backup)) = (&app, &adjacent, &app_backup) {
             fs::rename(app, app_backup)?;
             if let Err(e) = fs::rename(adjacent, app) {
@@ -416,9 +379,6 @@ fn publish_to(
             } else if destination.exists() {
                 fs::remove_file(destination)?;
             }
-        }
-        if let Some(agents) = launch_agents {
-            let _ = reload_replaced_agents(Path::new("/bin/launchctl"), agents, companion_bins);
         }
         if replaced_binary {
             atomic_copy(&previous, binary, 0o755)?;
@@ -523,7 +483,6 @@ mod tests {
                     app: None,
                     companion: false,
                     companion_bins: vec![api.clone()],
-                    launch_agents: None,
                     skills: Vec::new(),
                     harvester: None,
                 },
@@ -584,7 +543,7 @@ esac
 "#
                 ),
             );
-            let result = reload_registration(&launchctl, "local.hey-boss", &registration);
+            let result = reload_desktop_registration(&launchctl, &registration);
             if failure == "permanent" {
                 assert!(result.unwrap_err().to_string().contains("denied"));
             } else {
@@ -604,35 +563,6 @@ esac
                 "existing registration"
             );
         }
-    }
-
-    #[test]
-    fn agents_running_replaced_companions_reregister() {
-        let temp = Temp::new().unwrap();
-        let launchctl = temp.0.join("launchctl");
-        script(&launchctl, "echo \"$1 $2\" >> \"$0.calls\"");
-        let agents = temp.0.join("agents");
-        fs::create_dir_all(&agents).unwrap();
-        let proxy = temp.0.join("bin/hey-proxy");
-        for (label, program) in [
-            ("local.proxy", proxy.to_str().unwrap()),
-            ("local.tunnel", "/usr/bin/ssh"),
-        ] {
-            fs::write(
-                agents.join(format!("{label}.plist")),
-                format!(
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string><key>ProgramArguments</key><array><string>{program}</string></array></dict></plist>"
-                ),
-            )
-            .unwrap();
-        }
-        fs::write(agents.join("notes.txt"), "not an agent").unwrap();
-        reload_replaced_agents(&launchctl, &agents, std::slice::from_ref(&proxy)).unwrap();
-        let domain = format!("gui/{}", unsafe { libc::getuid() });
-        assert_eq!(
-            fs::read_to_string(launchctl.with_extension("calls")).unwrap(),
-            format!("bootout {domain}/local.proxy\nbootstrap {domain}\n")
-        );
     }
 
     #[test]
@@ -735,7 +665,6 @@ esac
                 app: None,
                 companion: false,
                 companion_bins: vec![],
-                launch_agents: None,
                 harvester: None,
                 skills: Vec::new(),
             },
@@ -793,7 +722,6 @@ esac
                     bin.with_file_name("hey-gh"),
                     bin.with_file_name("hey-harvester"),
                 ],
-                launch_agents: None,
                 skills: Vec::new(),
                 harvester: None,
             },
@@ -847,7 +775,6 @@ esac
                     app: None,
                     companion: false,
                     companion_bins: vec![harvester.clone()],
-                    launch_agents: None,
                     skills: Vec::new(),
                     harvester: Some(harvester.clone()),
                 },
@@ -950,7 +877,6 @@ esac
                     bin.with_file_name("hey-gh"),
                     bin.with_file_name("hey-harvester"),
                 ],
-                launch_agents: None,
                 skills: vec![skill.clone()],
                 harvester: None,
             },
