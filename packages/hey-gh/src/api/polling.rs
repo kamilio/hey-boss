@@ -21,20 +21,25 @@ impl Api {
             .filter(|m| !m.task.is_finished())
             .ok_or(Error::CacheMiss)?;
         let status = monitor.state.lock().await;
-        let age = self.0.client.report_timeout().as_millis() as u64
-            + watch.interval_seconds.saturating_mul(2000);
+        let report_ms = self.0.client.report_timeout().as_millis() as u64;
+        let age = report_ms.saturating_add(watch.interval_seconds.saturating_mul(2000));
+        // Discovery retains its original bound. Hydration stops admissions after
+        // one report budget, then drains at most two already-admitted PRs, each
+        // with its own report budget. This is polling ownership, not evidence
+        // freshness: all source validation and row health checks are unchanged.
+        let hydration_age = age.saturating_add(report_ms);
         let now = now_ms();
-        let recent = |at: Option<u64>| {
+        let recent = |at: Option<u64>, age| {
             at.and_then(|at| now.checked_sub(at))
                 .is_some_and(|elapsed| elapsed <= age)
         };
-        if !recent(status.discovery_last_poll_at_ms) {
+        if !recent(status.discovery_last_poll_at_ms, age) {
             return Err(Error::CacheMiss);
         }
         let modes = [
-            recent(status.ci_last_poll_at_ms),
-            recent(status.last_poll_at_ms),
-            recent(status.policy_last_poll_at_ms),
+            recent(status.ci_last_poll_at_ms, hydration_age),
+            recent(status.last_poll_at_ms, hydration_age),
+            recent(status.policy_last_poll_at_ms, hydration_age),
         ];
         if !modes.iter().any(|mode| *mode) {
             return Err(Error::CacheMiss);
@@ -383,6 +388,34 @@ mod tests {
         assert!(api.polling_coverage().await.is_err());
         state.lock().await.discovery_last_poll_at_ms = Some(now_ms());
         api.0.client.delete_watch(&id).await.unwrap();
+        assert!(api.polling_coverage().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn coverage_keeps_bounded_draining_hydration_but_not_stale_discovery() {
+        let (_dir, api, id, _) = fixture().await;
+        let timeout = api.0.client.report_timeout().as_millis() as u64;
+        let interval_allowance = 120_000;
+        let state = api.0.monitors.lock().await[&id].state.clone();
+        let draining = now_ms() - timeout - interval_allowance - timeout / 2;
+        {
+            let mut state = state.lock().await;
+            state.ci_last_poll_at_ms = Some(draining);
+            state.last_poll_at_ms = Some(draining);
+            state.policy_last_poll_at_ms = Some(draining);
+        }
+        assert_eq!(api.polling_coverage().await.unwrap().modes, [true; 3]);
+        // Discovery never drains PR collections and keeps its original bound.
+        state.lock().await.discovery_last_poll_at_ms = Some(draining);
+        assert!(api.polling_coverage().await.is_err());
+        {
+            let mut state = state.lock().await;
+            state.discovery_last_poll_at_ms = Some(now_ms());
+            let expired = now_ms() - 2 * timeout - interval_allowance - 1000;
+            state.ci_last_poll_at_ms = Some(expired);
+            state.last_poll_at_ms = Some(expired);
+            state.policy_last_poll_at_ms = Some(expired);
+        }
         assert!(api.polling_coverage().await.is_err());
     }
 

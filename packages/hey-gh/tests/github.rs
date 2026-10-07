@@ -58,6 +58,9 @@ mod ci_discovery_status;
 #[path = "github/detail_continuation.rs"]
 mod detail_continuation;
 
+#[path = "github/cycle_drain.rs"]
+mod cycle_drain;
+
 #[path = "github/detail_seed.rs"]
 mod detail_seed;
 
@@ -329,6 +332,18 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
     if mode == "account-multi-source-budget" && total_calls > 6 {
         mock.release.notified().await;
         return reply(503, json!({"message":"synthetic interrupted read"}), &[]);
+    }
+    if mode.starts_with("account-large-cycle-drain")
+        && call_number == 1
+        && matches!(
+            path.as_str(),
+            "/repos/acme/demo/pulls/7" | "/repos/acme/watch00/pulls/7"
+        )
+    {
+        if mode.ends_with("-cancel") && path == "/repos/acme/watch00/pulls/7" {
+            mock.release.notified().await;
+        }
+        tokio::time::sleep(Duration::from_millis(1300)).await;
     }
     if mode.starts_with("account-large-detail-")
         && phase == 2
