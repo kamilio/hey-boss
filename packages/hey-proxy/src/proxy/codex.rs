@@ -2,7 +2,7 @@
 mod paths;
 #[cfg(test)]
 mod tests;
-mod usage;
+pub(super) mod usage;
 use super::*;
 use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
@@ -116,7 +116,7 @@ impl ProviderConfig {
 
 #[derive(Default)]
 pub(super) struct CodexState {
-    tokens: crate::codex_auth::TokenManager,
+    pub(super) tokens: crate::codex_auth::TokenManager,
     paths: paths::Cache,
     usage: tokio::sync::Mutex<usage::Cache>,
 }

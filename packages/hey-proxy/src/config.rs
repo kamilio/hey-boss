@@ -1,4 +1,8 @@
+pub mod accounts;
 mod secrets;
+pub(crate) fn account_key(path: &Path) -> Result<[u8; 32]> {
+    secrets::key(&fs::canonicalize(path)?, true)
+}
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -14,6 +18,7 @@ use std::{
 #[derive(Clone, Deserialize)]
 #[serde(try_from = "ConfigFile")]
 pub struct Config {
+    pub accounts: BTreeMap<String, accounts::AccountConfig>,
     pub model_registry: Option<crate::model_registry::ModelRegistry>,
     pub fallbacks: hey_proxy::fallback::Fallbacks,
     #[serde(default)]
@@ -53,6 +58,10 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    #[serde(default)]
+    account_schema_version: Option<u32>,
+    #[serde(default)]
+    accounts: BTreeMap<String, accounts::AccountConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_registry: Option<crate::model_registry::ModelRegistry>,
     #[serde(default)]
@@ -118,6 +127,14 @@ struct OpenAiProvider {
 impl TryFrom<ConfigFile> for Config {
     type Error = anyhow::Error;
     fn try_from(mut file: ConfigFile) -> Result<Self> {
+        anyhow::ensure!(
+            file.account_schema_version.is_none_or(|v| v == 1),
+            "Unsupported account schema version"
+        );
+        anyhow::ensure!(
+            file.accounts.is_empty() || file.account_schema_version == Some(1),
+            "Named accounts require account_schema_version 1"
+        );
         if let Some(openai) = file.providers.openai {
             if !file.api_keys.is_empty()
                 || file.upstream_url != default_upstream()
@@ -137,6 +154,7 @@ impl TryFrom<ConfigFile> for Config {
             file.gemini = Some(gemini);
         }
         Ok(Self {
+            accounts: file.accounts,
             model_registry: file.model_registry,
             fallbacks: file.fallbacks,
             ssh_hosts: file.ssh_hosts,
@@ -198,6 +216,11 @@ impl Serialize for Config {
         if let Some(connection) = &self.connection {
             value["connection"] =
                 serde_json::to_value(connection).map_err(serde::ser::Error::custom)?;
+        }
+        if self.mode != Mode::Client && !self.accounts.is_empty() {
+            value["account_schema_version"] = serde_json::json!(1);
+            value["accounts"] =
+                serde_json::to_value(&self.accounts).map_err(serde::ser::Error::custom)?;
         }
         value.serialize(serializer)
     }
@@ -406,6 +429,7 @@ impl Default for Retry {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            accounts: BTreeMap::new(),
             model_registry: None,
             fallbacks: BTreeMap::new(),
             gemini: None,
@@ -499,6 +523,15 @@ impl Config {
         config
     }
     pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.accounts.len() <= 128, "Too many named accounts");
+        anyhow::ensure!(
+            self.mode != Mode::Client || self.accounts.is_empty(),
+            "Client relays cannot own named credentials"
+        );
+        for (name, account) in &self.accounts {
+            anyhow::ensure!(accounts::valid_name(name), "Invalid account name");
+            account.validate()?;
+        }
         if let Some(registry) = &self.model_registry {
             registry.validate()?;
         }
@@ -796,6 +829,7 @@ fn parse(content: &[u8], path: &Path) -> Result<Config> {
     let config: Config =
         serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid config fields"))?;
     config.validate()?;
+    config.validate_account_paths(path)?;
     Ok(config)
 }
 
@@ -811,6 +845,43 @@ pub fn fingerprint(path: &Path) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_accounts_roundtrip_and_reject_invalid_connections() {
+        let raw = serde_json::json!({"listen":"127.0.0.1:8080", "account_schema_version":1,
+        "accounts": {
+            "personal":{"implementation":"codex","auth":"subscription","credentials_file":"personal.json"},
+            "work":{"implementation":"codex","auth":"subscription","credentials_file":"work.json"},
+            "writing":{"implementation":"claude","auth":"subscription","credentials_file":"writing.json"},
+            "ultima":{"implementation":"openai","auth":"api","endpoint":"https://ultima.example","credential":"op://Private/Ultima/key"}
+        }});
+        let config: Config = serde_json::from_value(raw.clone()).unwrap();
+        config.validate().unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["accounts"], raw["accounts"]);
+        for (key, value) in [
+            ("account_schema_version", serde_json::json!(99)),
+            (
+                "accounts",
+                serde_json::json!({"bad/name":{"implementation":"codex","auth":"subscription","credentials_file":"x.json"}}),
+            ),
+            (
+                "accounts",
+                serde_json::json!({"no-store":{"implementation":"codex","auth":"subscription"}}),
+            ),
+            (
+                "accounts",
+                serde_json::json!({"literal":{"implementation":"openai","auth":"api","endpoint":"https://example.com","credential":"synthetic-secret"}}),
+            ),
+        ] {
+            let mut invalid = raw.clone();
+            invalid[key] = value;
+            assert!(
+                serde_json::from_value::<Config>(invalid)
+                    .and_then(|c| c.validate().map_err(serde::de::Error::custom))
+                    .is_err()
+            );
+        }
+    }
     #[test]
     fn protects_literal_api_keys_in_opaque_encrypted_fields_and_preserves_references() {
         let dir = tempfile::tempdir().unwrap();

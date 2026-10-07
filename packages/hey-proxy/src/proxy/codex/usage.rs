@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 #[derive(Default)]
-pub(super) struct Cache {
+pub(in crate::proxy) struct Cache {
     identity: Option<[u8; 32]>,
     retry_at: Option<Instant>,
     updated_at: Option<u64>,
@@ -314,7 +314,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
     } else {
         return json!({"state":"disabled"});
     };
-    let path = match service
+    let path = match proxy
         .codex
         .paths
         .resolve(provider, service.source.as_deref())
@@ -326,14 +326,21 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
         }
     };
     let token_url = provider.token_url();
-    let mut creds = match service
-        .codex
-        .tokens
-        .credentials(&path, &proxy.client, &token_url)
-        .await
-    {
-        Ok(creds) => creds,
-        Err(error) => return json!({"state":"error","error":error.to_string()}),
+    let mut creds = if let Some(binding) = &proxy.binding {
+        crate::codex_auth::Credentials {
+            access_token: binding.token.clone(),
+            account_id: binding.account_id.clone(),
+        }
+    } else {
+        match proxy
+            .codex
+            .tokens
+            .credentials(&path, &proxy.client, &token_url)
+            .await
+        {
+            Ok(creds) => creds,
+            Err(error) => return json!({"state":"error","error":error.to_string()}),
+        }
     };
     let identity: [u8; 32] = Sha256::digest(
         format!(
@@ -346,7 +353,39 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
         .as_bytes(),
     )
     .into();
-    let mut cache = service.codex.usage.lock().await;
+    let legacy_quota = if proxy.binding.is_none() && !proxy.config.accounts.is_empty() {
+        let resolved = async {
+            let id = creds
+                .account_id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Subscription identity unavailable"))?;
+            proxy.quota_for("codex", &id).await
+        }
+        .await;
+        match resolved {
+            Ok(quota) => Some(quota),
+            Err(_) => return json!({"state":"error","error":"Subscription identity unavailable"}),
+        }
+    } else {
+        None
+    };
+    let identity = proxy
+        .binding
+        .as_ref()
+        .map(|b| Sha256::digest(b.reference.as_bytes()).into())
+        .or_else(|| {
+            legacy_quota
+                .as_ref()
+                .map(|(reference, _)| Sha256::digest(reference.as_bytes()).into())
+        })
+        .unwrap_or(identity);
+    let cache_mutex = proxy
+        .binding
+        .as_ref()
+        .map(|b| &b.quota.codex)
+        .or_else(|| legacy_quota.as_ref().map(|(_, quota)| &quota.codex))
+        .unwrap_or(&proxy.codex.usage);
+    let mut cache = cache_mutex.lock().await;
     if cache.identity != Some(identity) {
         *cache = Cache {
             identity: Some(identity),
@@ -375,8 +414,11 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
                 .await
                 .map_err(|_| anyhow::anyhow!("Cannot reach Codex usage endpoint"))?;
             let status = response.status();
-            if status == StatusCode::UNAUTHORIZED && attempt == 0 {
-                creds = service
+            if status == StatusCode::UNAUTHORIZED {
+                proxy.rejected_binding().await;
+            }
+            if status == StatusCode::UNAUTHORIZED && attempt == 0 && proxy.binding.is_none() {
+                creds = proxy
                     .codex
                     .tokens
                     .rejected(&path, &proxy.client, &token_url, creds.access_token)

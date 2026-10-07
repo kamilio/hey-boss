@@ -30,6 +30,16 @@ pub(crate) fn configured_accounts(config: &Config, source: Option<&Path>) -> Vec
             id: "default".into(),
         });
     }
+    list.extend(
+        config
+            .accounts
+            .iter()
+            .filter(|(_, a)| a.auth() == "subscription")
+            .map(|(name, a)| Account {
+                provider: a.implementation().into(),
+                id: name.clone(),
+            }),
+    );
     list
 }
 
@@ -56,13 +66,31 @@ pub(crate) async fn account_usage(
             "Subscription usage is not implemented for this provider",
         ));
     }
-    if account != "default" {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "unknown_account",
-            "Unknown subscription account",
-        ));
-    }
+    let selected;
+    let proxy = if account != "default" {
+        if !proxy
+            .config
+            .accounts
+            .get(account)
+            .is_some_and(|a| a.implementation() == provider)
+        {
+            return Err((
+                StatusCode::NOT_FOUND,
+                "unknown_account",
+                "Unknown subscription account",
+            ));
+        }
+        selected = proxy.select(account).await.map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "account_unavailable",
+                "Named account is not ready",
+            )
+        })?;
+        &selected
+    } else {
+        proxy
+    };
     let raw = match provider {
         "claude" => claude::reading(proxy).await,
         "codex" => codex::reading(proxy).await,
@@ -157,7 +185,7 @@ pub(super) async fn recommend(State(service): State<Arc<Service>>) -> Response {
 
 // Independent of inference forwarding: no retries, body inspection or request-log writes.
 // Deserialize through the public schema to retain the allowlist across client relays.
-async fn relay<T: DeserializeOwned + Serialize>(proxy: &Proxy, path: &str) -> Response {
+pub(super) async fn relay<T: DeserializeOwned + Serialize>(proxy: &Proxy, path: &str) -> Response {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let source = proxy
             .config

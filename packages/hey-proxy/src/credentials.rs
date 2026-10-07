@@ -38,7 +38,12 @@ pub struct CredentialResolver {
     op_cli: Option<std::path::PathBuf>,
 }
 pub fn validate_source(source: &str) -> Result<()> {
-    if let Some(command) = source.strip_prefix("sh://") {
+    if let Some(path) = source.strip_prefix("file://") {
+        anyhow::ensure!(
+            std::path::Path::new(path).is_absolute() && !path.contains('\0'),
+            "Credential file reference requires an absolute path"
+        );
+    } else if let Some(command) = source.strip_prefix("sh://") {
         if command.trim().is_empty() || command.contains('\0') {
             bail!("sh:// requires a nonempty shell command without NUL");
         }
@@ -105,6 +110,47 @@ impl CredentialResolver {
     pub async fn resolve(&self, source: &str, ttl: Duration) -> Result<HeaderValue> {
         let started = Instant::now();
         validate_source(source)?;
+        if let Some(path) = source.strip_prefix("file://") {
+            let path = path.to_owned();
+            return tokio::task::spawn_blocking(move || {
+                use std::io::Read;
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+                }
+                let file = options
+                    .open(path)
+                    .map_err(|_| anyhow!("Protected credential file unavailable"))?;
+                let meta = file.metadata()?;
+                anyhow::ensure!(meta.is_file(), "Credential store must be a regular file");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    anyhow::ensure!(
+                        meta.mode() & 0o077 == 0 && meta.uid() == unsafe { libc::geteuid() },
+                        "Credential file requires private owner permissions"
+                    );
+                }
+                let mut bytes = Vec::new();
+                file.take(16385)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| anyhow!("Cannot read credential file"))?;
+                anyhow::ensure!(bytes.len() <= 16384, "Credential file too large");
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| anyhow!("Invalid credential file"))?
+                    .trim();
+                anyhow::ensure!(!text.is_empty(), "Empty credential file");
+                let mut value =
+                    HeaderValue::from_str(text).map_err(|_| anyhow!("Invalid credential file"))?;
+                value.set_sensitive(true);
+                Ok(value)
+            })
+            .await
+            .map_err(|_| anyhow!("Credential read failed"))?;
+        }
         let shell = source.strip_prefix("sh://");
         let onepassword = source.starts_with("op://");
         if shell.is_none() && !onepassword {

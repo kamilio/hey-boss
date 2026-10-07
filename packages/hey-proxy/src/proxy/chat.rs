@@ -72,6 +72,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
     };
     let requested_model = input["model"].as_str().unwrap_or("").to_owned();
     let inner = Arc::new(Proxy {
+        claude: proxy.claude.clone(),
+        codex: proxy.codex.clone(),
+        binding: proxy.binding.clone(),
         config: Arc::new(config),
         client: proxy.client.clone(),
         service: proxy.service.clone(),

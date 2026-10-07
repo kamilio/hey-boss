@@ -2,7 +2,7 @@
 mod paths;
 #[cfg(test)]
 mod tests;
-mod usage;
+pub(super) mod usage;
 use super::*;
 use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ impl ProviderConfig {
 }
 #[derive(Default)]
 pub(super) struct ClaudeState {
-    tokens: crate::claude_auth::TokenManager,
+    pub(super) tokens: crate::claude_auth::TokenManager,
     paths: paths::Cache,
     usage: tokio::sync::Mutex<usage::Cache>,
 }
@@ -226,7 +226,6 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             true
         });
     let path = match proxy
-        .service
         .claude
         .paths
         .resolve(provider, proxy.service.source.as_deref())
@@ -240,15 +239,15 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             );
         }
     };
-    let mut token = match proxy
-        .service
-        .claude
-        .tokens
-        .token(&path, &proxy.client)
-        .await
-    {
-        Ok(token) => token,
-        Err(error) => return messages::error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+    let mut token = if let Some(binding) = &proxy.binding {
+        binding.token.clone()
+    } else {
+        match proxy.claude.tokens.token(&path, &proxy.client).await {
+            Ok(token) => token,
+            Err(error) => {
+                return messages::error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string());
+            }
+        }
     };
     let query = parts
         .uri
@@ -279,6 +278,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             }
         };
         let status = upstream.status();
+        if status == StatusCode::UNAUTHORIZED {
+            proxy.rejected_binding().await;
+        }
         attempt.finish(
             if status.is_success() {
                 "accepted"
@@ -289,9 +291,8 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             None,
         );
         // Authentication was rejected before generation: rotate once, never replay a started stream.
-        if status == StatusCode::UNAUTHORIZED && index == 0 {
+        if status == StatusCode::UNAUTHORIZED && index == 0 && proxy.binding.is_none() {
             token = match proxy
-                .service
                 .claude
                 .tokens
                 .rejected(&path, &proxy.client, token)

@@ -140,6 +140,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
 
     // Each model is attempted once. No deadline or nested timed retry loop.
     let attempt_proxy = Arc::new(Proxy {
+        claude: proxy.claude.clone(),
+        codex: proxy.codex.clone(),
+        binding: proxy.binding.clone(),
         config: config.clone(),
         client: proxy.client.clone(),
         service: proxy.service.clone(),

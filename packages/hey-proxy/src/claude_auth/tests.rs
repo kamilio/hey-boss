@@ -6,6 +6,7 @@ pub(crate) fn fixture(path: &Path, expires_at: u64) {
     save(
         path,
         &Tokens {
+            account_id: None,
             access_token: "sk-ant-oat01-synthetic-old".into(),
             refresh_token: "synthetic-refresh-old".into(),
             expires_at,

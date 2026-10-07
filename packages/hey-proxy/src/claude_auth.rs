@@ -33,6 +33,8 @@ const MAX_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Tokens {
     pub access_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     refresh_token: String,
     expires_at: u64,
 }
@@ -153,7 +155,7 @@ fn load(path: &Path) -> Result<Tokens> {
     );
     Ok(tokens)
 }
-fn save(path: &Path, tokens: &Tokens) -> Result<()> {
+pub(crate) fn save(path: &Path, tokens: &Tokens) -> Result<()> {
     let cipher = Aes256GcmSiv::new((&key(path, true)?).into());
     let nonce = random::<12>()?;
     let encrypted = cipher
@@ -247,6 +249,11 @@ async fn exchange(
         .filter(|n| *n > 0 && *n <= 366 * 86400)
         .context("Invalid Claude OAuth token lifetime")?;
     Ok(Tokens {
+        account_id: value
+            .pointer("/organization/uuid")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| previous.and_then(|p| p.account_id.clone())),
         access_token: access.into(),
         refresh_token: refresh.into(),
         expires_at: now().saturating_add(expires),
@@ -384,6 +391,7 @@ pub(crate) async fn login(
         "Sign in on the proxy host, not a client relay"
     );
     let path = provider.credentials_path(Some(config_path))?;
+    crate::config::accounts::owned_store(&path)?;
     fs::create_dir_all(path.parent().context("Invalid Claude credential path")?)?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:54545")
         .await
@@ -421,6 +429,7 @@ pub(crate) async fn login(
     let _lock = lock(&path).await?;
     let client = crate::proxy::build_client(config)?;
     let tokens = exchange(&client, TOKEN_URL, json!({"grant_type":"authorization_code","code":code,"redirect_uri":REDIRECT,"client_id":CLIENT_ID,"code_verifier":verifier,"state":state}), None).await?;
+    crate::config::accounts::owned_store(&path)?;
     save(&path, &tokens)?;
     println!("Claude subscription connected. hey-proxy owns and refreshes these credentials.");
     if config.claude.is_none() {
@@ -431,3 +440,72 @@ pub(crate) async fn login(
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Resolve a provider-reported organization identity, never a user-supplied alias.
+/// Old encrypted stores are upgraded locally without touching the Claude CLI.
+pub(crate) async fn account_identity(
+    path: &Path,
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+) -> Result<String> {
+    let disk = path.to_owned();
+    let stored = tokio::task::spawn_blocking(move || load(&disk)).await??;
+    ensure!(
+        stored.access_token == token,
+        "Account credentials changed; retry selection"
+    );
+    if let Some(id) = stored.account_id.filter(|id| !id.is_empty()) {
+        return Ok(id);
+    }
+    let mut response = client
+        .get(format!(
+            "{}/api/oauth/profile",
+            endpoint.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|_| anyhow::anyhow!("Cannot verify Claude account identity"))?;
+    ensure!(
+        response.status().is_success(),
+        "Cannot verify Claude account identity"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| anyhow::anyhow!("Cannot read Claude identity"))?
+    {
+        ensure!(
+            bytes.len() + chunk.len() <= MAX_BYTES as usize,
+            "Claude identity response too large"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("Invalid Claude identity response"))?;
+    let id = value
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 256)
+        .context("Claude organization identity unavailable")?
+        .to_owned();
+    let _lock = lock(path).await?;
+    let disk = path.to_owned();
+    let expected = token.to_owned();
+    let identity = id.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut current = load(&disk)?;
+        ensure!(
+            current.access_token == expected,
+            "Account credentials changed; retry selection"
+        );
+        current.account_id = Some(identity);
+        save(&disk, &current)
+    })
+    .await??;
+    Ok(id)
+}
