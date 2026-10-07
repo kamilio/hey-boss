@@ -1,8 +1,8 @@
 use super::{Client, Freshness, Response, Result, validate_repository};
 use serde_json::json;
 
-// Rollups can omit workflow checks. Prove emptiness with complete suites and
-// each suite's latest-run count, without downloading nonempty check payloads.
+// Complete suites prove empty commit lists and validate cached workflow versions.
+// Rollups can omit workflow checks; they cannot establish the workflow roster.
 const QUERY: &str = r#"query CommitLists($owner: String!, $repo: String!, $head: GitObjectID!, $merge: GitObjectID!, $hasMerge: Boolean!) {
   repository(owner: $owner, name: $repo) {
     id nameWithOwner
@@ -15,7 +15,16 @@ fragment CommitListsCommit on Commit {
   status { id }
   checkSuites(first: 24) {
     totalCount pageInfo { hasNextPage }
-    nodes { id checkRuns(first: 1, filterBy: {checkType: LATEST}) { totalCount } }
+    nodes {
+      id databaseId status conclusion updatedAt
+      checkRuns(first: 1, filterBy: {checkType: LATEST}) { totalCount }
+      workflowRun {
+        id databaseId runAttempt runNumber event createdAt updatedAt displayTitle
+        workflow { databaseId name }
+        file { path }
+        checkSuite { databaseId commit { oid } }
+      }
+    }
   }
 }"#;
 

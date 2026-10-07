@@ -97,26 +97,42 @@ impl Client {
             }
         });
         tokio::select! {
-            // Prefer a completed direct read, including its explicit errors.
+            // Consume already available proof before a simultaneous REST result.
             biased;
-            result = &mut read => consume(result),
             (late, validations) = late => {
                 if let Err(error) = &late
                     && commit_summaries::required_error(error)
                 {
                     consume((Err(error.clone()), validations))
                 } else if let Ok(CachedList::Ready(values)) = late {
+                    // Do not hide a direct response (especially an access
+                    // denial) that has already completed alongside this proof.
+                    if let std::task::Poll::Ready(result) =
+                        std::future::poll_fn(|cx| std::task::Poll::Ready(read.as_mut().poll(cx))).await
+                    {
+                        return consume(result);
+                    }
                     // Dropping this receiver abandons only our REST wait.
                     // Coalesced readers and active responses still finish.
                     // Only consumed proof clocks reach the report.
                     tracing::info!(source=list.label(), "CI list reused newly validated metadata");
                     consume((Ok(values), validations))
+                } else if let Ok(CachedList::Changed {nonempty, versions}) = late {
+                    let values = consume(read.await)?;
+                    if nonempty && values.is_empty() {
+                        return Err(crate::Error::Invalid(format!("{} disagree with newer CI metadata", list.label().replace('-', " "))));
+                    }
+                    if let Some(versions) = versions {
+                        versions.validate(&values)?;
+                    }
+                    Ok(values)
                 } else {
                     // Missing, changed or unusable optional proof retains the
                     // original read, its errors, and its original deadline.
                     consume(read.await)
                 }
-            }
+            },
+            result = &mut read => consume(result),
         }
     }
 }

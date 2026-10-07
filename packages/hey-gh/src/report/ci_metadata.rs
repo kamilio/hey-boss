@@ -7,17 +7,48 @@ pub(super) mod commit_summaries;
 pub(super) mod discovery;
 mod late;
 mod status_versions;
+mod workflow_versions;
 
 enum CachedList {
     Ready(Vec<Value>),
-    Changed,
+    Changed {
+        nonempty: bool,
+        versions: Option<ListVersions>,
+    },
     Unavailable,
 }
 
 struct VersionEvidence {
-    versions: status_versions::Versions,
+    versions: ListVersions,
     at: u64,
     resource: String,
+}
+
+#[derive(PartialEq, Eq)]
+enum ListVersions {
+    Statuses(status_versions::Versions),
+    Workflows(workflow_versions::Versions),
+}
+
+impl ListVersions {
+    fn validate(&self, values: &[Value]) -> Result<()> {
+        if let Self::Workflows(versions) = self {
+            versions.validate(values)?;
+        }
+        Ok(())
+    }
+    async fn cached(
+        &self,
+        client: &Client,
+        path: &str,
+        at: u64,
+        freshness: Freshness,
+    ) -> Result<status_versions::Cached> {
+        match self {
+            Self::Statuses(versions) => versions.cached(client, path, at, freshness).await,
+            Self::Workflows(versions) => versions.cached(client, path, at, freshness).await,
+        }
+    }
 }
 
 struct ListEvidence {
@@ -31,6 +62,7 @@ struct ListEvidence {
 pub(super) enum CommitList {
     Statuses,
     Checks,
+    Workflows,
 }
 
 impl CommitList {
@@ -38,6 +70,7 @@ impl CommitList {
         match self {
             Self::Statuses => "statuses",
             Self::Checks => "check_runs",
+            Self::Workflows => "workflow_runs",
         }
     }
 
@@ -45,6 +78,7 @@ impl CommitList {
         match self {
             Self::Statuses => "commit-statuses",
             Self::Checks => "check-runs",
+            Self::Workflows => "workflow-versions",
         }
     }
 }
@@ -55,6 +89,7 @@ fn list_empty(pr: &Value, sha: &str, list: CommitList) -> Option<bool> {
             return None;
         }
         match list {
+            CommitList::Workflows => None,
             CommitList::Statuses => match commit.get("status")? {
                 Value::Null => Some(true),
                 value if value["id"].as_str().is_some_and(|id| !id.is_empty()) => Some(false),
@@ -179,7 +214,7 @@ impl Client {
         {
             CachedList::Ready(values) => Ok(values),
             CachedList::Unavailable => self.pages(rest_path, Some(list.field()), freshness).await,
-            CachedList::Changed => {
+            CachedList::Changed { nonempty, versions } => {
                 // Newer metadata contradicts the old list. Offline reads
                 // cannot invent the missing full REST payload.
                 if matches!(freshness, Freshness::CachedOnly) {
@@ -188,11 +223,14 @@ impl Client {
                 let values = self
                     .pages(rest_path, Some(list.field()), Freshness::Revalidate)
                     .await?;
-                if values.is_empty() {
+                if nonempty && values.is_empty() {
                     return Err(Error::Invalid(format!(
                         "{} disagree with newer CI metadata",
                         list.label().replace('-', " ")
                     )));
+                }
+                if let Some(versions) = versions {
+                    versions.validate(&values)?;
                 }
                 Ok(values)
             }
@@ -211,6 +249,16 @@ impl Client {
             || matches!(freshness, Freshness::MaxAge(age) if age.is_zero())
         {
             return Ok(CachedList::Unavailable);
+        }
+        if matches!(list, CommitList::Workflows) {
+            // Workflow versions validate an existing REST roster; cold reads
+            // and old/malformed payloads retain REST discovery. Never use a
+            // shortcut to reconstruct fields that GraphQL does not expose.
+            match self.peek_get(rest_path).await {
+                Ok(rest) if workflow_versions::reusable(&rest, sha, freshness) => {}
+                Ok(_) | Err(Error::CacheMiss) => return Ok(CachedList::Unavailable),
+                Err(error) => return Err(error),
+            }
         }
         let mut evidence = self
             .cached_list_evidence(repository, sha, list, freshness)
@@ -232,13 +280,29 @@ impl Client {
                 Err(Error::CacheMiss) => None,
                 Err(error) => return Err(error),
             };
+            // HTTP validation order cannot reverse an observed workflow attempt
+            // or update. A lagging REST response may have a newer local clock.
+            if let Some(proof) = versions.as_ref()
+                && let ListVersions::Workflows(expected) = &proof.versions
+                && rest.as_ref().is_some_and(|r| {
+                    r.data[list.field()].as_array().is_some_and(|values| {
+                        expected.regresses(values)
+                            || (r.link.is_none() && expected.validate(values).is_err())
+                    })
+                })
+            {
+                return Ok(CachedList::Changed {
+                    nonempty: !empty,
+                    versions: versions.map(|proof| proof.versions),
+                });
+            }
             // A later REST response can observe newly posted checks/statuses.
             // At the same clock, positive evidence from either source wins;
             // an empty payload cannot certify contradictory presence metadata.
             if rest.as_ref().is_none_or(|rest| {
                 rest.validated_at_ms < at || (!empty && rest.validated_at_ms == at)
             }) {
-                if empty {
+                if empty && !matches!(list, CommitList::Workflows) {
                     let _ = super::VALIDATIONS.try_with(|records| {
                         records.borrow_mut().push(super::ResourceValidation {
                             resource,
@@ -249,10 +313,12 @@ impl Client {
                     return Ok(CachedList::Ready(Vec::new()));
                 }
                 let mut changed = false;
+                let mut changed_versions = None;
                 if let Some(proof) = versions
-                    && rest
-                        .as_ref()
-                        .is_some_and(|r| r.data["sha"] == sha && r.validated_at_ms <= proof.at)
+                    && rest.as_ref().is_some_and(|r| {
+                        (matches!(list, CommitList::Workflows) || r.data["sha"] == sha)
+                            && r.validated_at_ms <= proof.at
+                    })
                 {
                     match proof
                         .versions
@@ -269,7 +335,10 @@ impl Client {
                             });
                             return Ok(CachedList::Ready(values));
                         }
-                        status_versions::Cached::Changed => changed = true,
+                        status_versions::Cached::Changed => {
+                            changed = true;
+                            changed_versions = Some(proof.versions);
+                        }
                         status_versions::Cached::Unavailable => {}
                     }
                 }
@@ -280,7 +349,10 @@ impl Client {
                             .is_some_and(Vec::is_empty)
                     })
                 {
-                    return Ok(CachedList::Changed);
+                    return Ok(CachedList::Changed {
+                        nonempty: !empty,
+                        versions: changed_versions,
+                    });
                 }
             }
         }
@@ -294,6 +366,9 @@ impl Client {
         list: CommitList,
         freshness: Freshness,
     ) -> Result<Option<ListEvidence>> {
+        if matches!(list, CommitList::Workflows) {
+            return Ok(None);
+        }
         let Some(owner) = crate::entity::current().filter(|owner| {
             owner.repository.eq_ignore_ascii_case(repository) && owner.node_id.is_some()
         }) else {
@@ -342,7 +417,8 @@ impl Client {
             if matches!(list, CommitList::Statuses)
                 && status_versions::Versions::has_fields(&node, sha)
             {
-                let proof = status_versions::Versions::from_node(&node, sha);
+                let proof =
+                    status_versions::Versions::from_node(&node, sha).map(ListVersions::Statuses);
                 if at > version_at {
                     version_at = at;
                     versions = proof.map(|proof| VersionEvidence {

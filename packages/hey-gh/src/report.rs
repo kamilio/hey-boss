@@ -725,23 +725,21 @@ impl Client {
         let head = sha(pr, "head")?;
         let merge = pr["merge_commit_sha"].as_str().filter(|s| valid_sha(s));
         let read = self.ci_report(repository, &head, merge, freshness);
-        // Closed PRs often lack potentialMergeCommit. Explicit immutable refs
-        // can prove empty lists without certifying current PR selectors.
-        if pr["state"] == "closed" {
-            let wait_for_selectors =
-                pr["merged"] == false && pr["mergeable"] == true && merge.is_some();
-            ci_metadata::commit_summaries::scope(
-                self,
-                repository,
-                &head,
-                merge,
-                wait_for_selectors,
-                read,
-            )
-            .await
-        } else {
-            read.await
-        }
+        // Commit-bound proofs do not certify current PR selectors. Give the
+        // selector read first use for checks/statuses when it can supply them;
+        // workflow rosters need their own complete suite/version evidence.
+        let wait_for_selectors = pr["state"] != "closed"
+            || (pr["merged"] == false && pr["mergeable"] == true && merge.is_some());
+        ci_metadata::commit_summaries::scope(
+            self,
+            repository,
+            &head,
+            merge,
+            pr["state"] == "closed",
+            wait_for_selectors,
+            read,
+        )
+        .await
     }
 
     async fn final_pull_request(
@@ -1396,6 +1394,9 @@ impl Client {
             if let Some(list) = match source {
                 "commit_statuses" => Some(ci_metadata::CommitList::Statuses),
                 "check_runs" => Some(ci_metadata::CommitList::Checks),
+                "workflow_runs" if ci_metadata::commit_summaries::ready().is_some() => {
+                    Some(ci_metadata::CommitList::Workflows)
+                }
                 _ => None,
             } {
                 return self
