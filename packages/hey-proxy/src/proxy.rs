@@ -1,6 +1,7 @@
 mod capacity;
 mod chat;
 pub(crate) mod claude;
+pub(crate) mod codex;
 mod fallback;
 mod gemini;
 mod guidance;
@@ -10,7 +11,7 @@ mod overview;
 mod recovery;
 mod replay;
 mod sse;
-mod subscription;
+pub(crate) mod subscription;
 mod websocket;
 use crate::config::{self, Config, Fingerprint, IpVersion, Mode};
 use anyhow::Result;
@@ -53,6 +54,7 @@ struct Service {
     credentials: hey_proxy::credentials::CredentialResolver,
     gemini: gemini::GeminiState,
     claude: claude::ClaudeState,
+    codex: codex::CodexState,
     logs: Arc<logs::Store>,
     access_config: Option<PathBuf>,
     access_keys: RwLock<(Instant, Option<crate::access::Keys>)>,
@@ -73,7 +75,7 @@ struct Loaded {
 }
 
 /// A request-scoped view: the config and client in force when the request arrived.
-struct Proxy {
+pub(crate) struct Proxy {
     fallback_attempt: bool,
     config: Arc<Config>,
     client: reqwest::Client,
@@ -143,6 +145,30 @@ fn router(config: Config) -> Result<Router> {
     router_with(config, Options::default())
 }
 
+pub(crate) fn local_snapshot(config: Config, source: Option<PathBuf>) -> Result<Proxy> {
+    let client = build_client(&config)?;
+    let fingerprint = source.as_ref().and_then(|p| crate::config::fingerprint(p));
+    let service = Arc::new(Service {
+        credentials: Default::default(),
+        claude: Default::default(),
+        codex: Default::default(),
+        gemini: gemini::GeminiState::new(source.as_deref())?,
+        logs: Arc::new(logs::Store::memory(&config)),
+        access_keys: RwLock::new((Instant::now(), None)),
+        access_config: None,
+        state: RwLock::new(Loaded {
+            config: Arc::new(config.effective()),
+            client,
+            fingerprint,
+        }),
+        source,
+        ip_lookup: Options::default().ip_lookup,
+        public_ip: Mutex::new([None, None]),
+        connectivity_probes: Options::default().connectivity_probes,
+    });
+    Ok(service.snapshot())
+}
+
 pub fn router_with(config: Config, options: Options) -> Result<Router> {
     config.validate()?;
     let client = build_client(&config)?;
@@ -156,6 +182,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     let service = Arc::new(Service {
         credentials: Default::default(),
         claude: Default::default(),
+        codex: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: match options.logs {
             Some(logs) => logs,
@@ -190,6 +217,12 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         .route("/overview.js", axum::routing::get(overview::script))
         .route("/overview/api", axum::routing::get(overview::data))
         .route("/claude/usage", axum::routing::get(claude::usage))
+        .route("/codex/usage", axum::routing::get(codex::usage))
+        .route(
+            "/usage/v1/recommend",
+            axum::routing::get(subscription::recommend),
+        )
+        .route("/usage/v1/spend", axum::routing::get(subscription::spend))
         .route(
             "/usage/v1/accounts",
             axum::routing::get(subscription::accounts),
@@ -275,7 +308,7 @@ async fn authenticate(
         return next.run(request).await;
     }
     let path = request.uri().path();
-    if !matches!(path, "/" | "/apis" | "/claude/usage")
+    if !matches!(path, "/" | "/apis" | "/claude/usage" | "/codex/usage")
         && !path.starts_with("/usage/")
         && !path.starts_with("/overview")
         && !path.starts_with("/logs")
@@ -1060,7 +1093,7 @@ async fn forward(State(service): State<Arc<Service>>, request: Request) -> Respo
     let proxy = Arc::new(snapshot);
     let response = if claude::is_path(request.uri().path())
         && proxy.config.mode != Mode::Client
-        && proxy.config.claude.is_some()
+        && proxy.config.claude.as_ref().is_some_and(|c| c.routing)
     {
         claude::forward(proxy, request).await
     } else if chat::is_path(request.uri().path()) && proxy.config.mode != Mode::Client {

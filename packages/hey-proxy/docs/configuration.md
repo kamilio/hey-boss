@@ -124,6 +124,9 @@ When explicitly configuring Codex on a host, include its proxy config so the com
 hey-proxy configure-codex \
   --base-url http://127.0.0.1:8080/v1 \
   --proxy-config ~/.hey-proxy/config.json
+hey-proxy configure-gemini \
+  --base-url http://127.0.0.1:8080/v1 \
+  --proxy-config ~/.hey-proxy/config.json
 ```
 
 `hey-proxy verify` checks the proxy and its connection. Add `--codex` only if you also want to verify an already-configured Codex installation. Verification does not modify Codex files.
