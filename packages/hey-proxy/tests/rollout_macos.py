@@ -39,4 +39,15 @@ with tempfile.TemporaryDirectory() as directory:
         assert operations == ['print'] + (['bootout'] if loaded else []) + ['bootstrap', 'bootstrap']
         assert len(set(paths)) == 2 and not any(p.exists() for p in paths)
 
+with tempfile.TemporaryDirectory() as directory:
+    # launchd pins an agent to its program's code signature; a stable system
+    # shell keeps upgraded proxy binaries launchable without re-registration.
+    binary = Path(directory) / 'hey proxy'
+    binary.write_text('#!/bin/sh\nprintf "%s|" "$0" "$@"\n')
+    binary.chmod(0o755)
+    argv = service.launch_arguments(binary, Path(directory) / 'config.json')
+    assert argv[0] == '/bin/sh'
+    output = subprocess.run(argv, capture_output=True, text=True, check=True).stdout
+    assert output == f'{binary}|--config|{directory}/config.json|'
+
 print('macOS restart checks passed: reuse, changed definition, EIO retry, private registration, cleanup')

@@ -54,6 +54,12 @@ def atomic(path, data, mode, backup=False):
             os.unlink(name)
 
 
+def launch_arguments(binary_path, config_path):
+    # launchd pins an agent to its program's code signature and refuses a replaced
+    # binary (EX_CONFIG). The stable system shell lets upgrades take effect on restart.
+    return ['/bin/sh', '-c', 'exec "$0" "$@"', str(binary_path), '--config', str(config_path)]
+
+
 def restart_macos(data, previous=None):
     home = Path.home()
     domain = f'gui/{os.getuid()}'
@@ -190,7 +196,7 @@ def _install(binary, source_config, base_url, codex_home, model, prepared, profi
         label = 'com.hey-proxy'
         plist = home / 'Library/LaunchAgents/com.hey-proxy.plist'
         previous = plist.read_bytes() if plist.exists() else None
-        data = plistlib.dumps(dict(Label=label, ProgramArguments=[str(binary_path), '--config', str(config_path)],
+        data = plistlib.dumps(dict(Label=label, ProgramArguments=launch_arguments(binary_path, config_path),
             RunAtLoad=True, KeepAlive=True, EnvironmentVariables={"TMPDIR": str(temp_path)}, StandardOutPath=str(log_path), StandardErrorPath=str(log_path), ThrottleInterval=2))
         atomic(plist, data, 0o600)
         restart_macos(data, previous)
