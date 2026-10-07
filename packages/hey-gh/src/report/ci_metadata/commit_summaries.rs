@@ -1,4 +1,6 @@
-use super::{CommitList, ListEvidence, late, recent};
+use super::{
+    CommitList, ListEvidence, ListVersions, VersionEvidence, late, recent, workflow_versions,
+};
 use crate::{Client, Error, Freshness, Response, Result, now_ms};
 use serde_json::Value;
 use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
@@ -8,6 +10,7 @@ struct Collection {
     repository: String,
     head: String,
     merge: Option<String>,
+    closed: bool,
     wait_for_selectors: bool,
     response: OnceCell<Result<Option<Response>>>,
     requested: OnceCell<(Freshness, tokio::time::Instant)>,
@@ -22,6 +25,7 @@ pub(in crate::report) async fn scope<T>(
     repository: &str,
     head: &str,
     merge: Option<&str>,
+    closed: bool,
     wait_for_selectors: bool,
     read: impl Future<Output = T>,
 ) -> T {
@@ -29,6 +33,7 @@ pub(in crate::report) async fn scope<T>(
         repository: repository.to_owned(),
         head: head.to_owned(),
         merge: merge.map(str::to_owned),
+        closed,
         wait_for_selectors,
         response: OnceCell::new(),
         requested: OnceCell::new(),
@@ -67,7 +72,7 @@ pub(in crate::report) async fn scope<T>(
         .await
 }
 
-pub(super) fn ready() -> Option<watch::Receiver<bool>> {
+pub(in crate::report) fn ready() -> Option<watch::Receiver<bool>> {
     COLLECTION.try_with(|c| c.ready.subscribe()).ok()
 }
 
@@ -94,6 +99,7 @@ fn list_empty(commit: &Value, sha: &str, list: CommitList) -> Option<bool> {
         return None;
     }
     match list {
+        CommitList::Workflows => None,
         CommitList::Statuses => match commit.get("status")? {
             Value::Null => Some(true),
             status if status["id"].as_str().is_some_and(|id| !id.is_empty()) => Some(false),
@@ -135,6 +141,9 @@ pub(super) async fn evidence(
     }) else {
         return Ok(None);
     };
+    if !collection.closed && !matches!(list, CommitList::Workflows) {
+        return Ok(None);
+    }
     let cached = client
         .commit_lists_response(
             repository,
@@ -156,7 +165,9 @@ pub(super) async fn evidence(
             // Merged/ambiguous PR metadata cannot supply one, so immutable
             // commit summaries need not queue behind that unrelated REST read.
             if matches!(freshness, Freshness::CachedOnly)
-                || (collection.wait_for_selectors && late::metadata_pending())
+                || (collection.wait_for_selectors
+                    && !matches!(list, CommitList::Workflows)
+                    && late::metadata_pending())
             {
                 return Ok(None);
             }
@@ -206,25 +217,36 @@ pub(super) async fn evidence(
     {
         return Ok(None);
     }
-    let Some(empty) = list_empty(
-        &repo[if collection.head == sha {
-            "head"
-        } else {
-            "merge"
-        }],
-        sha,
-        list,
-    ) else {
-        return Ok(None);
+    let commit = &repo[if collection.head == sha {
+        "head"
+    } else {
+        "merge"
+    }];
+    let (empty, versions) = if matches!(list, CommitList::Workflows) {
+        let Some(versions) = workflow_versions::Versions::from_commit(commit, sha) else {
+            return Ok(None);
+        };
+        (versions.is_empty(), Some(ListVersions::Workflows(versions)))
+    } else {
+        let Some(empty) = list_empty(commit, sha, list) else {
+            return Ok(None);
+        };
+        (empty, None)
     };
+    let resource = format!(
+        "graphql://{}/{repository}#commit-lists:{}:{sha}",
+        client.hostname(),
+        list.label()
+    );
+    let versions = versions.map(|versions| VersionEvidence {
+        versions,
+        at: response.validated_at_ms,
+        resource: resource.clone(),
+    });
     Ok(Some(ListEvidence {
         empty,
         at: response.validated_at_ms,
-        resource: format!(
-            "graphql://{}/{repository}#commit-lists:{}:{sha}",
-            client.hostname(),
-            list.label()
-        ),
-        versions: None,
+        resource,
+        versions,
     }))
 }

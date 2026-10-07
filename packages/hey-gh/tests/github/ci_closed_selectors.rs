@@ -49,7 +49,24 @@ async fn closed_selectors_validate_explicit_test_merge_and_reuse_empty_status_pr
         );
         assert!(report.data.commit_statuses.is_empty());
         let reads = h.calls()[before..].to_vec();
-        assert_eq!(reads.iter().filter(|v| v.path == "/graphql").count(), 1);
+        let queries: Vec<_> = reads
+            .iter()
+            .filter(|v| v.path == "/graphql")
+            .map(|v| v.body["query"].as_str().unwrap())
+            .collect();
+        // A workflow proof can race the selector that supplies empty statuses.
+        // Neither path may dispatch account discovery or duplicate its query.
+        assert!(queries.len() <= 2);
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|query| query.contains("query CiSelectors"))
+                .count(),
+            1
+        );
+        assert!(queries.iter().all(
+            |query| query.contains("query CiSelectors") || query.contains("query CommitLists")
+        ));
         assert!(
             reads.iter().all(|v| !v.path.ends_with("/pulls/7")),
             "{reads:?}"
