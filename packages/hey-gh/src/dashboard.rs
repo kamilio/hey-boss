@@ -975,7 +975,11 @@ impl Client {
             }
             if !seed_only && (result.is_ok() || retained_progress) {
                 if result.is_ok() {
-                    schedule.succeeded(&(repo.clone(), number));
+                    // Offline availability cannot consume a pending upstream
+                    // change; keep its priority until a validating read succeeds.
+                    if !matches!(freshness, Freshness::CachedOnly) {
+                        schedule.succeeded(&(repo.clone(), number));
+                    }
                 } else {
                     schedule.progressed(&(repo.clone(), number));
                     tracing::info!(repository=%repo,number,mode,"PR collection continuation queued");

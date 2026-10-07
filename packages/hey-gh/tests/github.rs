@@ -1088,6 +1088,9 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
                     node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] =
                         json!(if phase >= 3 { "SUCCESS" } else { "PENDING" });
                 }
+                if mode == "account-priority-activity" && phase >= 3 && repository == "acme/other" {
+                    node["updatedAt"] = json!("2026-09-19T00:01:00Z");
+                }
                 if mode == "account-repository-case-change" && phase >= 1 {
                     node["repository"]["nameWithOwner"] = json!(repository.to_ascii_uppercase());
                 }
@@ -1380,10 +1383,20 @@ async fn handler(State(mock): State<Mock>, uri: Uri, headers: HeaderMap, body: B
         }
         return reply(200, data, &[]);
     }
-    if (mode == "account-slow-one" || mode.starts_with("account-priority-") && phase >= 3)
+    if (mode == "account-slow-one"
+        || mode.starts_with("account-priority-")
+            && mode != "account-priority-activity"
+            && phase >= 3)
         && path == "/repos/acme/demo/pulls/7"
     {
         mock.release.notified().await;
+    }
+    if mode == "account-priority-activity" && path == "/repos/acme/other/issues/7/comments" {
+        return reply(
+            200,
+            json!([{"id":901,"body":if phase >= 3 {"Edited discussion"} else {"Original discussion"},"updated_at":if phase >= 3 {"2026-09-19T00:01:00Z"} else {"2026-09-19T00:00:00Z"}}]),
+            &[],
+        );
     }
     if mode == "account-identity-stalled" && path == "/repos/acme/other/issues/7/comments" {
         mock.release.notified().await;
@@ -8471,6 +8484,112 @@ async fn account_new_pr_gets_ci_before_the_older_rotation_after_discovery_and_re
 #[tokio::test]
 async fn account_finished_ci_gets_refreshed_before_old_rotation_without_a_new_commit() {
     account_priority_after_discovery_and_restart("account-priority-ci", HEAD).await;
+}
+
+#[tokio::test]
+async fn account_activity_refreshes_young_detail_caches_after_discovery_and_restart() {
+    account_activity_cache_refresh(false).await;
+}
+
+#[tokio::test]
+async fn account_background_activity_refreshes_young_detail_caches_after_discovery_and_restart() {
+    account_activity_cache_refresh(true).await;
+}
+
+async fn account_activity_cache_refresh(background: bool) {
+    let h = Harness::new().await;
+    h.mode("account-priority-activity");
+    h.phase(2);
+    let c = h.client();
+    assert!(
+        c.refresh_pr_status(Freshness::Revalidate, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let read_row = async |client: &Client| {
+        client
+            .pr_status_page(Some("acme/other"), None, 1000, Duration::ZERO)
+            .await
+            .unwrap()
+            .pull_requests
+            .remove(0)
+    };
+    assert_eq!(
+        read_row(&c).await["comments"][0]["body"],
+        "Original discussion"
+    );
+    h.phase(3);
+    // Discovery publishes the newer metadata before hydration sees it. Cached
+    // comments are still young, and the head and CI state are unchanged.
+    c.prepare_pr_status(Freshness::Revalidate).await.unwrap();
+    drop(c);
+    let c = h.client();
+    let offline_before = h.calls().len();
+    c.refresh_pr_status(Freshness::CachedOnly, false)
+        .await
+        .unwrap();
+    assert_eq!(h.calls().len(), offline_before);
+    assert_eq!(
+        read_row(&c).await["comments"][0]["body"],
+        "Original discussion"
+    );
+    if background {
+        let previous_finished = c
+            .account_refresh_cycle(false)
+            .await
+            .unwrap()
+            .unwrap()
+            .finished_at_ms;
+        let api = hey_gh::api::Api::new(c.clone()).await.unwrap();
+        api.watch_account(60).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if read_row(&c).await["comments"][0]["body"] == "Edited discussion" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Let the detail cycle checkpoint success before stopping its owner.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while c
+                .account_refresh_cycle(false)
+                .await
+                .unwrap()
+                .is_none_or(|cycle| cycle.finished_at_ms <= previous_finished)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        api.stop().await;
+    } else {
+        c.refresh_pr_status(Freshness::default(), false)
+            .await
+            .unwrap();
+    }
+    let row = read_row(&c).await;
+    assert_eq!(row["headRefOid"], HEAD);
+    assert_eq!(row["comments"][0]["body"], "Edited discussion");
+    let count = || {
+        h.calls()
+            .iter()
+            .filter(|c| c.path == "/repos/acme/other/issues/7/comments")
+            .count()
+    };
+    let refreshed = count();
+    c.refresh_pr_status(Freshness::default(), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        count(),
+        refreshed,
+        "A completed activity refresh must retain ordinary cache reuse"
+    );
 }
 
 async fn account_priority_after_discovery_and_restart(mode: &str, expected_head: &str) {
