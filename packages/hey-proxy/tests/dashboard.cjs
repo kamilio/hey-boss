@@ -20,7 +20,7 @@ test('Claude limits render unknown and stale readings safely', async () => {
   const catalog={mode:'standalone',relay:false,apis:[{id:'claude',name:'Claude subscription',description:'Native',configured:true,base_path:'',routes:[],models:[]}]};
   const payload={state:'stale',updated_at:1790800000,error:'Waiting before retrying',data:{windows:[{label:'<img src=x onerror=bad()>',used_percent:null,resets_at:null},{label:'Weekly',used_percent:112,resets_at:'bad-date'}],extra_usage:{enabled:false}}};
   let usageCalls=0;
-  const context={document:{getElementById:id=>{assert.ok(nodes.has(id),`Missing element ${id}`);return nodes.get(id);},createElement:tag=>new Element(tag),documentElement:new Element(),addEventListener(){},hidden:false},location:{origin:'http://localhost',hash:''},window:{addEventListener(){}},setInterval(){},clearTimeout(){},setTimeout(){},localStorage:{setItem(){}},fetch:async path=>({ok:true,status:200,json:async()=>path==='/overview/api'?catalog:(usageCalls++,payload)})};
+  const context={document:{getElementById:id=>{assert.ok(nodes.has(id),`Missing element ${id}`);return nodes.get(id);},createElement:tag=>new Element(tag),documentElement:new Element(),addEventListener(){},hidden:false},location:{origin:'http://localhost',hash:''},window:{addEventListener(){}},setInterval(){},clearTimeout(){},setTimeout(){},localStorage:{setItem(){}},fetch:async path=>({ok:true,status:200,json:async()=>path==='/overview/api'?catalog:path==='/providers/v1'?{schema_version:1,connections:[]}:(usageCalls++,payload)})};
   vm.runInNewContext(fs.readFileSync(require.resolve('../src/proxy/overview.js'),'utf8'),context);
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(usageCalls,1);
