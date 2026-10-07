@@ -1,0 +1,8 @@
+{
+  "listen": "127.0.0.1:8080",
+  "providers": {
+    "claude": {}
+  },
+  "aliases": [],
+  "fallbacks": {}
+}
