@@ -1492,3 +1492,118 @@ async fn last_report_detail_takes_a_completion_turn_before_unrelated_slow_detail
         );
     }
 }
+
+#[tokio::test]
+async fn two_pending_report_sources_progress_without_taking_the_ordinary_turn() {
+    for (coalesced, interactive) in [(false, false), (false, true), (true, false), (true, true)] {
+        let f = Fixture::new().await;
+        let freshness = Freshness::MaxAge(Duration::from_secs(30));
+        assert!(
+            f.client
+                .pr_report("acme/demo", 7, freshness)
+                .await
+                .unwrap()
+                .complete
+        );
+        f.mock.calls.lock().unwrap().clear();
+        rusqlite::Connection::open(f.dir.path().join("cache.sqlite"))
+            .unwrap()
+            .execute(
+                "DELETE FROM cache WHERE key LIKE '%/issues/7/timeline%' OR key LIKE '%/pulls/7/reviews%'",
+                [],
+            )
+            .unwrap();
+        let read = |path: &'static str| {
+            let client = f.client.clone();
+            tokio::spawn(async move {
+                crate::client::INTERACTIVE_READ
+                    .scope(
+                        Arc::new(AtomicBool::new(interactive)),
+                        client.get(path, Freshness::Revalidate),
+                    )
+                    .await
+            })
+        };
+        let gate = read("repos/acme/demo/issues/8/comments");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("/issues/8/comments"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let ordinary = read("repos/acme/demo/issues/9/comments");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let shared = coalesced.then(|| read("repos/acme/demo/issues/7/timeline?per_page=100"));
+        let before = f.client.status().coalesced_requests;
+        let reader = f.client.clone();
+        let report = tokio::spawn(async move {
+            crate::client::INTERACTIVE_READ
+                .scope(
+                    Arc::new(AtomicBool::new(interactive)),
+                    reader.pr_report("acme/demo", 7, freshness),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f.client.status().outstanding_requests != 4
+                || (coalesced && f.client.status().coalesced_requests == before)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Four groups can finish from cache while both remaining collections
+        // wait for the occupied detail lane. Neither depends on the other.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        f.mock.detail_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !f
+                .mock
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("/issues/9/comments"))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Ordinary reads must retain their alternating turn");
+        let calls = f.mock.calls.lock().unwrap().clone();
+        let ordinary_at = calls
+            .iter()
+            .position(|p| p.ends_with("/issues/9/comments"))
+            .unwrap();
+        let completed_before_ordinary = calls[..ordinary_at]
+            .iter()
+            .filter(|p| p.ends_with("/reviews") || p.ends_with("/timeline"))
+            .count();
+        f.mock.ordinary_detail_release.notify_one();
+        gate.await.unwrap().unwrap();
+        ordinary.await.unwrap().unwrap();
+        if let Some(shared) = shared {
+            shared.await.unwrap().unwrap();
+        }
+        assert!(report.await.unwrap().unwrap().complete);
+        assert_eq!(
+            completed_before_ordinary, 1,
+            "Two required collections must make progress, then yield the next turn (coalesced={coalesced}, interactive={interactive}): {calls:?}"
+        );
+    }
+}
