@@ -121,6 +121,10 @@ pub(crate) struct Job {
     pub notify: watch::Sender<SharedResult>,
     pub deadline: Arc<Mutex<Instant>>,
     pub waiting_deadlines: Arc<WaitingDeadlines>,
+    // A proof racing REST may remain queued longer, but its response cannot
+    // occupy a socket longer than an ordinary optional selector. A required
+    // coalescer still owns its independent, extendable request lifetime.
+    pub retained_selector_deadline: Option<Instant>,
     pub ready_at: Instant,
     // A lower-priority validator borrowed this completion's paced wait. Its
     // charged response keeps the exact job's slot and repays debt afterwards.
@@ -389,10 +393,18 @@ enum BodyError {
 // the same transport alive until that current deadline or the HTTP timeout.
 async fn before_deadline<T>(job: &Job, future: impl Future<Output = T>) -> Option<T> {
     tokio::pin!(future);
+    let deadline = || {
+        if !job.required_reader.load(Ordering::Relaxed) {
+            job.retained_selector_deadline
+                .map_or(job.deadline(), |limit| limit.min(job.deadline()))
+        } else {
+            job.deadline()
+        }
+    };
     loop {
-        match tokio::time::timeout_at(job.deadline(), &mut future).await {
+        match tokio::time::timeout_at(deadline(), &mut future).await {
             Ok(value) => return Some(value),
-            Err(_) if job.deadline() > Instant::now() => continue,
+            Err(_) if deadline() > Instant::now() => continue,
             Err(_) => return None,
         }
     }
@@ -1228,6 +1240,9 @@ impl Scheduler {
                     minting = true;
                 } else {
                     job.attempts += 1;
+                    if let Some(deadline) = &mut job.retained_selector_deadline {
+                        *deadline = (*deadline).min(Instant::now() + Duration::from_secs(2));
+                    }
                 }
                 job.http_status = None;
                 job.secondary_retry_at = None;
@@ -2170,6 +2185,7 @@ mod tests {
             notify: watch::channel(SharedResult::Queued).0,
             deadline: Arc::new(Mutex::new(Instant::now() + Duration::from_secs(60))),
             waiting_deadlines: Arc::new(WaitingDeadlines::default()),
+            retained_selector_deadline: None,
             ready_at: Instant::now(),
             protected_pacing: Vec::new(),
             attempts: 0,

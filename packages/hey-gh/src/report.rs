@@ -730,8 +730,15 @@ impl Client {
         if pr["state"] == "closed" {
             let wait_for_selectors =
                 pr["merged"] == false && pr["mergeable"] == true && merge.is_some();
-            ci_metadata::commit_summaries::scope(repository, &head, merge, wait_for_selectors, read)
-                .await
+            ci_metadata::commit_summaries::scope(
+                self,
+                repository,
+                &head,
+                merge,
+                wait_for_selectors,
+                read,
+            )
+            .await
         } else {
             read.await
         }
