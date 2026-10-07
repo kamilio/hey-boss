@@ -54,6 +54,16 @@ impl Cycle<'_> {
             authoritative_roster,
             deadline,
         } = *self;
+        // Discovery can report an edit while the old discussion cache is still
+        // young. Validate this pending activity before clearing its queue signal;
+        // normal polling resumes ordinary cache reuse after a successful read.
+        let freshness = if item.activity_pending && !matches!(freshness, Freshness::CachedOnly) {
+            tracing::info!(repository=%item.key.0, number=item.key.1, mode=mode.label(),
+                "PR activity validation started");
+            Freshness::Revalidate
+        } else {
+            freshness
+        };
         let ci_only = mode == Refresh::Ci;
         let seed_only = mode == Refresh::Discovery;
         let details_only = mode == Refresh::Details;

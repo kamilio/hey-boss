@@ -1,4 +1,4 @@
-//! Durable alternation between changed heads/CI and the ordinary account rotation.
+//! Durable alternation between changed PR evidence and the ordinary account rotation.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -43,6 +43,10 @@ struct Head {
     sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ci: Option<CiState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_at: Option<i64>,
+    #[serde(default)]
+    activity_pending: bool,
 }
 
 impl Head {
@@ -51,6 +55,15 @@ impl Head {
             node: node["id"].as_str().map(str::to_owned),
             sha: node["headRefOid"].as_str().map(str::to_owned),
             ci: ci_only.then(|| CiState::from_node(node)).flatten(),
+            activity_at: (!ci_only)
+                .then(|| {
+                    chrono::DateTime::parse_from_rfc3339(node["updatedAt"].as_str()?)
+                        .ok()
+                        .map(|at| at.timestamp_millis())
+                        .filter(|at| *at >= 0)
+                })
+                .flatten(),
+            activity_pending: false,
         }
     }
 
@@ -73,6 +86,7 @@ pub(super) struct Schedule {
 pub(super) struct Work {
     pub key: Key,
     pub node: Value,
+    pub activity_pending: bool,
     urgent: bool,
     at_normal_front: bool,
     successor: Key,
@@ -106,6 +120,25 @@ impl Schedule {
             .iter()
             .map(|(key, node)| {
                 let mut head = Head::from_node(node, ci_only);
+                // Activity is only a scheduling signal. Never treat an
+                // unchanged PR timestamp as proof that discussion is current.
+                // Preserve its high-water mark and pending read across stale
+                // discovery, failed refreshes and restarts, within this identity.
+                let activity_changed = if !ci_only {
+                    seen.get(key)
+                        .filter(|old| old.node == head.node)
+                        .is_some_and(|old| {
+                            let changed = old
+                                .activity_at
+                                .zip(head.activity_at)
+                                .is_some_and(|(old, new)| new > old);
+                            head.activity_at = head.activity_at.max(old.activity_at);
+                            head.activity_pending = old.activity_pending || changed;
+                            changed
+                        })
+                } else {
+                    false
+                };
                 let changed = match seen.get(key) {
                     Some(old) if old.same_commit(&head) => {
                         // Legacy records establish a baseline without queueing
@@ -119,7 +152,7 @@ impl Schedule {
                     }
                     _ => true,
                 };
-                if changed && !queued.contains(key) {
+                if (changed || activity_changed) && !queued.contains(key) {
                     self.urgent.push_back(key.clone());
                 }
                 (key.clone(), head)
@@ -128,6 +161,12 @@ impl Schedule {
     }
 
     pub fn order(&self, mut nodes: BTreeMap<Key, Value>) -> Vec<Work> {
+        let activity_pending: BTreeSet<_> = self
+            .seen
+            .iter()
+            .filter(|(_, head)| head.activity_pending)
+            .map(|(key, _)| key)
+            .collect();
         let mut normal: Vec<_> = nodes.keys().cloned().collect();
         let successors: BTreeMap<_, _> = normal
             .iter()
@@ -164,6 +203,7 @@ impl Schedule {
             let successor = successors[&key].clone();
             let at_normal_front = normal.front() == Some(&key);
             work.push(Work {
+                activity_pending: activity_pending.contains(&key),
                 key,
                 node,
                 urgent: priority,
@@ -195,6 +235,9 @@ impl Schedule {
     pub fn succeeded(&mut self, key: &Key) {
         self.urgent.retain(|queued| queued != key);
         self.resume.retain(|queued| queued != key);
+        if let Some((_, head)) = self.seen.iter_mut().find(|(seen, _)| seen == key) {
+            head.activity_pending = false;
+        }
     }
 
     // Retained CI pages or a finished detail collection awaiting validation
@@ -235,6 +278,143 @@ mod tests {
         node["commits"] = json!({"nodes":[{"commit":{
             "oid":node["headRefOid"], "statusCheckRollup":rollup
         }}]});
+    }
+
+    #[test]
+    fn newer_activity_prioritizes_details_without_changing_ci_or_head() {
+        for ci_only in [false, true] {
+            let mut current = nodes(&[1, 2, 3]);
+            current.get_mut(&key(3)).unwrap()["updatedAt"] = json!("2026-10-06T00:00:00Z");
+            let mut schedule = Schedule::baseline(&current, None, ci_only);
+            current.get_mut(&key(3)).unwrap()["updatedAt"] = json!("2026-10-06T00:01:00Z");
+            schedule = restart(schedule);
+            schedule.reconcile(&current, ci_only);
+            let work = schedule.order(current.clone());
+            assert_eq!(work[0].key, key(if ci_only { 1 } else { 3 }));
+            assert_eq!(
+                work.iter()
+                    .find(|work| work.key == key(3))
+                    .unwrap()
+                    .activity_pending,
+                !ci_only
+            );
+            assert_eq!(work.len(), current.len());
+            schedule.started(&work[0]);
+            schedule.succeeded(&key(3));
+            schedule = restart(schedule);
+            schedule.reconcile(&current, ci_only);
+            assert!(
+                schedule.urgent.is_empty(),
+                "Unchanged activity must not requeue work"
+            );
+            assert!(
+                schedule
+                    .order(current)
+                    .iter()
+                    .all(|work| !work.activity_pending)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_activity_refresh_keeps_validation_pending_until_success_or_identity_change() {
+        let mut current = nodes(&[1, 2]);
+        current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:00:00Z");
+        let mut schedule = Schedule::baseline(&current, None, false);
+        current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:01:00Z");
+        schedule.reconcile(&current, false);
+        let work = schedule.order(current.clone());
+        schedule.started(&work[0]); // A failed or interrupted attempt is not success.
+        schedule = restart(schedule);
+        current.get_mut(&key(2)).unwrap()["updatedAt"] = Value::Null;
+        schedule.reconcile(&current, false);
+        assert!(
+            schedule
+                .order(current.clone())
+                .iter()
+                .find(|work| work.key == key(2))
+                .unwrap()
+                .activity_pending
+        );
+        current.get_mut(&key(2)).unwrap()["id"] = json!("replacement");
+        schedule.reconcile(&current, false);
+        assert!(
+            schedule
+                .order(current)
+                .iter()
+                .all(|work| !work.activity_pending)
+        );
+    }
+
+    #[test]
+    fn invalid_missing_and_older_activity_cannot_requeue_or_erase_the_last_signal() {
+        for value in [
+            Value::Null,
+            json!(42),
+            json!("invalid"),
+            json!("2026-10-05T00:00:00Z"),
+        ] {
+            let mut current = nodes(&[1, 2]);
+            current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:00:00Z");
+            let mut schedule = Schedule::baseline(&current, None, false);
+            current.get_mut(&key(2)).unwrap()["updatedAt"] = value;
+            schedule.reconcile(&current, false);
+            assert!(schedule.urgent.is_empty());
+            schedule = restart(schedule);
+            current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:00:00-00:00");
+            schedule.reconcile(&current, false);
+            assert!(
+                schedule.urgent.is_empty(),
+                "Equivalent timestamps are unchanged"
+            );
+            current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:01:00Z");
+            schedule.reconcile(&current, false);
+            assert_eq!(schedule.urgent, VecDeque::from([key(2)]));
+        }
+    }
+
+    #[test]
+    fn activity_priority_survives_restart_and_keeps_ordinary_turns_under_continual_updates() {
+        let mut current = nodes(&[1, 2, 3, 4, 5]);
+        for number in [4, 5] {
+            current.get_mut(&key(number)).unwrap()["updatedAt"] = json!("2026-10-06T00:00:00Z");
+        }
+        let mut schedule = Schedule::baseline(&current, None, false);
+        let mut order = Vec::new();
+        for minute in 1..=6 {
+            for number in [4, 5] {
+                current.get_mut(&key(number)).unwrap()["updatedAt"] =
+                    json!(format!("2026-10-06T00:{minute:02}:00Z"));
+            }
+            schedule.reconcile(&current, false);
+            let work = schedule.order(current.clone());
+            order.push(work[0].key.1);
+            schedule.started(&work[0]);
+            schedule = restart(schedule);
+        }
+        assert_eq!(order, vec![4, 1, 5, 2, 4, 3]);
+    }
+
+    #[test]
+    fn legacy_activity_baselines_do_not_queue_the_entire_account() {
+        let mut current = nodes(&[1, 2]);
+        let mut schedule = Schedule::baseline(&current, None, false);
+        schedule.urgent.push_back(key(1));
+        for node in current.values_mut() {
+            node["updatedAt"] = json!("2026-10-06T00:00:00Z");
+        }
+        let mut stored = serde_json::to_value(schedule).unwrap();
+        for entry in stored["seen"].as_array_mut().unwrap() {
+            let head = entry[1].as_object_mut().unwrap();
+            head.remove("activity_at");
+            head.remove("activity_pending");
+        }
+        schedule = serde_json::from_value(stored).unwrap();
+        schedule.reconcile(&current, false);
+        assert_eq!(schedule.urgent, VecDeque::from([key(1)]));
+        current.get_mut(&key(2)).unwrap()["updatedAt"] = json!("2026-10-06T00:01:00Z");
+        schedule.reconcile(&current, false);
+        assert_eq!(schedule.urgent, VecDeque::from([key(1), key(2)]));
     }
 
     #[test]
