@@ -48,6 +48,7 @@ tokio::task_local! { pub(crate) static READ_DEADLINE: tokio::time::Instant; }
 struct OptionalSelectorBudget {
     queued_until: tokio::time::Instant,
     deadline: watch::Sender<tokio::time::Instant>,
+    retained: bool,
 }
 tokio::task_local! { static OPTIONAL_SELECTOR_BUDGET: OptionalSelectorBudget; }
 
@@ -70,7 +71,23 @@ mod native_policy_tests;
 pub(crate) async fn optional_selector_read<T>(
     read: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let queued_until = tokio::time::Instant::now() + Duration::from_secs(2);
+    selector_read(read, false).await
+}
+
+// The collection drives this optional proof alongside REST, so queuing need
+// not consume the fallback's budget. Dispatched responses retain a short bound.
+pub(crate) async fn retained_selector_read<T>(
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    selector_read(read, true).await
+}
+
+async fn selector_read<T>(
+    read: impl std::future::Future<Output = Result<T>>,
+    retained: bool,
+) -> Result<T> {
+    let queued_until =
+        tokio::time::Instant::now() + Duration::from_secs(if retained { 15 } else { 2 });
     let deadline = READ_DEADLINE
         .try_with(|deadline| queued_until.min(*deadline))
         .unwrap_or(queued_until);
@@ -80,6 +97,7 @@ pub(crate) async fn optional_selector_read<T>(
             OptionalSelectorBudget {
                 queued_until,
                 deadline: sender,
+                retained,
             },
             async {
                 tokio::pin!(read);
@@ -902,6 +920,10 @@ impl Client {
                     track_pending_validation(&completion);
                 }
                 let job = Job {
+                    retained_selector_deadline: OPTIONAL_SELECTOR_BUDGET
+                        .try_with(|budget| budget.retained)
+                        .unwrap_or(false)
+                        .then_some(caller_deadline),
                     completion_validation: completion.clone(),
                     required_reader: required.clone(),
                     installation: installation
@@ -983,7 +1005,9 @@ impl Client {
                     return Err(Error::Deadline);
                 }
                 SharedResult::OptionalDeferred
-                    if OPTIONAL_SELECTOR_BUDGET.try_with(|_| ()).is_ok() =>
+                    if OPTIONAL_SELECTOR_BUDGET
+                        .try_with(|budget| !budget.retained)
+                        .unwrap_or(false) =>
                 {
                     // Only the shortcut falls back to REST. Required callers
                     // sharing this request retain the job and its quota gates.
@@ -992,6 +1016,9 @@ impl Client {
                 state => {
                     if matches!(state, SharedResult::Active) {
                         let _ = OPTIONAL_SELECTOR_BUDGET.try_with(|budget| {
+                            if budget.retained {
+                                return;
+                            }
                             // Do not discard a paid shortcut merely because
                             // queuing left too little time for its response.
                             // Only dispatched work gets up to one response

@@ -1,8 +1,8 @@
 use super::{CommitList, ListEvidence, late, recent};
 use crate::{Client, Error, Freshness, Response, Result, now_ms};
 use serde_json::Value;
-use std::{collections::BTreeSet, future::Future, sync::Arc};
-use tokio::sync::OnceCell;
+use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
+use tokio::sync::{Notify, OnceCell, watch};
 
 struct Collection {
     repository: String,
@@ -10,29 +10,83 @@ struct Collection {
     merge: Option<String>,
     wait_for_selectors: bool,
     response: OnceCell<Result<Option<Response>>>,
+    requested: OnceCell<(Freshness, tokio::time::Instant)>,
+    wake: Notify,
+    ready: watch::Sender<bool>,
 }
 
 tokio::task_local! { static COLLECTION: Arc<Collection>; }
 
 pub(in crate::report) async fn scope<T>(
+    client: &Client,
     repository: &str,
     head: &str,
     merge: Option<&str>,
     wait_for_selectors: bool,
     read: impl Future<Output = T>,
 ) -> T {
+    let collection = Arc::new(Collection {
+        repository: repository.to_owned(),
+        head: head.to_owned(),
+        merge: merge.map(str::to_owned),
+        wait_for_selectors,
+        response: OnceCell::new(),
+        requested: OnceCell::new(),
+        wake: Notify::new(),
+        ready: watch::channel(false).0,
+    });
     COLLECTION
-        .scope(
-            Arc::new(Collection {
-                repository: repository.to_owned(),
-                head: head.to_owned(),
-                merge: merge.map(str::to_owned),
-                wait_for_selectors,
-                response: OnceCell::new(),
-            }),
-            read,
-        )
+        .scope(collection.clone(), async {
+            let fetch = async {
+                collection.wake.notified().await;
+                let response = crate::client::retained_selector_read(client.commit_lists_response(
+                    repository,
+                    head,
+                    merge,
+                    collection.requested.get().expect("requested proof").0,
+                ))
+                .await;
+                let response = match response {
+                    Ok(response) => Ok(Some(response)),
+                    Err(error) if required_error(&error) => Err(error),
+                    _ => Ok(None),
+                };
+                let _ = collection.response.set(response);
+                collection.ready.send_replace(true);
+            };
+            tokio::pin!(read);
+            // Keep the query in this collection's task-local identity, generation,
+            // priority and deadline scopes. Completion/cancellation drops it; no
+            // detached task can spend quota after its consumer has finished.
+            tokio::select! {
+                biased;
+                result = &mut read => result,
+                _ = fetch => read.await,
+            }
+        })
         .await
+}
+
+pub(super) fn ready() -> Option<watch::Receiver<bool>> {
+    COLLECTION.try_with(|c| c.ready.subscribe()).ok()
+}
+
+pub(super) fn required_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Auth(_)
+            | Error::LocalAuth(_)
+            | Error::Storage(_)
+            | Error::Stopped
+            | Error::GraphQL {
+                access_denied: true,
+                ..
+            }
+            | Error::GitHub {
+                status: 401 | 403,
+                ..
+            }
+    )
 }
 
 fn list_empty(commit: &Value, sha: &str, list: CommitList) -> Option<bool> {
@@ -114,36 +168,25 @@ pub(super) async fn evidence(
                 Err(error) if !matches!(error, Error::CacheMiss) => return Err(error),
                 _ => {}
             }
-            collection
-                .response
-                .get_or_init(|| async {
-                    match crate::client::optional_selector_read(client.commit_lists_response(
-                        repository,
-                        &collection.head,
-                        collection.merge.as_deref(),
-                        freshness,
-                    ))
-                    .await
-                    {
-                        Ok(response) => Ok(Some(response)),
-                        Err(
-                            error @ (Error::Auth(_)
-                            | Error::LocalAuth(_)
-                            | Error::Storage(_)
-                            | Error::Stopped
-                            | Error::GraphQL {
-                                access_denied: true,
-                                ..
-                            }
-                            | Error::GitHub {
-                                status: 401 | 403, ..
-                            }),
-                        ) => Err(error),
-                        _ => Ok(None),
-                    }
-                })
-                .await
-                .clone()?
+            if collection
+                .requested
+                .set((
+                    freshness,
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                ))
+                .is_ok()
+            {
+                collection.wake.notify_one();
+            }
+            let mut ready = collection.ready.subscribe();
+            // Start the existing REST fallback promptly, but retain the one
+            // shared proof while that fallback is pending. Late consumers use
+            // its own validation clock, never the old REST payload's clock.
+            // All list consumers share one fallback clock; later REST waves
+            // must not wait another two seconds for the same pending query.
+            let fallback_at = collection.requested.get().expect("requested proof").1;
+            let _ = tokio::time::timeout_at(fallback_at, ready.wait_for(|done| *done)).await;
+            collection.response.get().cloned().unwrap_or(Ok(None))?
         }
     };
     let Some(response) = response else {

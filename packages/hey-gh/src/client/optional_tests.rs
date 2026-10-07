@@ -149,6 +149,82 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn retained_selector_bounds_its_response_without_cutting_off_required_coalescers() {
+    for coalesce in [false, true] {
+        let f = Fixture::new().await;
+        let optional = tokio::spawn(retained_selector_read(read(
+            f.client.clone(),
+            "held-optional",
+            Freshness::Revalidate,
+        )));
+        tokio::time::timeout(Duration::from_secs(1), f.gate.entered.notified())
+            .await
+            .unwrap();
+        let required = if coalesce {
+            let required = tokio::spawn(read(
+                f.client.clone(),
+                "held-optional",
+                Freshness::Revalidate,
+            ));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while f.client.status().coalesced_requests == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            Some(required)
+        } else {
+            None
+        };
+        tokio::time::sleep(Duration::from_millis(2250)).await;
+        if coalesce {
+            assert!(
+                !optional.is_finished(),
+                "a required coalescer lost its response lifetime"
+            );
+        } else {
+            assert!(
+                optional.is_finished(),
+                "a retained proof occupied its socket beyond the response bound"
+            );
+        }
+        f.gate.release.notify_one();
+        let result = optional.await.unwrap();
+        if let Some(required) = required {
+            result.unwrap();
+            required.await.unwrap().unwrap();
+        } else {
+            assert!(matches!(result, Err(Error::Deadline)));
+        }
+        assert_eq!(f.client.status().network_requests, 1);
+    }
+}
+
+#[tokio::test]
+async fn retained_selector_keeps_the_callers_short_deadline_and_cancels_queued_work() {
+    let f = Fixture::new().await;
+    let gate = f.hold().await;
+    let client = f.client.clone();
+    let start = tokio::time::Instant::now();
+    let optional = tokio::spawn(async move {
+        READ_DEADLINE
+            .scope(
+                start + Duration::from_millis(200),
+                retained_selector_read(read(client, "never-dispatched", Freshness::Revalidate)),
+            )
+            .await
+    });
+    f.queued(2).await;
+    assert!(matches!(optional.await.unwrap(), Err(Error::Deadline)));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    f.queued(1).await;
+    f.gate.release.notify_one();
+    gate.await.unwrap().unwrap();
+    assert_eq!(*f.gate.calls.lock().unwrap(), ["gate"]);
+}
+
+#[tokio::test]
 async fn optional_selector_allows_a_bounded_response_after_a_late_dispatch() {
     for caller_bound in [false, true] {
         let f = Fixture::new().await;
