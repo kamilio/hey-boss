@@ -12,34 +12,44 @@ use tokio::sync::Notify;
 struct Group {
     completing: Arc<AtomicBool>,
     pending: Mutex<Vec<Weak<PendingRequest>>>,
+    parent: Option<Arc<Group>>,
 }
 
 pub(super) struct PendingRequest(Arc<AtomicBool>);
 
 tokio::task_local! { static SOURCE: Arc<Group>; }
 
-pub(super) fn track(priority: &Arc<AtomicBool>) -> Option<Arc<PendingRequest>> {
+pub(super) fn track(priority: &Arc<AtomicBool>) -> Option<Vec<Arc<PendingRequest>>> {
     SOURCE
         .try_with(|group| {
-            let mut pending = group.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if group.completing.load(Ordering::Acquire) {
-                priority.store(true, Ordering::Relaxed);
-                return None;
+            // Nested CI groups still belong to a full report's source group.
+            // Keep one guard per ancestor so either collection can promote
+            // the same shared request without retaining cancelled groups.
+            let mut requests = Vec::new();
+            let mut current = Some(group.as_ref());
+            while let Some(group) = current {
+                let mut pending = group.pending.lock().unwrap_or_else(|e| e.into_inner());
+                if group.completing.load(Ordering::Acquire) {
+                    priority.store(true, Ordering::Relaxed);
+                } else {
+                    pending.retain(|request| request.strong_count() > 0);
+                    let request = pending
+                        .iter()
+                        .filter_map(Weak::upgrade)
+                        .find(|request| Arc::ptr_eq(&request.0, priority))
+                        .unwrap_or_else(|| {
+                            let request = Arc::new(PendingRequest(priority.clone()));
+                            pending.push(Arc::downgrade(&request));
+                            request
+                        });
+                    requests.push(request);
+                }
+                current = group.parent.as_deref();
             }
-            pending.retain(|request| request.strong_count() > 0);
-            if let Some(shared) = pending
-                .iter()
-                .filter_map(Weak::upgrade)
-                .find(|request| Arc::ptr_eq(&request.0, priority))
-            {
-                return Some(shared);
-            }
-            let request = Arc::new(PendingRequest(priority.clone()));
-            pending.push(Arc::downgrade(&request));
-            Some(request)
+            requests
         })
         .ok()
-        .flatten()
+        .filter(|requests| !requests.is_empty())
 }
 
 pub(crate) struct SourceCompletion {
@@ -61,6 +71,7 @@ impl SourceCompletion {
         let group = Arc::new(Group {
             completing: self.completing.clone(),
             pending: Mutex::new(Vec::new()),
+            parent: SOURCE.try_with(Arc::clone).ok(),
         });
         {
             let mut groups = self.groups.lock().unwrap_or_else(|e| e.into_inner());
@@ -168,5 +179,48 @@ mod tests {
             SOURCE.with(|group| assert_eq!(group.pending.lock().unwrap().len(), 1));
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn nested_groups_keep_parent_completion_and_release_cancelled_tracking() {
+        for cancel in [false, true] {
+            let parent = SourceCompletion::new(Arc::new(Notify::new()));
+            let child = SourceCompletion::new(Arc::new(Notify::new()));
+            let flag = Arc::new(AtomicBool::new(false));
+            let mut read = Box::pin(parent.collect(child.collect(async {
+                let _request = track(&flag);
+                for _ in 0..1000 {
+                    track(&flag);
+                }
+                SOURCE.with(|group| {
+                    assert_eq!(group.pending.lock().unwrap().len(), 1);
+                    assert_eq!(
+                        group.parent.as_ref().unwrap().pending.lock().unwrap().len(),
+                        1
+                    );
+                });
+                std::future::pending::<()>().await;
+            })));
+            poll_pending(read.as_mut()).await;
+            if cancel {
+                drop(read);
+            }
+            parent.promote();
+            assert_eq!(
+                flag.load(Ordering::Relaxed),
+                !cancel,
+                "nested tracking must preserve parent promotion and cancellation"
+            );
+            let later = Arc::new(AtomicBool::new(false));
+            parent
+                .collect(child.collect(async {
+                    track(&later);
+                }))
+                .await;
+            assert!(
+                later.load(Ordering::Relaxed),
+                "later children inherit a completing parent"
+            );
+        }
     }
 }

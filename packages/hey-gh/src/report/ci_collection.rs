@@ -160,6 +160,8 @@ impl Client {
         let mut workflow_lists = sources.iter().filter(|s| s.name == "workflow_runs").count();
         let mut workflows = Vec::new();
         let mut job_results: Vec<Option<Result<Vec<Value>>>> = Vec::new();
+        let completion = self.source_completion();
+        let mut tail_promoted = false;
         let mut active: Vec<Read<'_>> = Vec::new();
         let width = if self.status().queue_capacity >= 32 {
             3
@@ -167,6 +169,12 @@ impl Client {
             1
         };
         while !pending.is_empty() || !active.is_empty() {
+            // Workflow lists can discover more job collections. Only promote
+            // a bounded tail after every list has resolved and all work is known.
+            if !tail_promoted && workflow_lists == 0 && pending.len() + active.len() <= 2 {
+                completion.promote();
+                tail_promoted = true;
+            }
             while active.len() < width {
                 // Cache preparation can yield before the shared HTTP queue.
                 // Preserve source order through admission, while overlapping
@@ -208,7 +216,7 @@ impl Client {
                     }
                 });
                 active.push(Read {
-                    future: Box::pin(future),
+                    future: Box::pin(completion.collect(future)),
                     admission: Box::pin(async move {
                         let _ = admitted.wait_for(|ready| *ready).await;
                     }),

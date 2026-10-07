@@ -431,16 +431,17 @@ impl Client {
         // Refill each freed slot immediately: a paced REST read must not keep
         // healthy siblings behind a batch barrier. Poll in this caller's task
         // so entity fencing, validation clocks and collection budgets survive.
+        let completion = self.source_completion();
         let fetch = |index: usize| {
             let (source, path) = &sources[index];
-            Box::pin(self.refresh_pr_detail_source(
+            Box::pin(completion.collect(self.refresh_pr_detail_source(
                 repository,
                 number,
                 source,
                 path,
                 freshness,
                 &first_page,
-            ))
+            )))
         };
         let tail_admitted = tokio::sync::Notify::new();
         let confirmation_age = std::time::Duration::from_secs(15);
@@ -471,6 +472,7 @@ impl Client {
         };
         let collection = async {
             let mut next = 0;
+            let mut finished = 0;
             let mut active = Vec::new();
             while next < sources.len() || !active.is_empty() {
                 while next < sources.len() && active.len() < width {
@@ -490,6 +492,13 @@ impl Client {
                 })
                 .await;
                 let (index, _) = active.remove(position);
+                finished += 1;
+                if sources.len() - finished == 2 {
+                    // Like full reports, let the last two live collections
+                    // share completion turns. The shared scheduler still
+                    // alternates them with ordinary work in the same class.
+                    completion.promote();
+                }
                 match result {
                     Ok(values) => {
                         if sources[index].0 == "reviews" {
