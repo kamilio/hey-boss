@@ -52,7 +52,7 @@ fn normalize(value: &Value) -> Result<Value> {
                 .or_else(|| bounded(&limit["scope"]["model"]["id"]))
                 .or_else(|| bounded(&limit["kind"]))
                 .unwrap_or_else(|| "Subscription limit".into());
-            windows.push(json!({"id":format!("limit_{index}"),"label":label,"group":bounded(&limit["group"]),"used_percent":percent(&limit["percent"]),"resets_at":bounded(&limit["resets_at"])}));
+            windows.push(json!({"id":format!("limit_{index}"),"label":label,"group":bounded(&limit["group"]),"model":bounded(&limit["scope"]["model"]["id"]),"used_percent":percent(&limit["percent"]),"resets_at":bounded(&limit["resets_at"])}));
         }
     }
     for window in &mut windows {

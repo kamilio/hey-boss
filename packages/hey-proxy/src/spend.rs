@@ -1482,6 +1482,7 @@ fn latest_snapshot_windows(conn: &Connection, provider: &str) -> Vec<Window> {
             id: r.get(0)?,
             label: r.get(1)?,
             group: None,
+            model: None,
             used_percent: Some(r.get(2)?),
             remaining_percent: Some(r.get(3)?),
             resets_at: r.get(4)?,
@@ -1676,10 +1677,12 @@ mod tests {
                 state: State::Ok,
                 updated_at: Some(1_790_950_000),
                 data: Some(hey_proxy::usage::UsageData {
+                    availability_unknown: false,
                     windows: vec![Window {
                         id: "seven_day".into(),
                         label: "Weekly · all models".into(),
                         group: None,
+                        model: None,
                         used_percent: Some(10.0),
                         remaining_percent: Some(90.0),
                         resets_at: None,

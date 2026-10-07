@@ -26,6 +26,8 @@
 //! # Ok(()) }
 //! ```
 mod client;
+mod worker;
+pub use worker::*;
 mod recommend;
 pub use client::{Client, Error};
 pub use recommend::{format_duration_short, format_unix_iso8601, parse_timestamp, recommend};
@@ -94,6 +96,9 @@ pub struct Reading {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UsageData {
+    /// Provider denied availability without establishing which included limit applies.
+    #[serde(default)]
+    pub availability_unknown: bool,
     pub windows: Vec<Window>,
     pub extra_usage: Option<ExtraUsage>,
 }
@@ -103,6 +108,9 @@ pub struct Window {
     pub id: String,
     pub label: String,
     pub group: Option<String>,
+    /// Exact upstream model scope when supplied by the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Can exceed 100 if the provider reports usage above a cap.
     pub used_percent: Option<f64>,
     /// max(0, 100 - used_percent). Missing utilization stays unknown.

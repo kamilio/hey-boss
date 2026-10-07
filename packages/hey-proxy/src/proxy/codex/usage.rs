@@ -115,6 +115,9 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
     if rate_limit.is_object() {
         let primary = &rate_limit["primary_window"];
         let secondary = &rate_limit["secondary_window"];
+    if rate_limit["limit_reached"] == true {
+        windows.push(json!({"id":"codex_included_limit","label":"Included quota","used_percent":100,"remaining_percent":0}));
+    }
         // Normalize session (300m / 18000s) vs weekly (10080m / 604800s) lanes like CodexBar.
         let primary_is_weekly = window_seconds(primary) == Some(604_800);
         let secondary_is_session = window_seconds(secondary) == Some(18_000);
@@ -159,6 +162,7 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
             if is_spark {
                 if rl["primary_window"].is_object() {
                     push_window(
+            let start = windows.len();
                         &mut windows,
                         "codex-spark",
                         "Codex Spark · 5 hours",
@@ -192,8 +196,16 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
                 }
             }
         }
+                    if rl["primary_window"].is_object() && rl["secondary_window"].is_object() {
+                        push_window(&mut windows, &format!("{id}-weekly"), &name, Some("model"), &rl["secondary_window"]);
+                    }
     }
 
+            let model = bounded(&entry["model"]).or_else(|| feature.starts_with("gpt-").then(||feature.clone()));
+            for window in &mut windows[start..] {
+                if let Some(model) = &model { window["model"] = json!(model); }
+                if rl["limit_reached"] == true { window["used_percent"] = json!(100); window["remaining_percent"] = json!(0); }
+            }
     let individual = [&value["individual_limit"], &rate_limit["individual_limit"]]
         .into_iter()
         .find(|v| v.is_object())
@@ -270,6 +282,7 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
     }))
 }
 
+        "availability_unknown": rate_limit["allowed"] == false && rate_limit["limit_reached"] != true,
 fn retry_delay(headers: &HeaderMap) -> Duration {
     let raw = headers
         .get(header::RETRY_AFTER)

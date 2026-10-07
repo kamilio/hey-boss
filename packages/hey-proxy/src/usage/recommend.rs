@@ -55,7 +55,7 @@ pub fn parse_timestamp(raw: &str) -> Option<u64> {
             .ok()
             .map(|d| d.as_secs());
     }
-    if s.len() < 19 {
+    if s.len() < 19 || !s.is_ascii() {
         return None;
     }
     let b = s.as_bytes();
@@ -229,21 +229,6 @@ fn evaluate_candidate(usage: &AccountUsage, now_unix: u64) -> RecommendationCand
         min_remaining
     };
 
-    let extra_available = data.extra_usage.as_ref().is_some_and(|extra| {
-        if extra.enabled != Some(true) {
-            return false;
-        }
-        if let Some(spend) = &extra.spend {
-            if let Some(rem) = spend.remaining {
-                return rem > 0.0;
-            }
-            if spend.limit.is_some_and(|l| l > 0.0) && spend.used.is_some_and(|u| u == 0.0) {
-                return true;
-            }
-        }
-        extra.remaining_percent.is_some_and(|rp| rp > 0.0)
-    });
-
     if included_exhausted {
         // When exhausted, the account remains blocked until all exhausted core windows reset.
         let blocking = exhausted_windows
@@ -259,13 +244,12 @@ fn evaluate_candidate(usage: &AccountUsage, now_unix: u64) -> RecommendationCand
             .map(|w| to_expiring_window(w, now_unix));
         let next_reset_at = blocking.as_ref().and_then(|w| w.resets_at.clone());
         let next_reset_in_seconds = blocking.as_ref().and_then(|w| w.resets_in_seconds);
-        let available = extra_available && matches!(reading.state, State::Ok | State::Stale);
         return RecommendationCandidate {
             account: usage.account.clone(),
             state: reading.state,
-            available,
+            available: false,
             exhausted: true,
-            using_extra_usage: available,
+            using_extra_usage: false,
             effective_remaining_percent: Some(0.0),
             earliest_expiring_window: blocking,
             next_reset_at,
@@ -315,8 +299,7 @@ fn evaluate_candidate(usage: &AccountUsage, now_unix: u64) -> RecommendationCand
 
     let next_reset_at = chosen_window.as_ref().and_then(|w| w.resets_at.clone());
     let next_reset_in_seconds = chosen_window.as_ref().and_then(|w| w.resets_in_seconds);
-    let available = matches!(reading.state, State::Ok | State::Stale)
-        && (effective_remaining_percent.is_some_and(|r| r > 0.0) || extra_available);
+    let available = super::included_quota(usage, "", now_unix).is_ok();
 
     RecommendationCandidate {
         account: usage.account.clone(),
@@ -442,15 +425,7 @@ pub fn recommend(usages: &[AccountUsage], now_unix: u64) -> Recommendation {
     };
 
     let second = candidates.get(1);
-    let (reason, summary) = if best.using_extra_usage {
-        (
-            "extra_usage_fallback".to_owned(),
-            format!(
-                "Recommended {} ({}/{}) via enabled extra usage because all included subscription quotas are exhausted.",
-                best.account.provider, best.account.provider, best.account.id
-            ),
-        )
-    } else if let Some(other) = second {
+    let (reason, summary) = if let Some(other) = second {
         if other.exhausted && !other.available {
             let rem = best
                 .effective_remaining_percent
@@ -563,11 +538,13 @@ mod tests {
                 state: State::Ok,
                 updated_at: Some(1_790_800_000),
                 data: Some(UsageData {
+                    availability_unknown: false,
                     windows: vec![
                         Window {
                             id: "five_hour".into(),
                             label: "Session · 5 hours".into(),
                             group: None,
+                            model: None,
                             used_percent: Some(five_hour_used),
                             remaining_percent: Some((100.0 - five_hour_used).max(0.0)),
                             resets_at: five_hour_reset.map(str::to_owned),
@@ -576,6 +553,7 @@ mod tests {
                             id: "seven_day".into(),
                             label: "Weekly · all models".into(),
                             group: None,
+                            model: None,
                             used_percent: Some(seven_day_used),
                             remaining_percent: Some((100.0 - seven_day_used).max(0.0)),
                             resets_at: seven_day_reset.map(str::to_owned),
@@ -692,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_extra_usage_only_when_all_included_quotas_are_out() {
+    fn paid_extra_usage_never_establishes_recommendation_eligibility() {
         let now = 1_790_800_000u64;
         let mut claude = sample_usage(
             "claude",
@@ -723,7 +701,12 @@ mod tests {
             Some(&format_unix_iso8601(now + 100_000)),
         );
         let rec = recommend(&[codex, claude], now);
-        assert_eq!(rec.recommended_provider.as_deref(), Some("claude"));
-        assert_eq!(rec.reason, "extra_usage_fallback");
+        assert_eq!(rec.recommended_provider, None);
+        assert_eq!(rec.reason, "all_exhausted");
+        assert!(
+            rec.candidates
+                .iter()
+                .all(|c| !c.available && !c.using_extra_usage)
+        );
     }
 }

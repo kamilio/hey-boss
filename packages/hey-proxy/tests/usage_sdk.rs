@@ -328,3 +328,44 @@ async fn cli_recommend_and_codex_usage_work_for_both_earliest_expiring_and_exhau
 
     task.abort();
 }
+
+#[tokio::test]
+async fn worker_sdk_versions_capabilities_and_no_result_are_explicit() {
+    use hey_proxy::usage::{RecommendationStatus, Runtime};
+    for version in [2, 3] {
+        let (url, task) = serve(Router::new().fallback(any(move |request: Request| async move {
+            assert_eq!(request.uri(), "/usage/v2/recommend?runtimes=codex,claude");
+            assert_eq!(request.headers()["authorization"], "Bearer synthetic-host-key");
+            axum::Json(json!({"schema_version":version,"config_revision":"revision-one","generated_at":1000,"expires_at":1000,"recheck_at":1060,"status":"no_recommendation","selected":null,"candidates":[]}))
+        }))).await;
+        let result = Client::new(&url, Some("synthetic-host-key"))
+            .unwrap()
+            .recommend_workers(&[Runtime::Claude, Runtime::Codex, Runtime::Codex])
+            .await;
+        if version == 2 {
+            assert_eq!(
+                result.unwrap().status,
+                RecommendationStatus::NoRecommendation
+            );
+        } else {
+            assert_eq!(result.unwrap_err(), Error::UnsupportedSchema(3));
+        }
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn worker_sdk_checks_version_before_decoding_new_schema() {
+    let (url, task) =
+        serve(Router::new().fallback(any(|| async { axum::Json(json!({"schema_version":99})) })))
+            .await;
+    assert_eq!(
+        Client::new(&url, None)
+            .unwrap()
+            .recommend_workers(&[])
+            .await
+            .unwrap_err(),
+        Error::UnsupportedSchema(99)
+    );
+    task.abort();
+}
