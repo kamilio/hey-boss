@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>hey-proxy · Traffic &amp; spend</title>
+<style>
+:root{font:16px/1.5 system-ui,sans-serif;color-scheme:light dark;background:light-dark(#f7f8fa,#151719);color:light-dark(#202630,#edf0f4)}
+*{box-sizing:border-box}body{margin:0}main,header{max-width:1050px;margin:auto;padding:28px}header{display:flex;gap:24px;align-items:center;border-bottom:1px solid light-dark(#dce0e6,#373d44)}a{color:inherit}header a:first-child{font-weight:700;text-decoration:none;margin-right:auto}h1{font-size:28px;margin:12px 0 4px}h2{font-size:15px;font-weight:500;margin:0}p{color:light-dark(#626b79,#aab2bf)}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:24px 0}.card{border:1px solid light-dark(#dce0e6,#373d44);border-radius:12px;background:light-dark(white,#20242a);padding:24px}.card strong{display:block;font-size:32px;font-weight:600;letter-spacing:-1px;margin:16px 0 8px;overflow-wrap:anywhere}.card small{color:light-dark(#626b79,#aab2bf)}.traffic{display:flex;gap:24px;align-items:baseline;margin-top:32px}.traffic strong{font-size:52px;font-variant-numeric:tabular-nums}.status{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin:32px 0 20px}button{font:inherit;padding:6px 14px;border:1px solid light-dark(#dce0e6,#555d69);border-radius:6px;background:light-dark(white,#20242a);color:inherit;cursor:pointer}button:focus-visible,a:focus-visible{outline:2px solid #548fee;outline-offset:4px}.warning{color:light-dark(#994c0c,#ffb56f)}footer{font-size:13px;border-top:1px solid light-dark(#dce0e6,#373d44);padding-top:12px}#updated{font-size:13px;color:light-dark(#626b79,#aab2bf)}[hidden]{display:none!important}@media(max-width:700px){main,header{padding:20px}.cards{grid-template-columns:1fr}.card strong{font-size:30px}.traffic{gap:16px}header{font-size:14px}}
+</style>
+<script defer src="/logs/dashboard.js"></script>
+</head>
+<body>
+<header><a href="/">hey-proxy</a><a href="/apis">API setup</a><a href="/logs" aria-current="page">Traffic &amp; spend</a></header>
+<main>
+<h1>Traffic &amp; spend</h1>
+<p id="scope">This proxy · client relays excluded</p>
+<div class="traffic"><strong id="rpm">—</strong><div><b>Requests per minute</b><br><small>Last 60 seconds</small></div></div>
+<section class="cards" aria-label="Estimated spend in USD">
+<article class="card"><h2>Today · estimated USD</h2><strong id="today">—</strong><small id="today-note">Loading history…</small></article>
+<article class="card"><h2>This week · estimated USD</h2><strong id="week">—</strong><small id="week-note">Loading history…</small></article>
+<article class="card"><h2>All time · estimated USD</h2><strong id="all_time">—</strong><small id="all_time-note">Loading history…</small></article>
+</section>
+<div class="status"><span id="status" role="status">Connecting…</span><span id="updated"></span><button id="refresh" type="button">Refresh</button><a id="login" href="/logs" hidden>Sign in again</a></div>
+<footer><p>Today starts at your local midnight. Weeks start Monday in your local time zone. Spend follows each request’s start time and includes all retained local history, including reported usage from requests still running. Refreshes every five seconds.</p><p>Estimates use recognized models’ standard list prices and reported usage, including cache reads and writes. Unknown models and missing usage remain unpriced. Claude subscription usage shows its API-equivalent value, not additional subscription charges. Subscription fees, discounts, tool fees and unreported retry charges are excluded. Logging gaps can undercount spend. No prompts, response bodies or credentials are stored.</p></footer>
+<noscript><p>Enable JavaScript to display traffic and spend.</p></noscript>
+</main>
+</body>
+</html>

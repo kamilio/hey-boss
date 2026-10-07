@@ -1,0 +1,342 @@
+{
+  "version": "2026-10-01",
+  "source": "https://developers.openai.com/api/docs/pricing",
+  "currency": "USD",
+  "prices": {
+    "gpt-5.5": [
+      5,
+      0.5,
+      30,
+      null,
+      272000
+    ],
+    "gpt-5.5-pro": [
+      30,
+      null,
+      180,
+      null,
+      272000
+    ],
+    "gpt-5.4": [
+      2.5,
+      0.25,
+      15,
+      null,
+      272000
+    ],
+    "gpt-5.4-pro": [
+      30,
+      null,
+      180,
+      null,
+      272000
+    ],
+    "gpt-5.4-mini": [
+      0.75,
+      0.075,
+      4.5
+    ],
+    "gpt-5.4-nano": [
+      0.2,
+      0.02,
+      1.25
+    ],
+    "gpt-5.3-codex": [
+      1.75,
+      0.175,
+      14
+    ],
+    "gpt-5.2": [
+      1.75,
+      0.175,
+      14
+    ],
+    "gpt-5.2-pro": [
+      21,
+      null,
+      168
+    ],
+    "gpt-5.1": [
+      1.25,
+      0.125,
+      10
+    ],
+    "gpt-5": [
+      1.25,
+      0.125,
+      10
+    ],
+    "gpt-5-mini": [
+      0.25,
+      0.025,
+      2
+    ],
+    "gpt-5-nano": [
+      0.05,
+      0.005,
+      0.4
+    ],
+    "gpt-5-pro": [
+      15,
+      null,
+      120
+    ],
+    "gpt-4.1": [
+      2,
+      0.5,
+      8
+    ],
+    "gpt-4.1-mini": [
+      0.4,
+      0.1,
+      1.6
+    ],
+    "gpt-4.1-nano": [
+      0.1,
+      0.025,
+      0.4
+    ],
+    "gpt-4o": [
+      2.5,
+      1.25,
+      10
+    ],
+    "gpt-4o-2024-05-13": [
+      5,
+      null,
+      15
+    ],
+    "gpt-4o-mini": [
+      0.15,
+      0.075,
+      0.6
+    ],
+    "o1": [
+      15,
+      7.5,
+      60
+    ],
+    "o1-pro": [
+      150,
+      null,
+      600
+    ],
+    "o3": [
+      2,
+      0.5,
+      8
+    ],
+    "o3-pro": [
+      20,
+      null,
+      80
+    ],
+    "o3-mini": [
+      1.1,
+      0.55,
+      4.4
+    ],
+    "o4-mini": [
+      1.1,
+      0.275,
+      4.4
+    ],
+    "gemini-3.1-pro-preview": [
+      2,
+      0.2,
+      12,
+      null,
+      200000
+    ]
+  },
+  "aliases": {
+    "gpt-4.1-2025-04-14": "gpt-4.1",
+    "o3-2025-04-16": "o3",
+    "gemini/gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "gemini/models/gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "models/gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+    "claude-sonnet-4-5-20250929": "claude-sonnet-4-5",
+    "claude-opus-4-5-20251101": "claude-opus-4-5",
+    "claude-opus-4-6-20260205": "claude-opus-4-6",
+    "claude-opus-4-7-20260416": "claude-opus-4-7"
+  },
+  "sources": {
+    "openai": "https://developers.openai.com/api/docs/pricing",
+    "gemini": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-pro-preview",
+    "claude": "https://docs.claude.com/en/docs/about-claude/pricing"
+  },
+  "claude_prices": {
+    "claude-fable-5-1": [
+      10,
+      0.25,
+      50,
+      12.5,
+      null,
+      20,
+      null
+    ],
+    "claude-mythos-5-1": [
+      10,
+      0.25,
+      50,
+      12.5,
+      null,
+      20,
+      null
+    ],
+    "claude-fable-5": [
+      10,
+      1,
+      50,
+      12.5,
+      null,
+      20,
+      null
+    ],
+    "claude-mythos-5": [
+      10,
+      1,
+      50,
+      12.5,
+      null,
+      20,
+      null
+    ],
+    "claude-opus-5-5": [
+      4,
+      0.2,
+      20,
+      5,
+      null,
+      8,
+      2
+    ],
+    "claude-opus-5": [
+      5,
+      0.5,
+      25,
+      6.25,
+      null,
+      10,
+      2
+    ],
+    "claude-opus-4-8": [
+      5,
+      0.5,
+      25,
+      6.25,
+      null,
+      10,
+      2
+    ],
+    "claude-opus-4-7": [
+      5,
+      0.5,
+      25,
+      6.25,
+      null,
+      10,
+      null
+    ],
+    "claude-opus-4-6": [
+      5,
+      0.5,
+      25,
+      6.25,
+      null,
+      10,
+      1
+    ],
+    "claude-opus-4-5": [
+      5,
+      0.5,
+      25,
+      6.25,
+      null,
+      10,
+      null
+    ],
+    "claude-opus-4-1": [
+      15,
+      1.5,
+      75,
+      18.75,
+      null,
+      30,
+      null
+    ],
+    "claude-opus-4": [
+      15,
+      1.5,
+      75,
+      18.75,
+      null,
+      30,
+      null
+    ],
+    "claude-sonnet-5-5": [
+      2,
+      0.2,
+      10,
+      2.5,
+      null,
+      4,
+      null
+    ],
+    "claude-sonnet-5": [
+      2,
+      0.2,
+      10,
+      2.5,
+      null,
+      4,
+      null
+    ],
+    "claude-sonnet-4-6": [
+      3,
+      0.3,
+      15,
+      3.75,
+      null,
+      6,
+      null
+    ],
+    "claude-sonnet-4-5": [
+      3,
+      0.3,
+      15,
+      3.75,
+      200000,
+      6,
+      null
+    ],
+    "claude-sonnet-4": [
+      3,
+      0.3,
+      15,
+      3.75,
+      200000,
+      6,
+      null
+    ],
+    "claude-haiku-4-5": [
+      1,
+      0.1,
+      5,
+      1.25,
+      null,
+      2,
+      null
+    ],
+    "claude-3-5-haiku": [
+      0.8,
+      0.08,
+      4,
+      1,
+      null,
+      1.6,
+      null
+    ]
+  }
+}
