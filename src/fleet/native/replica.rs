@@ -1509,46 +1509,31 @@ fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Valu
     for (index, table, row) in appends {
         changes[index]["append"] = canonical_append(&own, &table, row, &ids)?;
     }
-    allocation_payload(
-        db,
-        node,
-        json!({"cursor":changes.last().map(|c|c["seq"].clone()).unwrap_or(json!(cursor)),"changes":changes}),
-    )
+    let mut has_deltas = false;
+    for change in &changes {
+        if change["table_name"] == "issue_github_watches"
+            && row_json(change, "after_json")?
+                .get("status_delta")
+                .is_some()
+        {
+            has_deltas = true;
+            break;
+        }
+    }
+    let mut payload = json!({"cursor":changes.last().map(|c|c["seq"].clone()).unwrap_or(json!(cursor)),"changes":changes});
+    if has_deltas {
+        payload["watch_delta_base"] = json!(cursor);
+    }
+    allocation_payload(db, node, payload)
 }
 
-// Old peers cannot apply status deltas. Send the current canonical watch once
-// per key, retaining the original batch cursor. This is an upgrade fallback;
-// negotiated peers receive the durable delta without loading unchanged status.
-pub(super) fn legacy_watch_rows(db: &Connection, payload: &mut Value) -> Result<()> {
-    let Some(changes) = payload["changes"].as_array_mut() else {
-        return Ok(());
-    };
-    let mut seen = BTreeSet::new();
-    let mut kept = Vec::with_capacity(changes.len());
-    for mut change in changes.drain(..).rev() {
-        if change["table_name"] == "issue_github_watches" {
-            let after = row_json(&change, "after_json")?;
-            let key = if after.is_null() {
-                row_json(&change, "before_json")?
-            } else {
-                after.clone()
-            };
-            if !seen.insert(pending_key("issue_github_watches", &key)?) {
-                continue;
-            }
-            if after.get("status_delta").is_some() {
-                let row = current_row(db, "issue_github_watches", &key)?;
-                change["after_json"] = if row.is_null() {
-                    Value::Null
-                } else {
-                    json!(row.to_string())
-                };
-            }
-        }
-        kept.push(change);
+// A peer without delta support (or repairing a missing base) needs one coherent
+// snapshot and its cursor. Current rows paired with an older cursor could mix
+// future watch fields with historical deltas after that peer upgrades.
+pub(super) fn legacy_watch_rows(db: &Connection, node: &str, payload: &mut Value) -> Result<()> {
+    if payload.get("watch_delta_base").is_some() {
+        *payload = snapshot(db, node)?;
     }
-    kept.reverse();
-    *changes = kept;
     Ok(())
 }
 
@@ -1743,10 +1728,18 @@ pub(super) fn apply_pull(
         .as_i64()
         .filter(|cursor| *cursor >= 0)
         .ok_or_else(|| invalid("Invalid fleet pull cursor"))?;
-    if cursor < state_get(db, "cursor", json!(0))?.as_i64().unwrap_or(0) {
+    let previous_cursor = state_get(db, "cursor", json!(0))?.as_i64().unwrap_or(0);
+    if cursor < previous_cursor {
         return Err(invalid(
             "Stale fleet pull: the cursor precedes the last committed synchronization; no changes or receipts were applied",
         ));
+    }
+    if let Some(base) = payload.get("watch_delta_base") {
+        if base.as_i64() != Some(previous_cursor) && cursor != previous_cursor {
+            return Err(invalid(
+                "Watch delta base cursor does not match committed synchronization",
+            ));
+        }
     }
     db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
     if let Some(assignments) = payload.get("chief_ownership") {
@@ -1955,6 +1948,11 @@ pub(super) fn apply_pull(
             if table == "issue_github_watches"
                 && let Some(delta) = after.get("status_delta")
             {
+                // The final cursor already commits the whole batch. Its watch
+                // may have been deleted by a later change in that same batch.
+                if cursor == previous_cursor {
+                    continue;
+                }
                 let mut row = current_row(db, table, &after)?;
                 let mut status: Value =
                     serde_json::from_str(row["status"].as_str().ok_or_else(|| {
@@ -2895,6 +2893,53 @@ mod tests {
     }
 
     #[test]
+    fn watch_delta_retry_after_deletion_is_already_committed() {
+        let main = Fixture::new();
+        main.capture();
+        main.db
+            .execute(
+                "INSERT INTO issue_github_watches VALUES('named:Native fleet',1,?1)",
+                [json!({"prs":{},"event":"first"}).to_string()],
+            )
+            .unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "peer").unwrap();
+        let initial = snapshot(&main.db, "peer").unwrap();
+        apply_pull(&peer.db, "peer", &initial, &[]).unwrap();
+        main.db
+            .execute(
+                "UPDATE issue_github_watches SET status=?1",
+                [json!({"prs":{},"event":"next"}).to_string()],
+            )
+            .unwrap();
+        main.db
+            .execute("DELETE FROM issue_github_watches", [])
+            .unwrap();
+        let pull = incremental(&main.db, "peer", initial["cursor"].as_i64().unwrap()).unwrap();
+        let mut gap = pull.clone();
+        gap["watch_delta_base"] = json!(initial["cursor"].as_i64().unwrap() + 1);
+        assert!(
+            apply_pull(&peer.db, "peer", &gap, &[])
+                .unwrap_err()
+                .to_string()
+                .contains("base cursor")
+        );
+        assert_eq!(
+            state_get(&peer.db, "cursor", Value::Null).unwrap(),
+            initial["cursor"]
+        );
+        apply_pull(&peer.db, "peer", &pull, &[]).unwrap();
+        apply_pull(&peer.db, "peer", &pull, &[]).unwrap();
+        assert_eq!(
+            peer.db
+                .query_row("SELECT count(*) FROM issue_github_watches", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn watch_update_journal_contains_only_changed_json() {
         let main = Fixture::new();
         main.capture();
@@ -2995,14 +3040,9 @@ mod tests {
         apply_pull(&legacy.db, "legacy", &initial, &[]).unwrap();
         let mut old_pull =
             incremental(&reopened, "legacy", initial["cursor"].as_i64().unwrap()).unwrap();
-        legacy_watch_rows(&reopened, &mut old_pull).unwrap();
-        assert_eq!(old_pull["changes"].as_array().unwrap().len(), 1);
-        assert!(
-            row_json(&old_pull["changes"][0], "after_json")
-                .unwrap()
-                .get("status_delta")
-                .is_none()
-        );
+        legacy_watch_rows(&reopened, "legacy", &mut old_pull).unwrap();
+        assert!(old_pull["tables"].is_object());
+        assert!(old_pull.get("watch_delta_base").is_none());
         apply_pull(&legacy.db, "legacy", &old_pull, &[]).unwrap();
         let saved: String = legacy
             .db
@@ -3043,7 +3083,7 @@ mod tests {
         );
         state_set(&peer.db, "watch_delta_repair", &json!(true)).unwrap();
         let mut repair = next;
-        legacy_watch_rows(&reopened, &mut repair).unwrap();
+        legacy_watch_rows(&reopened, "peer", &mut repair).unwrap();
         apply_pull(&peer.db, "peer", &repair, &[]).unwrap();
         assert_eq!(
             state_get(&peer.db, "watch_delta_repair", Value::Null).unwrap(),
