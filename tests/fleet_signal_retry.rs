@@ -311,3 +311,41 @@ fn generated_ids_are_visible_on_failure_and_new_for_each_invocation() {
     );
     assert_eq!(fixture.signals().len(), 2);
 }
+
+#[test]
+fn malformed_companion_acknowledgment_preserves_the_unknown_outcome() {
+    let mut fixture = Fixture::new();
+    fixture.companion();
+    let listener = UnixListener::bind(fixture.root.join("client/fleet-authority.sock")).unwrap();
+    let relay = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut stream).read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["request"]["id"], "malformed-reply");
+        stream
+            .write_all(b"{\"ok\":false,\"error\":null}\n")
+            .unwrap();
+    });
+    let output = fixture
+        .command(&[
+            "worker",
+            "--json",
+            "restart",
+            "fixture-worker",
+            "--request-id",
+            "malformed-reply",
+        ])
+        .output()
+        .unwrap();
+    relay.join().unwrap();
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["error"]["details"],
+        json!({"request_id":"malformed-reply","outcome":"unknown"})
+    );
+}

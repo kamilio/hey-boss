@@ -61,7 +61,8 @@ pub(in crate::fleet) fn call_cancellable(
         cancelled,
     )?;
     if result["ok"] == false {
-        let mut error: Error = serde_json::from_value(result["error"].clone())?;
+        let mut error: Error =
+            serde_json::from_value(result["error"].clone()).map_err(unavailable)?;
         if matches!(kind.as_str(), "capabilities" | "issue_metadata")
             && error.code == "invalid_input"
             && error.message == "Unsupported authority request"
