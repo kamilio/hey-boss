@@ -205,6 +205,161 @@ async fn sonnet_uses_included_native_messages_then_explicit_paid_responses_adapt
 }
 
 #[tokio::test]
+async fn model_probe_selects_the_same_provider_and_quota_as_forwarding() {
+    for (used, work_used, provider) in
+        [(20, 0, "personal"), (100, 10, "work"), (100, 100, "ultima")]
+    {
+        let f = Fixture::new().await;
+        f.used.store(used, Ordering::SeqCst);
+        f.work_used.store(work_used, Ordering::SeqCst);
+        for stream in [false, true] {
+            let response = f.request(json!({"model":"gpt-6.1-sol","reasoning":{"effort":"medium"},"input":"hello-hey-proxy-model","stream":stream})).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["x-hey-proxy-probe"], "true");
+            let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(text.contains(&format!("Using: {provider}")), "{text}");
+            assert!(text.contains("Configured provider order:"), "{text}");
+            assert!(
+                text.contains("personal: 5-hour quota: 80.0% remaining")
+                    || text.contains("personal: 5-hour quota: 0.0% remaining"),
+                "{text}"
+            );
+            assert!(text.contains("resets "), "{text}");
+            assert!(!text.contains("Quota was not checked"), "{text}");
+            assert!(
+                !text.contains("oauth-") && !text.contains("synthetic-paid-key"),
+                "{text}"
+            );
+        }
+        assert!(
+            f.seen.lock().unwrap().is_empty(),
+            "probe generated model traffic"
+        );
+        let calls = f.usage_calls.load(Ordering::SeqCst);
+        assert_eq!(calls, if provider == "personal" { 1 } else { 2 });
+        let actual = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
+        assert_eq!(actual.headers()["x-hey-proxy-provider"], provider);
+        assert_eq!(
+            f.usage_calls.load(Ordering::SeqCst),
+            calls,
+            "probe must reuse forwarding cache"
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_probe_does_not_claim_paid_selection_when_quota_is_unknown_or_history_is_bound() {
+    for bound in [false, true] {
+        let f = Fixture::new().await;
+        let mut input = json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy-model"});
+        if bound {
+            f.used.store(100, Ordering::SeqCst);
+            input["previous_response_id"] = json!("bound-history");
+        } else {
+            f.usage_status.store(503, Ordering::SeqCst);
+        }
+        let response = f.request(input).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("Using: none"), "{text}");
+        assert!(
+            text.contains(if bound {
+                "history or tools prevent"
+            } else {
+                "quota is unavailable"
+            }),
+            "{text}"
+        );
+        assert!(f.seen.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn model_probe_has_a_total_deadline_without_slowing_the_plain_probe() {
+    let f = Fixture::new().await;
+    let selected = f.proxy.select("personal").await.unwrap();
+    let _guard = selected.binding.as_ref().unwrap().quota.codex.lock().await;
+    let start = tokio::time::Instant::now();
+    let plain = f
+        .request(json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy"}))
+        .await;
+    assert_eq!(plain.headers()["x-hey-proxy-probe"], "true");
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let response = f
+        .request(json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy-model"}))
+        .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        text.contains("Using: none") && text.contains("within 2s"),
+        "{text}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(f.seen.lock().unwrap().is_empty());
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn native_messages_probe_reaches_real_selection_before_replying() {
+    let mut f = Fixture::new().await;
+    f.claude();
+    let response = super::super::forward(State(f.proxy.service.clone()), Request::builder()
+        .method("POST").uri("/v1/messages").header(header::CONTENT_TYPE,"application/json")
+        .body(Body::from(json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"hello-hey-proxy-model"}]}).to_string())).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_slice(&bytes).unwrap();
+    let text = value["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("Using: sonnet -> claude/claude-sonnet-5-5"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Weekly Sonnet quota: 100.0% remaining"),
+        "{text}"
+    );
+    assert!(f.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn model_probe_honors_upstream_cooldowns_and_paid_model_overrides() {
+    let f = Fixture::new().await;
+    let selected = f.proxy.select("personal").await.unwrap();
+    quota::exhausted(&selected, "gpt-6.1-sol").await;
+    for (model, expected, detail) in [
+        (
+            "gpt-6.1-sol",
+            "Using: work -> codex/gpt-6.1-sol",
+            "personal: quota exhausted (upstream cooldown)",
+        ),
+        (
+            "gpt-6-astra",
+            "Using: ultima -> openai/ultima-alpha",
+            "Reasoning: high",
+        ),
+    ] {
+        let response = f.request(json!({"model":model,"input":"hello-hey-proxy-model","reasoning":{"effort":"medium"}})).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains(expected) && text.contains(detail), "{text}");
+    }
+    assert!(f.seen.lock().unwrap().is_empty());
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn exhausted_subscriptions_use_paid_key_despite_available_overage() {
     let f = Fixture::new().await;
     f.used.store(100, Ordering::SeqCst);

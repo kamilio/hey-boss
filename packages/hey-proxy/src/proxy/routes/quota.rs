@@ -22,17 +22,22 @@ pub(in crate::proxy) fn crossed_reset(data: Option<&Value>, updated: Option<u64>
         })
 }
 
+#[cfg(test)]
 pub(super) async fn availability(proxy: &Proxy, model: &str) -> Availability {
+    check(proxy, model).await.0
+}
+
+pub(super) async fn check(proxy: &Proxy, model: &str) -> (Availability, Option<Value>) {
     let binding = proxy.binding.as_ref().expect("selected account");
     let signal = binding.quota.exhausted.lock().await.get(model).copied();
     if let Some((until, observed)) = signal {
         if until > Instant::now() {
-            return Availability::Exhausted;
+            return (Availability::Exhausted, None);
         }
         match binding.implementation {
             "codex" => binding.quota.codex.lock().await.expire_before(observed),
             "claude" => binding.quota.claude.lock().await.expire_before(observed),
-            _ => return Availability::Unavailable,
+            _ => return (Availability::Unavailable, None),
         }
     }
     let reading = match tokio::time::timeout(Duration::from_secs(25), async {
@@ -45,14 +50,28 @@ pub(super) async fn availability(proxy: &Proxy, model: &str) -> Availability {
     .await
     {
         Ok(reading) => reading,
-        Err(_) => return Availability::Unavailable,
+        Err(_) => return (Availability::Unavailable, None),
     };
-    evaluate(
+    let availability = evaluate(
         &reading,
         binding.implementation,
         model,
         crate::codex_auth::now(),
-    )
+    );
+    (availability, Some(reading))
+}
+
+pub(super) fn applies(window: &Value, implementation: &str, model: &str) -> Option<bool> {
+    match (implementation, window["id"].as_str().unwrap_or("")) {
+        (_, "five_hour" | "seven_day")
+        | ("claude", "seven_day_oauth_apps")
+        | ("codex", "codex_included_limit") => Some(true),
+        ("claude", "seven_day_sonnet") => Some(model.starts_with("claude-sonnet-")),
+        ("claude", "seven_day_opus") => Some(model.starts_with("claude-opus-")),
+        ("claude", "seven_day_routines") => Some(false),
+        ("codex", "codex-spark" | "codex-spark-weekly") => Some(model.contains("spark")),
+        _ => window["model"].as_str().map(|scope| scope == model),
+    }
 }
 
 pub(super) async fn exhausted(proxy: &Proxy, model: &str) {
@@ -90,23 +109,10 @@ fn evaluate(reading: &Value, implementation: &str, model: &str, now: u64) -> Ava
     let mut applicable = 0;
     let mut exhausted = false;
     for window in windows {
-        let id = window["id"].as_str().unwrap_or("");
-        let applies = match (implementation, id) {
-            (_, "five_hour" | "seven_day")
-            | ("claude", "seven_day_oauth_apps")
-            | ("codex", "codex_included_limit") => true,
-            ("claude", "seven_day_sonnet") => model.starts_with("claude-sonnet-"),
-            ("claude", "seven_day_opus") => model.starts_with("claude-opus-"),
-            ("claude", "seven_day_routines") => false,
-            ("codex", "codex-spark" | "codex-spark-weekly") => model.contains("spark"),
-            _ => match window["model"].as_str() {
-                Some(scope) => scope == model,
-                // Unknown limit scope is not evidence of included capacity.
-                None => return Availability::Unavailable,
-            },
-        };
-        if !applies {
-            continue;
+        match applies(window, implementation, model) {
+            Some(true) => {}
+            Some(false) => continue,
+            None => return Availability::Unavailable,
         }
         applicable += 1;
         let Some(remaining) = window["remaining_percent"]

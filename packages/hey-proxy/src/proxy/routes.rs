@@ -1,6 +1,7 @@
 //! Ordered, quota-gated provider routes, independent of recommendation policy.
 use super::*;
 use crate::config::routes::{BillingMode, ResolvedLeg};
+mod diagnostic;
 pub(super) mod inspect;
 pub(super) mod quota;
 
@@ -76,198 +77,226 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
     if let Some(response) = probe::parsed(&proxy.config, &mut parts, &input) {
         return response;
     }
-    let replayable = replay_blocker(&input).is_none();
-    // Bound history prevents switching, not the initial attempt. Keep it intact
-    // and use only the first configured provider unless the caller pins another.
-    let attempts = if replayable { plan.len() } else { 1 };
-    for index in 0..attempts {
-        let leg = plan.resolve(index).expect("validated route snapshot");
-        // Capability failure is not quota exhaustion and must never choose paid billing.
-        let mut attempt_parts = parts.clone();
-        if let Err(message) = transport(&leg, &mut attempt_parts) {
-            return failure(
-                StatusCode::BAD_REQUEST,
-                "route_transport_unsupported",
-                message,
-            );
-        }
-        let mut selected = match tokio::time::timeout(
-            Duration::from_secs(25),
-            proxy.select(&leg.provider),
-        )
-        .await
-        {
-            Ok(Ok(selected)) => selected,
-            _ => {
-                return failure(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "route_account_unavailable",
-                    "Selected provider credentials or account identity are unavailable",
+    let is_probe = probe::is_model(parts.uri.path(), &input);
+    let mut report =
+        is_probe.then(|| diagnostic::Probe::new(&proxy.config, parts.uri.path(), &input));
+    // Probes run exactly the same selection as forwarding, but stop before a
+    // model request. Only probes have this short total deadline.
+    let routing = async {
+        let replayable = replay_blocker(&input).is_none();
+        // Bound history prevents switching, not the initial attempt. Keep it intact
+        // and use only the first configured provider unless the caller pins another.
+        let attempts = if replayable { plan.len() } else { 1 };
+        for index in 0..attempts {
+            let leg = plan.resolve(index).expect("validated route snapshot");
+            // Capability failure is not quota exhaustion and must never choose paid billing.
+            let mut attempt_parts = parts.clone();
+            if let Err(message) = transport(&leg, &mut attempt_parts) {
+                return diagnostic::failure(
+                    report.as_ref(),
+                    StatusCode::BAD_REQUEST,
+                    "route_transport_unsupported",
+                    message,
                 );
             }
-        };
-        selected.fallback_attempt = true;
-        if leg.billing_mode == BillingMode::IncludedSubscription {
-            match quota::availability(&selected, &leg.upstream_model).await {
-                quota::Availability::Included => {}
-                quota::Availability::Exhausted => {
-                    diagnostic(&proxy, &leg, index, "included_exhausted");
+            let mut selected =
+                match tokio::time::timeout(Duration::from_secs(25), proxy.select(&leg.provider))
+                    .await
+                {
+                    Ok(Ok(selected)) => selected,
+                    _ => {
+                        return diagnostic::failure(
+                            report.as_ref(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "route_account_unavailable",
+                            "Selected provider credentials or account identity are unavailable",
+                        );
+                    }
+                };
+            selected.fallback_attempt = true;
+            if leg.billing_mode == BillingMode::IncludedSubscription {
+                let (availability, reading) = quota::check(&selected, &leg.upstream_model).await;
+                if let Some(report) = &mut report {
+                    report.quota(&leg, &availability, reading.as_ref());
+                }
+                match availability {
+                    quota::Availability::Included => {}
+                    quota::Availability::Exhausted => {
+                        diagnostic(&proxy, &leg, index, "included_exhausted");
+                        continue;
+                    }
+                    quota::Availability::Unavailable => {
+                        return diagnostic::failure(
+                            report.as_ref(),
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "route_quota_unavailable",
+                            "Fresh account/model-specific included quota is unavailable; no paid leg was selected",
+                        );
+                    }
+                }
+            }
+            if let Some(report) = &report {
+                return report.reply(Some(&leg), None);
+            }
+            let mut payload = input.clone();
+            // Full visible history and local tool pairs are portable. Opaque
+            // reasoning belongs to its originating provider and is optional on
+            // another leg; never strip compaction or server-side references.
+            let stripped = if index > 0 {
+                strip_reasoning(&mut payload)
+            } else {
+                0
+            };
+            payload["model"] = json!(leg.upstream_model);
+            if let Some(effort) = &leg.reasoning {
+                let key =
+                    if claude::is_path(parts.uri.path()) || messages::is_path(parts.uri.path()) {
+                        "output_config"
+                    } else if parts.uri.path().ends_with("/chat/completions") {
+                        "reasoning_effort"
+                    } else {
+                        "reasoning"
+                    };
+                if key == "reasoning_effort" {
+                    payload[key] = json!(effort);
+                } else {
+                    if payload.get(key).is_none_or(Value::is_null) {
+                        payload[key] = json!({});
+                    }
+                    if !payload[key].is_object() {
+                        return failure(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            "Reasoning options must be an object",
+                        );
+                    }
+                    payload[key]["effort"] = json!(effort);
+                }
+            }
+            for name in [
+                "x-hey-proxy-provider",
+                "x-hey-proxy-account",
+                "chatgpt-account-id",
+                "content-length",
+            ] {
+                attempt_parts.headers.remove(name);
+            }
+            attempt_parts.headers.insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            if let Some(key) = attempt_parts.headers.get("idempotency-key") {
+                use sha2::{Digest, Sha256};
+                let mut digest = Sha256::new();
+                digest.update(key.as_bytes());
+                digest.update([0]);
+                digest.update(selected.binding.as_ref().unwrap().reference.as_bytes());
+                digest.update([0]);
+                digest.update(leg.upstream_model.as_bytes());
+                attempt_parts.headers.insert(
+                    "idempotency-key",
+                    format!("hey-proxy-route-{:x}", digest.finalize())
+                        .parse()
+                        .unwrap(),
+                );
+            }
+            diagnostic(&proxy, &leg, index, "selected");
+            let selected = Arc::new(selected);
+            let response = forward_selected(
+                selected.clone(),
+                Request::from_parts(attempt_parts, Body::from(payload.to_string())),
+            )
+            .await;
+            // Buffering the stream prelude only serves fallback. Return it directly
+            // when no further attempt is permitted, including stateful requests.
+            let can_switch = index + 1 < attempts;
+            let (mut response, exhausted) = if can_switch {
+                inspect::response(response).await
+            } else {
+                (response, false)
+            };
+            if exhausted && leg.billing_mode == BillingMode::IncludedSubscription {
+                quota::exhausted(&selected, &leg.upstream_model).await;
+                diagnostic(&proxy, &leg, index, "upstream_quota_exhausted");
+                if can_switch {
+                    drop(response);
                     continue;
                 }
-                quota::Availability::Unavailable => {
-                    return failure(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "route_quota_unavailable",
-                        "Fresh account/model-specific included quota is unavailable; no paid leg was selected",
-                    );
+            }
+            diagnostic(&proxy, &leg, index, "result");
+            for (name, value) in [
+                ("x-hey-proxy-provider", leg.provider.as_str()),
+                ("x-hey-proxy-requested-model", leg.source_model.as_str()),
+            ] {
+                if let Ok(value) = value.parse() {
+                    response.headers_mut().insert(name, value);
                 }
             }
-        }
-        let mut payload = input.clone();
-        // Full visible history and local tool pairs are portable. Opaque
-        // reasoning belongs to its originating provider and is optional on
-        // another leg; never strip compaction or server-side references.
-        let stripped = if index > 0 {
-            strip_reasoning(&mut payload)
-        } else {
-            0
-        };
-        payload["model"] = json!(leg.upstream_model);
-        if let Some(effort) = &leg.reasoning {
-            let key = if claude::is_path(parts.uri.path()) || messages::is_path(parts.uri.path()) {
-                "output_config"
-            } else if parts.uri.path().ends_with("/chat/completions") {
-                "reasoning_effort"
-            } else {
-                "reasoning"
-            };
-            if key == "reasoning_effort" {
-                payload[key] = json!(effort);
-            } else {
-                if payload.get(key).is_none_or(Value::is_null) {
-                    payload[key] = json!({});
-                }
-                if !payload[key].is_object() {
-                    return failure(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        "Reasoning options must be an object",
-                    );
-                }
-                payload[key]["effort"] = json!(effort);
+            response
+                .headers_mut()
+                .insert("x-hey-proxy-route-attempt", (index + 1).into());
+            if stripped > 0 {
+                response.headers_mut().insert(
+                    "x-hey-proxy-reasoning-stripped",
+                    stripped.to_string().parse().unwrap(),
+                );
             }
-        }
-        for name in [
-            "x-hey-proxy-provider",
-            "x-hey-proxy-account",
-            "chatgpt-account-id",
-            "content-length",
-        ] {
-            attempt_parts.headers.remove(name);
-        }
-        attempt_parts.headers.insert(
-            header::CONTENT_TYPE,
-            header::HeaderValue::from_static("application/json"),
-        );
-        if let Some(key) = attempt_parts.headers.get("idempotency-key") {
-            use sha2::{Digest, Sha256};
-            let mut digest = Sha256::new();
-            digest.update(key.as_bytes());
-            digest.update([0]);
-            digest.update(selected.binding.as_ref().unwrap().reference.as_bytes());
-            digest.update([0]);
-            digest.update(leg.upstream_model.as_bytes());
-            attempt_parts.headers.insert(
-                "idempotency-key",
-                format!("hey-proxy-route-{:x}", digest.finalize())
+            response.headers_mut().insert(
+                "x-hey-proxy-account",
+                selected
+                    .binding
+                    .as_ref()
+                    .unwrap()
+                    .reference
                     .parse()
                     .unwrap(),
             );
-        }
-        diagnostic(&proxy, &leg, index, "selected");
-        let selected = Arc::new(selected);
-        let response = forward_selected(
-            selected.clone(),
-            Request::from_parts(attempt_parts, Body::from(payload.to_string())),
-        )
-        .await;
-        // Buffering the stream prelude only serves fallback. Return it directly
-        // when no further attempt is permitted, including stateful requests.
-        let can_switch = index + 1 < attempts;
-        let (mut response, exhausted) = if can_switch {
-            inspect::response(response).await
-        } else {
-            (response, false)
-        };
-        if exhausted && leg.billing_mode == BillingMode::IncludedSubscription {
-            quota::exhausted(&selected, &leg.upstream_model).await;
-            diagnostic(&proxy, &leg, index, "upstream_quota_exhausted");
-            if can_switch {
-                drop(response);
-                continue;
-            }
-        }
-        diagnostic(&proxy, &leg, index, "result");
-        for (name, value) in [
-            ("x-hey-proxy-provider", leg.provider.as_str()),
-            ("x-hey-proxy-requested-model", leg.source_model.as_str()),
-        ] {
-            if let Ok(value) = value.parse() {
-                response.headers_mut().insert(name, value);
-            }
-        }
-        response
-            .headers_mut()
-            .insert("x-hey-proxy-route-attempt", (index + 1).into());
-        if stripped > 0 {
             response.headers_mut().insert(
-                "x-hey-proxy-reasoning-stripped",
-                stripped.to_string().parse().unwrap(),
+                "x-hey-proxy-billing",
+                header::HeaderValue::from_static(match leg.billing_mode {
+                    BillingMode::IncludedSubscription => "included_subscription",
+                    BillingMode::PayPerToken => "pay_per_token",
+                }),
             );
+            let sse = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.contains("text/event-stream"));
+            let (parts, body) = response.into_parts();
+            let mut stream = body.into_data_stream();
+            let body = Body::from_stream(async_stream::stream! {
+                let mut reader = logs::UsageReader::new(sse);
+                while let Some(chunk) = stream.next().await {
+                    if let Ok(bytes) = &chunk { reader.feed(bytes,&proxy.service.logs,proxy.log_id); }
+                    yield chunk;
+                }
+                reader.finish(&proxy.service.logs,proxy.log_id);
+            });
+            return Response::from_parts(parts, body);
         }
-        response.headers_mut().insert(
-            "x-hey-proxy-account",
-            selected
-                .binding
-                .as_ref()
-                .unwrap()
-                .reference
-                .parse()
-                .unwrap(),
-        );
-        response.headers_mut().insert(
-            "x-hey-proxy-billing",
-            header::HeaderValue::from_static(match leg.billing_mode {
-                BillingMode::IncludedSubscription => "included_subscription",
-                BillingMode::PayPerToken => "pay_per_token",
-            }),
-        );
-        let sse = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/event-stream"));
-        let (parts, body) = response.into_parts();
-        let mut stream = body.into_data_stream();
-        let body = Body::from_stream(async_stream::stream! {
-            let mut reader = logs::UsageReader::new(sse);
-            while let Some(chunk) = stream.next().await {
-                if let Ok(bytes) = &chunk { reader.feed(bytes,&proxy.service.logs,proxy.log_id); }
-                yield chunk;
-            }
-            reader.finish(&proxy.service.logs,proxy.log_id);
-        });
-        return Response::from_parts(parts, body);
+        diagnostic::failure(
+            report.as_ref(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "route_included_exhausted",
+            if !replayable && plan.len() > 1 {
+                "The first provider's included quota is exhausted; history or tools prevent automatic switching. Pin the original provider/account or start a new conversation"
+            } else {
+                "All configured included subscription legs are exhausted and no usable paid leg remains"
+            },
+        )
+    };
+    if is_probe {
+        match tokio::time::timeout(Duration::from_secs(2), routing).await {
+            Ok(response) => response,
+            Err(_) => report.as_ref().unwrap().reply(
+                None,
+                Some("selection could not be verified within 2s; quota or credentials unavailable"),
+            ),
+        }
+    } else {
+        routing.await
     }
-    failure(
-        StatusCode::TOO_MANY_REQUESTS,
-        "route_included_exhausted",
-        if !replayable && plan.len() > 1 {
-            "The first provider's included quota is exhausted; history or tools prevent automatic switching. Pin the original provider/account or start a new conversation"
-        } else {
-            "All configured included subscription legs are exhausted and no usable paid leg remains"
-        },
-    )
 }
 
 fn transport(

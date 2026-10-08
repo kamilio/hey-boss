@@ -204,15 +204,18 @@ pub(super) fn response(config: &Config, path: &str, input: &Value) -> Option<Res
     let text = if matches_prompt(shape, input, PROMPT) {
         REPLY.to_owned()
     } else if matches_prompt(shape, input, MODEL_PROMPT) {
+        // Ordered routes answer only after the real provider/quota selection.
+        if input["model"]
+            .as_str()
+            .is_some_and(|model| config.route_index(model, path).is_some())
+        {
+            return None;
+        }
         routing::describe(config, path, input)
     } else {
         return None;
     };
-    let streaming = input["stream"] == true
-        || path
-            .trim_end_matches('/')
-            .ends_with(":streamGenerateContent");
-    Some(reply(shape, input, streaming, &text))
+    Some(text_reply(path, input, &text))
 }
 
 #[cfg(test)]
@@ -220,7 +223,23 @@ fn matches(shape: Shape, input: &Value) -> bool {
     matches_prompt(shape, input, PROMPT)
 }
 
-mod routing;
+pub(super) mod routing;
+
+pub(super) fn is_model(path: &str, input: &Value) -> bool {
+    shape(path).is_some_and(|shape| matches_prompt(shape, input, MODEL_PROMPT))
+}
+
+pub(super) fn text_reply(path: &str, input: &Value, text: &str) -> Response {
+    reply(
+        shape(path).expect("model probe API shape"),
+        input,
+        input["stream"] == true
+            || path
+                .trim_end_matches('/')
+                .ends_with(":streamGenerateContent"),
+        text,
+    )
+}
 
 fn reply(shape: Shape, input: &Value, streaming: bool, text: &str) -> Response {
     let suffix = format!("{:016x}", rand::random::<u64>());

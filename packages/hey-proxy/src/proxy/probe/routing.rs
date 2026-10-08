@@ -13,7 +13,7 @@ fn endpoint(raw: &str) -> String {
     url.to_string()
 }
 
-pub(super) fn describe(config: &Config, path: &str, input: &Value) -> String {
+pub(in crate::proxy) fn describe(config: &Config, path: &str, input: &Value) -> String {
     let path = path.trim_end_matches('/');
     let native = gemini::native_path(path);
     let requested = if native {
@@ -71,11 +71,7 @@ pub(super) fn describe(config: &Config, path: &str, input: &Value) -> String {
                 ));
             }
         }
-        lines.push(
-            "Quota was not checked; actual selection depends on quota and request replayability."
-                .into(),
-        );
-        lines.push("No upstream request was made.".into());
+        lines.push("No model request was made.".into());
         return lines.join("\n");
     }
     let alias = if claude {
