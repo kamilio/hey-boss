@@ -34,6 +34,50 @@ pub(super) fn describe(config: &Config, path: &str, input: &Value) -> String {
     }
     let claude = path == "/v1/messages" && config.claude.as_ref().is_some_and(|c| c.routing);
     let incoming = requested_effort(path, input);
+    // Native Gemini bypasses ordered forwarding. Bound accounts have their
+    // routes cleared, so their diagnostics continue through the legacy path.
+    if !native && let Some(index) = config.route_index(requested, path) {
+        let route = &config.routes[index];
+        let mut lines = vec![
+            format!("Route: {requested}"),
+            format!("API: {path}"),
+            "Rule: ordered provider route".into(),
+            "Configured provider order:".into(),
+        ];
+        for index in 0..route.legs.len() {
+            let leg = match route.resolve(config, index, incoming) {
+                Ok(leg) => leg,
+                Err(_) => {
+                    return "Routing error: invalid provider route. No upstream request was made."
+                        .into();
+                }
+            };
+            let billing = match leg.billing_mode {
+                crate::config::routes::BillingMode::IncludedSubscription => "included subscription",
+                crate::config::routes::BillingMode::PayPerToken => "pay per token",
+            };
+            lines.push(format!(
+                "{}. {} -> {}/{} ({billing})",
+                index + 1,
+                leg.provider,
+                leg.implementation,
+                leg.upstream_model
+            ));
+            if incoming.is_some() || leg.reasoning.is_some() {
+                lines.push(format!(
+                    "   Reasoning: {} -> {}",
+                    incoming.unwrap_or("default"),
+                    leg.reasoning.as_deref().unwrap_or("default")
+                ));
+            }
+        }
+        lines.push(
+            "Quota was not checked; actual selection depends on quota and request replayability."
+                .into(),
+        );
+        lines.push("No upstream request was made.".into());
+        return lines.join("\n");
+    }
     let alias = if claude {
         None
     } else if native {
