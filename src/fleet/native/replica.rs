@@ -2894,6 +2894,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn watch_capture_is_compatible_with_system_sqlite() {
+        let main = Fixture::new();
+        main.capture();
+        let output = std::process::Command::new("/usr/bin/sqlite3")
+            .arg(&main.path)
+            .arg(r#"INSERT INTO issue_github_watches VALUES('named:Native fleet',1,'{"prs":{"u":{"checked_at":1,"evidence":{"ok":true}}}}'); UPDATE issue_github_watches SET status=json_set(status,'$.prs.u.checked_at',2); SELECT json_extract(after_json,'$.status_delta.fields.prs.fields.u.fields.checked_at.value') FROM fleet_outbox WHERE table_name='issue_github_watches' ORDER BY seq DESC LIMIT 1;"#)
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+    }
+
+    #[test]
     fn watch_delta_retry_after_deletion_is_already_committed() {
         let main = Fixture::new();
         main.capture();
