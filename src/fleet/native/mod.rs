@@ -19,6 +19,7 @@ mod replica;
 mod service;
 mod supervisor;
 mod takeover;
+mod watch_delta;
 #[cfg(test)]
 mod watcher_tests;
 

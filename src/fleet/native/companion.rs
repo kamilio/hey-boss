@@ -435,7 +435,17 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                         {
                             continue;
                         }
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            if error
+                                .downcast_ref::<crate::issues::Error>()
+                                .is_some_and(|e| e.code == "watch_delta_base")
+                            {
+                                // Retry this unacknowledged cursor with full watch
+                                // rows once. Keep the cursor and other tables intact.
+                                replica::state_set(&db, "watch_delta_repair", &json!(true))?;
+                            }
+                            return Err(error);
+                        }
                     }
                 }
                 crate::chief_ownership::stop_unassigned(&db)?;
@@ -477,7 +487,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 let chief_ownership = crate::chief_ownership::read(&db)?;
                 reply(
                     &output,
-                    json!({"kind":"heartbeat","at":now(),"chief_ownership":chief_ownership,"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
+                    json!({"kind":"heartbeat","watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
                 )?;
             }
             _ => return Err(invalid("Unknown fleet message kind")),
