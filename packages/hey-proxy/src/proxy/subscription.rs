@@ -113,9 +113,6 @@ pub(crate) async fn account_usage(
         },
         reading,
     };
-    if let Some(tracker) = crate::spend::global_tracker(proxy.service.source.as_deref()) {
-        tracker.record_subscription(&usage);
-    }
     Ok(usage)
 }
 
@@ -216,10 +213,15 @@ pub(super) async fn relay<T: DeserializeOwned + Serialize>(proxy: &Proxy, path: 
         if !status.is_success() {
             return Ok::<_, anyhow::Error>(Err(status));
         }
+        let limit = if path.starts_with("/usage/v1/spend?") {
+            8 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             anyhow::ensure!(
-                bytes.len() + chunk.len() <= 1024 * 1024,
+                bytes.len() + chunk.len() <= limit,
                 "Host usage response is too large"
             );
             bytes.extend_from_slice(&chunk);
@@ -250,28 +252,69 @@ pub(super) async fn spend(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let proxy = service.snapshot();
-    let db_path = crate::spend::default_db_path(proxy.service.source.as_deref());
-    let days = params
-        .get("days")
-        .and_then(|d| d.parse::<i64>().ok())
-        .filter(|d| *d > 0);
-    let since_ms = days.map(|d| crate::spend::now_ms() - d * 86_400 * 1000);
-    let label = days
-        .map(|d| format!("Last {d}d"))
-        .unwrap_or_else(|| "All time".to_string());
-    let _ = crate::spend::sync_local_sources(&db_path, since_ms);
-    let mut live_usages = Vec::new();
-    for prov in ["codex", "claude"] {
-        if let Ok(u) = account_usage(&proxy, prov, "default").await {
-            live_usages.push(u);
+    if proxy.config.mode == Mode::Client {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&params)
+            .finish();
+        return relay::<crate::spend::SpendReport>(&proxy, &format!("/usage/v1/spend?{query}"))
+            .await;
+    }
+    let since = if let Some(raw) = params.get("since_ms") {
+        match raw.parse::<i64>() {
+            Ok(v)
+                if v >= crate::spend::now_ms() / crate::spend::DAY_MS * crate::spend::DAY_MS
+                    - 730 * crate::spend::DAY_MS
+                    && v <= crate::spend::now_ms() =>
+            {
+                Some(v)
+            }
+            _ => {
+                return failure(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_window",
+                    "Invalid since_ms",
+                );
+            }
+        }
+    } else if let Some(raw) = params.get("days") {
+        match raw.parse::<i64>() {
+            Ok(v) if (1..=730).contains(&v) => {
+                Some(crate::spend::now_ms() - v * crate::spend::DAY_MS)
+            }
+            _ => {
+                return failure(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_window",
+                    "days must be 1..730",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let provider = params.get("provider").cloned();
+    // A bounded asynchronous barrier makes freshly completed usage visible, while
+    // a slow disk still returns a report with queue/health information promptly.
+    if let Some(tracker) = &service.logs.spend {
+        let health = tracker.health();
+        if health.ready && health.queued_records > 0 {
+            let _ = tokio::time::timeout(Duration::from_millis(300), tracker.flush()).await;
         }
     }
-    match crate::spend::generate_spend_report(&db_path, since_ms, &label, &live_usages) {
-        Ok(report) => reply(report),
-        Err(err) => failure(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "spend_report_failed",
-            &err.to_string(),
+    let path = crate::spend::default_db_path(proxy.service.source.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        crate::spend::generate_spend_report(&path, since, provider.as_deref())
+    })
+    .await;
+    match result {
+        Ok(Ok(mut report)) => {
+            report.writer = service.logs.spend.as_ref().map(|t| t.health());
+            reply(report)
+        }
+        _ => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "accounting_unavailable",
+            "Accounting is initializing or unavailable; forwarding is unaffected",
         ),
     }
 }

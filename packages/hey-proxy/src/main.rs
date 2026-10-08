@@ -45,7 +45,7 @@ enum Command {
     Usage(usage_cli::Args),
     /// Recommend the best subscription provider (codex or claude) based on earliest expiring usage and remaining quota
     Recommend(usage_cli::RecommendArgs),
-    /// Monitor API-equivalent spend across providers and models and estimate subscription yield
+    /// Report proxy token usage and API-equivalent value by provider and account
     Spend(usage_cli::SpendArgs),
     /// Install/update the proxy and sync its config on SSH hosts
     Rollout {

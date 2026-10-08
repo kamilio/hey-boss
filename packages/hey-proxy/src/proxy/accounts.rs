@@ -19,6 +19,7 @@ pub(super) struct Quota {
 #[derive(Clone)]
 pub(super) struct Binding {
     pub reference: String,
+    pub name: String,
     pub token: String,
     pub account_id: Option<String>,
     pub implementation: &'static str,
@@ -70,6 +71,25 @@ impl Registry {
     }
 }
 impl Proxy {
+    pub(super) fn record_accounting_route(&self, provider: &str, account: &str) {
+        let (provider, account, label) = match &self.binding {
+            Some(binding) => (
+                binding.implementation,
+                binding.reference.as_str(),
+                binding.name.as_str(),
+            ),
+            None => (provider, account, account),
+        };
+        let billing = if matches!(provider, "codex" | "claude") {
+            "subscription"
+        } else {
+            "api"
+        };
+        self.service
+            .logs
+            .attribution(self.log_id, provider, account, label, billing);
+    }
+
     /// Rotate only the selected store for the next request; never rebind this request.
     pub(super) async fn rejected_binding(&self) {
         let Some(binding) = &self.binding else { return };
@@ -215,6 +235,7 @@ impl Proxy {
         };
         let (reference, quota) = self.quota_for(account.implementation(), &identity).await?;
         selected.binding = Some(Binding {
+            name: name.to_owned(),
             reference,
             token,
             account_id,

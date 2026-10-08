@@ -32,6 +32,14 @@ pub struct Entry {
     pub routed_reasoning: Option<String>,
     pub route_rule: Option<String>,
     pub project: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_label: Option<String>,
+    #[serde(default)]
+    pub billing: Option<String>,
     pub status: Option<u16>,
     pub state: String,
     pub outcome_source: Option<String>,
@@ -131,10 +139,11 @@ impl Store {
     }
     pub fn open(config: &Config, config_path: &std::path::Path) -> anyhow::Result<Self> {
         let mut store = Self::memory(config);
-        let spend_dir = config_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        store.spend = crate::spend::SpendTracker::open(spend_dir.join("spend.sqlite3")).ok();
+        if config.mode != Mode::Client {
+            store.spend =
+                crate::spend::SpendTracker::open(crate::spend::default_db_path(Some(config_path)))
+                    .ok();
+        }
         if config.logging.enabled {
             let directory = config_path
                 .parent()
@@ -206,7 +215,7 @@ impl Store {
             .collect()
     }
     fn persist(&self, entry: &Entry, kind: &str, mut details: Value) {
-        if matches!(kind, "usage" | "finished")
+        if kind == "finished"
             && let Some(spend) = &self.spend
         {
             spend.record_entry(entry);
@@ -289,6 +298,15 @@ impl Store {
             }
         }
     }
+    pub fn attribution(&self, id: u64, provider: &str, account: &str, label: &str, billing: &str) {
+        self.update(id, "accounting_route", Value::Null, |entry| {
+            entry.provider = Some(provider.chars().take(128).collect());
+            entry.account_id = Some(account.chars().take(128).collect());
+            entry.account_label = Some(label.chars().take(128).collect());
+            entry.billing = Some(billing.into());
+            true
+        });
+    }
     pub fn route(
         &self,
         id: u64,
@@ -359,10 +377,12 @@ impl Store {
         );
     }
     pub fn usage(&self, id: u64, value: &Value) {
+        let native = hey_proxy::gemini::usage(value);
         let usage = value
             .get("usage")
             .or_else(|| value.get("response").and_then(|v| v.get("usage")))
-            .or_else(|| value.get("message").and_then(|v| v.get("usage")));
+            .or_else(|| value.get("message").and_then(|v| v.get("usage")))
+            .or(native.as_ref());
         let Some(usage) = usage else { return };
         let mut input = usage
             .get("input_tokens")

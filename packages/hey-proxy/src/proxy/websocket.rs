@@ -181,6 +181,10 @@ fn queue_message(queue: &mut PendingQueue, message: Message) -> Result<(), &'sta
             outgoing,
             project.as_deref().unwrap_or(&queue.config.default.api_key),
         );
+        let account = project.as_deref().unwrap_or(&queue.config.default.api_key);
+        queue
+            .store
+            .attribution(id, "openai", account, account, "api");
         queue.store.update(id, "queued", json!({}), |entry| {
             entry.request_bytes = message.len() as u64;
             entry.streaming = create;

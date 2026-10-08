@@ -30,7 +30,7 @@ impl fmt::Display for Error {
             Self::InvalidToken => write!(f, "Access token cannot be used as an HTTP Bearer header"),
             Self::Transport => write!(f, "Cannot reach hey-proxy usage endpoint"),
             Self::Http(status) => write!(f, "Proxy usage endpoint returned HTTP {status}"),
-            Self::ResponseTooLarge => write!(f, "Proxy usage response exceeded 1 MiB"),
+            Self::ResponseTooLarge => write!(f, "Proxy usage response exceeded its size limit"),
             Self::InvalidResponse => write!(f, "Invalid proxy usage response"),
             Self::UnsupportedSchema(version) => {
                 write!(f, "Unsupported usage schema version {version}")
@@ -97,6 +97,31 @@ impl Client {
         })
     }
 
+    /// Proxy-observed accounting (schema 2); does not refresh upstream quotas.
+    pub async fn spend(
+        &self,
+        since_ms: Option<i64>,
+        provider: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(since) = since_ms {
+            query.append_pair("since_ms", &since.to_string());
+        }
+        if let Some(provider) = provider {
+            query.append_pair("provider", provider);
+        }
+        let result: serde_json::Value = self
+            .get(&format!("usage/v1/spend?{}", query.finish()))
+            .await?;
+        let version = result["schema_version"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(Error::InvalidResponse)?;
+        if version != 2 {
+            return Err(Error::UnsupportedSchema(version));
+        }
+        Ok(result)
+    }
     pub fn with_timeout(mut self, timeout: Duration) -> Result<Self, Error> {
         if timeout.is_zero() {
             return Err(Error::InvalidTimeout);
@@ -211,9 +236,14 @@ impl Client {
         if !response.status().is_success() {
             return Err(Error::Http(response.status().as_u16()));
         }
+        let limit = if path.starts_with("usage/v1/spend?") {
+            8 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| Error::Transport)? {
-            if bytes.len() + chunk.len() > 1024 * 1024 {
+            if bytes.len() + chunk.len() > limit {
                 return Err(Error::ResponseTooLarge);
             }
             bytes.extend_from_slice(&chunk);

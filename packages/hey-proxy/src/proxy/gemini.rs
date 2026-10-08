@@ -92,6 +92,7 @@ pub(super) async fn send_native(
     url: &str,
     body: &Value,
 ) -> std::result::Result<reqwest::Response, Box<Response>> {
+    proxy.record_accounting_route("gemini", "default");
     let mut recovery = Recovery::for_request(proxy);
     let mut adc_refreshed = false;
     loop {
@@ -703,6 +704,7 @@ pub(super) async fn forward_native(
         Ok(v) => v,
         Err(e) => return error(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
+    proxy.record_accounting_route("gemini", "default");
     let incoming = parts.uri.path();
     // Config can name either the Developer API version root or a complete
     // Vertex publisher root. Incoming full Vertex resource paths remain valid.
