@@ -144,7 +144,7 @@ if(typeof document!=='undefined') (()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), icon=HeyBossUI.icon;
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
   let activeFile='', editingMarkdown=false, editorDraft='', codeMirrorInstance=null, editorScriptPromise=null, deletePromptSkill='';
-  let actionError='';
+  let actionError='', actorId='';
   const labels={codex:'Codex',claude:'Claude',agents:'Shared agents',project:'Repository',library:'Saved library'};
   function renderMachineTags(skill, includeMissing=false){
     const cov = machineCoverage(skill, data.machines);
@@ -229,8 +229,25 @@ if(typeof document!=='undefined') (()=>{
     });
   }
   async function request(body){
-    const response=await fetch('/api/skills',{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(15000)});
-    const value=await response.json();if(!response.ok||value.ok===false)throw Error(value.error?.message||value.error||'Could not reach skill manager');return value;
+    const payload=body?JSON.stringify(body):undefined;
+    for(let attempt=0;attempt<2;attempt++){
+      const sentToken=csrf;
+      const response=await fetch('/api/skills',{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json','X-Hey-Boss-CSRF':sentToken}:{},body:payload,signal:AbortSignal.timeout(15000)});
+      const value=await response.json();
+      // A rejected CSRF check runs before the action. Only replay that rejection,
+      // once, with the same actor and payload; interrupted writes are ambiguous.
+      if(body&&attempt===0&&response.status===403&&value.error?.code==='forbidden'){
+        try{
+          const bootstrap=await fetch('/api/bootstrap',{cache:'no-store',signal:AbortSignal.timeout(10000)}),fresh=await bootstrap.json();
+          if(bootstrap.ok&&fresh.ok&&typeof fresh.csrf==='string'&&fresh.csrf&&fresh.csrf!==sentToken&&actorId&&fresh.actor?.id===actorId){
+            csrf=fresh.csrf;
+            continue;
+          }
+        }catch{/* Keep the original failure and the current page state. */}
+      }
+      if(!response.ok||value.ok===false)throw Error(value.error?.message||value.error||'Could not reach skill manager');
+      return value;
+    }
   }
   function use(value,reset=false){
     data=value;skills=library(data);
@@ -556,8 +573,8 @@ if(typeof document!=='undefined') (()=>{
   window.addEventListener('beforeunload',e=>{if(dirty||editingMarkdown){e.preventDefault();e.returnValue='';}});
   async function start(){
     HeyBossUI.icons();$('#nav-skills')?.setAttribute('aria-current','page');
-    const bootResponse=await fetch('/api/bootstrap'),boot=await bootResponse.json();
-    if(!bootResponse.ok)throw Error(boot.error?.message||'Could not connect');csrf=boot.csrf;
+    const bootResponse=await fetch('/api/bootstrap',{cache:'no-store',signal:AbortSignal.timeout(10000)}),boot=await bootResponse.json();
+    if(!bootResponse.ok||!boot.ok)throw Error(boot.error?.message||'Could not connect');csrf=boot.csrf;actorId=boot.actor?.id||'';
     const projects=boot.projects||[];
     const initialProjId=HeyBossUI.projectId(boot.project?.id||projects[0]?.id);
     let currentProj=projects.find(p=>p.id===initialProjId||p.name===initialProjId)||boot.project||projects[0]||null;
