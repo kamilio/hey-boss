@@ -122,6 +122,7 @@ try{
   for(const width of [1440,768,390,320])for(const colorScheme of ['light','dark']){
     await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${width} ${colorScheme}: no horizontal overflow`);
+    assert.ok(await page.locator('.version-preview').first().evaluate(el=>el.getBoundingClientRect().width>=180),`${width} ${colorScheme}: machine labels retain readable width`);
     await screenshot(`${width}-${colorScheme}`);
   }
   assert.deepEqual(errors,[],'No browser runtime errors');
