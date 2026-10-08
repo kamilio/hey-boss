@@ -22,6 +22,8 @@ pub mod markdown;
 pub mod mindmap;
 pub mod notices;
 pub mod quiet_hours;
+#[doc(hidden)]
+pub mod readiness;
 pub mod routes;
 pub mod skill;
 #[doc(hidden)]
@@ -450,6 +452,16 @@ impl Client {
     }
 
     pub fn try_start(&self, request: &Request) -> std::io::Result<PendingResponse> {
+        self.try_start_cancellable(request, || false)
+    }
+
+    /// Wait up to two minutes for the daemon before sending. Cancellation applies
+    /// only before transmission; an uncertain write or reply is never retried.
+    pub fn try_start_cancellable(
+        &self,
+        request: &Request,
+        cancelled: impl Fn() -> bool,
+    ) -> std::io::Result<PendingResponse> {
         let mut request = request.clone();
         if request.command == "update" && self.comments_enabled {
             request.comments_enabled = true;
@@ -503,13 +515,27 @@ impl Client {
             origin.agent = notices::capture_sender(&origin.cwd);
             request.origin = Some(origin);
         }
-        let mut stream = UnixStream::connect(&self.socket)?;
+        let mut stream = readiness::connect(
+            &self.socket,
+            std::time::Instant::now() + readiness::RECOVERY_WAIT,
+            &cancelled,
+        )?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
         if !request.sync && request.command != "wait" {
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+            stream.set_read_timeout(Some(if readiness::is_desktop_control(&request.command) {
+                readiness::CONTROL_REPLY_WAIT
+            } else {
+                std::time::Duration::from_secs(10)
+            }))?;
         }
         let mut payload = serde_json::to_value(&request)?;
         payload["source_host"] = serde_json::Value::String("This Mac".into());
+        if cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Request cancelled before sending",
+            ));
+        }
         stream.write_all(&serde_json::to_vec(&payload)?)?;
         stream.shutdown(Shutdown::Write)?;
         Ok(PendingResponse { stream })
@@ -700,9 +726,48 @@ mod tests {
         let client = Client::new(root.join("absent.sock"));
         assert!(
             client
-                .try_send(&Request::action("status", Some("missing")))
+                .try_start_cancellable(&Request::action("status", Some("missing")), || true)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn creations_wait_for_socket_recovery_and_send_once() {
+        for command in ["alert", "update", "ask"] {
+            let root = std::env::temp_dir().join(format!(
+                "hb-client-recovery-{}-{command}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let socket = root.join("daemon.sock");
+            let client = Client::new(&socket);
+            let mut request = Request::action(command, None);
+            request.project = Some("Recovery fixture".into());
+            request.title = Some("Synthetic recovery".into());
+            request.question = Some("Synthetic content".into());
+            let sender = std::thread::spawn(move || client.try_send(&request));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(!sender.is_finished(), "{command} failed before recovery");
+            let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+                command
+            );
+            stream
+                .write_all(br#"{"task_id":"recovered","status":"pending"}"#)
+                .unwrap();
+            drop(stream);
+            assert_eq!(
+                sender.join().unwrap().unwrap().status.as_deref(),
+                Some("pending")
+            );
+            listener.set_nonblocking(true).unwrap();
+            assert!(listener.accept().is_err());
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

@@ -460,6 +460,8 @@ To install the agent skill: `mkdir -p ~/.codex/skills && cp -R skills/hey-boss ~
 
 Build and check: `cargo test --locked && cargo clippy --locked --all-targets -- -D warnings`; then `mkdir -p out && xcrun swiftc -O -parse-as-library -D HEY_BOSS_AUDIT hey_boss_daemon.swift test_hey_boss.swift -o out/hey-boss-test && out/hey-boss-test`. Rust consumers use `hey_boss::Client::new(socket_path)`; `cargo doc --open` lists the API.
 
+Notification and desktop clients wait up to two minutes for a restarting daemon before sending. Ctrl+C cancels a CLI wait; SDK callers can use `try_start_cancellable` or `notices::execute_cancellable`. Desktop bridge recovery repeats only read-only protocol probes; desktop actions are never queued or replayed after transmission. An accepted notification can still be pending in the durable broker queue; its stable replay ID lets the native receiver deduplicate a lost acknowledgement.
+
 History and launch metadata (working directory, Git branch, process ancestry) stay in the chosen state directory. There is no telemetry. Links open in your associated applications. Review notification contents before sharing history; use synthetic data in bug reports.
 
 To uninstall, run `launchctl bootout "gui/$(id -u)" "$HEY_BOSS_LAUNCH_AGENTS_DIR/local.hey-boss.plist"`, then remove that plist, the installed CLI, its adjacent `hey-boss.state`, and the daemon executable. Keep `history.db` if you want your archive.

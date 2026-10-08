@@ -57,10 +57,118 @@ fn call(state: &Path, request: serde_json::Value) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 #[test]
+fn notification_cli_waits_for_restarting_broker_and_preserves_pending_ids() {
+    for kind in ["alert", "update", "ask"] {
+        let root = std::path::PathBuf::from("/tmp")
+            .join(format!("hb-cli-recovery-{}-{kind}", std::process::id()));
+        let state = root.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let executable = root.join("hey-boss");
+        std::fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &executable).unwrap();
+        std::fs::write(root.join("hey-boss.state"), state.to_str().unwrap()).unwrap();
+        std::fs::write(root.join("hey-boss.companion"), "1").unwrap();
+        let broker = start(&state);
+        drop(broker);
+        std::fs::remove_file(state.join("daemon.sock")).unwrap();
+        let mut args = vec![
+            "notif",
+            kind,
+            "--project",
+            "Server migration",
+            "--title",
+            "Recovery fixture",
+            "Synthetic recovery",
+        ];
+        if kind == "update" {
+            args.push("# Synthetic report");
+        }
+        if kind == "ask" {
+            args.extend(["Synthetic description", "--async"]);
+        }
+        args.push("--json");
+        let mut child = command(&executable, &state)
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{kind} failed before broker recovery"
+        );
+        let restarted = start(&state);
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["status"], "pending");
+        assert_eq!(std::fs::read_dir(state.join("queue")).unwrap().count(), 1);
+        let bridge = UnixListener::bind(state.join("bridge.sock")).unwrap();
+        bridge.set_nonblocking(true).unwrap();
+        let (mut stream, sent) = bridge_action(&bridge);
+        assert_eq!(sent["command"], kind);
+        assert_eq!(sent["task_id"], response["task_id"]);
+        stream
+            .write_all(br#"{"task_id":"native-recovered","status":"pending"}"#)
+            .unwrap();
+        drop(stream);
+        std::thread::sleep(Duration::from_millis(650));
+        assert!(bridge.accept().is_err(), "{kind} delivered more than once");
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn notification_cli_cancellation_leaves_no_request_after_recovery() {
+    let root =
+        std::path::PathBuf::from("/tmp").join(format!("hb-cli-cancel-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    projects::seed(&root.join("issues.db"), &["named:Server migration"]);
+    let executable = root.join("hey-boss");
+    std::fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &executable).unwrap();
+    std::fs::write(root.join("hey-boss.state"), root.to_str().unwrap()).unwrap();
+    std::fs::write(root.join("hey-boss.companion"), "1").unwrap();
+    let mut child = command(&executable, &root)
+        .args([
+            "notif",
+            "alert",
+            "--project",
+            "Server migration",
+            "--title",
+            "Cancelled",
+            "Synthetic content",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(child.try_wait().unwrap().is_none());
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGINT);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let listener = UnixListener::bind(root.join("daemon.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    assert!(listener.accept().is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn overview_controls_are_forwarded_and_never_queued() {
     let state = std::env::temp_dir().join(format!("hb-overview-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
     let broker = start(&state);
+    std::fs::write(state.join("bridge-protocol"), "unsupported").unwrap();
     assert_eq!(
         call(
             &state,
@@ -68,6 +176,7 @@ fn overview_controls_are_forwarded_and_never_queued() {
         )["status"],
         "error"
     );
+    std::fs::write(state.join("bridge-protocol"), "1").unwrap();
     let bridge = UnixListener::bind(state.join("bridge.sock")).unwrap();
     let peer = std::thread::spawn(move || {
         loop {
@@ -82,6 +191,8 @@ fn overview_controls_are_forwarded_and_never_queued() {
             let control = request["command"] == "overview_snapshot";
             let response = if control {
                 serde_json::json!({"task_id":"overview","status":"ok","result":"{\"rows\":[]}"})
+            } else if request["command"] == "protocol" {
+                serde_json::json!({"task_id":"protocol","status":"ok","result":"1"})
             } else {
                 assert_eq!(request["command"], "agents_snapshot");
                 serde_json::json!({"task_id":"agents","status":"ok"})
@@ -106,17 +217,19 @@ fn overview_controls_are_forwarded_and_never_queued() {
     std::fs::remove_dir_all(state).unwrap();
 }
 #[test]
-fn desktop_actions_fail_offline_and_stamp_connection_identity_without_queueing() {
+fn desktop_actions_reject_incompatible_protocol_and_stamp_connection_identity_without_queueing() {
     let state = std::env::temp_dir().join(format!("hb-desktop-actions-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
     let broker = start(&state);
+    std::fs::write(state.join("bridge-protocol"), "unsupported").unwrap();
     let action = serde_json::json!({"command":"action","sync":false,"question":"{}","bridge_host":"spoof","bridge_generation":"spoof"});
     let began = Instant::now();
     let offline = call(&state, action.clone());
     assert_eq!(offline["status"], "error");
-    assert!(offline["error"].as_str().unwrap().contains("not connected"));
+    assert!(offline["error"].as_str().unwrap().contains("incompatible"));
     assert!(began.elapsed() < Duration::from_secs(2));
     assert_eq!(std::fs::read_dir(state.join("queue")).unwrap().count(), 0);
+    std::fs::write(state.join("bridge-protocol"), "1").unwrap();
     std::fs::write(state.join("bridge-host"), "devbox").unwrap();
     std::fs::write(state.join("bridge-generation"), "connection-1").unwrap();
     let bridge = UnixListener::bind(state.join("bridge.sock")).unwrap();
@@ -129,6 +242,12 @@ fn desktop_actions_fail_offline_and_stamp_connection_identity_without_queueing()
             let mut bytes = Vec::new();
             stream.read_to_end(&mut bytes).unwrap();
             let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if request["command"] == "protocol" {
+                stream
+                    .write_all(br#"{"task_id":"protocol","status":"ok","result":"1"}"#)
+                    .unwrap();
+                continue;
+            }
             let is_action = request["command"] == "action";
             if is_action {
                 assert_eq!(request["bridge_host"], "devbox");
@@ -504,14 +623,20 @@ fn unnegotiated_legacy_bridge_receives_no_control_commands() {
     std::fs::remove_file(state.join("bridge-protocol")).unwrap();
     let bridge = UnixListener::bind(state.join("bridge.sock")).unwrap();
     bridge.set_nonblocking(true).unwrap();
-    assert_eq!(
-        call(
-            &state,
-            serde_json::json!({"command":"overview_snapshot","sync":false})
-        )["status"],
-        "error"
-    );
-    std::thread::sleep(Duration::from_millis(600));
+    let mut caller = UnixStream::connect(state.join("daemon.sock")).unwrap();
+    caller
+        .write_all(br#"{"command":"overview_snapshot","sync":false}"#)
+        .unwrap();
+    caller.shutdown(Shutdown::Write).unwrap();
+    caller
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(matches!(
+        caller.read(&mut [0u8; 1]).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    drop(caller); // Cancel while waiting for protocol negotiation.
+    std::thread::sleep(Duration::from_millis(200));
     assert_eq!(
         bridge.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
