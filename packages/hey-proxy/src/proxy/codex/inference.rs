@@ -74,29 +74,11 @@ pub(in crate::proxy) async fn forward(proxy: Arc<Proxy>, request: Request) -> Re
     parts
         .headers
         .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-    let mut response = forward_request(
+    let response = forward_request(
         proxy.clone(),
         Request::from_parts(parts, Body::from(input.to_string())),
     )
     .await;
-    // The ChatGPT backend can omit Content-Type on its SSE response. The
-    // requested native protocol is still SSE; clients and replay guards need it.
-    if !compact
-        && response.status().is_success()
-        && !response.headers().contains_key(header::CONTENT_TYPE)
-    {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-        response.headers_mut().remove(header::CONTENT_LENGTH);
-        proxy
-            .service
-            .logs
-            .update(proxy.log_id, "response_type", json!({}), |entry| {
-                entry.streaming = true;
-                true
-            });
-    }
     if streaming
         || compact
         || !response.status().is_success()
