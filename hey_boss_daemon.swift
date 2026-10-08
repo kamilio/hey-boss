@@ -69,7 +69,7 @@ struct IssueReference: Codable, Equatable {
     }
 }
 
-struct Request: Decodable {
+struct Request: Codable {
     let command: String
     let issue: IssueReference?
     let question: String?
@@ -95,6 +95,22 @@ struct Request: Decodable {
     let severity: String?
     let icon: String?
     let icon_path: String?
+
+    /// Only ordinary notification creation uses receipts; secrets never enter Store.
+    func notificationReceipt() throws -> (source: String, id: String, fingerprint: String)? {
+        guard let id = task_id else { return nil }
+        let source = source_host ?? ""
+        guard !id.isEmpty, id.utf8.count <= 256, source.utf8.count <= 1024,
+              !id.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              !source.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            throw StorageError(description: "Invalid notification request identity")
+        }
+        var payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(self)) as! [String: Any]
+        // Reconnecting or changing how a caller waits cannot change notification identity.
+        for key in ["task_id", "source_host", "sync", "bridge_host", "bridge_generation"] { payload.removeValue(forKey: key) }
+        let bytes = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .withoutEscapingSlashes])
+        return (source, id, SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+    }
 }
 
 struct Launcher: Codable {
@@ -348,6 +364,7 @@ final class Database {
         sqlite3_busy_timeout(db, 3000)
         try execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS dialogs (id TEXT PRIMARY KEY, status TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS pending ON dialogs(status);")
         try execute("CREATE TABLE IF NOT EXISTS muted_agents (sender TEXT PRIMARY KEY)")
+        try execute("CREATE TABLE IF NOT EXISTS notification_receipts (source TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES dialogs(id), PRIMARY KEY(source, request_id)) WITHOUT ROWID")
         try execute("CREATE INDEX IF NOT EXISTS inbox_issue ON dialogs(json_extract(body,'$.issue.project'),json_extract(body,'$.issue.number'),coalesce(json_extract(body,'$.issue.host'),'')) WHERE json_valid(body)")
         try execute("UPDATE dialogs SET body=json_set(body, '$.title', json_extract(body, '$.description')) WHERE json_valid(body) AND json_extract(body, '$.kind')='update' AND json_extract(body, '$.title') IS NULL;")
         try execute("CREATE VIEW IF NOT EXISTS notifications AS SELECT id, json_extract(body, '$.project') AS project, json_extract(body, '$.title') AS title, json_extract(body, '$.kind') AS kind, json_extract(body, '$.question') AS message, json_extract(body, '$.description') AS summary, status, json_extract(body, '$.createdAt') AS created_at, json_extract(body, '$.presentedAt') AS presented_at, json_extract(body, '$.completedAt') AS completed_at FROM dialogs;")
@@ -380,6 +397,27 @@ final class Database {
         let result = sqlite3_step(stmt)
         guard [SQLITE_ROW, SQLITE_DONE].contains(result) else { throw failure() }
         return result == SQLITE_ROW
+    }
+    func replay(_ receipt: (source: String, id: String, fingerprint: String)) throws -> Record? {
+        let stmt = try statement("SELECT fingerprint, task_id FROM notification_receipts WHERE source=? AND request_id=?")
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        guard sqlite3_bind_text(stmt, 1, receipt.source, -1, transient) == SQLITE_OK,
+              sqlite3_bind_text(stmt, 2, receipt.id, -1, transient) == SQLITE_OK else { throw failure() }
+        let code = sqlite3_step(stmt)
+        if code == SQLITE_DONE { return nil }
+        guard code == SQLITE_ROW, let digest = sqlite3_column_text(stmt, 0), let id = sqlite3_column_text(stmt, 1) else { throw failure() }
+        guard String(cString: digest) == receipt.fingerprint else { throw StorageError(description: "Notification request ID was already used with different content") }
+        return try get(String(cString: id))
+    }
+    func saveReceipt(_ receipt: (source: String, id: String, fingerprint: String), taskID: String) throws {
+        let stmt = try statement("INSERT INTO notification_receipts(source, request_id, fingerprint, task_id) VALUES (?, ?, ?, ?)")
+        defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        for (index, value) in [receipt.source, receipt.id, receipt.fingerprint, taskID].enumerated() {
+            guard sqlite3_bind_text(stmt, Int32(index + 1), value, -1, transient) == SQLITE_OK else { throw failure() }
+        }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure() }
     }
     func muteAgent(_ agent: NotificationAgent, muted: Bool) throws {
         let stmt = try statement(muted ? "INSERT OR IGNORE INTO muted_agents(sender) VALUES(?)" : "DELETE FROM muted_agents WHERE sender=?")
@@ -679,21 +717,31 @@ final class Store {
             }
             let options = request.options ?? []
             if request.command != "alert", request.description == nil { throw invalid("Description is required") }
-            var row = Record(taskID: UUID().uuidString.lowercased(), kind: request.command == "update" ? "update" : (request.command == "alert" ? "alert" : (options.isEmpty ? "prompt" : "approval")), question: question, project: project, title: title, description: request.description ?? "", options: request.command == "ask" ? options : [], autoclose: request.autoclose, linkURL: request.link_url, linkLabel: request.link_label, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: request.origin)
-            try request.issue?.validate(); row.issue = request.issue
-            row.documentName = request.document_name.map { String($0.prefix(256)) }
-            if let attachment = request.attachment { _ = try attachment.validatedImage(); row.attachment = attachment }
-            row.commentsEnabled = request.command == "update" && request.comments_enabled == true
-            row.sourceKnown = request.source_host != nil
-            row.sourceHost = request.source_host
-            row.severity = request.severity; row.icon = request.icon
-            row.iconData = request.icon_path.flatMap(snapshotIcon)
-            row.quietHoursMuted = notificationsMuted()
-            row.agentMuted = try database.agentMuted(row.origin?.agent)
-            try database.transaction { try database.save(row); try mobile?.track(row) }
-            refreshPendingCount()
-            if request.sync { waiters[row.taskID] = [reply] } else { reply.send(["task_id": row.taskID]) }
-            if row.quietHoursMuted != true && row.agentMuted != true { show(row) }
+            let receipt = try request.notificationReceipt()
+            var stored: Record!, created = false
+            // Receipt, native row and mobile outbox commit together, before replying or showing.
+            try database.transaction {
+                if let receipt, let replay = try database.replay(receipt) { stored = replay; return }
+                var row = Record(taskID: UUID().uuidString.lowercased(), kind: request.command == "update" ? "update" : (request.command == "alert" ? "alert" : (options.isEmpty ? "prompt" : "approval")), question: question, project: project, title: title, description: request.description ?? "", options: request.command == "ask" ? options : [], autoclose: request.autoclose, linkURL: request.link_url, linkLabel: request.link_label, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: request.origin)
+                try request.issue?.validate(); row.issue = request.issue
+                row.documentName = request.document_name.map { String($0.prefix(256)) }
+                if let attachment = request.attachment { _ = try attachment.validatedImage(); row.attachment = attachment }
+                row.commentsEnabled = request.command == "update" && request.comments_enabled == true
+                row.sourceKnown = request.source_host != nil
+                row.sourceHost = request.source_host
+                row.severity = request.severity; row.icon = request.icon
+                row.iconData = request.icon_path.flatMap(snapshotIcon)
+                row.quietHoursMuted = notificationsMuted()
+                row.agentMuted = try database.agentMuted(row.origin?.agent)
+                try database.save(row); try mobile?.track(row)
+                if let receipt { try database.saveReceipt(receipt, taskID: row.taskID) }
+                stored = row; created = true
+            }
+            let row = stored!
+            if created { refreshPendingCount() }
+            if request.sync && row.status == "pending" { waiters[row.taskID, default: []].append(reply) }
+            else { reply.send(created ? ["task_id": row.taskID] : row.response) }
+            if created && row.quietHoursMuted != true && row.agentMuted != true { show(row) }
             return
         }
         guard ["status", "hide", "wait"].contains(request.command) else { throw invalid("Unknown command") }

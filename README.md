@@ -783,8 +783,12 @@ order. Server task IDs remain stable across reconnects and broker restarts.
 task; observed answers and cancellations are cached on the server. Interrupting
 `wait` does not cancel the question. Entries are retained in
 `~/.local/share/hey-boss/queue`; there is currently no automatic retention limit.
-Delivery is **at least once**: interruption after the Mac accepts an item but
-before the server saves its acknowledgment can replay a duplicate. Server icons
+Delivery retries reuse a durable native receipt scoped to the source machine and
+server request ID. Losing an acknowledgment returns the original notification
+without presenting another one, including after a Mac restart or a question's
+answer/cancellation. Reusing an ID with changed content is rejected. Requests
+without an ID retain normal creation behavior; secrets never use this queue or
+receipt store. Server icons
 use `--icon`; local files and file links cannot be transferred by this transport.
 
 Edit `skills/hey-boss/SKILL.md` for everyday guidance and its linked `references/`
