@@ -535,7 +535,7 @@ fn model_probe_supports_bound_codex_responses_path() {
 }
 
 #[tokio::test]
-async fn model_probe_reports_named_route_without_resolving_credentials_or_quota() {
+async fn model_probe_reports_unavailable_credentials_with_the_configured_plan() {
     let config: Config = serde_json::from_value(json!({
         "listen":"127.0.0.1:8080", "account_schema_version":1,
         "default":{"api_key":"alpha"},
@@ -588,8 +588,9 @@ async fn model_probe_reports_named_route_without_resolving_credentials_or_quota(
             "Rule: ordered provider route",
             "Reasoning: medium -> medium",
             "Reasoning: medium -> high",
-            "Quota was not checked",
-            "No upstream request was made.",
+            "Using: none",
+            "credentials or account identity are unavailable",
+            "No model request was made.",
         ] {
             assert!(text.contains(expected), "{text}");
         }
