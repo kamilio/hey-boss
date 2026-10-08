@@ -66,19 +66,29 @@ impl Plan {
 
     /// Resolve safe route metadata without copying credentials or selecting a transport.
     pub fn resolve(&self, index: usize) -> Result<ResolvedLeg> {
-        let route = &self.config.routes[self.route];
-        let leg = route.legs.get(index).context("Unknown route leg")?;
-        let account = self
-            .config
+        self.config.routes[self.route].resolve(&self.config, index, self.effort.as_deref())
+    }
+}
+
+impl Route {
+    /// Shared by forwarding and local diagnostics; never opens credential stores.
+    pub(crate) fn resolve(
+        &self,
+        config: &Config,
+        index: usize,
+        effort: Option<&str>,
+    ) -> Result<ResolvedLeg> {
+        let leg = self.legs.get(index).context("Unknown route leg")?;
+        let account = config
             .accounts
             .get(&leg.provider)
             .context("Unknown route provider")?;
-        let model = leg.model.as_deref().unwrap_or(&route.model);
+        let model = leg.model.as_deref().unwrap_or(&self.model);
         let rewrite = leg
             .override_name
             .as_ref()
             .map(|name| {
-                self.config
+                config
                     .overrides
                     .get(&leg.provider)
                     .and_then(|overrides| overrides.get(name))
@@ -86,14 +96,14 @@ impl Plan {
             })
             .transpose()?;
         let upstream = rewrite
-            .and_then(|alias| alias.destination(self.effort.as_deref()).0)
+            .and_then(|alias| alias.destination(effort).0)
             .unwrap_or(model);
         let reasoning = rewrite
             .and_then(|alias| alias.reasoning.as_deref())
-            .or(self.effort.as_deref());
+            .or(effort);
         let resolved = ResolvedLeg {
-            config_revision: self.config.revision.clone(),
-            source_model: route.model.clone(),
+            config_revision: config.revision.clone(),
+            source_model: self.model.clone(),
             upstream_model: upstream.into(),
             provider: leg.provider.clone(),
             implementation: account.implementation(),
@@ -118,6 +128,18 @@ fn overlap(a: Option<ApiShape>, b: Option<ApiShape>) -> bool {
 }
 
 impl Config {
+    pub(crate) fn route_index(&self, model: &str, path: &str) -> Option<usize> {
+        if self.mode == Mode::Client {
+            return None;
+        }
+        self.routes.iter().position(|route| {
+            route.model == model
+                && route
+                    .api_shape
+                    .is_none_or(|s| Some(s) == ApiShape::from_route_path(path))
+        })
+    }
+
     /// None delegates to the existing legacy alias/fallback path. A matching named
     /// route owns the entire chain; legacy rewrites must never be run afterward.
     pub fn route_plan(
@@ -126,22 +148,11 @@ impl Config {
         path: &str,
         effort: Option<&str>,
     ) -> Option<Plan> {
-        if self.mode == Mode::Client {
-            return None;
-        }
-        self.routes
-            .iter()
-            .position(|route| {
-                route.model == model
-                    && route
-                        .api_shape
-                        .is_none_or(|s| Some(s) == ApiShape::from_route_path(path))
-            })
-            .map(|route| Plan {
-                config: self.clone(),
-                route,
-                effort: effort.map(str::to_owned),
-            })
+        self.route_index(model, path).map(|route| Plan {
+            config: self.clone(),
+            route,
+            effort: effort.map(str::to_owned),
+        })
     }
 
     pub(super) fn validate_routes(&self) -> Result<()> {

@@ -533,3 +533,75 @@ fn model_probe_supports_bound_codex_responses_path() {
     );
     assert!(response(&config, "/responses", &input).is_some());
 }
+
+#[tokio::test]
+async fn model_probe_reports_named_route_without_resolving_credentials_or_quota() {
+    let config: Config = serde_json::from_value(json!({
+        "listen":"127.0.0.1:8080", "account_schema_version":1,
+        "default":{"api_key":"alpha"},
+        "api_keys":{"alpha":"sh://exit 1"},
+        "accounts":{
+            "codex-subscription":{"implementation":"codex","auth":"subscription","credentials_file":"/missing/probe-oauth.json"},
+            "openai-api":{"implementation":"openai","auth":"api","endpoint":"https://api.openai.com","credential":"file:///missing/probe-api.key"}
+        },
+        "routes":[{"model":"gpt-6.1-sol","api_shape":"responses","legs":[
+            {"provider":"codex-subscription"}, {"provider":"openai-api","override":"fallback"}
+        ]}],
+        "overrides":{"openai-api":{"fallback":{"from":"gpt-6.1-sol","reasoning":"high",
+            "reasoning_routes":{"medium":{"to":"fallback-model"}}
+        }}}
+    })).unwrap();
+    let input = json!({"model":"gpt-6.1-sol","reasoning":{"effort":"medium"},"input":MODEL_PROMPT});
+    let unmatched = routing::describe(&config, "/v1/chat/completions", &input);
+    assert!(unmatched.contains("Rule: passthrough"), "{unmatched}");
+    let (url, task) = serve(router(config).unwrap()).await;
+    let client = reqwest::Client::new();
+    for stream in [false, true] {
+        let mut input = input.clone();
+        input["stream"] = json!(stream);
+        let response = client
+            .post(format!("{url}/v1/responses"))
+            .json(&input)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-hey-proxy-probe"], "true");
+        let body = response.text().await.unwrap();
+        let text = if stream {
+            body
+        } else {
+            serde_json::from_str::<Value>(&body).unwrap()["output"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let first = text
+            .find("1. codex-subscription -> codex/gpt-6.1-sol (included subscription)")
+            .expect(&text);
+        let second = text
+            .find("2. openai-api -> openai/fallback-model (pay per token)")
+            .expect(&text);
+        assert!(first < second, "{text}");
+        for expected in [
+            "Rule: ordered provider route",
+            "Reasoning: medium -> medium",
+            "Reasoning: medium -> high",
+            "Quota was not checked",
+            "No upstream request was made.",
+        ] {
+            assert!(text.contains(expected), "{text}");
+        }
+        for hidden in [
+            "alpha",
+            "passthrough",
+            "/missing",
+            "probe-oauth",
+            "probe-api",
+        ] {
+            assert!(!text.contains(hidden), "{text}");
+        }
+    }
+    task.abort();
+}
