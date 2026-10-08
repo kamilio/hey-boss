@@ -15,6 +15,9 @@ mod notif_cli;
 mod project_cli;
 mod proxy_cli;
 mod secret_cli;
+#[cfg(test)]
+#[path = "../tests/support/projects.rs"]
+mod test_projects;
 mod upgrade_cli;
 mod upgrade_provenance;
 mod utils_cli;
@@ -880,6 +883,9 @@ mod tests {
                     hey_boss::issues::identity::machine().map_err(std::io::Error::other)?;
                 let detected = hey_boss::issues::identity::project(&cwd, &machine)
                     .map_err(std::io::Error::other)?;
+                // Register only the projects these request tests use. Unknown
+                // overrides must still exercise production registry validation.
+                test_projects::seed(&root.join("issues.db"), &[&detected.id, "named:Atlas"]);
                 hey_boss::issues::Store::open(&root.join("issues.db"))
                     .and_then(|mut store| store.notification_project(&detected, override_id))
                     .map_err(std::io::Error::other)
@@ -989,6 +995,24 @@ mod tests {
                 Command::Notif(notif_cli::Action::Secret(_))
             ));
         }
+    }
+
+    #[test]
+    fn creation_requests_reject_unregistered_project_overrides() {
+        let error = Cli::try_parse_from([
+            "hey-boss",
+            "alert",
+            "Ready",
+            "--project",
+            "Unregistered",
+            "--title",
+            "Review",
+        ])
+        .unwrap()
+        .into_test_request()
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("not initialized"), "{error}");
     }
 
     #[test]
