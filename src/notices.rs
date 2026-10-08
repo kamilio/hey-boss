@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -236,26 +235,13 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Application Support/hey-boss/daemon.sock"))
 }
 pub fn execute(action: &Action) -> Result<Value> {
+    execute_cancellable(action, || false)
+}
+
+/// Cancellation is checked before transmission; sent actions are never replayed.
+pub fn execute_cancellable(action: &Action, cancelled: impl Fn() -> bool) -> Result<Value> {
     let payload = action.payload()?;
-    let mut stream = UnixStream::connect(socket_path()?).map_err(|_| {
-        Error::new(
-            "inbox_unavailable",
-            "Inbox is unavailable. Start or update the hey-boss desktop app, then refresh.",
-        )
-    })?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(&serde_json::to_vec(&payload)?)?;
-    stream.shutdown(Shutdown::Write)?;
-    let mut bytes = Vec::new();
-    stream.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err(Error::new(
-            "inbox_unavailable",
-            "Inbox response exceeds the supported size",
-        ));
-    }
-    let reply: Value = serde_json::from_slice(&bytes)?;
+    let reply = exchange(&socket_path()?, &payload, &cancelled)?;
     if reply["status"] != "ok" {
         return Err(Error::new(
             "inbox_error",
@@ -269,6 +255,37 @@ pub fn execute(action: &Action) -> Result<Value> {
         )
     })?)?;
     project_response(action, result)
+}
+
+fn exchange(
+    socket: &std::path::Path,
+    payload: &Value,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Value> {
+    let mut stream = crate::readiness::connect(
+        socket,
+        std::time::Instant::now() + crate::readiness::RECOVERY_WAIT,
+        cancelled,
+    )?;
+    stream.set_read_timeout(Some(crate::readiness::CONTROL_REPLY_WAIT))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    if cancelled() {
+        return Err(Error::new(
+            "cancelled",
+            "Inbox action cancelled before sending",
+        ));
+    }
+    stream.write_all(&serde_json::to_vec(&payload)?)?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut bytes = Vec::new();
+    stream.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err(Error::new(
+            "inbox_unavailable",
+            "Inbox response exceeds the supported size",
+        ));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn project_response(action: &Action, mut result: Value) -> Result<Value> {
@@ -340,6 +357,38 @@ fn project_response(action: &Action, mut result: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inbox_waits_before_transmission_and_never_replays_lost_reply() {
+        let root = PathBuf::from("/tmp").join(format!("hb-inbox-recovery-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let socket = root.join("daemon.sock");
+        let target = socket.clone();
+        let client = std::thread::spawn(move || {
+            exchange(
+                &target,
+                &json!({"command":"inbox_dismiss","task_id":"synthetic","sync":false}),
+                &|| false,
+            )
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!client.is_finished());
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["task_id"],
+            "synthetic"
+        );
+        drop(stream);
+        assert!(client.join().unwrap().is_err());
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err());
+        assert!(exchange(&socket, &json!({}), &|| true).is_err());
+        assert!(listener.accept().is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn related_notices_match_the_whole_reference_and_project_legacy_responses() {
         let action: Action = serde_json::from_value(

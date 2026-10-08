@@ -766,12 +766,6 @@ fn run() -> std::io::Result<()> {
         eprintln!("Remote companion supports --icon; --icon-file requires a file on the Mac.");
         std::process::exit(1);
     }
-    if executable.with_file_name("hey-boss.companion").exists()
-        && !std::path::Path::new(&state).join("daemon.sock").exists()
-    {
-        eprintln!("hey-boss is disconnected; connect the companion from your Mac first.");
-        std::process::exit(1);
-    }
     let result = Client::new(std::path::Path::new(&state).join("daemon.sock"))
         .try_send(&request)
         .unwrap_or_else(|error| {
