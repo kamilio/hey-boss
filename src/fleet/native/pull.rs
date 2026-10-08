@@ -27,7 +27,15 @@ pub(super) fn send_pull(
     frame["payload"] = payload;
     frame["receipts"] = Value::Array(receipts);
     if !supports_chunks || !snapshot {
-        if let Some(bytes) = encode_frame(&frame, crate::issues::WIRE_LIMIT - 1)? {
+        // Even a retained incremental batch can contain megabytes of changed
+        // evidence. Bound the plain preflight and use the negotiated compressed
+        // stream for anything larger; small control traffic stays cheap.
+        let plain_limit = if supports_chunks {
+            64 * 1024
+        } else {
+            crate::issues::WIRE_LIMIT - 1
+        };
+        if let Some(bytes) = encode_frame(&frame, plain_limit)? {
             writer.write_all(&bytes)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -229,6 +237,23 @@ mod tests {
             frames.push(frame);
         }
         frames
+    }
+
+    #[test]
+    fn ordinary_large_incremental_pull_is_compressed_for_capable_peers() {
+        let payload =
+            json!({"changes":[{"after_json":"unchanged evidence ".repeat(50_000)}],"cursor":7});
+        let mut wire = Vec::new();
+        send_pull(&mut wire, payload.clone(), vec![], true).unwrap();
+        assert!(wire.len() < 20_000, "{} wire bytes", wire.len());
+        let mut reader = PullReader::default();
+        let mut received = None;
+        for frame in frames(&wire) {
+            if let Some(frame) = reader.receive(frame).unwrap() {
+                received = Some(frame);
+            }
+        }
+        assert_eq!(received.unwrap()["payload"], payload);
     }
 
     #[test]
