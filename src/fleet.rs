@@ -7,6 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 mod native;
+mod signal;
+pub use signal::queue_signal;
 
 #[cfg(test)]
 pub(crate) fn test_replica(
@@ -87,6 +89,10 @@ pub enum Action {
         worker: String,
         #[arg(value_parser = ["pause", "resume", "stop", "restart"])]
         signal: String,
+        /// Reuse this ID and identical arguments after an uncertain response.
+        /// Omit to generate a new ID, printed before sending.
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 

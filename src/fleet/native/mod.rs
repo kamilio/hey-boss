@@ -44,6 +44,35 @@ pub(super) fn request(value: Value) -> crate::issues::Result<Value> {
             .unwrap_or_else(|| crate::issues::Error::new("fleet_unavailable", e.to_string()))
     })
 }
+pub(super) fn signal_request(mut value: Value) -> crate::issues::Result<Value> {
+    use super::signal::not_sent;
+    let ctx = Context::new().map_err(not_sent)?;
+    let db = ctx.db().map_err(not_sent)?;
+    let companion: bool = db
+        .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .map_err(not_sent)?;
+    if companion {
+        value["kind"] = json!("worker_signal");
+        authority::call(&ctx.state, &ctx.path, value).map_err(|error| {
+            if error
+                .details
+                .as_ref()
+                .is_some_and(|details| details["sent"] == false)
+            {
+                not_sent(error)
+            } else if error.code == "fleet_unavailable" {
+                super::signal::unknown(error)
+            } else {
+                error
+            }
+        })
+    } else {
+        let stream = UnixStream::connect(ctx.state.join("fleet.sock")).map_err(not_sent)?;
+        super::signal::exchange(stream, &value)
+    }
+}
 pub(super) fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
     self::auto_workers::run(apply, config_only).map_err(std::io::Error::other)
 }
@@ -73,6 +102,19 @@ fn save_upgrade_source(ctx: &Context, source: &std::path::Path) -> Result<()> {
     Ok(())
 }
 fn run_inner(action: &super::Action) -> Result<()> {
+    if let super::Action::Signal {
+        host,
+        worker,
+        signal,
+        request_id,
+    } = action
+    {
+        println!(
+            "{}",
+            super::queue_signal(host, worker, signal, request_id.as_deref())?
+        );
+        return Ok(());
+    }
     let startup = matches!(
         action,
         super::Action::Companion { stdio: true, .. }
@@ -157,20 +199,6 @@ fn run_inner(action: &super::Action) -> Result<()> {
                     &ctx,
                     json!({"kind":"capabilities"})
                 )?)?
-            );
-            Ok(())
-        }
-        super::Action::Signal {
-            host,
-            worker,
-            signal,
-        } => {
-            println!(
-                "{}",
-                local_request(
-                    &ctx,
-                    json!({"kind":"signal","host":host,"worker":worker,"signal":signal})
-                )?
             );
             Ok(())
         }
