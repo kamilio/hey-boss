@@ -1734,12 +1734,13 @@ pub(super) fn apply_pull(
             "Stale fleet pull: the cursor precedes the last committed synchronization; no changes or receipts were applied",
         ));
     }
-    if let Some(base) = payload.get("watch_delta_base") {
-        if base.as_i64() != Some(previous_cursor) && cursor != previous_cursor {
-            return Err(invalid(
-                "Watch delta base cursor does not match committed synchronization",
-            ));
-        }
+    if let Some(base) = payload.get("watch_delta_base")
+        && base.as_i64() != Some(previous_cursor)
+        && cursor != previous_cursor
+    {
+        return Err(invalid(
+            "Watch delta base cursor does not match committed synchronization",
+        ));
     }
     db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
     if let Some(assignments) = payload.get("chief_ownership") {
