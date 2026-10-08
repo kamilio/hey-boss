@@ -878,12 +878,12 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     assert_eq!(disconnected["error"]["code"], "fleet_unavailable");
     let offline_assignment = issue(&peer, &["assign", "3", "github"], 1);
     assert_eq!(offline_assignment["error"]["code"], "fleet_unavailable");
-    assert!(
-        disconnected["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("same --request-id")
-    );
+    // The relay socket is gone: these calls were never sent, so their outcome
+    // is known rather than an unacknowledged write requiring a retry ID.
+    for response in [&disconnected, &offline_assignment] {
+        assert_eq!(response["error"]["details"]["sent"], false, "{response}");
+        assert_eq!(response["error"]["details"]["route"], "supervisor_tunnel");
+    }
     assert_eq!(
         issue(&main, &["view", "2"], 0)["issue"]["labels"],
         serde_json::json!(["reviewed"])
