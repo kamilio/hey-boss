@@ -7,7 +7,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// Covers SSH failure detection and the first automatic reconnect cooldown.
+pub(crate) const RECOVERY_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("destination").required(true).args(["env_file", "stdout", "command"])))]
@@ -237,16 +240,41 @@ struct SecretResponse {
     // on the shape of an unused (and potentially credential-bearing) payload.
     result: Option<Box<serde_json::value::RawValue>>,
 }
+fn connect(socket: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let mut waiting = false;
+    loop {
+        match UnixStream::connect(socket) {
+            Ok(stream) => return Ok(stream),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) && Instant::now() < deadline =>
+            {
+                if !waiting {
+                    eprintln!(
+                        "Waiting for the desktop companion to reconnect; no secret request has been sent."
+                    );
+                    waiting = true;
+                }
+                std::thread::sleep(
+                    Duration::from_millis(100)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(_) => break,
+        }
+    }
+    Err(not_delivered(
+        "unavailable",
+        "Connect an updated desktop companion; no request was sent.",
+    ))
+}
 fn receive(socket: &Path, request: &serde_json::Value) -> io::Result<Vec<String>> {
-    let mut stream = UnixStream::connect(socket).map_err(|_| {
-        not_delivered(
-            "unavailable",
-            "Connect an updated desktop companion; no request was sent.",
-        )
-    })?;
+    let mut stream = connect(socket, Instant::now() + RECOVERY_WAIT)?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    // Let the desktop's 900-second expiry and bounded reply write finish first.
-    stream.set_read_timeout(Some(Duration::from_secs(915)))?;
+    // The remote broker may first wait for its bridge, then for desktop expiry.
+    stream.set_read_timeout(Some(RECOVERY_WAIT + Duration::from_secs(915)))?;
     let payload = serde_json::to_vec(request)
         .map_err(|_| not_delivered("request_invalid", "Invalid secret request."))?;
     stream.write_all(&payload).and_then(|()| stream.shutdown(std::net::Shutdown::Write))
@@ -453,6 +481,30 @@ fn run_inner(options: &Options) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connection_wait_recovers_and_has_a_deadline() {
+        let root = std::env::temp_dir().join(format!("hb-secret-connect-{}", SystemNonce::value()));
+        fs::create_dir(&root).unwrap();
+        let socket = root.join("daemon.sock");
+        let delayed_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let listener = std::os::unix::net::UnixListener::bind(delayed_socket).unwrap();
+            listener.accept().unwrap();
+        });
+        connect(&socket, Instant::now() + Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        // The stale socket remains after the listener closes.
+        let start = Instant::now();
+        let failure = connect(&socket, start + Duration::from_millis(150)).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(
+            failure
+                .to_string()
+                .contains("delivery=not_delivered reason=unavailable")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn values_round_trip_without_shell_execution() {
         let fields = vec!["ONE".into(), "TWO".into()];

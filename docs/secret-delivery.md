@@ -20,6 +20,12 @@ Legacy companion errors appear as `unavailable` without claiming cancellation.
 `response_empty`, `response_missing`, and `response_malformed` distinguish a
 connection closed without a reply, an absent result, and invalid response data.
 Transport failures and response-size limits also leave the destination untouched.
+Before sending, the CLI waits up to two minutes for a restarting local broker;
+the broker separately waits up to two minutes for the desktop bridge and verifies
+it with a read-only protocol probe. This covers brief reconnects without depending
+on the separate fleet supervisor tunnel. Waiting ends when the caller disconnects.
+Only readiness probes are retried: after sending the secret request, any failure
+returns without replay. No pending request or probe response is persisted.
 Before an explicitly authorized retry after a transport/protocol failure, dismiss
 any remaining private prompt and repair/reconnect the companion. Requests are
 ephemeral: they are never queued, replayed, or written to notification history.
