@@ -1415,6 +1415,20 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
         }
         let peer = upstream.remote_addr();
         let mut response_headers = upstream.headers().clone();
+        // Codex inference requests SSE even when the caller wants a final JSON
+        // response. Normalize its missing header before capacity translation,
+        // usage inspection and replay guards choose how to parse the body.
+        if status.is_success()
+            && proxy
+                .binding
+                .as_ref()
+                .is_some_and(|b| b.implementation == "codex")
+            && parts.uri.path().trim_end_matches('/') == "/responses"
+            && !response_headers.contains_key(header::CONTENT_TYPE)
+        {
+            response_headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            response_headers.remove(header::CONTENT_LENGTH);
+        }
         let upstream_id = response_headers
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())

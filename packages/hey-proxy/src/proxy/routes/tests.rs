@@ -662,6 +662,63 @@ async fn fresh_reading_recovers_after_exhaustion_and_pin_bypasses_automatic_rout
 }
 
 #[tokio::test]
+async fn subscription_capacity_events_use_the_responses_retry_translation_without_replay() {
+    for content_type in ["", "text/event-stream"] {
+        for kind in ["response.failed", "error"] {
+            let f = Fixture::new().await;
+            let original = json!({"code":"server_is_overloaded","type":"server_is_overloaded","message":"Selected model is at capacity"});
+            let event = if kind == "response.failed" {
+                json!({"type":kind,"response":{"id":"synthetic-refusal","error":original}})
+            } else {
+                json!({"type":kind,"status":503,"error":original})
+            };
+            let prelude = "data: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\n";
+            *f.failure.lock().unwrap() = Some((
+                200,
+                content_type.into(),
+                format!("{prelude}data: {event}\n\n"),
+            ));
+            let response = f
+                .request(json!({"model":"gpt-6.1-sol","input":[],"stream":true}))
+                .await;
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            assert_eq!(response.headers()["x-hey-proxy-provider"], "personal");
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            assert!(bytes.starts_with(prelude.as_bytes()));
+            let events = sse::SseDecoder::default().feed(&bytes, true).unwrap();
+            let result = events.last().unwrap();
+            let error = result
+                .pointer("/response/error")
+                .or_else(|| result.get("error"))
+                .unwrap();
+            assert_eq!(error["code"], "server_error", "{result}");
+            assert_eq!(error["type"], "server_error");
+            assert_eq!(error["upstream_code"], "server_is_overloaded");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Selected model is at capacity")
+            );
+            if kind == "error" {
+                assert_eq!(result["status"], 500);
+            }
+            assert_eq!(
+                f.seen.lock().unwrap().len(),
+                1,
+                "translation must not replay or switch providers"
+            );
+            assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}
+
+#[tokio::test]
 async fn codex_missing_content_type_remains_sse_and_nonstreaming_collects_terminal_object() {
     for streaming in [true, false] {
         let f = Fixture::new().await;
