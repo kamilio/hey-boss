@@ -369,3 +369,43 @@ async fn worker_sdk_checks_version_before_decoding_new_schema() {
     );
     task.abort();
 }
+
+#[tokio::test]
+async fn spend_report_uses_accounting_schema_and_encodes_filters() {
+    let (url, task) = serve(Router::new().route(
+        "/usage/v1/spend",
+        any(
+            |axum::extract::Query(q): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| async move {
+                assert_eq!(
+                    q.get("provider").map(String::as_str),
+                    Some("openai&all=true")
+                );
+                assert_eq!(q.get("since_ms").map(String::as_str), Some("1234"));
+                assert_eq!(q.len(), 2);
+                axum::Json(json!({"schema_version":2,"summary":{"requests":1}}))
+            },
+        ),
+    ))
+    .await;
+    let report = Client::new(&url, None)
+        .unwrap()
+        .spend(Some(1234), Some("openai&all=true"))
+        .await
+        .unwrap();
+    assert_eq!(report["summary"]["requests"], 1);
+    task.abort();
+    let (url, task) =
+        serve(Router::new().fallback(any(|| async { axum::Json(json!({"schema_version":1})) })))
+            .await;
+    assert_eq!(
+        Client::new(&url, None)
+            .unwrap()
+            .spend(None, None)
+            .await
+            .unwrap_err(),
+        Error::UnsupportedSchema(1)
+    );
+    task.abort();
+}

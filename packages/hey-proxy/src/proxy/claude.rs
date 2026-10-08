@@ -239,6 +239,7 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             );
         }
     };
+    proxy.record_accounting_route("claude", "default");
     let mut token = if let Some(binding) = &proxy.binding {
         binding.token.clone()
     } else {
@@ -347,7 +348,9 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         let mut response = Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
-        response.extensions_mut().insert(fallback::Upstream { gemini: false });
+        response
+            .extensions_mut()
+            .insert(fallback::Upstream { gemini: false });
         return response;
     }
     unreachable!()

@@ -58,6 +58,8 @@ enum Field {
     InferenceGeo,
     Status,
     Usage,
+    #[serde(rename = "usageMetadata")]
+    UsageMetadata,
     Response,
     Message,
     Error,
@@ -89,6 +91,7 @@ impl<'de> Deserialize<'de> for Metadata {
                         Field::InferenceGeo => ("inference_geo", map.next_value()?),
                         Field::Status => ("status", map.next_value()?),
                         Field::Usage => ("usage", map.next_value()?),
+                        Field::UsageMetadata => ("usageMetadata", map.next_value()?),
                         Field::Code => ("code", map.next_value()?),
                         Field::Reason => ("reason", map.next_value()?),
                         Field::Response => ("response", map.next_value::<Metadata>()?.0),
@@ -228,5 +231,15 @@ mod tests {
         assert!(serde_json::from_str::<Value>(&deep).is_err());
         assert!(parse(deep.as_bytes()).is_err());
         assert!(parse(br#"{"model":"claude","messages":[{"content":"\ud83d\ude00"}]}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod native_accounting_tests {
+    #[test]
+    fn native_gemini_usage_survives_metadata_only_parsing() {
+        let value=super::parse(br#"{"candidates":[{"content":{"parts":[{"text":"not retained"}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"thoughtsTokenCount":15}}"#).unwrap();
+        assert!(value.get("candidates").is_none());
+        assert_eq!(value["usageMetadata"]["promptTokenCount"], 100);
     }
 }

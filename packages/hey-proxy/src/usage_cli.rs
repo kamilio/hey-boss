@@ -24,7 +24,7 @@ pub(crate) struct Args {
     /// Recommend the best provider (`codex` or `claude`) based on earliest expiring usage and remaining quota
     #[arg(long, conflicts_with_all = ["provider", "account", "accounts", "spend"])]
     recommend: bool,
-    /// Show API-equivalent spend by provider and model and subscription yield
+    /// Show proxy token usage and API-equivalent value
     #[arg(long, conflicts_with_all = ["account", "accounts", "recommend"])]
     spend: bool,
     /// Print only the recommended provider ID (`codex` or `claude`) when recommending
@@ -66,24 +66,24 @@ pub(crate) struct RecommendArgs {
 #[derive(ClapArgs)]
 pub(crate) struct SpendArgs {
     /// Time window in days (default: 7 days to match weekly subscription cycle; use --all for all time)
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=730))]
     pub days: Option<u64>,
     /// Time window in hours (e.g. --hours 5 for the 5-hour session window or --hours 24)
-    #[arg(long, conflicts_with = "days")]
+    #[arg(long, conflicts_with = "days", value_parser = clap::value_parser!(u64).range(1..=2160))]
     pub hours: Option<u64>,
     /// Include all recorded history instead of defaulting to the last 7 days
     #[arg(long, conflicts_with_all = ["days", "hours"])]
     pub all: bool,
-    /// Filter breakdown to a specific provider (`codex`, `claude`, `gemini`, `openai`)
+    /// Filter the entire report to a specific provider (`codex`, `claude`, `gemini`, `openai`)
     #[arg(long)]
     pub provider: Option<String>,
-    /// Skip incremental ingestion of local Codex/Claude CLI session JSONL logs
-    #[arg(long)]
+    /// Compatibility flag; CLI history is no longer imported
+    #[arg(long, hide = true)]
     pub no_sync: bool,
     /// Custom path to the spend SQLite database (default: ~/.hey-proxy/spend.sqlite3)
     #[arg(long)]
     pub db: Option<PathBuf>,
-    /// Print the versioned spend & subscription yield report as JSON
+    /// Print provider/account/model breakdowns and daily history as JSON
     #[arg(long)]
     pub json: bool,
 }
@@ -171,73 +171,37 @@ fn should_fallback_locally(error: &SdkError) -> bool {
 }
 
 pub(crate) async fn run_spend(args: SpendArgs, config_path: Option<PathBuf>) -> Result<()> {
-    let resolved_cfg = crate::config_path(config_path.clone()).ok();
-    let db_path = args
+    let resolved = crate::config_path(config_path.clone())?;
+    let path = args
         .db
         .clone()
-        .unwrap_or_else(|| crate::spend::default_db_path(resolved_cfg.as_deref()));
-
+        .unwrap_or_else(|| crate::spend::default_db_path(Some(&resolved)));
     let now = crate::spend::now_ms();
-    let (since_ms, window_label) = if let Some(hours) = args.hours {
-        (
-            Some(now - (hours as i64) * 3600 * 1000),
-            format!("Last {hours}h"),
-        )
-    } else if let Some(days) = args.days {
-        (
-            Some(now - (days as i64) * 86_400 * 1000),
-            format!("Last {days}d"),
-        )
+    let since = if args.all {
+        None
     } else {
-        (None, "All-time".to_string())
+        Some(
+            now - args
+                .hours
+                .map(|h| h as i64 * crate::spend::HOUR_MS)
+                .unwrap_or(args.days.unwrap_or(7) as i64 * crate::spend::DAY_MS),
+        )
     };
-
-    if let Some(tracker) = crate::spend::global_tracker(resolved_cfg.as_deref()) {
-        tracker.flush().await;
-    }
-    if !args.no_sync {
-        let _ = crate::spend::sync_local_sources(&db_path, None);
-    }
-
-    let mut live_usages = Vec::new();
-    if let Some(cfg_file) = resolved_cfg.as_ref() {
-        let cfg = if cfg_file.exists() {
-            crate::config::load(cfg_file).unwrap_or_default()
-        } else {
-            crate::config::Config::default()
-        };
-        if let Ok(snapshot) = crate::proxy::local_snapshot(cfg, Some(cfg_file.clone())) {
-            let (codex_res, claude_res) = tokio::join!(
-                crate::proxy::subscription::account_usage(&snapshot, "codex", "default"),
-                crate::proxy::subscription::account_usage(&snapshot, "claude", "default"),
-            );
-            for u in [codex_res, claude_res].into_iter().flatten() {
-                if u.reading.state == State::Ok {
-                    live_usages.push(u);
-                }
+    let provider = args.provider.as_deref().map(str::to_ascii_lowercase);
+    let report = if args.db.is_none() {
+        let target = build_target(None, "HEY_PROXY_TOKEN", 5, config_path)?;
+        match target.client.spend(since, provider.as_deref()).await {
+            Ok(value) => serde_json::from_value::<crate::spend::SpendReport>(value)?,
+            Err(SdkError::Transport) if target.local_fallback.is_some() => {
+                crate::spend::generate_spend_report(&path, since, provider.as_deref())?
             }
+            Err(e) => return Err(e.into()),
         }
-    }
-
-    let mut report =
-        crate::spend::generate_spend_report(&db_path, since_ms, &window_label, &live_usages)?;
-    if let Some(prov_filter) = args.provider.as_deref() {
-        report
-            .by_provider
-            .retain(|p| p.provider.eq_ignore_ascii_case(prov_filter));
-        report
-            .by_model
-            .retain(|m| m.provider.eq_ignore_ascii_case(prov_filter));
-        report
-            .subscription_yield
-            .retain(|s| s.provider.eq_ignore_ascii_case(prov_filter));
-    }
-
+    } else {
+        crate::spend::generate_spend_report(&path, since, provider.as_deref())?
+    };
     if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&report).context("Cannot encode spend report")?
-        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         print!("{}", crate::spend::render_spend_report(&report));
     }

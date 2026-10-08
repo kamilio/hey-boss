@@ -374,13 +374,63 @@ Install and authenticate the [1Password CLI](https://developer.1password.com/doc
 
 `hey-proxy check-credentials` checks access without printing secret values. Multiple OpenAI projects and credential selection per overwrite are covered in [configuration](docs/configuration.md).
 
+## Token usage and subscription API value
+
+```sh
+hey-boss proxy spend --days 7
+hey-boss proxy spend --days 30 --json
+hey-boss proxy spend --hours 5 --provider codex --json
+hey-boss proxy spend --all --json
+```
+
+`spend` counts completed requests observed by this proxy, grouped by provider,
+account, billing transport and model. JSON also includes daily history. Named
+accounts use their pinned opaque account identity; legacy connections use their
+configured credential alias. Subscription OAuth and API-key traffic are separated
+using the selected transport, never the model name. A subscription label identifies
+the authentication channel; provider-reported extra charges remain in `usage`.
+Traffic outside the proxy is outside this report's coverage.
+
+Input totals include cache reads and writes; output totals include reported
+reasoning. These breakdowns must not be added again. API value applies the embedded
+model price book, including cache tiers, long-context rates and reported Claude
+speed/geography. Unknown models or incomplete usage produce a null `api_value_usd`,
+with the priced portion and missing/unpriced request counts shown separately. This
+is estimated API value, not a bill or a prediction of full subscription capacity.
+
+Forwarding performs one nonblocking enqueue of small metadata at completion. A
+4096-record queue feeds a background writer that batches for up to 250 ms; pricing,
+SQLite, retention and migration never run on the forwarding thread. No prompts,
+outputs or per-request ledger rows are stored by `spend`. Hourly totals last 90
+days, daily totals last 730 days, and lifetime totals remain. Windows round down to
+UTC hour boundaries (days for windows older than 90 days); daily history contains
+whole UTC days, including partial current days. Counts use completion time.
+The SQLite database is capped at 64 MiB, with a bounded 2048-series catalog and
+regular WAL checkpoints. Disk/queue failures cannot block inference: reports expose
+writer health and lost-record counts. In-flight requests and unflushed records at
+process termination are not counted.
+
+The first updated start compacts the old per-request database in the background.
+Old source totals and up to 730 days of provider/source history remain in
+`legacy_unverified` and `legacy_by_day`, excluded from authoritative totals because
+CLI and proxy sources overlap and historical subscription attribution is uncertain.
+There are no further CLI-history scans or quota fetches in `spend`. Client relays
+read their host's accounting without recording it again. Each independent host or
+config database has its own totals; this is not a fleet-wide total.
+
+The CLI reads the running proxy's `/usage/v1/spend` endpoint (report schema 2), or
+its local database if the service is offline. `--db PATH` reads another database.
+The endpoint accepts `days`, `since_ms`, and `provider`; it uses background read
+queries and returns the writer's current health. Separate detailed request logging
+and the older traffic dashboard are controlled by `logging` and are unaffected.
+
 ## Dashboard and remote use
 
 The default page at `/` (also `/logs`) shows RPM and estimated USD spend for today, this week, and all time. Days use your browser's local midnight; weeks start Monday. Client relays show their host's totals without double counting. API setup and subscription limits are at `/apis`.
 
 The dashboard reads small, cached aggregates rather than request histories. A background writer maintains totals, and forwarding never waits for dashboard queries or disk writes. Accounting snapshots are the default; set `logging.detailed: true` to retain full diagnostic timelines. Historical query and export APIs remain available.
 
-Spend uses reported tokens and published model rates, including Claude cache writes and reads. **Claude subscription usage is shown as its API-equivalent value, not extra subscription charges.** Unrecognized models and missing usage stay unpriced, and logging gaps are visible. Totals survive restarts; disabling persistence makes spend unavailable. Estimates exclude subscription fees, discounts, server-side tool charges and unreported retry usage. No prompts, response bodies or credentials are retained in request history.
+Spend uses reported tokens and published model rates, including Claude cache writes and reads. **Claude subscription usage is shown as its API-equivalent value, not extra subscription charges.** Unrecognized models and missing usage stay unpriced, and logging gaps are visible. Dashboard totals survive restarts; disabling request-history persistence makes dashboard spend unavailable. The compact `spend` report above remains enabled. Estimates exclude subscription fees, discounts, server-side tool charges and unreported retry usage. No prompts, response bodies or credentials are retained in request history.
 
 For SSH deployment, add hosts to `ssh_hosts` and run `hey-proxy rollout`. This installs the proxy service and syncs its proxy configuration. **Codex setup remains a separate command on each machine.** See [remote setup](docs/configuration.md#remote-setup) for host/client modes and credential requirements.
 

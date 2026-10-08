@@ -237,7 +237,10 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
             axum::routing::get(subscription::recommend),
         )
         .route("/usage/v1/spend", axum::routing::get(subscription::spend))
-        .route("/usage/v2/recommend", axum::routing::get(subscription::recommend_workers))
+        .route(
+            "/usage/v2/recommend",
+            axum::routing::get(subscription::recommend_workers),
+        )
         .route(
             "/usage/v1/accounts",
             axum::routing::get(subscription::accounts),
@@ -1170,7 +1173,11 @@ async fn forward_api(proxy: Arc<Proxy>, request: Request) -> Response {
 }
 
 async fn forward_selected(proxy: Arc<Proxy>, request: Request) -> Response {
-    if proxy.binding.as_ref().is_some_and(|b| b.implementation == "codex") {
+    if proxy
+        .binding
+        .as_ref()
+        .is_some_and(|b| b.implementation == "codex")
+    {
         codex::inference::forward(proxy, request).await
     } else if claude::is_path(request.uri().path())
         && proxy.config.mode != Mode::Client
@@ -1325,6 +1332,7 @@ async fn forward_request(proxy: Arc<Proxy>, request: Request) -> Response {
         Ok(v) => v,
         Err(e) => return error(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
+    proxy.record_accounting_route("openai", &project);
     let mut authorization = header::HeaderValue::from_str(&format!(
         "Bearer {}",
         resolved.to_str().expect("validated credential")
