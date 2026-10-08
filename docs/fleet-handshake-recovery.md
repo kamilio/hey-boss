@@ -31,6 +31,18 @@ Writes are throttled to once per second. Only a completed pull advances
 `last_sync`; EOF clears connection freshness without erasing the last sync time.
 No worker restart, pause, capacity adjustment, or assignment change is needed.
 
+Authority commands allow up to 15 seconds for a missing/refused local relay or
+an unfinished supervisor handshake to recover. The same deadline covers the
+response, including partial frames; cancellation stops waiting. An explicit
+configure with missing capabilities still reports unsupported promptly. A
+connection gap alone never recommends an upgrade.
+
+Retries occur only before connection or after the relay explicitly confirms
+that the handshake is pending and nothing was forwarded. Once forwarding is
+possible, a lost response has an unknown outcome: reuse the same request ID and
+content to inspect/recover its receipt. Revision guards are never refreshed
+automatically, and no failure falls back to writing the local replica.
+
 Verification uses private databases and transport processes:
 
 ```sh

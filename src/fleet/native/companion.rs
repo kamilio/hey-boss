@@ -409,10 +409,11 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                         &db,
                         &message["payload"],
                         |key, project, number, cursor| {
-                            authority::call(
+                            authority::call_cancellable(
                                 &ctx.state,
                                 &ctx.path,
                                 json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
+                                &|| ctx.stopped(),
                             )
                         },
                     )?;

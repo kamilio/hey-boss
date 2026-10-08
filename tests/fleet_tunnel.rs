@@ -192,6 +192,42 @@ impl Drop for Fleet {
 }
 
 #[test]
+fn cancelling_cli_during_authority_reconnect_stops_waiting() {
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fleet::new();
+    f.sql("peer", "UPDATE fleet_meta SET role='agent' WHERE id=1");
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        let mut child = f
+            .command("peer", &["fleet", "capabilities"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "CLI did not wait for reconnect"
+        );
+        let start = Instant::now();
+        unsafe {
+            libc::kill(child.id() as i32, signal);
+        }
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(status.signal(), Some(signal));
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(1) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("CLI did not stop waiting after cancellation");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[test]
 fn companion_moves_persist_with_guarded_retries_and_no_offline_fallback() {
     let mut f = Fleet::new();
     f.start();
