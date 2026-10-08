@@ -897,6 +897,9 @@ impl Supervisor {
             Some(cursor) => replica::incremental(&read, node, cursor)?,
             None => replica::snapshot(&read, node)?,
         };
+        if message["watch_deltas"] != true {
+            replica::legacy_watch_rows(&read, &mut payload)?;
+        }
         for (change, receipt) in message["changes"].as_array().unwrap().iter().zip(&receipts) {
             if receipt["state"] == "conflict"
                 && !matches!(change["table_name"].as_str(), Some("comments" | "events"))

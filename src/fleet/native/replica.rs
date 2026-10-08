@@ -411,10 +411,25 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
                 String::new()
             };
             let name = format!("fleet_capture_{table}_{operation}");
+            // Watch status contains every PR for an issue. Journaling both full
+            // copies for one changed timestamp can consume megabytes, expire
+            // retained history and force peers into repeated full snapshots.
+            let watch_delta =
+                role == "controller" && *table == "issue_github_watches" && operation == "UPDATE";
+            let before_json = if watch_delta {
+                "json_object('project_id',OLD.project_id,'issue_number',OLD.issue_number)"
+                    .to_owned()
+            } else {
+                row_json(before)
+            };
+            let after_json = if watch_delta {
+                super::watch_delta::capture_after(&row_json(after))
+            } else {
+                row_json(after)
+            };
             let sql = format!(
                 "CREATE TRIGGER {name} AFTER {operation} ON {table} WHEN (SELECT syncing FROM fleet_meta WHERE id=1)=0{different} BEGIN INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('{table}',{},{},CAST(strftime('%s','now') AS INTEGER)*1000); END",
-                row_json(before),
-                row_json(after)
+                before_json, after_json
             );
             let existing: Option<String> = db
                 .query_row(
@@ -1501,6 +1516,42 @@ fn incremental_retained(db: &Connection, node: &str, cursor: i64) -> Result<Valu
     )
 }
 
+// Old peers cannot apply status deltas. Send the current canonical watch once
+// per key, retaining the original batch cursor. This is an upgrade fallback;
+// negotiated peers receive the durable delta without loading unchanged status.
+pub(super) fn legacy_watch_rows(db: &Connection, payload: &mut Value) -> Result<()> {
+    let Some(changes) = payload["changes"].as_array_mut() else {
+        return Ok(());
+    };
+    let mut seen = BTreeSet::new();
+    let mut kept = Vec::with_capacity(changes.len());
+    for mut change in changes.drain(..).rev() {
+        if change["table_name"] == "issue_github_watches" {
+            let after = row_json(&change, "after_json")?;
+            let key = if after.is_null() {
+                row_json(&change, "before_json")?
+            } else {
+                after.clone()
+            };
+            if !seen.insert(pending_key("issue_github_watches", &key)?) {
+                continue;
+            }
+            if after.get("status_delta").is_some() {
+                let row = current_row(db, "issue_github_watches", &key)?;
+                change["after_json"] = if row.is_null() {
+                    Value::Null
+                } else {
+                    json!(row.to_string())
+                };
+            }
+        }
+        kept.push(change);
+    }
+    kept.reverse();
+    *changes = kept;
+    Ok(())
+}
+
 fn pending_key(table: &str, row: &Value) -> Result<String> {
     Ok(format!(
         "{table}:{}",
@@ -1900,7 +1951,29 @@ pub(super) fn apply_pull(
                 )?;
             }
         } else {
-            let after = row_json(change, "after_json")?;
+            let mut after = row_json(change, "after_json")?;
+            if table == "issue_github_watches"
+                && let Some(delta) = after.get("status_delta")
+            {
+                let mut row = current_row(db, table, &after)?;
+                let mut status: Value =
+                    serde_json::from_str(row["status"].as_str().ok_or_else(|| {
+                        crate::issues::Error::new(
+                            "watch_delta_base",
+                            "Missing base for GitHub watch delta",
+                        )
+                    })?)?;
+                super::watch_delta::apply(&mut status, delta).map_err(|message| {
+                    if message == "JSON delta requires an object base" {
+                        Box::new(crate::issues::Error::new("watch_delta_base", message))
+                            as Box<dyn std::error::Error + Send + Sync>
+                    } else {
+                        invalid(message)
+                    }
+                })?;
+                row["status"] = json!(status.to_string());
+                after = row;
+            }
             if !after.is_null() {
                 apply_row(&mut writer, &pending, table, &after, "")?;
             } else {
@@ -2032,7 +2105,7 @@ pub(super) fn apply_pull(
         "last_sync",
         &json!(crate::issues::worker::now() as f64 / 1000.0),
     )?;
-    db.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
+    db.execute_batch("UPDATE fleet_meta SET syncing=0 WHERE id=1; UPDATE fleet_state SET value='false' WHERE key='watch_delta_repair' AND value<>'false';")?;
     if let Some(tx) = tx {
         tx.commit()?;
     }
@@ -2818,6 +2891,171 @@ mod tests {
         assert_eq!(
             current_row(&main.db, "github_fetch_status", &key).unwrap(),
             before
+        );
+    }
+
+    #[test]
+    fn watch_update_journal_contains_only_changed_json() {
+        let main = Fixture::new();
+        main.capture();
+        let mut status = json!({"prs":{},"event":"initial"});
+        for i in 0..200 {
+            status["prs"][format!("https://github.com/o/r/pull/{i}")] =
+                json!({"checked_at":1,"evidence":{"body":"e".repeat(10_000),"complete":true}});
+        }
+        main.db
+            .execute(
+                "INSERT INTO issue_github_watches VALUES('named:Native fleet',1,?1)",
+                [status.to_string()],
+            )
+            .unwrap();
+        let peer = Fixture::new();
+        install_capture(&peer.db, "agent", "peer").unwrap();
+        let initial = snapshot(&main.db, "peer").unwrap();
+        apply_pull(&peer.db, "peer", &initial, &[]).unwrap();
+        status["prs"]["https://github.com/o/r/pull/17"]["checked_at"] = json!(2);
+        main.db
+            .execute(
+                "UPDATE issue_github_watches SET status=?1",
+                [status.to_string()],
+            )
+            .unwrap();
+        let retained = journal(&main.db, initial["cursor"].as_i64().unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&retained).unwrap().len();
+        eprintln!("200 PRs, one changed timestamp: {bytes} journal bytes");
+        assert!(bytes < 1000, "watch delta is {bytes} bytes");
+        let pull = incremental(&main.db, "peer", initial["cursor"].as_i64().unwrap()).unwrap();
+        let mut wire = Vec::new();
+        super::super::pull::send_pull(&mut wire, pull.clone(), vec![], true).unwrap();
+        eprintln!("200 PRs, one changed timestamp: {} wire bytes", wire.len());
+        assert!(wire.len() < 2000);
+        apply_pull(&peer.db, "peer", &pull, &[]).unwrap();
+        apply_pull(&peer.db, "peer", &pull, &[]).unwrap();
+        let saved: String = peer
+            .db
+            .query_row("SELECT status FROM issue_github_watches", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&saved).unwrap() == status,
+            "reconstructed watch differs"
+        );
+
+        // A disconnected peer catches up from durable changes after reopen.
+        let cursor = pull["cursor"].as_i64().unwrap();
+        let reopened = Connection::open(main.db.path().unwrap()).unwrap();
+        let capture_started = std::time::Instant::now();
+        for checked_at in 3..33 {
+            status["prs"]["https://github.com/o/r/pull/17"]["checked_at"] = json!(checked_at);
+            reopened
+                .execute(
+                    "UPDATE issue_github_watches SET status=?1",
+                    [status.to_string()],
+                )
+                .unwrap();
+            prune_journal(&reopened).unwrap();
+        }
+        eprintln!("30 durable SQL captures: {:?}", capture_started.elapsed());
+        assert!(
+            incremental(&reopened, "peer", cursor)
+                .unwrap()
+                .get("tables")
+                .is_none(),
+            "small updates must not evict the peer cursor and force a snapshot"
+        );
+        status["prs"]["https://github.com/o/r/pull/17"]["evidence"] =
+            json!({"body":null,"complete":false,"checks":[1,null,3]});
+        status["prs"]
+            .as_object_mut()
+            .unwrap()
+            .remove("https://github.com/o/r/pull/18");
+        status["prs"]["https://github.com/o/r/pull/new~key"] = json!({"head":null});
+        reopened
+            .execute(
+                "UPDATE issue_github_watches SET status=?1",
+                [status.to_string()],
+            )
+            .unwrap();
+        let catch_up = incremental(&reopened, "peer", cursor).unwrap();
+        apply_pull(&peer.db, "peer", &catch_up, &[]).unwrap();
+        let saved: String = peer
+            .db
+            .query_row("SELECT status FROM issue_github_watches", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&saved).unwrap() == status,
+            "reconstructed watch differs"
+        );
+        assert!(
+            apply_pull(&peer.db, "peer", &pull, &[]).is_err(),
+            "stale delta must not move cursor backwards"
+        );
+
+        let legacy = Fixture::new();
+        install_capture(&legacy.db, "agent", "legacy").unwrap();
+        apply_pull(&legacy.db, "legacy", &initial, &[]).unwrap();
+        let mut old_pull =
+            incremental(&reopened, "legacy", initial["cursor"].as_i64().unwrap()).unwrap();
+        legacy_watch_rows(&reopened, &mut old_pull).unwrap();
+        assert_eq!(old_pull["changes"].as_array().unwrap().len(), 1);
+        assert!(
+            row_json(&old_pull["changes"][0], "after_json")
+                .unwrap()
+                .get("status_delta")
+                .is_none()
+        );
+        apply_pull(&legacy.db, "legacy", &old_pull, &[]).unwrap();
+        let saved: String = legacy
+            .db
+            .query_row("SELECT status FROM issue_github_watches", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&saved).unwrap() == status,
+            "reconstructed watch differs"
+        );
+
+        // A malformed/missing base never acknowledges a delta it did not apply.
+        peer.db
+            .execute_batch("UPDATE fleet_meta SET syncing=1; DELETE FROM issue_github_watches; UPDATE fleet_meta SET syncing=0;")
+            .unwrap();
+        let previous_cursor = state_get(&peer.db, "cursor", Value::Null).unwrap();
+        status["event"] = json!("next");
+        reopened
+            .execute(
+                "UPDATE issue_github_watches SET status=?1",
+                [status.to_string()],
+            )
+            .unwrap();
+        let next = incremental(&reopened, "peer", previous_cursor.as_i64().unwrap()).unwrap();
+        let error = apply_pull(&peer.db, "peer", &next, &[]).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<crate::issues::Error>().unwrap().code,
+            "watch_delta_base"
+        );
+        assert_eq!(
+            state_get(&peer.db, "cursor", Value::Null).unwrap(),
+            previous_cursor
+        );
+        assert_eq!(
+            peer.db
+                .query_row("SELECT syncing FROM fleet_meta", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        state_set(&peer.db, "watch_delta_repair", &json!(true)).unwrap();
+        let mut repair = next;
+        legacy_watch_rows(&reopened, &mut repair).unwrap();
+        apply_pull(&peer.db, "peer", &repair, &[]).unwrap();
+        assert_eq!(
+            state_get(&peer.db, "watch_delta_repair", Value::Null).unwrap(),
+            false
+        );
+        let saved: String = peer
+            .db
+            .query_row("SELECT status FROM issue_github_watches", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&saved).unwrap() == status,
+            "reconstructed watch differs"
         );
     }
 
