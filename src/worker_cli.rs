@@ -81,6 +81,10 @@ enum Action {
     /// Queue a durable restart through the fleet supervisor; keep the supervisor alive.
     Restart {
         id: String,
+        /// Reuse this ID and identical arguments after an uncertain response.
+        /// Omit to generate a new ID, printed before sending.
+        #[arg(long)]
+        request_id: Option<String>,
     },
     Stop {
         id: String,
@@ -127,7 +131,7 @@ fn run_inner(o: &Options) -> Result<()> {
         .map_err(|e| Error::new("worker_error", e.to_string()))?;
         return Ok(());
     }
-    if let Some(Action::Restart { id }) = &o.action {
+    if let Some(Action::Restart { id, request_id }) = &o.action {
         let host = o
             .host
             .clone()
@@ -137,9 +141,7 @@ fn run_inner(o: &Options) -> Result<()> {
                     .filter(|v| !v.is_empty())
             })
             .unwrap_or_else(|| "local".into());
-        let value = hey_boss::fleet::call(
-            &serde_json::json!({"kind":"signal", "host":host, "worker":id, "signal":"restart"}),
-        )?;
+        let value = hey_boss::fleet::queue_signal(&host, id, "restart", request_id.as_deref())?;
         if o.json {
             println!("{value}");
         } else {
@@ -650,7 +652,12 @@ fn remote_arguments(o: &Options) -> Vec<String> {
                 args.extend(["--count".into(), count.to_string()]);
             }
         }
-        Some(Action::Restart { id }) => args.extend(["restart".into(), id.clone()]),
+        Some(Action::Restart { id, request_id }) => {
+            args.extend(["restart".into(), id.clone()]);
+            if let Some(request_id) = request_id {
+                args.extend(["--request-id".into(), request_id.clone()]);
+            }
+        }
         Some(Action::Stop { id }) => args.extend(["stop".into(), id.clone()]),
         Some(Action::Pause { id }) => args.extend(["pause".into(), id.clone()]),
         None => args.push("run".into()),

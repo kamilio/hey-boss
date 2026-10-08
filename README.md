@@ -28,6 +28,12 @@ with its dashboard, or `hey-boss worker watch` to watch existing workers.
 Use `hey-boss worker status` (or `list`) for one text snapshot; add `--json` for JSON.
 Bare `worker` and `auto-workers` commands show help and do not start work.
 The older `worker --id ID` restore form remains accepted so running workers can reload during upgrades.
+`worker restart ID --request-id KEY` and `fleet signal HOST WORKER SIGNAL --request-id KEY`
+reuse one durable signal receipt. Omit the key for a new operation; the CLI prints
+its generated ID to stderr before sending. After an **Outcome unknown** error,
+retry identical arguments with that key. **Not sent** means this attempt failed
+before transmission. A changed payload with the same key is rejected; a new
+intentional restart needs a new key. JSON receipts remain on stdout.
 For a live log in scripts or agent sessions, use `hey-boss worker watch`.
 It observes every registered worker on the selected machine every two seconds,
 showing slots, pickup state, active issues, latest activity and session IDs.
