@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REPLAY"] == "1" { auditNotificationReplay(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_VISUAL"] {
         app.setActivationPolicy(.regular)
         let suite = "hey-boss-quick-visual"
@@ -94,6 +95,7 @@ func audit() {
     auditArtifactEditor()
     auditIssuesShortcut()
     auditSecretInput()
+    auditNotificationReplay()
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
     auditNativeMindmap()
@@ -1685,6 +1687,257 @@ final class AgentPreviewController: NSObject {
         overview.remote = [:]
         overview.rebuild()
     }
+}
+
+/// Exercise the native receiver, including its durable state and actual reply sockets.
+func auditNotificationReplay() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-replay-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try! FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("history.db").path
+    var store = try! Store(path)
+    var shown: [Record] = []
+    store.show = { shown.append($0) }
+    func request(_ kind: String, id: String? = nil) -> [String: Any] {
+        var body: [String: Any] = ["command":kind, "project":"Replay test", "title":"Delivery recovered", "question":"Synthetic notification", "description":"Connection restored", "source_host":"audit.test", "sync":false]
+        if let id { body["task_id"] = id }
+        if kind == "ask" { body["options"] = ["Continue", "Cancel"] }
+        return body
+    }
+    func call(_ body: [String: Any]) -> [String: Any] {
+        var peers: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
+        let reader = FileHandle(fileDescriptor: peers[1], closeOnDealloc: true)
+        let decoded = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: body))
+        store.handle(decoded, Reply(peers[0]))
+        return try! JSONSerialization.jsonObject(with: reader.readToEnd()!) as! [String: Any]
+    }
+    for kind in ["alert", "update", "ask"] {
+        let body = request(kind, id: "stable-" + kind)
+        let first = call(body)
+        let count = shown.count
+        let retry = call(body)
+        precondition(first["task_id"] as? String == retry["task_id"] as? String, "Replay must return the original native ID")
+        precondition(shown.count == count, "Replay must not present again")
+        precondition((try! store.database.pendingCount()) == count)
+    }
+    let question = request("ask", id: "stable-ask")
+    let id = call(question)["task_id"] as! String
+    try! store.finish(id, "Continue")
+    // Mutable record fields (answers, comments, presentation) are not the request fingerprint.
+    var sync = question; sync["sync"] = true
+    precondition(call(sync)["result"] as? String == "Continue")
+    store = try! Store(path)
+    store.show = { shown.append($0) }
+    precondition(call(question)["task_id"] as? String == id)
+    precondition(call(sync)["result"] as? String == "Continue")
+    for kind in ["alert", "update"] { _ = call(request(kind, id: "stable-" + kind)) }
+    precondition(shown.count == 3, "Restarted receiver must not present a replay")
+    var restored: [String] = []
+    store.show = { restored.append($0.taskID) }; store.restore()
+    precondition(restored.count == 2, "Startup restores only the two pending notices")
+    for kind in ["alert", "update", "ask"] { _ = call(request(kind, id: "stable-" + kind)) }
+    precondition(restored.count == 2, "Replays must not present another copy after startup restoration")
+    store.show = { shown.append($0) }
+    let cancelled = request("ask", id: "cancelled")
+    let cancelledID = call(cancelled)["task_id"] as! String
+    try! store.dismissRecords([cancelledID])
+    store = try! Store(path); store.show = { shown.append($0) }
+    var cancelledSync = cancelled; cancelledSync["sync"] = true
+    precondition(call(cancelledSync)["status"] as? String == "cancelled")
+    // Every user-visible payload change must conflict, including identity/provenance.
+    for (key, value) in [("question", "Changed"), ("title", "Changed"), ("project", "Other"), ("description", "Changed"), ("command", "update"), ("icon", "warning"), ("document_name", "other.md")] {
+        var conflict = question; conflict[key] = value
+        precondition(call(conflict)["status"] as? String == "error", "Conflicting \(key) accepted")
+    }
+    for (key, value) in [("options", ["Different"] as Any), ("autoclose", 10 as Any), ("comments_enabled", true as Any), ("issue", ["project":"named:Other", "number":1] as Any)] {
+        var conflict = question; conflict[key] = value
+        precondition(call(conflict)["status"] as? String == "error", "Conflicting \(key) accepted")
+    }
+    var other = question; other["source_host"] = "second.test"
+    precondition(call(other)["task_id"] as? String != id, "Different machines must have separate ID scopes")
+    let anonymous = request("alert")
+    precondition(call(anonymous)["task_id"] as? String != call(anonymous)["task_id"] as? String)
+    let beforeFailure = try! store.database.inboxRows().count
+    try! store.database.execute("CREATE TRIGGER reject_receipt BEFORE INSERT ON notification_receipts WHEN NEW.request_id='atomic-failure' BEGIN SELECT RAISE(ABORT, 'synthetic receipt failure'); END")
+    precondition(call(request("alert", id: "atomic-failure"))["status"] as? String == "error")
+    precondition((try! store.database.inboxRows().count) == beforeFailure && shown.count == beforeFailure)
+    try! store.database.execute("DROP TRIGGER reject_receipt")
+    _ = call(request("alert", id: "atomic-failure"))
+    precondition((try! store.database.inboxRows().count) == beforeFailure + 1)
+    // Two synchronous retries both receive the answer from one presentation.
+    var pendingSync = request("ask", id: "sync-waiters"); pendingSync["sync"] = true
+    var readers: [FileHandle] = []
+    for _ in 0..<2 {
+        var peers: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
+        readers.append(FileHandle(fileDescriptor: peers[1], closeOnDealloc: true))
+        store.handle(try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: pendingSync)), Reply(peers[0]))
+    }
+    let waitingID = shown.last!.taskID
+    precondition(store.waiters[waitingID]?.count == 2)
+    try! store.finish(waitingID, "Continue")
+    for reader in readers {
+        let answer = try! JSONSerialization.jsonObject(with: reader.readToEnd()!) as! [String: Any]
+        precondition(answer["task_id"] as? String == waitingID && answer["result"] as? String == "Continue")
+    }
+    let beforeSecret = try! store.database.inboxRows().count
+    _ = call(["command":"secret", "task_id":"never-persist", "sync":false])
+    precondition((try! store.database.inboxRows().count) == beforeSecret)
+    print("Passed: native replay IDs, no duplicate presentation, restart, terminal questions, payload conflicts, source isolation, anonymous callers and secret exclusion")
+    auditCompanionNotificationReplay()
+}
+
+func auditCompanionNotificationReplay() {
+    // Keep Unix socket paths below Darwin's 104-byte limit.
+    let root = URL(fileURLWithPath: "/tmp/hb-replay-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try! FileManager.default.removeItem(at: root) }
+    try! Data("1".utf8).write(to: root.appendingPathComponent("bridge-protocol"))
+    func socketAt(_ name: String, listen: Bool = false) -> Int32 {
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        precondition(fd >= 0)
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+        let path = root.appendingPathComponent(name).path.utf8CString
+        precondition(path.count <= MemoryLayout.size(ofValue: address.sun_path))
+        withUnsafeMutableBytes(of: &address.sun_path) { target in target.copyBytes(from: path.map { UInt8(bitPattern: $0) }) }
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                listen ? Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) : Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result != 0 { Darwin.close(fd); return -1 }
+        if listen { precondition(Darwin.listen(fd, 16) == 0) }
+        return fd
+    }
+    func write(_ fd: Int32, _ body: [String: Any]) {
+        let data = try! JSONSerialization.data(withJSONObject: body)
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        try! handle.write(contentsOf: data)
+        precondition(shutdown(fd, SHUT_WR) == 0)
+    }
+    let broker = Process()
+    broker.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"] ?? FileManager.default.currentDirectoryPath + "/target/debug/hey-boss")
+    broker.arguments = ["companion", "serve", "--state", root.path]
+    try! broker.run()
+    defer { broker.terminate(); broker.waitUntilExit() }
+    let deadline = Date().addingTimeInterval(10)
+    while true {
+        let fd = socketAt("daemon.sock")
+        if fd >= 0 { Darwin.close(fd); break }
+        precondition(Date() < deadline, "Companion startup timed out")
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    for kind in ["alert", "update", "ask"] {
+        let fd = socketAt("daemon.sock"); precondition(fd >= 0)
+        write(fd, ["command":kind, "project":"Replay test", "title":kind.capitalized + " recovered", "question":"Synthetic lost acknowledgement", "description":"One notification after reconnect", "sync":false])
+        let response = try! JSONSerialization.jsonObject(with: readRequest(fd)) as! [String: Any]
+        Darwin.close(fd)
+        precondition(response["task_id"] != nil && response["status"] as? String != "error")
+    }
+    let listener = socketAt("bridge.sock", listen: true); precondition(listener >= 0)
+    defer { Darwin.close(listener) }
+    let path = root.appendingPathComponent("history.db").path
+    var store = try! Store(path)
+    var shown: [Record] = []
+    store.show = { shown.append($0) }
+    var accepted: [String: String] = [:], attempts: [String: Int] = [:]
+    while attempts.values.reduce(0, +) < 6 {
+        var ready = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+        precondition(poll(&ready, 1, 15000) > 0, "Companion replay timed out")
+        let fd = accept(listener, nil, nil); precondition(fd >= 0)
+        let data = try! readRequest(fd)
+        let request = try! JSONDecoder().decode(Request.self, from: data)
+        if request.command == "agents_snapshot" {
+            write(fd, ["task_id":"agents", "status":"ok"]); Darwin.close(fd); continue
+        }
+        var peers: [Int32] = [0, 0]
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
+        store.handle(request, Reply(peers[0]))
+        let response = try! JSONSerialization.jsonObject(with: readRequest(peers[1])) as! [String: Any]
+        Darwin.close(peers[1])
+        if ["alert", "update", "ask"].contains(request.command) {
+            let key = request.task_id!
+            attempts[key, default: 0] += 1
+            let id = response["task_id"] as! String
+            if attempts[key] == 1 {
+                accepted[key] = id
+                // Native persistence succeeded, but the bridge disconnects without its ack.
+                Darwin.close(fd)
+                // Reopen the actual native DB before the broker's reconnect/retry.
+                store = try! Store(path); store.show = { shown.append($0) }
+                continue
+            }
+            precondition(id == accepted[key], "Broker retry created another native record")
+        }
+        write(fd, response); Darwin.close(fd)
+    }
+    precondition(attempts.count == 3 && attempts.values.allSatisfy { $0 == 2 })
+    precondition(shown.count == 3 && Set(shown.map(\.taskID)).count == 3)
+    precondition((try! store.database.inboxRows()).count == 3)
+    print("Passed: real companion → native Store, lost ack, reconnect and receiver restart: three commands, three rows, three presentations")
+    auditReplayPresentation(shown, store: store)
+}
+
+func auditReplayPresentation(_ rows: [Record], store: Store) {
+    let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"]
+    let ui = Interface(present: false)
+    defer { ui.stack.orderOut(nil); ui.question.orderOut(nil) }
+    ui.onComplete = { id, answer in try! store.finish(id, answer); ui.remove(id) }
+    ui.onPresented = { store.presented($0, $1) }
+    for row in rows { ui.add(row) }
+    ui.layout()
+    RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    precondition(ui.cards.count == 2 && ui.current?.kind == "prompt")
+    func snapshot(_ name: String, _ window: NSWindow) {
+        guard let directory else { return }
+        try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        // Offscreen AppKit cannot capture compositor glass. Render the same native
+        // controls and geometry over the solid backing used by other visual audits.
+        let preview = Interface(present: false)
+        for card in ui.cards { preview.add(card.row) }
+        if let current = ui.current { preview.add(current) }
+        preview.layout()
+        let source = window === ui.stack ? preview.stack : preview.question
+        let canvas = AuditCanvas(frame: source.contentView!.bounds.insetBy(dx: -8, dy: -8))
+        canvas.setBoundsOrigin(.zero)
+        let surfaces: [Surface] = window === ui.stack ? [preview.stackToolbar] + preview.cards.map(\.view) : [source.contentView as! Surface]
+        let frames = surfaces.map { $0.convert($0.bounds, to: source.contentView) }
+        for (surface, frame) in zip(surfaces, frames) {
+            surface.drawsSurface = false; canvas.addSubview(surface)
+            surface.frame = frame.offsetBy(dx: 8, dy: 8)
+            precondition(canvas.bounds.contains(surface.frame), "Replay capture clips a control")
+        }
+        let capture = NSWindow(contentRect: canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        capture.isReleasedWhenClosed = false; capture.contentView = canvas; capture.appearance = window.appearance
+        defer { capture.close(); preview.stack.orderOut(nil); preview.question.orderOut(nil) }
+        canvas.layoutSubtreeIfNeeded()
+        let bitmap = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds)!
+        canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
+    }
+    for dark in [false, true] {
+        let mode = dark ? "dark" : "light"
+        ui.stack.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        ui.question.appearance = ui.stack.appearance
+        snapshot("replay-notifications-" + mode, ui.stack)
+        snapshot("replay-question-" + mode, ui.question)
+    }
+    ui.field!.stringValue = "Synthetic answer"
+    ui.buttons[0].performClick(nil)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    precondition(ui.current == nil)
+    precondition((try! store.database.get(rows.last!.taskID)).result == "Synthetic answer")
+    let approval = Record(taskID: "visual-approval", kind: "approval", question: "Choose the synthetic test result", project: "Replay test", title: "Reconnected question", description: "Only one approval is shown", options: ["Continue", "Cancel"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    try! store.database.save(approval); ui.add(approval)
+    for dark in [false, true] {
+        ui.question.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        snapshot("replay-approval-" + (dark ? "dark" : "light"), ui.question)
+    }
+    ui.buttons.first { $0.title == "Continue" }!.performClick(nil)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    precondition(ui.current == nil && (try! store.database.get(approval.taskID)).result == "Continue")
+    print("Passed: native notification stack, free-text and approval interaction, light/dark presentation and terminal dismissal")
 }
 
 func auditResilience(root: URL) {
