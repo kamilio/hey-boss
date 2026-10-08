@@ -77,14 +77,10 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         return response;
     }
     let replayable = replay_blocker(&input).is_none();
-    if plan.len() > 1 && !replayable {
-        return failure(
-            StatusCode::CONFLICT,
-            "route_non_replayable",
-            "History or tools require a pinned provider/account; automatic provider switching cannot preserve this request",
-        );
-    }
-    for index in 0..plan.len() {
+    // Bound history prevents switching, not the initial attempt. Keep it intact
+    // and use only the first configured provider unless the caller pins another.
+    let attempts = if replayable { plan.len() } else { 1 };
+    for index in 0..attempts {
         let leg = plan.resolve(index).expect("validated route snapshot");
         // Capability failure is not quota exhaustion and must never choose paid billing.
         let mut attempt_parts = parts.clone();
@@ -128,6 +124,14 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             }
         }
         let mut payload = input.clone();
+        // Full visible history and local tool pairs are portable. Opaque
+        // reasoning belongs to its originating provider and is optional on
+        // another leg; never strip compaction or server-side references.
+        let stripped = if index > 0 {
+            strip_reasoning(&mut payload)
+        } else {
+            0
+        };
         payload["model"] = json!(leg.upstream_model);
         if let Some(effort) = &leg.reasoning {
             let key = if claude::is_path(parts.uri.path()) || messages::is_path(parts.uri.path()) {
@@ -187,11 +191,18 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
             Request::from_parts(attempt_parts, Body::from(payload.to_string())),
         )
         .await;
-        let (mut response, exhausted) = inspect::response(response).await;
+        // Buffering the stream prelude only serves fallback. Return it directly
+        // when no further attempt is permitted, including stateful requests.
+        let can_switch = index + 1 < attempts;
+        let (mut response, exhausted) = if can_switch {
+            inspect::response(response).await
+        } else {
+            (response, false)
+        };
         if exhausted && leg.billing_mode == BillingMode::IncludedSubscription {
             quota::exhausted(&selected, &leg.upstream_model).await;
             diagnostic(&proxy, &leg, index, "upstream_quota_exhausted");
-            if index + 1 < plan.len() && replayable {
+            if can_switch {
                 drop(response);
                 continue;
             }
@@ -208,6 +219,12 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         response
             .headers_mut()
             .insert("x-hey-proxy-route-attempt", (index + 1).into());
+        if stripped > 0 {
+            response.headers_mut().insert(
+                "x-hey-proxy-reasoning-stripped",
+                stripped.to_string().parse().unwrap(),
+            );
+        }
         response.headers_mut().insert(
             "x-hey-proxy-account",
             selected
@@ -245,7 +262,11 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
     failure(
         StatusCode::TOO_MANY_REQUESTS,
         "route_included_exhausted",
-        "All configured included subscription legs are exhausted and no usable paid leg remains",
+        if !replayable && plan.len() > 1 {
+            "The first provider's included quota is exhausted; history or tools prevent automatic switching. Pin the original provider/account or start a new conversation"
+        } else {
+            "All configured included subscription legs are exhausted and no usable paid leg remains"
+        },
     )
 }
 
@@ -315,24 +336,46 @@ fn replay_blocker(input: &Value) -> Option<&'static str> {
                         && tool["input_schema"].is_object()
                 })
             });
-        if !native_local_tools {
+        // Declaring web search is not executing it. The response inspection
+        // commits the provider as soon as a tool/output event is observed.
+        fn portable_tool(tool: &Value) -> bool {
+            match tool["type"].as_str() {
+                Some("function" | "custom" | "web_search" | "web_search_preview") => true,
+                Some("namespace") => tool["tools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().all(portable_tool)),
+                _ => false,
+            }
+        }
+        let portable_tools = reason == "hosted_tools"
+            && input["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().all(portable_tool));
+        if !native_local_tools && !portable_tools {
             return Some(reason);
         }
     }
     fn bound(value: &Value) -> bool {
         match value {
             Value::Object(map) => {
+                if reasoning_item(value) {
+                    return false;
+                }
                 map.contains_key("signature")
                     || map.contains_key("encrypted_content")
                     || map.contains_key("file_id")
+                    || map.contains_key("container_id")
+                    || map.contains_key("vector_store_id")
                     || matches!(
                         value["type"].as_str(),
                         Some(
-                            "reasoning"
-                                | "thinking"
-                                | "redacted_thinking"
-                                | "item_reference"
+                            "item_reference"
                                 | "compaction"
+                                | "compaction_summary"
+                                | "code_interpreter_call"
+                                | "file_search_call"
+                                | "computer_call"
+                                | "computer_call_output"
                         )
                     )
                     || map.values().any(bound)
@@ -341,7 +384,46 @@ fn replay_blocker(input: &Value) -> Option<&'static str> {
             _ => false,
         }
     }
-    bound(input).then_some("provider_bound_history")
+    input
+        .get("input")
+        .into_iter()
+        .chain(input.get("messages"))
+        .any(bound)
+        .then_some("provider_bound_history")
+}
+
+fn reasoning_item(value: &Value) -> bool {
+    matches!(
+        value["type"].as_str(),
+        Some("reasoning" | "thinking" | "redacted_thinking")
+    )
+}
+
+/// Only known history slots are changed, never tool arguments/results or text.
+fn strip_reasoning(input: &mut Value) -> usize {
+    let mut stripped = 0;
+    if let Some(items) = input.get_mut("input").and_then(Value::as_array_mut) {
+        items.retain(|item| {
+            let remove = reasoning_item(item);
+            stripped += usize::from(remove);
+            !remove
+        });
+    }
+    if let Some(messages) = input.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.retain_mut(|message| {
+            if message["role"] != "assistant" {
+                return true;
+            }
+            let Some(parts) = message["content"].as_array_mut() else {
+                return true;
+            };
+            let before = parts.len();
+            parts.retain(|part| !reasoning_item(part));
+            stripped += before - parts.len();
+            before == parts.len() || !parts.is_empty()
+        });
+    }
+    stripped
 }
 
 #[cfg(test)]

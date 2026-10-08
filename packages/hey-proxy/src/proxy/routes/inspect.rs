@@ -70,7 +70,9 @@ pub(in crate::proxy) async fn response(response: Response) -> (Response, bool) {
     let mut size = 0usize;
     let mut decoder = sse::SseDecoder::default();
     let mut exhausted = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // Fresh quota gates handle ordinary exhaustion. Only hold the prelude for
+    // an immediate refusal; waiting for generation delays headers/heartbeats.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
     loop {
         let next = match tokio::time::timeout_at(deadline, stream.next()).await {
             Ok(next) => next,

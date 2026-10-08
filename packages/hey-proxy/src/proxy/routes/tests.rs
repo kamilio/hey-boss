@@ -11,6 +11,7 @@ struct Fixture {
     usage_status: Arc<AtomicUsize>,
     usage_calls: Arc<AtomicUsize>,
     failure: Arc<Mutex<Option<(u16, String, String)>>>,
+    response_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -25,6 +26,8 @@ impl Fixture {
         let usage_status = Arc::new(AtomicUsize::new(200));
         let usage_calls = Arc::new(AtomicUsize::new(0));
         let failure = Arc::new(Mutex::new(None::<(u16, String, String)>));
+        let response_gate = Arc::new(Mutex::new(None::<Arc<tokio::sync::Notify>>));
+        let gate = response_gate.clone();
         let (s, u, c, f) = (
             seen.clone(),
             used.clone(),
@@ -33,6 +36,7 @@ impl Fixture {
         );
         let (w, us) = (work_used.clone(), usage_status.clone());
         let app = Router::new().fallback(axum::routing::any(move |request: Request| {
+            let gate = gate.clone();
             let (s, u, c, f) = (s.clone(), u.clone(), c.clone(), f.clone());
             let (w, us) = (w.clone(), us.clone());
             async move {
@@ -57,7 +61,16 @@ impl Fixture {
                 s.lock().unwrap().push(json!({"path":path,"auth":auth,"account":account,"body":body}));
                 if path == "/v1/messages" { return axum::Json(json!({"id":"synthetic-message","type":"message","model":body["model"],"role":"assistant","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":0}})).into_response(); }
                 if account == "personal" && let Some((status, content_type, body)) = f.lock().unwrap().clone() {
-                    let mut response = Response::new(Body::from(body));
+                    let gate = gate.lock().unwrap().clone();
+                    let body = if let Some(gate) = gate {
+                        Body::from_stream(async_stream::stream! {
+                            yield Ok::<_, std::io::Error>(Bytes::from(body));
+                            gate.notified().await;
+                        })
+                    } else {
+                        Body::from(body)
+                    };
+                    let mut response = Response::new(body);
                     *response.status_mut() = StatusCode::from_u16(status).unwrap();
                     if !content_type.is_empty() { response.headers_mut().insert(header::CONTENT_TYPE,content_type.parse().unwrap()); }
                     return response;
@@ -114,6 +127,7 @@ impl Fixture {
             usage_status,
             usage_calls,
             failure,
+            response_gate,
         }
     }
     async fn request(&self, input: Value) -> Response {
@@ -282,7 +296,7 @@ async fn typed_429_advances_but_auth_policy_invalid_and_transient_failures_do_no
 }
 
 #[tokio::test]
-async fn stateful_and_signed_history_is_rejected_before_any_account_is_used() {
+async fn stateful_and_signed_history_uses_first_provider_without_rewriting_history() {
     let f = Fixture::new().await;
     for extra in [
         json!({"previous_response_id":"resp_remote"}),
@@ -296,10 +310,95 @@ async fn stateful_and_signed_history_is_rejected_before_any_account_is_used() {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        assert_eq!(f.request(input).await.status(), StatusCode::CONFLICT);
+        let response = f.request(input).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-hey-proxy-provider"], "personal");
+        let seen = f.seen.lock().unwrap();
+        let sent = seen.last().unwrap();
+        assert_eq!(sent["account"], "personal");
+        for (key, value) in extra.as_object().unwrap() {
+            assert_eq!(&sent["body"][key], value, "{key}");
+        }
     }
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.seen.lock().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn account_bound_history_never_skips_an_exhausted_first_provider() {
+    let f = Fixture::new().await;
+    f.used.store(100, Ordering::SeqCst);
+    let response = f
+        .request(json!({"model":"gpt-6.1-sol","input":[
+        {"type":"compaction","encrypted_content":"synthetic"}
+    ],"stream":true}))
+        .await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
     assert!(f.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stateful_stream_returns_prelude_without_waiting_for_generation() {
+    let f = Fixture::new().await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.response_gate.lock().unwrap() = Some(gate.clone());
+    let prelude = "data: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\n";
+    *f.failure.lock().unwrap() = Some((200, "text/event-stream".into(), prelude.into()));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        f.request(json!({
+            "model":"gpt-6.1-sol", "stream":true,
+            "input":[{"type":"compaction","encrypted_content":"synthetic"}]
+        })),
+    )
+    .await
+    .expect("A request that cannot switch providers must not buffer its prelude");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, prelude);
+    gate.notify_one();
+    assert!(stream.next().await.is_none());
+    assert_eq!(f.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn account_bound_history_never_replays_upstream_quota_refusal() {
+    for (status, content_type, body) in [
+        (
+            429,
+            "application/json",
+            r#"{"error":{"code":"usage_limit_reached"}}"#,
+        ),
+        (
+            200,
+            "text/event-stream",
+            "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit_reached\"}}}\n\n",
+        ),
+    ] {
+        let f = Fixture::new().await;
+        *f.failure.lock().unwrap() = Some((status, content_type.into(), body.into()));
+        let response = f
+            .request(json!({"model":"gpt-6.1-sol","input":[
+            {"type":"compaction","encrypted_content":"synthetic"}
+        ],"stream":true}))
+            .await;
+        assert_eq!(response.status().as_u16(), status);
+        assert_eq!(response.headers()["x-hey-proxy-provider"], "personal");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+            body
+        );
+        assert_eq!(f.seen.lock().unwrap().len(), 1);
+        assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[tokio::test]
@@ -476,4 +575,130 @@ async fn sol_uses_exact_subscription_credentials_and_next_account_on_exhaustion(
     assert_eq!(seen[0]["account"], "work");
     assert_eq!(seen[0]["body"]["model"], "gpt-6.1-sol");
     assert_eq!(seen[0]["body"]["store"], false);
+}
+
+#[tokio::test]
+async fn reasoning_history_switches_on_quota_and_preserves_messages_and_tool_pairs() {
+    for preflight_exhausted in [true, false] {
+        let f = Fixture::new().await;
+        if preflight_exhausted {
+            f.used.store(100, Ordering::SeqCst);
+        } else {
+            *f.failure.lock().unwrap() = Some((
+                429,
+                "application/json".into(),
+                json!({"error":{"code":"usage_limit_reached"}}).to_string(),
+            ));
+        }
+        let history = json!([
+            {"role":"user","content":"synthetic request"},
+            {"type":"reasoning","encrypted_content":"opaque","summary":[]},
+            {"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_1","output":"synthetic result"},
+            {"type":"custom_tool_call","name":"patch","call_id":"call_2","input":"synthetic patch"},
+            {"type":"custom_tool_call_output","call_id":"call_2","output":"done"},
+            {"role":"assistant","content":"visible answer"}
+        ]);
+        let response = f.request(json!({"model":"gpt-6.1-sol","input":history,"stream":true,
+            "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"web_search"}]
+        })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-hey-proxy-provider"], "work");
+        let seen = f.seen.lock().unwrap();
+        assert_eq!(seen.len(), if preflight_exhausted { 1 } else { 2 });
+        if !preflight_exhausted {
+            assert_eq!(seen[0]["body"]["input"], history);
+        }
+        let mut expected = history.as_array().unwrap().clone();
+        expected.remove(1);
+        assert_eq!(seen.last().unwrap()["body"]["input"], json!(expected));
+        assert_eq!(
+            seen.last().unwrap()["body"]["tools"][1]["type"],
+            "web_search"
+        );
+    }
+}
+
+#[test]
+fn reasoning_cleanup_is_limited_to_history_and_preserves_compaction() {
+    let mut body = json!({"input":[
+        {"type":"reasoning","encrypted_content":"remove"},
+        {"type":"compaction","encrypted_content":"keep"},
+        {"type":"function_call_output","call_id":"c","output":{"type":"reasoning","signature":"tool data"}},
+        {"role":"user","content":"reasoning is ordinary text"}
+    ],"reasoning":{"effort":"high"},"tools":[{"type":"function","parameters":{"properties":{"signature":{"type":"string"}}}}]});
+    let mut expected = body.clone();
+    expected["input"].as_array_mut().unwrap().remove(0);
+    assert_eq!(strip_reasoning(&mut body), 1);
+    assert_eq!(body, expected);
+    assert_eq!(replay_blocker(&body), Some("provider_bound_history"));
+    assert_eq!(strip_reasoning(&mut body), 0);
+    let mut native = json!({"messages":[
+        {"role":"user","content":[{"type":"text","text":"synthetic"}]},
+        {"role":"assistant","content":[{"type":"thinking","thinking":"optional","signature":"opaque"}]},
+        {"role":"assistant","content":[{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"t","name":"lookup","input":{"signature":"argument"}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"result"}]}
+    ]});
+    let mut expected = native.clone();
+    expected["messages"].as_array_mut().unwrap().remove(1);
+    expected["messages"][1]["content"]
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    assert_eq!(strip_reasoning(&mut native), 2);
+    assert_eq!(native, expected);
+}
+
+#[tokio::test]
+async fn native_thinking_can_fall_back_without_losing_tool_history() {
+    let mut f = Fixture::new().await;
+    f.claude();
+    f.used.store(100, Ordering::SeqCst);
+    let response=super::super::forward_api(f.proxy.clone(),Request::builder().method("POST").uri("/v1/messages")
+        .header(header::CONTENT_TYPE,"application/json")
+        .body(Body::from(json!({"model":"claude-sonnet-5-5","max_tokens":16,"stream":false,
+            "messages":[
+                {"role":"user","content":"synthetic"},
+                {"role":"assistant","content":[{"type":"thinking","thinking":"optional","signature":"foreign"},{"type":"tool_use","id":"c","name":"lookup","input":{}}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"result"}]}
+            ],"tools":[{"name":"lookup","input_schema":{"type":"object"}}]
+        }).to_string())).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-hey-proxy-provider"], "ultima");
+    assert_eq!(response.headers()["x-hey-proxy-reasoning-stripped"], "1");
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let input = seen[0]["body"]["input"].as_array().unwrap();
+    assert!(
+        input
+            .iter()
+            .any(|i| i["type"] == "function_call" && i["call_id"] == "c")
+    );
+    assert!(input.iter().any(|i| i["type"] == "function_call_output"
+        && i["call_id"] == "c"
+        && i["output"] == json!([{"type":"input_text","text":"result"}])));
+}
+
+#[tokio::test]
+async fn switchable_stream_does_not_wait_seconds_for_generation() {
+    let f = Fixture::new().await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.response_gate.lock().unwrap() = Some(gate.clone());
+    let prelude = "data: {\"type\":\"response.created\",\"response\":{\"output\":[]}}\n\n";
+    *f.failure.lock().unwrap() = Some((200, "text/event-stream".into(), prelude.into()));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        f.request(json!({
+            "model":"gpt-6.1-sol", "stream":true,
+            "input":[{"type":"reasoning","encrypted_content":"synthetic"}]
+        })),
+    )
+    .await
+    .expect("Fallback inspection must not stall response headers for model generation");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    assert_eq!(stream.next().await.unwrap().unwrap(), prelude);
+    gate.notify_one();
+    assert!(stream.next().await.is_none());
+    assert_eq!(f.seen.lock().unwrap().len(), 1);
 }
