@@ -4,6 +4,18 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+#[path = "support/projects.rs"]
+mod projects;
+
+fn command(executable: &Path, state: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .current_dir(state)
+        .env("HEY_BOSS_ISSUE_DB", state.join("issues.db"))
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT");
+    command
+}
 
 struct Broker(Child);
 impl Drop for Broker {
@@ -15,9 +27,10 @@ impl Drop for Broker {
 fn start(state: &Path) -> Broker {
     // Mock bridges represent a protocol-negotiated connection from current Mac CLI.
     std::fs::create_dir_all(state).unwrap();
+    projects::seed(&state.join("issues.db"), &["named:Server migration"]);
     std::fs::write(state.join("bridge-protocol"), "1").unwrap();
     let broker = Broker(
-        Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        command(Path::new(env!("CARGO_BIN_EXE_hey-boss")), state)
             .args(["companion", "serve", "--state"])
             .arg(state)
             .spawn()
@@ -520,7 +533,7 @@ fn server_markdown_file_is_snapshotted_offline_and_replayed_after_restart() {
     let source = root.join("report.md");
     std::fs::write(&source, markdown).unwrap();
     let broker = start(&state);
-    let result = Command::new(&executable)
+    let result = command(&executable, &state)
         .args([
             "update",
             "--project",
@@ -655,7 +668,7 @@ fn document_review_status_returns_comments_and_caches_them_offline() {
     std::fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &executable).unwrap();
     std::fs::write(bin.join("hey-boss.state"), state.to_str().unwrap()).unwrap();
     for mode in [None, Some("--async"), Some("--sync")] {
-        let mut command = Command::new(&executable);
+        let mut command = command(&executable, &state);
         command.args(["status", &id]);
         if let Some(flag) = mode {
             command.arg(flag);
@@ -698,7 +711,7 @@ fn server_source_file_is_snapshotted_offline_and_replayed_after_restart() {
     let source = root.join("main.rs");
     std::fs::write(&source, markdown).unwrap();
     let broker = start(&state);
-    let result = Command::new(&executable)
+    let result = command(&executable, &state)
         .args([
             "update",
             "--project",
@@ -756,7 +769,7 @@ fn server_image_file_is_snapshotted_offline_and_replayed_after_restart() {
     let source = root.join("preview.png");
     std::fs::write(&source, &image).unwrap();
     let broker = start(&state);
-    let result = Command::new(&executable)
+    let result = command(&executable, &state)
         .args([
             "update",
             "--project",

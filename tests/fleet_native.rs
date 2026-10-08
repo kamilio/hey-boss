@@ -43,6 +43,7 @@ impl Fixture {
             .env("HEY_BOSS_FLEET_CONFIG", self.root.join("inventory.json"))
             .env("HEY_BOSS_FLEET_DESIRED", self.root.join("desired.json"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .env_remove("HEY_BOSS_FLEET_SUPERVISED")
             .env(
                 "HEY_BOSS_CODEX",
@@ -332,6 +333,9 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     use std::os::unix::fs::PermissionsExt;
     let main = Fixture::new();
     let peer = Fixture::new();
+    for fixture in [&main, &peer] {
+        projects::seed(&fixture.root.join("issues.db"), &["named:Authority"]);
+    }
     main.cli(&[
         "mm",
         "--project",
