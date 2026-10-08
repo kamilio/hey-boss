@@ -1,6 +1,6 @@
 //! Synthetic credentials only. Assert that neither errors nor child output expose them.
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -72,6 +72,32 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+#[test]
+fn secret_waits_for_restarting_local_broker_before_sending() {
+    let fixture = Fixture::new();
+    let mut child = fixture
+        .command()
+        .args(["--field", "KEY", "--", "true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut waiting = String::new();
+    std::io::BufReader::new(child.stderr.as_mut().unwrap())
+        .read_line(&mut waiting)
+        .unwrap();
+    assert!(waiting.contains("Waiting for the desktop companion to reconnect"));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "request failed before the broker recovered"
+    );
+    let server = fixture.reply(Some(vec!["synthetic-recovered".into()]));
+    let output = child.wait_with_output().unwrap();
+    server.join().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-recovered"));
 }
 #[test]
 fn file_sink_and_long_pair_report_delivery_without_secret_output() {

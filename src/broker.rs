@@ -80,22 +80,128 @@ fn forward_live(
     request: &Request,
     caller: Option<&UnixStream>,
 ) -> Result<Response, String> {
+    let mut stream = if let Some(caller) = caller {
+        connect_secret_bridge(
+            state,
+            caller,
+            Instant::now() + crate::secret_cli::RECOVERY_WAIT,
+        )?
+    } else {
+        connect_bridge(state, request.command == "action")?
+    };
+    // A caller can leave between the readiness probe and the request write.
+    if caller.is_some_and(client_disconnected) {
+        return Err("Secret caller disconnected before sending".into());
+    }
+    forward_connected(&mut stream, state, request, caller)
+}
+
+fn connect_bridge(state: &Path, desktop_action: bool) -> Result<UnixStream, String> {
     if std::fs::read_to_string(state.join("bridge-protocol"))
         .ok()
         .as_deref()
         != Some("1")
     {
-        return Err(if request.command == "action" {
+        return Err(if desktop_action {
             "Desktop companion is not connected. Connect this machine from the Mac before using desktop actions; the request was not queued.".into()
         } else {
             "reconnect with an upgraded Mac companion to negotiate the bridge protocol".into()
         });
     }
-    let mut stream = UnixStream::connect(state.join("bridge.sock")).map_err(|e| {
-        if request.command == "action" {
+    UnixStream::connect(state.join("bridge.sock")).map_err(|e| {
+        if desktop_action {
             format!("Desktop companion is not connected: {e}. Connect this machine from the Mac before using desktop actions; the request was not queued.")
         } else { e.to_string() }
-    })?;
+    })
+}
+
+// Only a read-only protocol probe may be repeated. Once the actual request is
+// written, forward_connected returns its outcome without any replay.
+fn connect_secret_bridge(
+    state: &Path,
+    caller: &UnixStream,
+    deadline: Instant,
+) -> Result<UnixStream, String> {
+    loop {
+        if client_disconnected(caller) {
+            return Err("Secret caller disconnected before sending".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("Desktop companion unavailable; no secret request was sent".into());
+        }
+        if probe_secret_bridge(state, caller, deadline).is_ok()
+            && !client_disconnected(caller)
+            && Instant::now() < deadline
+            && let Ok(stream) = connect_bridge(state, false)
+        {
+            return Ok(stream);
+        }
+        std::thread::sleep(
+            Duration::from_millis(100).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+fn probe_secret_bridge(state: &Path, caller: &UnixStream, deadline: Instant) -> Result<(), String> {
+    let mut stream = connect_bridge(state, false)?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(br#"{"command":"protocol","sync":false}"#)
+        .map_err(|e| e.to_string())?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|e| e.to_string())?;
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(1));
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 256];
+    loop {
+        if client_disconnected(caller) || Instant::now() >= deadline {
+            return Err("Desktop readiness probe interrupted".into());
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&buffer[..n]);
+                if bytes.len() > 4096 {
+                    return Err("Invalid desktop readiness reply".into());
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let reply: Response =
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid desktop readiness reply")?;
+    if reply.task_id == "protocol"
+        && reply.status.as_deref() == Some("ok")
+        && reply.result.as_deref() == Some("1")
+    {
+        Ok(())
+    } else {
+        Err("Desktop protocol unavailable".into())
+    }
+}
+
+fn forward_connected(
+    stream: &mut UnixStream,
+    state: &Path,
+    request: &Request,
+    caller: Option<&UnixStream>,
+) -> Result<Response, String> {
     stream
         .set_read_timeout(Some(if caller.is_some() {
             Duration::from_millis(250)
@@ -154,7 +260,7 @@ fn forward_live(
             }
         }
     } else {
-        (&mut stream)
+        stream
             .take(8 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
@@ -622,6 +728,20 @@ pub fn serve(state: PathBuf) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn accept_secret(listener: &UnixListener) -> UnixStream {
+        let (mut probe, _) = listener.accept().unwrap();
+        let mut bytes = Vec::new();
+        probe.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+            "protocol"
+        );
+        probe
+            .write_all(br#"{"task_id":"protocol","status":"ok","result":"1"}"#)
+            .unwrap();
+        drop(probe);
+        listener.accept().unwrap().0
+    }
     #[test]
     fn notice_issue_link_survives_durable_queue_and_legacy_records() {
         let directory =
@@ -680,6 +800,111 @@ mod tests {
         }
     }
     #[test]
+    fn secret_waits_for_bridge_recovery_without_disk_queue() {
+        let root = std::env::temp_dir().join(format!("hb-secret-recovery-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let (caller, peer) = UnixStream::pair().unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let state = root.clone();
+        let request: Request =
+            serde_json::from_value(serde_json::json!({"command":"secret","sync":true})).unwrap();
+        let client = std::thread::spawn(move || handle(&state, &Mutex::new(()), request, &caller));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !client.is_finished(),
+            "secret failed before the bridge recovered"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
+        std::fs::write(root.join("bridge-protocol"), "1").unwrap();
+        let (mut probe, _) = listener.accept().unwrap();
+        let mut bytes = Vec::new();
+        probe.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+            "protocol"
+        );
+        probe
+            .write_all(br#"{"task_id":"protocol","status":"ok","result":"1"}"#)
+            .unwrap();
+        drop(probe);
+        let (mut secret, _) = listener.accept().unwrap();
+        bytes.clear();
+        secret.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+            "secret"
+        );
+        secret
+            .write_all(br#"{"task_id":"secret","status":"cancelled"}"#)
+            .unwrap();
+        drop(secret);
+        assert_eq!(
+            client.join().unwrap().unwrap().status.as_deref(),
+            Some("cancelled")
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn secret_recovery_is_bounded_and_stops_when_caller_leaves() {
+        let root = std::env::temp_dir().join(format!("hb-secret-offline-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let (caller, peer) = UnixStream::pair().unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let start = Instant::now();
+        assert!(connect_secret_bridge(&root, &caller, start + Duration::from_millis(150)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let leaving = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(peer);
+        });
+        let start = Instant::now();
+        assert!(connect_secret_bridge(&root, &caller, start + Duration::from_secs(10)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        leaving.join().unwrap();
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stale_bridge_probe_is_retried_but_sent_secret_is_never_replayed() {
+        let root = std::env::temp_dir().join(format!("hb-secret-stale-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("bridge-protocol"), "1").unwrap();
+        let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stale, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stale.read_to_end(&mut bytes).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+                "protocol"
+            );
+            drop(stale); // SSH master is alive, but the desktop was restarting.
+            let mut secret = accept_secret(&listener);
+            bytes.clear();
+            secret.read_to_end(&mut bytes).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["command"],
+                "secret"
+            );
+            drop(secret); // Outcome is now ambiguous: a second prompt is forbidden.
+            listener
+        });
+        let (caller, peer) = UnixStream::pair().unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+        let request: Request =
+            serde_json::from_value(serde_json::json!({"command":"secret","sync":true})).unwrap();
+        let start = Instant::now();
+        assert!(handle(&root, &Mutex::new(()), request, &caller).is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+        let listener = server.join().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(listener.accept().is_err());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn secrets_bypass_disk_queue_and_cancel_on_disconnect() {
         let root = std::env::temp_dir().join(format!(
             "hb-secret-bridge-{}-{}",
@@ -693,7 +918,7 @@ mod tests {
         std::fs::write(root.join("bridge-protocol"), "1").unwrap();
         let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
         let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
+            let mut s = accept_secret(&listener);
             let mut request = Vec::new();
             s.read_to_end(&mut request).unwrap();
             s.write_all(b"{\"task_id\":\"secret\",\"status\":\"ok\",\"result\":\"[\\\"synthetic-only\\\"]\"}").unwrap();
@@ -708,17 +933,12 @@ mod tests {
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
         std::fs::remove_file(root.join("bridge.sock")).unwrap();
         let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut s, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            s.read_to_end(&mut request).unwrap();
-            std::thread::sleep(Duration::from_millis(400));
-        });
+        listener.set_nonblocking(true).unwrap();
         drop(peer);
         let started = Instant::now();
         assert!(handle(&root, &Mutex::new(()), request, &caller).is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
-        server.join().unwrap();
+        assert!(listener.accept().is_err());
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -745,7 +965,7 @@ mod tests {
         for status in ["cancelled", "expired", "rejected", "busy"] {
             let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
             let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
+                let mut stream = accept_secret(&listener);
                 let mut request = Vec::new();
                 stream.read_to_end(&mut request).unwrap();
                 stream
