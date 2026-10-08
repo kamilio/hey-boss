@@ -26,11 +26,14 @@ use std::{
 const SOCKET: &str = "fleet-authority.sock";
 const WAIT: Duration = Duration::from_secs(10);
 
+#[path = "authority_client.rs"]
+mod client;
+
 fn unavailable(detail: impl std::fmt::Display) -> Error {
     Error::new(
         "fleet_unavailable",
         format!(
-            "Cannot reach the authoritative fleet through the existing supervisor connection: {detail}. Restore that connection and upgrade hey-boss on the supervisor and companion. No local fallback was used"
+            "Cannot reach the authoritative fleet through the existing supervisor connection: {detail}. Restore that connection and retry. No local fallback was used"
         ),
     )
 }
@@ -40,17 +43,23 @@ pub(in crate::fleet) fn call(
     database: &Path,
     request: Value,
 ) -> crate::issues::Result<Value> {
-    let mut stream = UnixStream::connect(state.join(SOCKET)).map_err(unavailable)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    call_cancellable(state, database, request, &|| false)
+}
+
+pub(in crate::fleet) fn call_cancellable(
+    state: &Path,
+    database: &Path,
+    request: Value,
+    cancelled: &dyn Fn() -> bool,
+) -> crate::issues::Result<Value> {
     let kind = request["kind"].as_str().unwrap_or("").to_owned();
-    let envelope = json!({"database":database,"request":request});
-    send(&mut stream, envelope).map_err(unavailable)?;
-    // Requests are newline framed. A fast relay can close after replying before
-    // we half-close, making shutdown fail on macOS despite a buffered reply.
-    let result = read_frame(&mut BufReader::new(stream))
-        .map_err(unavailable)?
-        .ok_or_else(|| unavailable("connection closed before acknowledgment"))?;
+    let result = client::exchange(
+        state,
+        database,
+        request,
+        Instant::now() + Duration::from_secs(15),
+        cancelled,
+    )?;
     if result["ok"] == false {
         let mut error: Error = serde_json::from_value(result["error"].clone())?;
         if matches!(kind.as_str(), "capabilities" | "issue_metadata")
@@ -106,7 +115,13 @@ fn routed(request: &Request, database: &Path, kind: &str) -> crate::issues::Resu
         json!({"kind":kind,"request":request}),
     )
     .map_err(|mut error| {
-        if request.operation.writes() && error.code == "fleet_unavailable" {
+        if request.operation.writes()
+            && error.code == "fleet_unavailable"
+            && error
+                .details
+                .as_ref()
+                .is_none_or(|details| details["sent"] != false)
+        {
             error
                 .message
                 .push_str(". A write may have completed; retry with the same --request-id");
@@ -157,8 +172,6 @@ fn unsupported(capability: &str, build: &Value) -> Error {
 }
 
 pub(super) struct Relay {
-    supported: Arc<AtomicBool>,
-    numbers_supported: Arc<AtomicBool>,
     advertised: Arc<Mutex<Value>>,
     stopped: Arc<AtomicBool>,
     replies: mpsc::SyncSender<Value>,
@@ -182,14 +195,12 @@ impl Relay {
         let listener = UnixListener::bind(&socket)?;
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
-        let supported = Arc::new(AtomicBool::new(false));
-        let numbers_supported = Arc::new(AtomicBool::new(false));
-        let advertised = Arc::new(Mutex::new(json!({})));
+        // Null means no configure has arrived. An empty advertisement after
+        // configure is instead a genuine legacy supervisor.
+        let advertised = Arc::new(Mutex::new(Value::Null));
         let advertisement = advertised.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let (replies, incoming) = mpsc::sync_channel::<Value>(2);
-        let ready = supported.clone();
-        let numbers_ready = numbers_supported.clone();
         let stop = stopped.clone();
         let database = ctx.path.canonicalize()?;
         let thread = thread::spawn(move || {
@@ -214,12 +225,17 @@ impl Relay {
                         .map(Path::new)
                         .and_then(|p| p.canonicalize().ok());
                     if requested.as_ref() != Some(&database) {
-                        return Err(
-                            unavailable("relay belongs to a different issue database").into()
-                        );
+                        let mut error = unavailable("relay belongs to a different issue database");
+                        error.details = Some(json!({"route":"supervisor_tunnel","sent":false}));
+                        return Err(error.into());
+                    }
+                    let message = advertisement.lock().unwrap().clone();
+                    if message.is_null() {
+                        let mut error = Error::new("fleet_handshake_pending", "Waiting for the supervisor handshake; nothing was forwarded");
+                        error.details = Some(json!({"sent":false,"route":"supervisor_tunnel"}));
+                        return Err(error.into());
                     }
                     if request["request"]["kind"] == "capabilities" {
-                        let message = advertisement.lock().unwrap();
                         let flags = json!({
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
@@ -251,7 +267,6 @@ impl Relay {
                         let metadata: Request =
                             serde_json::from_value(request["request"]["request"].clone())?;
                         crate::issues::authority::validate(&metadata)?;
-                        let message = advertisement.lock().unwrap();
                         for capability in ["authority_rpc", "issue_metadata"]
                             .into_iter()
                             .chain(matches!(metadata.operation, crate::issues::Operation::Status { .. } | crate::issues::Operation::StatusHistory { .. } | crate::issues::Operation::StatusView { .. }).then_some("issue_status"))
@@ -299,11 +314,8 @@ impl Relay {
                             }
                         }
                     }
-                    if !ready.load(Ordering::Acquire) {
-                        return Err(unavailable(
-                            "supervisor has not advertised authoritative routing support",
-                        )
-                        .into());
+                    if message["capabilities"]["authority_rpc"] != true {
+                        return Err(unsupported("authority_rpc", &message["build"]).into());
                     }
                     if !matches!(
                         request["request"]["kind"].as_str(),
@@ -313,19 +325,14 @@ impl Relay {
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());
                     }
-                    if request["request"]["kind"]=="issue_archive" {
-                        let message=advertisement.lock().unwrap();
-                        if message["capabilities"]["issue_archives"]!=true {
-                            return Err(unsupported("issue_archives",&message["build"]).into());
-                        }
+                    if request["request"]["kind"] == "issue_archive"
+                        && message["capabilities"]["issue_archives"] != true {
+                        return Err(unsupported("issue_archives", &message["build"]).into());
                     }
                     if request["request"]["kind"] == "issue_numbers"
-                        && !numbers_ready.load(Ordering::Acquire)
+                        && message["capabilities"]["issue_numbers"] != true
                     {
-                        return Err(unavailable(
-                            "supervisor needs an upgrade for on-demand issue numbers",
-                        )
-                        .into());
+                        return Err(unsupported("issue_numbers", &message["build"]).into());
                     }
                     serial += 1;
                     let id = format!("{}-{serial}", std::process::id());
@@ -360,8 +367,6 @@ impl Relay {
             }
         });
         Ok(Self {
-            supported,
-            numbers_supported,
             advertised,
             stopped,
             replies,
@@ -373,14 +378,6 @@ impl Relay {
     pub fn configure(&self, message: &Value) {
         *self.advertised.lock().unwrap() =
             json!({"capabilities":message["capabilities"],"build":message["build"]});
-        self.numbers_supported.store(
-            message["capabilities"]["issue_numbers"] == true,
-            Ordering::Release,
-        );
-        self.supported.store(
-            message["capabilities"]["authority_rpc"] == true,
-            Ordering::Release,
-        );
     }
     pub fn replies(&self) -> mpsc::SyncSender<Value> {
         self.replies.clone()
@@ -414,10 +411,14 @@ pub(super) fn response(id: &Value, result: Value) -> Result<Value> {
 }
 
 #[cfg(test)]
+#[path = "authority_recovery_tests.rs"]
+mod recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_context() -> (std::path::PathBuf, Context, crate::issues::Store) {
+    pub(super) fn test_context() -> (std::path::PathBuf, Context, crate::issues::Store) {
         let root = std::path::PathBuf::from("/tmp").join(format!(
             "hb-authority-{}",
             super::super::context::id().unwrap()
@@ -549,7 +550,7 @@ mod tests {
         {
             let error = call(&ctx.state, &ctx.path, json!({"kind":kind})).unwrap_err();
             if kind == "resource" {
-                assert_eq!(error.code, "invalid_input");
+                assert_eq!(error.code, "invalid_input", "{error:?}");
                 assert_eq!(error.message, "Unsupported authority request");
             } else {
                 assert_eq!(error.code, "fleet_capability_unsupported", "{error:?}");
@@ -569,13 +570,14 @@ mod tests {
         let (root, ctx, store) = test_context();
         let output = Arc::new(Mutex::new(Vec::<u8>::new()));
         let relay = Relay::start(&ctx, output.clone()).unwrap();
+        relay.configure(&json!({"build":"legacy"}));
         let error = call(&ctx.state, &ctx.path, json!({"kind":"status"})).unwrap_err();
-        assert_eq!(error.code, "fleet_unavailable");
+        assert_eq!(error.code, "fleet_capability_unsupported");
         assert!(error.message.contains("has not advertised"));
         relay.configure(&json!({"capabilities":{"authority_rpc":true}}));
         let error = call(&ctx.state, &ctx.path, json!({"kind":"issue_numbers"})).unwrap_err();
-        assert_eq!(error.code, "fleet_unavailable");
-        assert!(error.message.contains("needs an upgrade"));
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert!(error.message.contains("hey-boss upgrade"));
         let read = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"view","number":1}}});
         let error = call(&ctx.state, &ctx.path, read).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");
@@ -595,7 +597,7 @@ mod tests {
         ] {
             let request = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"status-old","operation":operation}});
             let error = call(&ctx.state, &ctx.path, request).unwrap_err();
-            assert_eq!(error.code, "fleet_capability_unsupported");
+            assert_eq!(error.code, "fleet_capability_unsupported", "{error:?}");
             assert_eq!(
                 error.details.unwrap()["required_capability"],
                 "issue_status"
