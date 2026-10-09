@@ -1,4 +1,5 @@
-//! Durable scheduled definitions and occurrence decisions; no execution timer.
+//! Durable schedules, immutable instructions and fenced execution.
+pub(crate) mod execution;
 pub(crate) mod files;
 pub mod schedule;
 
@@ -95,12 +96,24 @@ pub enum Operation {
         id: String,
         run_id: String,
     },
+    RunNow {
+        id: String,
+    },
+    Stop {
+        id: String,
+        run_id: String,
+    },
 }
 impl Operation {
     pub fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Create { .. } | Self::Edit { .. } | Self::SetEnabled { .. } | Self::Delete { .. }
+            Self::Create { .. }
+                | Self::Edit { .. }
+                | Self::SetEnabled { .. }
+                | Self::Delete { .. }
+                | Self::RunNow { .. }
+                | Self::Stop { .. }
         )
     }
     pub fn validate(&self) -> Result<()> {
@@ -135,7 +148,7 @@ impl Operation {
                 validate_id(id)?;
                 revision(*if_revision)?;
             }
-            Self::View { id } => validate_id(id)?,
+            Self::View { id } | Self::RunNow { id } => validate_id(id)?,
             Self::List { after, limit, .. } => {
                 page(*limit)?;
                 if let Some(id) = after {
@@ -171,7 +184,7 @@ impl Operation {
                 validate_id(id)?;
                 revision(*r)?;
             }
-            Self::Run { id, run_id } => {
+            Self::Run { id, run_id } | Self::Stop { id, run_id } => {
                 validate_id(id)?;
                 validate_id(run_id)?;
             }

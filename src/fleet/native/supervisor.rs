@@ -193,6 +193,11 @@ impl Supervisor {
         )?;
         let state = self.state.lock().unwrap();
         let mut local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"build":state.build});
+        local["jobs"] = state
+            .machines
+            .get("local")
+            .map(|m| m["jobs"].clone())
+            .unwrap_or(Value::Null);
         local["workers"] = Value::Array(match visible {
             Some(projects) => state
                 .local
@@ -1124,8 +1129,30 @@ impl Supervisor {
         peer.set(node.to_owned()).unwrap();
         let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
+        let mut sent_jobs = std::collections::BTreeSet::new();
         while !self.ctx.stopped() {
             if last_ping.elapsed() >= Duration::from_secs(5) {
+                if hello["capabilities"]["job_execution"] == true {
+                    let store = crate::issues::Store::open(&self.ctx.path)?;
+                    let mut active_jobs = std::collections::BTreeSet::new();
+                    for dispatch in store.job_dispatches(node)? {
+                        let key = format!(
+                            "{}:{}:{}",
+                            dispatch.run.id, dispatch.generation, dispatch.revoke
+                        );
+                        active_jobs.insert(key.clone());
+                        if sent_jobs.contains(&key) {
+                            continue;
+                        }
+                        let markdown = store.job_instructions(&dispatch.run.snapshot)?;
+                        send(
+                            &mut *input.lock().unwrap(),
+                            json!({"kind":"job_dispatch","dispatch":dispatch,"markdown":markdown}),
+                        )?;
+                        sent_jobs.insert(key);
+                    }
+                    sent_jobs.retain(|key| active_jobs.contains(key));
+                }
                 send(&mut *input.lock().unwrap(), json!({"kind":"ping"}))?;
                 last_ping = Instant::now();
             }
@@ -1187,6 +1214,20 @@ impl Supervisor {
                 }
                 Some("heartbeat") => {
                     history.receive(&mut message, incremental_history)?;
+                    if hello["capabilities"]["job_execution"] == true {
+                        self.update(host, json!({"jobs":message["jobs"]}))?;
+                        let store = crate::issues::Store::open(&self.ctx.path)?;
+                        for value in message["job_reports"].as_array().into_iter().flatten() {
+                            let report: crate::jobs::execution::Report =
+                                serde_json::from_value(value.clone())?;
+                            if store.accept_job_report(node, &report)? {
+                                send(
+                                    &mut *input.lock().unwrap(),
+                                    json!({"kind":"job_ack","report":report}),
+                                )?;
+                            }
+                        }
+                    }
                     workers = self.local_config(
                         host,
                         message["local_config"]
@@ -1694,6 +1735,30 @@ impl Supervisor {
             self.ctx.wait(Duration::from_secs(5));
         }
     }
+    fn jobs(self: Arc<Self>) {
+        while !self.ctx.stopped() {
+            let result = (|| -> Result<()> {
+                let capability = super::jobs::capability(&self.ctx)?;
+                self.update("local", json!({"jobs":capability}))?;
+                let mut machines = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .machines
+                    .values()
+                    .filter(|m| m["host"] != "local")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                machines.insert(0,json!({"node":self.ctx.node,"state":"connected","heartbeat":now(),"jobs":capability}));
+                super::jobs::schedule(&self.ctx, &machines)?;
+                super::jobs::tick(&self.ctx)
+            })();
+            if let Err(error) = result {
+                self.event("local", "jobs", &error.to_string());
+            }
+            self.ctx.wait(Duration::from_secs(1));
+        }
+    }
     fn maintenance(self: Arc<Self>) {
         while !self.ctx.stopped() {
             if let Err(e) = self.tick() {
@@ -1989,6 +2054,8 @@ pub(super) fn run(ctx: Context) -> Result<()> {
     std::thread::spawn(move || scheduler.scheduler());
     let observer = app.clone();
     std::thread::spawn(move || observer.observer());
+    let jobs = app.clone();
+    std::thread::spawn(move || jobs.jobs());
     let maintenance = app.clone();
     std::thread::spawn(move || maintenance.maintenance());
     let mobile = ctx.clone();

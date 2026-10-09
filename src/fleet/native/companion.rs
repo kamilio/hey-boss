@@ -345,7 +345,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let mut incremental_history = false;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"worker_history_v1":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"worker_history_v1":true,"job_execution":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -487,6 +487,19 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                     json!({"kind":message["kind"],"id":message["id"],"result":result}),
                 )?;
             }
+            Some("job_dispatch") => {
+                let dispatch = serde_json::from_value(message["dispatch"].clone())?;
+                let markdown = message["markdown"]
+                    .as_str()
+                    .ok_or_else(|| invalid("Missing job instructions"))?;
+                super::jobs::receive(&ctx, &dispatch, markdown)?;
+            }
+            Some("job_ack") => {
+                super::jobs::acknowledge(
+                    &ctx,
+                    &serde_json::from_value(message["report"].clone())?,
+                )?;
+            }
             Some("ping") => {
                 let mut workers = if incremental_history {
                     ctx.workers_incremental(&mut history_versions)?
@@ -500,7 +513,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 let chief_ownership = crate::chief_ownership::read(&db)?;
                 reply(
                     &output,
-                    json!({"kind":"heartbeat","watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
+                    json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
                 )?;
             }
             _ => return Err(invalid("Unknown fleet message kind")),
@@ -517,6 +530,18 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
         return Err("Fleet companion is already running".into());
     };
     super::model_recovery::start(ctx.clone());
+    let jobs = ctx.clone();
+    std::thread::spawn(move || {
+        while !jobs.stopped() {
+            if let Err(error) = super::jobs::tick(&jobs) {
+                let _ = jobs.atomic_json(
+                    &jobs.state.join("jobs-error.json"),
+                    &json!({"error":error.to_string(),"at":now()}),
+                );
+            }
+            jobs.wait(Duration::from_secs(1));
+        }
+    });
     while !ctx.stopped() {
         let interrupted = {
             let _lock = ctx.lock("fleet-worker-control.lock", false)?;

@@ -10,6 +10,7 @@ mod conversation;
 mod github_reads;
 mod github_relay;
 mod handshake;
+mod jobs;
 mod mobile;
 mod model_recovery;
 mod pr_monitor;

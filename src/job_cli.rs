@@ -165,6 +165,10 @@ enum Action {
     Revision { id: String, revision: i64 },
     /// Read an execution snapshot and durably cache its required Markdown.
     Run { id: String, run_id: String },
+    /// Queue one execution, including when the schedule is paused.
+    RunNow { id: String },
+    /// Stop this exact owned execution; leaves the schedule unchanged.
+    Stop { id: String, run_id: String },
     /// Execute one Jobs operation read as JSON from stdin.
     Rpc,
 }
@@ -200,6 +204,11 @@ pub fn run(options: &Options) -> Result<()> {
             markdown: instructions.as_deref().map(markdown).transpose()?,
         },
         Action::View { id } => Operation::View { id: id.clone() },
+        Action::RunNow { id } => Operation::RunNow { id: id.clone() },
+        Action::Stop { id, run_id } => Operation::Stop {
+            id: id.clone(),
+            run_id: run_id.clone(),
+        },
         Action::List {
             after,
             limit,
@@ -281,7 +290,19 @@ pub fn run(options: &Options) -> Result<()> {
     } else {
         None
     };
-    let request_id = options.request_id.clone().or_else(|| {
+    let fresh_run_id =
+        if options.request_id.is_none() && matches!(operation, Operation::RunNow { .. }) {
+            let mut bytes = [0u8; 16];
+            std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+            Some(format!(
+                "job-run-{}",
+                bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            ))
+        } else {
+            None
+        };
+    let run_now = matches!(operation, Operation::RunNow { .. });
+    let request_id = options.request_id.clone().or(fresh_run_id).or_else(|| {
         use sha2::{Digest, Sha256};
         operation.writes().then(|| {
             format!(
@@ -301,7 +322,15 @@ pub fn run(options: &Options) -> Result<()> {
         request_id,
         operation: issues::Operation::Job { operation },
     };
-    let value = crate::cli_request::execute(&request, None, false)?;
+    let value = crate::cli_request::execute(&request, None, false).map_err(|mut error| {
+        if run_now {
+            error.message.push_str(&format!(
+                ". Retry this run with --request-id {}",
+                request.request_id.as_deref().unwrap()
+            ));
+        }
+        error
+    })?;
     print(
         &value,
         options.json || matches!(options.action, Action::Rpc),
