@@ -534,6 +534,15 @@ commands when the omitted evidence is needed. Supervisor routing requires the
 `issue_detail_compact` fleet capability; older stores fail instead of returning
 an unbounded fallback.
 
+## Scheduled jobs
+
+Open **Jobs** (`/jobs`) on desktop or a paired phone to schedule your Markdown
+instructions with a five-field cron, a fixed timezone, and an exact harness/model.
+The preview uses the same evaluator as execution. Jobs run independently of worker
+slots. Pause suspends future occurrences; Stop cancels only the current execution.
+Run history, task links, and saved sessions remain available after deletion.
+Unconfirmed requests can be retried safely; conflicting edits preserve your draft.
+
 ## URL lookup
 
 Issue-store reads, store opening, and transaction acquisition retry transient

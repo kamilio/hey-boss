@@ -12,6 +12,8 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  const call=(path,body,headers={})=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});
  assert.equal((await call('/issues')).status,401);
  assert.equal((await call('/merged-prs')).status,401);
+ assert.equal((await call('/jobs')).status,401);
+ assert.equal((await call('/api/jobs/runtime',{})).status,401);
  assert.equal((await call('/api/bootstrap')).status,401);
  assert.equal((await call('/api/bridge/web')).status,401);
  const paired=await call('/api/pair',{code:store.pairing()});
@@ -19,6 +21,7 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  const mergedPage=await call('/merged-prs',undefined,phone);
  assert.equal(mergedPage.status,200);
  assert.match(await mergedPage.text(),/id="merged-main"/);
+ const jobsPage=await call('/jobs',undefined,phone);assert.equal(jobsPage.status,200);assert.match(await jobsPage.text(),/id="jobs-main"/);
  assert.equal((await call('/api/action',{project:'named:Atlas',operation:{action:'list'}},{...phone,Origin:'https://evil.invalid'})).status,403);
  assert.equal((await call('/api/action',{project:'named:Atlas',host:'other',operation:{action:'view',number:1}},phone)).status,400);
  const reading=call('/api/bootstrap',undefined,phone);
@@ -40,6 +43,16 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  assert.equal((await(await writing).json()).error.code,'conflict');
  assert.equal((await(await call('/api/bridge/web',undefined,bridge)).json()).requests.length,0);
  assert.equal(store.db.prepare('SELECT count(*) AS n FROM artifact_requests').get().n,0);
+ for(const [path,kind,payload] of [
+  ['/api/jobs/runtime','jobs/runtime',{provider:'pi',configured:['route/custom']}],
+  ['/api/action','action',{project:'named:Atlas',operation:{action:'job',operation:{command:'run_now',id:'daily'}},request_id:'same-retry'}]
+ ]){
+  const response=call(path,payload,phone);
+  for(let i=0;i<30;i++){queue=(await(await call('/api/bridge/web',undefined,bridge)).json()).requests;if(queue.length)break;await new Promise(r=>setTimeout(r,10));}
+  assert.equal(queue[0].kind,kind);assert.deepEqual(queue[0].payload,payload);
+  await call('/api/bridge/web/'+queue[0].id+'/result',{ok:true,retained:true},bridge);
+  assert.deepEqual(await(await response).json(),{ok:true,retained:true});
+ }
  const cancelled=new AbortController();const pending=fetch(base+'/api/bootstrap',{headers:phone,signal:cancelled.signal}).catch(()=>{});
  for(let i=0;i<30;i++){queue=(await(await call('/api/bridge/web',undefined,bridge)).json()).requests;if(queue.length)break;await new Promise(r=>setTimeout(r,10));}
  cancelled.abort();await pending;await new Promise(r=>setTimeout(r,20));

@@ -195,6 +195,7 @@ function date(at) {
     const host = new URLSearchParams(location.hash.slice(1)).get('host');
     if (host && !Object.keys(document.documentElement.dataset).some(key => key.endsWith('Mobile'))) hash.set('host', host);
     if ($("#nav-merged-prs")) $("#nav-merged-prs").href = `/merged-prs#${hash}`;
+    if ($("#nav-jobs")) $("#nav-jobs").href = `/jobs#${hash}`;
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
     if ($("#nav-workers")) $("#nav-workers").href = `/agents#${hash}`;
