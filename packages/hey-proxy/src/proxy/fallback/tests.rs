@@ -163,8 +163,18 @@ async fn compressed_upstream_errors_are_forwarded_without_guessing_their_categor
     })))
     .await;
     let (url, p) = serve(router(configured(upstream)).unwrap()).await;
-    let r = post(&url, json!({"model":"model-primary"})).await;
+    // Observe the wire bytes even when another workspace crate enables gzip.
+    let r = reqwest::Client::builder()
+        .no_gzip()
+        .build()
+        .unwrap()
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"model-primary"}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()[header::CONTENT_ENCODING], "gzip");
     assert_eq!(r.text().await.unwrap(), "opaque-compressed-error");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     p.abort();
