@@ -547,6 +547,11 @@ fn worker_overview_for(
     db: &Connection,
     ids: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<Value>> {
+    // An empty selection cannot return workers; skip schema discovery as well
+    // as the indexed row query (older installations lack the metadata tables).
+    if ids.is_some_and(std::collections::HashSet::is_empty) {
+        return Ok(Vec::new());
+    }
     // Both metadata tables are additive; older installations may have neither.
     let (builds_exist, runtime_exists): (bool, bool) = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds'),EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')",
@@ -1882,7 +1887,17 @@ mod tests {
             );
             work.push(steps);
             fs::remove_dir_all(root).unwrap();
+            assert!(
+                commands <= 5,
+                "Empty selection performed database work: {commands} RPCs"
+            );
         }
+        // Schema discovery contributes fixed work. Increasing registrations
+        // must not increase it or turn the selected-row query into a scan.
+        assert!(
+            work.iter().all(|steps| *steps <= work[0] + 32),
+            "Scoped lookup work grew with unrelated workers: {work:?}"
+        );
         assert!(
             work.iter().all(|steps| *steps < 3000),
             "Scoped lookup scanned unrelated workers: {work:?}"
