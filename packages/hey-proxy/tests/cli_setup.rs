@@ -585,7 +585,7 @@ fn routing_diagnostic_is_offline_redacted_and_does_not_rewrite_profiles() {
     assert!(output.stderr.is_empty());
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["policy"], "routes");
-    assert_eq!(value["forwarding"], "staged");
+    assert_eq!(value["forwarding"], "active");
     assert_eq!(value["legs"][0]["provider"], "ultima");
     assert_eq!(value["legs"][0]["upstream_model"], "ultima-alpha");
     let text = String::from_utf8(output.stdout).unwrap();

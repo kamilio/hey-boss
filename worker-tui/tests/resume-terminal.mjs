@@ -47,6 +47,7 @@ let pilot;
 let added = false;
 try {
   await until(async () => {try {await access(socketBase + '.sock'); return true;} catch {return false;}}, 'private database service');
+  await cli(['project', 'init', '--prs', 'false', '--worktree', 'false', '--yes', '--json']);
   await cli(['issue', '--json', '--agent', 'human:resume-test', 'create', '--title', 'Keep building while pickup resumes']);
   await cli(['auto-workers', '--json', 'add', '--id', 'resume-fixture', '--name', 'Builder', '-C', checkout]);
   added = true;
