@@ -245,6 +245,12 @@ fn publish_to(
                     "-whole-module-optimization",
                     "-parse-as-library",
                 ])
+                .arg("-target")
+                .arg(if cfg!(target_arch = "aarch64") {
+                    "arm64-apple-macos15.0"
+                } else {
+                    "x86_64-apple-macos15.0"
+                })
                 .arg(snapshot.join("hey_boss_daemon.swift"))
                 .arg("-o")
                 .arg(temp.0.join("daemon")),

@@ -27,14 +27,14 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
       license "MIT"
 
       depends_on "rust" => :build
-      depends_on macos: :tahoe
+      depends_on macos: :sequoia
 
       def install
         system "cargo", "install", *std_cargo_args(root: libexec)
         system "cargo", "install", "--locked", "--path", "packages/hey-proxy", "--root", libexec
-        system "xcrun", "swiftc", "-O", "-whole-module-optimization", "-parse-as-library",
+        system "xcrun", "swiftc", "-target", "#{Hardware::CPU.arch}-apple-macos15.0", "-O", "-whole-module-optimization", "-parse-as-library",
                "hey_boss_daemon.swift", "-o", "hey-boss-daemon"
-        system "xcrun", "swiftc", "-O", "setup_hey_boss.swift", "-o", "hey-boss-setup"
+        system "xcrun", "swiftc", "-target", "#{Hardware::CPU.arch}-apple-macos15.0", "-O", "setup_hey_boss.swift", "-o", "hey-boss-setup"
         system "swift", "package_hey_boss.swift", "hey-boss-daemon", "Hey Boss.app"
         libexec.install "Hey Boss.app", "hey-boss-setup"
         bin.install_symlink libexec/"bin/hey-boss"

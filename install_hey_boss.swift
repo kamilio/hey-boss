@@ -11,8 +11,13 @@ func run(_ executable: String, _ arguments: [String]) {
 }
 
 func installHeyBoss() -> [String: String] {
+    #if arch(arm64)
+    let nativeTarget = "arm64-apple-macos15.0"
+    #else
+    let nativeTarget = "x86_64-apple-macos15.0"
+    #endif
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-    precondition(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26, "hey-boss requires macOS 26 or later")
+    precondition(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15, "hey-boss requires macOS 15 or later")
     let environment = ProcessInfo.processInfo.environment
     let state = URL(fileURLWithPath: environment["HEY_BOSS_STATE_DIR"]!)
     let binaries = URL(fileURLWithPath: environment["HEY_BOSS_BIN_DIR"]!)
@@ -24,7 +29,7 @@ func installHeyBoss() -> [String: String] {
     try! files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path)
     let staging = root.appendingPathComponent("out/hey-boss-daemon")
     run("/usr/bin/env", ["cargo", "build", "--locked", "--release", "--manifest-path", root.appendingPathComponent("Cargo.toml").path])
-    run("/usr/bin/xcrun", ["swiftc", "-O", "-whole-module-optimization", "-parse-as-library", root.appendingPathComponent("hey_boss_daemon.swift").path, "-o", staging.path])
+    run("/usr/bin/xcrun", ["swiftc", "-target", nativeTarget, "-O", "-whole-module-optimization", "-parse-as-library", root.appendingPathComponent("hey_boss_daemon.swift").path, "-o", staging.path])
     let binary = binaries.appendingPathComponent("hey-boss")
     let app = state.appendingPathComponent("Hey Boss.app")
     let daemon = app.appendingPathComponent("Contents/MacOS/hey-boss-daemon")
@@ -48,7 +53,7 @@ func installHeyBoss() -> [String: String] {
     run(binary.path, ["configure-agents", "--binary", binary.path])
     try! files.removeItem(at: staging)
     let setup = root.appendingPathComponent("out/hey-boss-setup")
-    run("/usr/bin/xcrun", ["swiftc", "-O", root.appendingPathComponent("setup_hey_boss.swift").path, "-o", setup.path])
+    run("/usr/bin/xcrun", ["swiftc", "-target", nativeTarget, "-O", root.appendingPathComponent("setup_hey_boss.swift").path, "-o", setup.path])
     run(setup.path, [state.path, binaries.path, agents.path, daemon.path])
     try! files.removeItem(at: setup)
     let plist = agents.appendingPathComponent("local.hey-boss.plist")

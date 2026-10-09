@@ -3600,6 +3600,7 @@ func auditNotificationAgents() {
 }
 
 func auditSubscriptionQuota() {
+    auditNativeBackdrops()
     let json = #"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"ok","updated_at":2000,"data":{"windows":[{"id":"weekly","label":"Weekly · all models","remaining_percent":90,"resets_at":"2099-10-15T16:42:07Z"}]}}"#
     let reading = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.utf8))
     precondition(reading.isFresh(now: 2005))
@@ -3658,6 +3659,35 @@ func auditSubscriptionQuota() {
     let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showSubscriptionQuota) }
     precondition(item?.title == "Subscription quota…" && item?.target === overview)
     print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, menu action")
+}
+
+func auditNativeBackdrops() {
+    for backdrop: NSView & BackdropContent in [VibrantBackdrop(), PlainBackdropContainer()] {
+        backdrop.frame = NSRect(x: 0, y: 0, width: 200, height: 120)
+        let original = NSView(), replacement = NSView()
+        backdrop.contentView = original
+        precondition(original.superview === backdrop && original.frame == backdrop.bounds)
+        backdrop.setFrameSize(NSSize(width: 320, height: 180))
+        precondition(original.frame == backdrop.bounds, "Fallback content must resize with its surface")
+        backdrop.contentView = replacement
+        precondition(original.superview == nil && replacement.superview === backdrop)
+        backdrop.contentView = nil
+        precondition(replacement.superview == nil, "Detaching content must not leave an invisible interactive view")
+    }
+    let surface = Surface(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+    let button = NSButton(title: "Test action", target: nil, action: nil)
+    surface.content.addSubview(button)
+    surface.drawsSurface = false
+    precondition(surface.content.superview === surface)
+    surface.drawsSurface = true
+    precondition(surface.content.superview != nil && button.superview === surface.content)
+    for style in [ButtonStyle.primary, .secondary, .quiet, .link] {
+        var invoked = false
+        let action = ActionButton("Test action", frame: NSRect(x: 0, y: 0, width: 120, height: 44), style: style) { invoked = true }
+        action.performClick(nil)
+        precondition(invoked && action.frame.height > 0)
+    }
+    print("PASS native backdrops: resize, content replacement, detach, surface toggling, button actions")
 }
 
 func previewSubscriptionQuota(_ state: String) {

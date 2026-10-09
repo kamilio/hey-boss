@@ -31,7 +31,7 @@ let info: [String: Any] = [
     "CFBundleShortVersionString": version,
     "CFBundleVersion": version,
     "CFBundleIconFile": "hey-boss.icns",
-    "LSMinimumSystemVersion": "26.0",
+    "LSMinimumSystemVersion": "15.0",
     "NSHighResolutionCapable": true,
     // The local Issues service intentionally uses HTTP. Keep ATS for all other hosts.
     "NSAppTransportSecurity": [
