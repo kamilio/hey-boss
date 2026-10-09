@@ -1681,13 +1681,17 @@ mod tests {
             upstream_url: format!("http://{}", listener.local_addr().unwrap()),
             ..Config::test_fixture()
         };
-        config.retry.recovery_timeout_ms = 1000;
-        config.retry.initial_delay_ms = 100;
-        config.retry.max_delay_ms = 100;
+        // The first backoff is 750..=1500 ms; the second is 1500..=3000 ms.
+        // Thus the second refusal exhausts the budget while fully buffered,
+        // instead of racing another upstream response against the deadline.
+        config.retry.recovery_timeout_ms = 2000;
+        config.retry.initial_delay_ms = 1500;
+        config.retry.max_delay_ms = 3000;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut followups = 0;
+            let mut first_attempts = 0;
             while let Some(Ok(message)) = socket.next().await {
                 if !message.is_text() {
                     break;
@@ -1696,6 +1700,8 @@ mod tests {
                 let followup = request["input"] == "followup";
                 if followup {
                     followups += 1;
+                } else {
+                    first_attempts += 1;
                 }
                 let id = if followup && followups > 1 {
                     "success"
@@ -1723,6 +1729,7 @@ mod tests {
                         .unwrap();
                 }
             }
+            assert_eq!(first_attempts, 2);
             assert_eq!(followups, 2);
         });
         let (url, task) = start(config).await;
@@ -1736,10 +1743,12 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            let created: Value =
-                serde_json::from_str(next(&mut socket).await.to_text().unwrap()).unwrap();
-            let terminal: Value =
-                serde_json::from_str(next(&mut socket).await.to_text().unwrap()).unwrap();
+            let created_frame = next(&mut socket).await;
+            assert!(created_frame.is_text(), "{input}: {created_frame:?}");
+            let created: Value = serde_json::from_str(created_frame.to_text().unwrap()).unwrap();
+            let terminal_frame = next(&mut socket).await;
+            assert!(terminal_frame.is_text(), "{input}: {terminal_frame:?}");
+            let terminal: Value = serde_json::from_str(terminal_frame.to_text().unwrap()).unwrap();
             if input == "first" {
                 assert_eq!(created["response"]["id"], "refused");
                 assert_eq!(terminal["error"]["code"], "server_error");
