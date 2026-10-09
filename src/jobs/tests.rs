@@ -895,3 +895,338 @@ fn job_conversations_use_saved_execution_identity_and_hide_hidden_projects() {
             .is_none()
     );
 }
+
+fn calendar(
+    f: &mut Fixture,
+    command: &str,
+    start: &str,
+    days: usize,
+    zone: &str,
+    now: i64,
+    cursor: Value,
+) -> Result<Value> {
+    let operation: JobOperation = serde_json::from_value(json!({"command":command,"start":start,"days":days,"timezone":zone,"job_id":null,"cursor":cursor})).unwrap();
+    f.op(operation, now)
+}
+fn timestamp(s: &str) -> i64 {
+    s.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+}
+
+#[test]
+fn calendar_uses_preview_across_zones_boundaries_and_dst() {
+    for (cron, zone, start, now) in [
+        (
+            "0 8 * * *",
+            "America/Chicago",
+            "2026-12-28",
+            "2026-12-01T00:00:00Z",
+        ),
+        (
+            "0 * * * *",
+            "Asia/Kathmandu",
+            "2026-12-28",
+            "2026-12-01T00:00:00Z",
+        ),
+        (
+            "30 2 * * *",
+            "America/New_York",
+            "2026-03-07",
+            "2026-03-01T00:00:00Z",
+        ),
+        (
+            "30 1 * * *",
+            "America/New_York",
+            "2026-10-31",
+            "2026-10-01T00:00:00Z",
+        ),
+        (
+            "45 1 * * *",
+            "Australia/Lord_Howe",
+            "2026-04-04",
+            "2026-04-01T00:00:00Z",
+        ),
+    ] {
+        let mut f = Fixture::new();
+        let now = timestamp(now);
+        f.op(
+            JobOperation::Create {
+                id: "job".into(),
+                definition: Definition {
+                    cron: cron.into(),
+                    timezone: zone.into(),
+                    ..definition()
+                },
+                markdown: ORIGINAL.into(),
+                enabled: true,
+            },
+            now,
+        )
+        .unwrap();
+        let result = calendar(&mut f, "calendar", start, 7, zone, now, Value::Null).unwrap();
+        let mut actual = vec![];
+        for day in result["days"].as_array().unwrap() {
+            let detail = calendar(
+                &mut f,
+                "calendar_entries",
+                day["date"].as_str().unwrap(),
+                1,
+                zone,
+                now,
+                Value::Null,
+            )
+            .unwrap();
+            assert_eq!(
+                day["count"].as_u64().unwrap() as usize,
+                detail["entries"].as_array().unwrap().len()
+            );
+            actual.extend(
+                detail["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e["scheduled_at"].as_i64().unwrap()),
+            );
+        }
+        let expected = Schedule::parse(cron, zone)
+            .unwrap()
+            .preview(
+                result["start_at"].as_i64().unwrap() - 1,
+                result["end_at"].as_i64().unwrap() - 1,
+                1000,
+            )
+            .unwrap();
+        assert_eq!(actual, expected, "{cron} {zone}");
+        assert_eq!(
+            f.store
+                .db
+                .query_row("SELECT COUNT(*) FROM scheduled_job_runs", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
+fn calendar_keeps_history_snapshots_and_actual_times_after_edit_pause_delete() {
+    let mut f = Fixture::new();
+    f.create("job", 0);
+    let first = reserve(&mut f, 2 * H + 1234);
+    let skipped = reserve(&mut f, 3 * H);
+    assert_eq!(skipped.state, "skipped");
+    f.store
+        .db
+        .execute(
+            "UPDATE scheduled_job_runs SET reason='Runtime unavailable' WHERE id=?1",
+            [&first.id],
+        )
+        .unwrap();
+    f.op(
+        JobOperation::Edit {
+            id: "job".into(),
+            if_revision: 1,
+            definition: Definition {
+                name: "Changed".into(),
+                cron: "0 8 * * *".into(),
+                ..definition()
+            },
+            markdown: None,
+        },
+        4 * H,
+    )
+    .unwrap();
+    let mixed = calendar(
+        &mut f,
+        "calendar_entries",
+        "1970-01-01",
+        1,
+        "UTC",
+        4 * H,
+        Value::Null,
+    )
+    .unwrap();
+    let entries = mixed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["scheduled_at"], 2 * H);
+    assert_eq!(entries[0]["run"]["created_at"], 2 * H + 1234);
+    assert_eq!(entries[0]["run"]["reason"], "Runtime unavailable");
+    assert_eq!(entries[1]["state"], "skipped");
+    assert_eq!(entries[1]["run"]["reason"], "overlap");
+    assert_eq!(entries[2]["snapshot"]["definition"]["name"], "Changed");
+    f.op(
+        JobOperation::SetEnabled {
+            id: "job".into(),
+            if_revision: 2,
+            enabled: false,
+        },
+        5 * H,
+    )
+    .unwrap();
+    f.op(
+        JobOperation::Delete {
+            id: "job".into(),
+            if_revision: 3,
+        },
+        6 * H,
+    )
+    .unwrap();
+    f.reopen();
+    let history = calendar(
+        &mut f,
+        "calendar_entries",
+        "1970-01-01",
+        1,
+        "UTC",
+        6 * H,
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(history["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        history["entries"][0]["snapshot"]["definition"]["name"],
+        "Schedule fixture"
+    );
+}
+
+#[test]
+fn calendar_dense_days_are_counted_and_paginated_without_gaps() {
+    let mut f = Fixture::new();
+    for id in ["a", "b"] {
+        f.op(
+            JobOperation::Create {
+                id: id.into(),
+                definition: Definition {
+                    cron: "* * * * *".into(),
+                    ..definition()
+                },
+                markdown: ORIGINAL.into(),
+                enabled: true,
+            },
+            0,
+        )
+        .unwrap();
+    }
+    let summary = calendar(&mut f, "calendar", "1970-01-02", 1, "UTC", 0, Value::Null).unwrap();
+    assert_eq!(summary["days"][0]["count"], 2880);
+    assert_eq!(summary["days"][0]["entries"].as_array().unwrap().len(), 3);
+    let mut cursor = Value::Null;
+    let mut keys = std::collections::BTreeSet::new();
+    loop {
+        let page = calendar(
+            &mut f,
+            "calendar_entries",
+            "1970-01-02",
+            1,
+            "UTC",
+            0,
+            cursor,
+        )
+        .unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        assert!(entries.len() <= 100);
+        for e in entries {
+            assert!(keys.insert((
+                e["scheduled_at"].as_i64().unwrap(),
+                e["key"].as_str().unwrap().to_string()
+            )));
+        }
+        cursor = page["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(keys.len(), 2880);
+    assert!(calendar(&mut f, "calendar", "1970-01-01", 43, "UTC", 0, Value::Null).is_err());
+    assert!(
+        calendar(
+            &mut f,
+            "calendar",
+            "1970-01-01",
+            1,
+            "Invalid/Zone",
+            0,
+            Value::Null
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn calendar_filters_are_read_only_scoped_and_history_range_is_indexed() {
+    let mut f = Fixture::new();
+    f.create("a", 0);
+    f.create("b", 0);
+    let op = |id: &str| {
+        serde_json::from_value::<JobOperation>(json!({"command":"calendar","start":"1970-01-02","days":1,"timezone":"UTC","job_id":id,"cursor":null})).unwrap()
+    };
+    assert_eq!(f.op(op("a"), 0).unwrap()["days"][0]["count"], 24);
+    f.store
+        .db
+        .execute(
+            "INSERT INTO projects(id,name,next_number) VALUES('named:Elsewhere','Elsewhere',1)",
+            [],
+        )
+        .unwrap();
+    f.store
+        .db
+        .execute(
+            "UPDATE scheduled_jobs SET project_id='named:Elsewhere' WHERE id='b'",
+            [],
+        )
+        .unwrap();
+    assert!(f.op(op("b"), 0).is_err());
+    assert_eq!(
+        calendar(&mut f, "calendar", "1970-01-02", 1, "UTC", 0, Value::Null).unwrap()["days"][0]["count"],
+        24
+    );
+    let plan=f.store.db.query_collect("EXPLAIN QUERY PLAN SELECT id FROM scheduled_job_runs WHERE project_id='named:Jobs' AND scheduled_at>=0 AND scheduled_at<86400000 ORDER BY scheduled_at,id LIMIT 101",[],|r|r.get::<_,String>(3)).unwrap().join(" ");
+    assert!(plan.contains("scheduled_job_calendar"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    assert!(!op("a").writes());
+}
+
+#[test]
+fn calendar_history_cursor_handles_equal_times_and_deleted_jobs() {
+    let mut f = Fixture::new();
+    f.create("job", 0);
+    for i in 0..205 {
+        let occurrence = f
+            .store
+            .manual_job("named:Jobs", "job", &format!("manual-{i}"), H)
+            .unwrap();
+        let run = f.store.commit_job_occurrence(&occurrence, task).unwrap();
+        f.store.db.execute("UPDATE scheduled_job_runs SET state='succeeded',started_at=?2,finished_at=?3 WHERE id=?1",params![run.id,H+500,H+1500]).unwrap();
+    }
+    f.op(
+        JobOperation::Delete {
+            id: "job".into(),
+            if_revision: 1,
+        },
+        2 * H,
+    )
+    .unwrap();
+    let mut cursor = Value::Null;
+    let mut ids = std::collections::BTreeSet::new();
+    for expected in [100, 100, 5] {
+        let page = calendar(
+            &mut f,
+            "calendar_entries",
+            "1970-01-01",
+            1,
+            "UTC",
+            2 * H,
+            cursor,
+        )
+        .unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), expected);
+        for e in entries {
+            assert_eq!(e["run"]["started_at"], H + 500);
+            assert_eq!(e["run"]["finished_at"], H + 1500);
+            assert!(ids.insert(e["key"].as_str().unwrap().to_owned()));
+        }
+        cursor = page["next_cursor"].clone();
+    }
+    assert!(cursor.is_null());
+    assert_eq!(ids.len(), 205);
+}
