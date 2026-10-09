@@ -316,3 +316,22 @@ fn claude_cannot_complete_without_acknowledging_its_model() {
     }
     panic!("No model confirmation failure");
 }
+
+#[test]
+fn claude_alias_catalog_without_resolved_ids_is_an_explicit_capability_failure() {
+    let mut config = launch(Provider::Claude, None, None);
+    config
+        .env
+        .insert("HEY_BOSS_FIXTURE_LEGACY_MODELS".into(), "1".into());
+    let custom = model(Provider::Claude, "configured-custom");
+    let catalog = AgentSession::discover_models(config, &[custom.clone()]);
+    assert!(
+        catalog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("resolved model IDs"))
+    );
+    assert_eq!(catalog.models.len(), 1);
+    assert_eq!(catalog.models[0].selection, custom);
+    assert!(!catalog.models[0].advertised);
+}

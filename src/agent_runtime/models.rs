@@ -192,7 +192,7 @@ impl AgentSession {
                     ),
                     // Resolve moving aliases before presenting a pinnable choice.
                     Provider::Claude => (
-                        required(entry, "resolvedModel").or_else(|_| required(entry, "value"))?,
+                        required(entry, "resolvedModel").map_err(|_| io::Error::other("Claude model discovery does not expose resolved model IDs; upgrade Claude Code or retain an explicitly configured exact model ID"))?,
                         None,
                         entry["displayName"].as_str(),
                     ),

@@ -212,7 +212,9 @@ Codex sends the ID on thread start/resume and every turn; Claude uses `--model`
 and checks its initialization event before accepting results; Pi uses exact
 `set_model {provider, modelId}`, verifies its response and subsequent state, and
 checks the saved file before resuming. Missing acknowledgments and substituted
-models fail explicitly. Claude choices resolve moving aliases to concrete IDs.
+models fail explicitly. Claude choices resolve moving aliases to concrete IDs. Older Claude catalogs
+without resolved IDs report an explicit capability error and retain configured
+custom IDs; they do not advertise moving aliases as pinnable models.
 
 `AgentSession::discover_models` returns serializable choices for editors, merging
 caller-configured custom IDs with the harness catalog. `configured` and

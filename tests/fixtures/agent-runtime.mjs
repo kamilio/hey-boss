@@ -242,7 +242,7 @@ for await (const chunk of process.stdin) {
         setTimeout(() => complete(), 100);
         continue;
       }
-      send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:r.request.subtype === 'initialize' && !discoveryFailure ? {models:[{value:'moving-alias',resolvedModel:'catalog-model',displayName:'Catalog model'}]} : {}}});
+      send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:r.request.subtype === 'initialize' && !discoveryFailure ? {models:[{value:'moving-alias',resolvedModel:process.env.HEY_BOSS_FIXTURE_LEGACY_MODELS ? undefined : 'catalog-model',displayName:'Catalog model'}]} : {}}});
       if (r.request.subtype === 'interrupt') complete(true);
     } else if (r.type === 'user') {
       // Claude may consume streaming input in the current tool loop and emit
