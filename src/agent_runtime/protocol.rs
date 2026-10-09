@@ -435,6 +435,20 @@ impl AgentSession {
         Ok(())
     }
     fn claude(&mut self, value: Value) -> io::Result<()> {
+        if value["type"] == "system" && value["subtype"] == "init" {
+            self.verify_model(&value["model"], &Value::Null)?;
+        }
+        if self.model.is_some()
+            && !self.model_verified
+            && matches!(
+                value["type"].as_str(),
+                Some("assistant" | "stream_event" | "result")
+            )
+        {
+            return Err(io::Error::other(
+                "Claude did not confirm the selected model before execution; upgrade the harness and check its model configuration",
+            ));
+        }
         if let Some(id) = value["session_id"].as_str() {
             self.attach(id.into(), None)?;
         }

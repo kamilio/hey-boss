@@ -52,6 +52,7 @@ fn real_idle_sessions_remain_responsive_for_one_hour() {
         let cwd = root.join(provider.name());
         std::fs::create_dir_all(&cwd).unwrap();
         let mut agent = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: None,
             cwd,

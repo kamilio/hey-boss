@@ -50,6 +50,7 @@ pub(super) fn run(
         }
     };
     let agent = AgentSession::launch(Launch {
+        model: None,
         provider,
         binary: None,
         cwd: job.config.cwd.clone().into(),
