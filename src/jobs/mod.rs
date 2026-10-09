@@ -1,4 +1,5 @@
 //! Durable schedules, immutable instructions and fenced execution.
+pub mod calendar;
 pub(crate) mod conversation;
 pub(crate) mod execution;
 pub(crate) mod files;
@@ -42,6 +43,14 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Calendar {
+        #[serde(flatten)]
+        query: calendar::Query,
+    },
+    CalendarEntries {
+        #[serde(flatten)]
+        query: calendar::Query,
+    },
     Create {
         id: String,
         definition: Definition,
@@ -120,6 +129,8 @@ impl Operation {
     }
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::Calendar { query } => query.validate(false)?,
+            Self::CalendarEntries { query } => query.validate(true)?,
             Self::Create {
                 id,
                 definition,

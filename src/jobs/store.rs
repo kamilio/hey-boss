@@ -4,6 +4,8 @@ use crate::jobs::{
     Occurrence, Operation as JobOperation, Run, Snapshot, files, schedule::Schedule,
 };
 use std::path::PathBuf;
+#[path = "calendar_store.rs"]
+mod calendar;
 #[path = "runner_store.rs"]
 mod runner;
 
@@ -42,6 +44,11 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_job_run_copies')",[],|r|r.get::<_,bool>(0))? {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?; tx.commit()?;
+    }
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='scheduled_job_calendar')",[],|r|r.get::<_,bool>(0))? {
+        let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_calendar ON scheduled_job_runs(project_id,scheduled_at,id); CREATE INDEX IF NOT EXISTS scheduled_job_calendar_job ON scheduled_job_runs(project_id,job_id,scheduled_at,id);")?;
+        tx.commit()?;
     }
     runner::migrate(db)
 }
@@ -277,6 +284,12 @@ impl Store {
         if !operation.writes() {
             let tx = self.db.read_transaction()?;
             let response = match operation {
+                JobOperation::Calendar { query } => {
+                    calendar::read(&tx, &project.id, query, now, false)?
+                }
+                JobOperation::CalendarEntries { query } => {
+                    calendar::read(&tx, &project.id, query, now, true)?
+                }
                 JobOperation::View { id } => {
                     json!({"job":job_summary(&tx,get_job(&tx,&project.id,id)?)?})
                 }
