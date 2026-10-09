@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict');
+const {range,shift,dayKey}=require('../src/issues/web/jobs-calendar.js');
+assert.deepEqual(range('2026-12-31','month'),{start:'2026-11-30',days:35});
+assert.deepEqual(range('2027-01-01','week'),{start:'2026-12-28',days:7});
+assert.deepEqual(range('2026-03-08','agenda'),{start:'2026-03-02',days:7});
+assert.equal(shift('2026-01-31','month',1),'2026-02-01');
+assert.equal(shift('2026-12-01','month',1),'2027-01-01');
+assert.equal(shift('2026-03-08','week',1),'2026-03-15');
+assert.equal(dayKey(Date.parse('2026-01-01T00:30:00Z'),'America/Chicago'),'2025-12-31');
+assert.equal(dayKey(Date.parse('2026-01-01T00:30:00Z'),'Asia/Tokyo'),'2026-01-01');
+console.log('Calendar civil-date navigation checks passed');

@@ -541,6 +541,8 @@ instructions with a five-field cron, a fixed timezone, and an exact harness/mode
 The preview uses the same evaluator as execution. Jobs run independently of worker
 slots. Pause suspends future occurrences; Stop cancels only the current execution.
 Run history, task links, and saved sessions remain available after deletion.
+Calendar offers month, week and agenda views in your chosen display timezone.
+Expand dense days to browse every occurrence and compare scheduled versus actual times.
 Unconfirmed requests can be retried safely; conflicting edits preserve your draft.
 
 ## URL lookup
