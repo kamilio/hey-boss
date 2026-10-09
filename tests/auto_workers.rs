@@ -142,7 +142,7 @@ impl Drop for Fixture {
 fn repeated_launches_reuse_workers_and_graceful_removal_finishes_the_agent() {
     let f = Fixture::new("drain");
     let project = hey_boss::issues::identity::project(
-        &f.root,
+        &f.root.join("checkout"),
         &hey_boss::issues::identity::machine().unwrap(),
     )
     .unwrap();
