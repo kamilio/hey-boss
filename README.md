@@ -313,6 +313,10 @@ Closing the page preserves unread items. Floating notification panels can be mov
 and hidden with the × button; their project-level close button dismisses the
 whole group, including document reviews.
 
+**Subscription quota…** opens a native panel with hey-proxy account aliases,
+remaining limits, and reset times. It refreshes while open; unavailable and stale
+readings are labeled explicitly, and unknown limits stay unknown.
+
 Notices can optionally link to an issue, with links visible in both directions:
 
 ```sh
