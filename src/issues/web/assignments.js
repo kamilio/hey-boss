@@ -28,6 +28,7 @@
   }
   function describeAssignment(issue, {actorName, bossName}) {
     const a = owner(issue), machine = a.machine_name || a.machine;
+    if (issue.job_run_id && (a.kind === "unassigned" || a.actor?.startsWith("job:"))) return {label:"Scheduled job", detail:"Owned by the dedicated job service.", icon:"clock"};
     if (current(issue).kind === "github") {
       if (a.kind === "agent") return {label:actorName(a.actor), detail:`${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}. GitHub monitoring continues.`, icon:"user"};
       if (a.kind === "github") return {label:"GitHub PR watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : "Waiting for new GitHub findings.", icon:"pull-request"};
@@ -53,7 +54,7 @@
     if (assigned.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
     if (selected === "active") targets.unshift({id:"active", name:description.label, disabled:true});
     const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
-    const trace = a.actor && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
+    const trace = a.actor && !a.actor.startsWith("job:") && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
     const help = [issue.draft ? "Mark ready before assigning." : description.detail,
       a.kind === "github" ? "Fetch now runs on the next watcher cycle, subject to GitHub rate limits." : "",
       editable && !hasPr ? "Attach a PR to enable the GitHub PR watcher." : ""].filter(Boolean).join(" ");
