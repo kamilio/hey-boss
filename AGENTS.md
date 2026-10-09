@@ -2,6 +2,7 @@
 - Commit small changes
 - TDD
 - Attention to performance
+- Every change must have a slick, polished design and be verified end-to-end before it is considered complete.
 
 ## Prompt style
 
