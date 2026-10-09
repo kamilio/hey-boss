@@ -29,7 +29,7 @@ pub(crate) fn runtime(value: Value) -> Result<Value> {
         ),
         Err(error) => (json!([]), Some(json!(error.to_string()))),
     };
-    let machine = crate::issues::identity::machine()?;
+    let machine = crate::issues::identity::host();
     let mut result =
         json!({"ok":true,"machines":machines,"machine":machine,"service_error":service_error});
     if let Some(provider) = input.provider {
