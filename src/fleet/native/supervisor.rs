@@ -1079,6 +1079,12 @@ impl Supervisor {
             }
             tx.commit()?;
         }
+        let incremental_history = hello["capabilities"]["worker_history_v1"] == true;
+        let mut history = super::worker_history::History::new(
+            hello["workers"]
+                .as_array()
+                .ok_or_else(|| invalid("Missing companion workers"))?,
+        );
         let previous = self.machine(host);
         let fallback = if previous["desired_workers"]
             .as_array()
@@ -1113,7 +1119,7 @@ impl Supervisor {
         };
         send(
             &mut *input.lock().unwrap(),
-            json!({"kind":"configure","project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
+            json!({"kind":"configure","worker_history_v1":incremental_history,"project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         peer.set(node.to_owned()).unwrap();
         let mut last_message = Instant::now();
@@ -1137,7 +1143,7 @@ impl Supervisor {
             if last_message.elapsed() > Duration::from_secs(15) {
                 return Err("Companion heartbeat timed out".into());
             }
-            let message = match rx.try_recv() {
+            let mut message = match rx.try_recv() {
                 Ok(result) => result?.ok_or_else(|| {
                     invalid(&format!(
                         "Companion connection closed: {}",
@@ -1180,6 +1186,7 @@ impl Supervisor {
                     )?;
                 }
                 Some("heartbeat") => {
+                    history.receive(&mut message, incremental_history)?;
                     workers = self.local_config(
                         host,
                         message["local_config"]
@@ -1260,7 +1267,7 @@ impl Supervisor {
                         revision = updated;
                         send(
                             &mut *input.lock().unwrap(),
-                            json!({"kind":"configure","project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
+                            json!({"kind":"configure","worker_history_v1":incremental_history,"project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&message["local_config"])}),
                         )?;
                         self.update(
                             host,

@@ -240,6 +240,19 @@ impl Store {
         &self,
         ids: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<Value>> {
+        self.fleet_workers_snapshot(ids, None)
+    }
+    pub(crate) fn fleet_workers_incremental(
+        &self,
+        versions: &mut HashMap<String, i64>,
+    ) -> Result<Vec<Value>> {
+        self.fleet_workers_snapshot(None, Some(versions))
+    }
+    fn fleet_workers_snapshot(
+        &self,
+        ids: Option<&std::collections::HashSet<String>>,
+        mut versions: Option<&mut HashMap<String, i64>>,
+    ) -> Result<Vec<Value>> {
         retry_contention(Instant::now() + CONTENTION_BUDGET, || {
             let legacy_runtime: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get(0))?;
             let tx = if legacy_runtime {
@@ -253,7 +266,25 @@ impl Store {
             migrate_runtime(&tx)?;
             let mut workers = worker_overview_for(&tx, ids)?;
             let ids: Vec<_> = workers.iter().map(|w| w["id"].as_str().unwrap()).collect();
-            let mut runs = worker_runs(&tx, &ids)?;
+            // Read counters and details in the capacity snapshot. Publish the
+            // counters only after commit so contention cannot swallow updates.
+            let next: HashMap<String, i64> = if versions.is_some() {
+                tx.query_collect("SELECT selected.value,coalesce(v.version,0) FROM json_each(?1) selected LEFT JOIN worker_history_versions v ON v.worker_id=selected.value", [serde_json::to_string(&ids)?], |r| -> rusqlite::Result<_> { Ok((r.get(0)?,r.get(1)?)) })?.into_iter().collect()
+            } else {
+                HashMap::new()
+            };
+            let changed: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    versions
+                        .as_ref()
+                        .is_none_or(|old| old.get(*id) != next.get(*id))
+                })
+                .collect();
+            let mut runs = worker_runs(&tx, &changed)?;
+            let changed: std::collections::HashSet<_> =
+                changed.into_iter().map(str::to_owned).collect();
             let mut chiefs = super::super::chief::status_for(&tx, &ids)?;
             let chief_projects = tx.prepare("SELECT p.id,p.name FROM projects p JOIN project_settings s ON s.project_id=p.id WHERE s.chief_enabled=1 AND p.hidden_at IS NULL")?.query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             // Queue counts depend on these sets, not the worker ID or capacity.
@@ -304,7 +335,6 @@ impl Store {
                 let active = worker["active"].as_i64().unwrap();
                 let Value::Object(activity) = json!({
                     "free":(config.concurrency as i64-active).max(0),
-                    "runs":runs.remove(id).unwrap_or_default(),
                     "chiefs":chiefs.remove(id).unwrap_or_default(),
                     "eligible":eligible,
                 }) else {
@@ -313,8 +343,15 @@ impl Store {
                 // The machine protocol exposes capacity and activity, while
                 // queue diagnostics belong to the public status response.
                 worker.as_object_mut().unwrap().extend(activity);
+                let id = worker["id"].as_str().unwrap();
+                if changed.contains(id) {
+                    worker["runs"] = json!(runs.remove(id).unwrap_or_default());
+                }
             }
             tx.commit()?;
+            if let Some(versions) = versions.as_deref_mut() {
+                *versions = next;
+            }
             Ok(workers)
         })
     }
