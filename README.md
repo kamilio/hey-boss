@@ -340,7 +340,7 @@ Install with Homebrew:
 brew install kamilio/tap/hey-boss
 ```
 
-Requires macOS 26+ and Xcode command-line tools. Homebrew installs Rust as a build dependency and compiles locally; no unsigned installer download is executed. The first notification or question registers the daemon automatically. Use `brew services restart hey-boss` to restart it, or `brew services stop hey-boss` before `brew uninstall hey-boss`. History is preserved.
+Requires macOS 15+ and Xcode command-line tools. Homebrew installs Rust as a build dependency and compiles locally; no unsigned installer download is executed. The first notification or question registers the daemon automatically. Use `brew services restart hey-boss` to restart it, or `brew services stop hey-boss` before `brew uninstall hey-boss`. History is preserved.
 
 For installation directly from source, install Rust and Xcode command-line tools. Run from a logged-in desktop session:
 

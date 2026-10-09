@@ -1364,29 +1364,30 @@ class ActionButton: NSButton {
         target = self
         self.action = #selector(activate)
         bezelStyle = .push
-        borderShape = .capsule
-        controlSize = style == .quiet || style == .link ? .regular : .extraLarge
+        controlSize = style == .quiet || style == .link ? .regular : .large
         font = .systemFont(ofSize: 13, weight: .medium)
         imageHugsTitle = true
         switch style {
         case .primary:
-            tintProminence = .primary
             bezelColor = .controlAccentColor
         case .secondary:
-            tintProminence = .none
+            break
         case .quiet:
             bezelStyle = .accessoryBarAction
-            borderShape = title.isEmpty ? .circle : .capsule
             showsBorderOnlyWhileMouseInside = true
-            tintProminence = .none
             contentTintColor = .secondaryLabelColor
         case .link:
             bezelStyle = .accessoryBarAction
-            borderShape = .roundedRectangle
             showsBorderOnlyWhileMouseInside = true
-            tintProminence = .none
             contentTintColor = .linkColor
         }
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            controlSize = style == .quiet || style == .link ? .regular : .extraLarge
+            borderShape = style == .link ? .roundedRectangle : style == .quiet && title.isEmpty ? .circle : .capsule
+            tintProminence = style == .primary ? .primary : .none
+        }
+        #endif
         if style == .primary || style == .secondary {
             let height = intrinsicContentSize.height
             self.frame = NSRect(x: frame.minX, y: frame.midY - height / 2, width: frame.width, height: height)
@@ -1545,9 +1546,62 @@ final class SeverityWash: NSView {
     }
 }
 
+// Keep the same content ownership on older SDKs and macOS versions.
+protocol BackdropContent: AnyObject { var contentView: NSView? { get set } }
+#if compiler(>=6.2)
+@available(macOS 26.0, *)
+extension NSGlassEffectView: BackdropContent {}
+@available(macOS 26.0, *)
+extension NSGlassEffectContainerView: BackdropContent {}
+#endif
+final class VibrantBackdrop: NSVisualEffectView, BackdropContent {
+    var contentView: NSView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            if let contentView {
+                contentView.frame = bounds
+                contentView.autoresizingMask = [.width, .height]
+                addSubview(contentView)
+            }
+        }
+    }
+}
+final class PlainBackdropContainer: NSView, BackdropContent {
+    var contentView: NSView? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            if let contentView {
+                contentView.frame = bounds
+                contentView.autoresizingMask = [.width, .height]
+                addSubview(contentView)
+            }
+        }
+    }
+}
+func nativeBackdrop() -> NSView & BackdropContent {
+    #if compiler(>=6.2)
+    if #available(macOS 26.0, *) {
+        let view = NSGlassEffectView(); view.cornerRadius = 14; view.style = .regular
+        return view
+    }
+    #endif
+    let view = VibrantBackdrop()
+    view.material = .popover; view.blendingMode = .behindWindow; view.state = .active
+    return view
+}
+func nativeBackdropContainer() -> NSView & BackdropContent {
+    #if compiler(>=6.2)
+    if #available(macOS 26.0, *) {
+        let view = NSGlassEffectContainerView(); view.spacing = 0
+        return view
+    }
+    #endif
+    return PlainBackdropContainer()
+}
+
 final class Surface: NSView {
     let content = NSView()
-    let glass = NSGlassEffectView()
+    let glass = nativeBackdrop()
     let severityWash = SeverityWash()
     var severity: Severity {
         get { severityWash.severity }
@@ -1579,8 +1633,6 @@ final class Surface: NSView {
         layer!.backgroundColor = NSColor.black.withAlphaComponent(0.01).cgColor
         glass.frame = bounds
         glass.autoresizingMask = [.width, .height]
-        glass.cornerRadius = 14
-        glass.style = .regular
         glass.wantsLayer = true
         glass.layer!.cornerRadius = 14
         glass.layer!.cornerCurve = .continuous
@@ -2856,7 +2908,7 @@ final class Interface {
     let hideStack = ActionButton("", frame: NSRect(x: 310, y: 5, width: 28, height: 24), style: .quiet, action: {})
     var stackHiddenByUser = false
     let document = NSView()
-    let glassContainer = NSGlassEffectContainerView()
+    let glassContainer = nativeBackdropContainer()
     let question = panel("Hey Boss question")
     var cards: [Card] = []
     var dismissalAnimations = 0
@@ -2889,7 +2941,6 @@ final class Interface {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         glassContainer.contentView = document
-        glassContainer.spacing = 0
         scroll.documentView = glassContainer
         stack.contentView = stackContent
         stackContent.addSubview(scroll)
@@ -3207,7 +3258,9 @@ final class Interface {
                 button.toolTip = option
                 if !inlineOptions {
                     button.bezelStyle = .flexiblePush
-                    button.borderShape = .roundedRectangle
+                    #if compiler(>=6.2)
+                    if #available(macOS 26.0, *) { button.borderShape = .roundedRectangle }
+                    #endif
                     button.controlSize = .large
                     button.alignment = .left
                     button.cell!.wraps = true
@@ -6518,7 +6571,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             titleField.toolTip = "Document title"; titleField.translatesAutoresizingMaskIntoConstraints = false
             titleField.widthAnchor.constraint(equalToConstant: 280).isActive = true
             let item = NSToolbarItem(itemIdentifier: identifier); item.label = "Document title"; item.view = titleField; item.visibilityPriority = .high
+            #if compiler(>=6.2)
             if #available(macOS 26.0, *) { item.isBordered = false }
+            #endif
             return item
         case "outline":
             outline.label = "Outline"; outline.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "Document outline")
@@ -6540,7 +6595,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             modes.label = "View"; modes.view = modeControl
             modeControl.selectedSegment = 0; modeControl.target = self; modeControl.action = #selector(modeChanged)
             modeControl.setAccessibilityLabel("Document view"); modes.toolTip = "Switch editing and reading (⌘E)"
+            #if compiler(>=6.2)
             if #available(macOS 26.0, *) { modes.isBordered = false }
+            #endif
             return modes
         default: return nil
         }

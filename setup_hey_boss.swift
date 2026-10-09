@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: String, _ daemonPath: String) {
-    precondition(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26)
+    precondition(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15)
     let state = URL(fileURLWithPath: statePath)
     let binaries = URL(fileURLWithPath: binaryPath)
     let agents = URL(fileURLWithPath: agentsPath)
