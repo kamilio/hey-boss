@@ -15,6 +15,7 @@ const HeyBossUI = (() => {
     if (!id) return "Unassigned";
     if (id === "human:boss") return bossName;
     if (id === "watcher:github") return "GitHub PR watcher";
+    if (id.startsWith("job:")) return "Scheduled job";
     const kind = id.split(":")[0];
     const agent = {codex:"Codex", claude:"Claude", pi:"Pi", worker:"Agent", agent:"Agent"}[kind];
     if (agent) return `${agent} · ${validModel(model) || validModel(actorModels.get(id)) || "model unknown"}`;
