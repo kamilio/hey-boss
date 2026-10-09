@@ -165,6 +165,9 @@ fn assigned_session(db: &Connection, session: &str) -> Result<Option<Value>> {
 }
 
 pub(crate) fn saved_run(db: &Connection, run: &str) -> Result<Option<Value>> {
+    if run.starts_with("job:") {
+        return crate::jobs::conversation::saved(db, run);
+    }
     if run.starts_with("chief:") {
         let owner: Option<String> = db.query_row("SELECT c.worker_id FROM project_chiefs c JOIN projects p ON p.id=c.project_id WHERE 'chief:'||c.machine||':'||c.project_id=?1 AND p.hidden_at IS NULL", [run], |r| r.get(0)).optional()?.flatten();
         return Ok(super::chief::status(db, owner.as_deref())?

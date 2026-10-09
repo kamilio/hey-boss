@@ -340,7 +340,12 @@ impl Supervisor {
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| m["host"] == host || (!mutation && m["hostname"] == host))
+            .find(|m| {
+                m["host"] == host
+                    || (!mutation
+                        && (m["hostname"] == host
+                            || (run_id.starts_with("job:") && m["node"] == host)))
+            })
             .ok_or_else(|| invalid("This device is no longer available"))?;
         let run = machine["workers"]
             .as_array()
@@ -355,6 +360,10 @@ impl Supervisor {
             .cloned();
         let run = if let Some(run) = run {
             run
+        } else if !mutation && run_id.starts_with("job:") {
+            crate::jobs::conversation::saved(&self.ctx.db()?, run_id)?
+                .filter(|r| r["machine"].is_string() && r["machine"] == machine["node"])
+                .ok_or_else(|| invalid("This job execution is not available on this device"))?
         } else if !mutation {
             let db = self.ctx.db()?;
             let origin = crate::issues::provenance::referenced(&db, host, run_id)?

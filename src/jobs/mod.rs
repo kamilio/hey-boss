@@ -1,7 +1,9 @@
 //! Durable schedules, immutable instructions and fenced execution.
+pub(crate) mod conversation;
 pub(crate) mod execution;
 pub(crate) mod files;
 pub mod schedule;
+pub(crate) mod web;
 
 use crate::issues::{Error, Result, identifier};
 use serde::{Deserialize, Serialize};
