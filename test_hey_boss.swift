@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_VISUAL"] { previewSubscriptionQuota(state); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REPLAY"] == "1" { auditNotificationReplay(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_VISUAL"] {
         app.setActivationPolicy(.regular)
@@ -91,6 +92,8 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
+    auditSubscriptionQuota()
     auditQuickIssue()
     auditArtifactEditor()
     auditIssuesShortcut()
@@ -3594,4 +3597,101 @@ func auditNotificationAgents() {
     NSApp.sendAction(steer.action!, to: steer.target, from: steer)
     precondition(questionLinks.count == 1 && ui.current?.taskID == question.taskID)
     print("PASS sender trace, native web actions, persistent scoped mute, pending questions, unmute without replay")
+}
+
+func auditSubscriptionQuota() {
+    let json = #"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"ok","updated_at":2000,"data":{"windows":[{"id":"weekly","label":"Weekly · all models","remaining_percent":90,"resets_at":"2099-10-15T16:42:07Z"}]}}"#
+    let reading = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.utf8))
+    precondition(reading.isFresh(now: 2005))
+    precondition(!reading.isFresh(now: 3000), "Old provider readings must not look current")
+    precondition(!reading.isFresh(now: 1000), "Future timestamps are not fresh")
+    precondition(reading.data!.windows[0].remaining == 90)
+    let unknown = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: "90", with: "null").utf8))
+    precondition(unknown.data!.windows[0].remaining == nil, "Unknown quota is never 100%")
+    let invalid = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: "90", with: "120").utf8))
+    precondition(invalid.data!.windows[0].remaining == nil)
+    let stale = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: #""state":"ok""#, with: #""state":"stale""#).utf8))
+    precondition(!stale.isFresh(now: 2005))
+    let expired = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: "2099-10-15T16:42:07Z", with: "1970-01-01T00:33:24Z").utf8))
+    precondition(!expired.isFresh(now: 2005), "Crossing reset invalidates the previous reading")
+    let ui = SubscriptionQuotaController(present: false)
+    var calls: [[String]] = []
+    var replies: [(Result<Data, Error>) -> Void] = []
+    ui.runner = { args, reply in calls.append(args); replies.append(reply) }
+    ui.open(cli: nil)
+    precondition(ui.loading && calls.count == 1 && calls[0].contains("--accounts"))
+    ui.refresh(); precondition(calls.count == 1, "Refreshes must coalesce")
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"},{"provider":"claude","id":"personal"},{"provider":"codex","id":"work"}]}"#.utf8)))
+    precondition(calls.count == 3 && ui.rows.count == 2, "Fetch every distinct account, including named subscriptions")
+    replies.removeFirst()(.success(Data(json.utf8)))
+    replies.removeFirst()(.failure(StorageError(description: "Synthetic failure")))
+    precondition(!ui.loading && ui.rows[0].reading != nil && ui.rows[1].reading == nil)
+    precondition(ui.rows[1].message == "Quota unavailable. Try refreshing.")
+    ui.open(cli: nil); precondition(calls.count == 3, "Reopening uses the short-lived cache")
+    ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
+    precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
+    ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":2,"accounts":[]}"#.utf8)))
+    precondition(!ui.loading && ui.message == "Could not load subscriptions")
+    let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("quota-cli-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: fixture) }
+    try! Data(("#!/bin/sh\nprintf '%s' '" + json + "'\nexit 1\n").utf8).write(to: fixture)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
+    let processUI = SubscriptionQuotaController(present: false)
+    processUI.cli = fixture.path
+    var completed = false
+    processUI.request(["--provider", "codex", "--account", "work"]) { result in
+        let decoded = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: result.get())
+        precondition(decoded.account.id == "work", "Preserve structured readings even when the CLI exits nonzero")
+        completed = true
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while !completed && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    precondition(completed, "Background CLI reads must complete without blocking the UI")
+    let overview = AgentsOverview(present: false)
+    let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showSubscriptionQuota) }
+    precondition(item?.title == "Subscription quota…" && item?.target === overview)
+    print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, menu action")
+}
+
+func previewSubscriptionQuota(_ state: String) {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.regular)
+    let ui = SubscriptionQuotaController()
+    if state == "live" { ui.open(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]) }
+    else {
+        ui.window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
+        let now = Date().timeIntervalSince1970
+        let reset = ISO8601DateFormatter().string(from: Date().addingTimeInterval(7620))
+        func reading(_ provider: String, _ id: String, _ status: String, _ windows: [[String: Any]]) -> SubscriptionQuotaRow {
+            let value: [String: Any] = ["schema_version": 1, "account": ["provider": provider, "id": id], "state": status, "updated_at": now - (status == "stale" ? 7200 : 20), "data": ["windows": windows]]
+            let reading = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: JSONSerialization.data(withJSONObject: value))
+            return SubscriptionQuotaRow(account: reading.account, reading: reading)
+        }
+        func limit(_ name: String, _ value: Any) -> [String: Any] { ["label": name, "remaining_percent": value, "resets_at": reset] }
+        ui.rows = [reading("codex", "work", "ok", [limit("5-hour · all models", 72), limit("Weekly · all models", 18)]), reading("claude", "personal", "ok", [limit("5-hour · all models", 0), limit("Weekly · Sonnet", 43)])]
+        if state.contains("stale") { ui.rows = [reading("codex", "long-account-name-for-the-design-team-with-extra-detail", "stale", [limit("Weekly · all models and a very long provider-reported limit label", 18), limit("Weekly · unknown limit", NSNull())]), reading("claude", "personal", "disabled", [])] }
+        if state.contains("many") { ui.rows = (1...12).map { reading("codex", "subscription-\($0)", "ok", [limit("Weekly · all models", 72)]) } }
+        if state.contains("empty") { ui.rows = []; ui.message = "No subscriptions connected" }
+        if state.contains("error") { ui.rows = []; ui.message = "Could not load subscriptions" }
+        if state.contains("loading") { ui.rows = []; ui.loading = true }
+        ui.runner = { _, _ in }
+        if state.contains("compact") { ui.window.setContentSize(NSSize(width: 420, height: 340)) }
+        ui.render(); ui.window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
+    }
+    if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_SNAPSHOT_DIR"] {
+        if state == "live" {
+            let deadline = Date().addingTimeInterval(40)
+            while ui.loading && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            precondition(!ui.loading && !ui.rows.isEmpty && ui.rows.contains { $0.reading?.isFresh() == true }, "Live quota integration requires a fresh provider reading")
+            print("PASS live quota: \(ui.rows.count) accounts, background CLI → native panel")
+        }
+        ui.content.layoutSubtreeIfNeeded()
+        let bitmap = ui.content.bitmapImageRepForCachingDisplay(in: ui.content.bounds)!
+        ui.content.cacheDisplay(in: ui.content.bounds, to: bitmap)
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent(state + ".png"))
+        ui.window.close(); return
+    }
+    withExtendedLifetime(ui) { app.run() }
 }
