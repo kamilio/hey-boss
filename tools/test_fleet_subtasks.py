@@ -175,7 +175,8 @@ class SubtaskFleetTests(unittest.TestCase):
 
     def test_legacy_bootstrap_keeps_graph_prs_and_truthful_history(self):
         project='Legacy graph'
-        self.command(self.main_path,'whoami',project=project);self.pull()
+        subprocess.run([str(BINARY), 'project', 'init', '--project', project, '--prs', 'false', '--worktree', 'false', '--yes', '--json'], cwd=self.root, env={**os.environ, 'HEY_BOSS_ISSUE_DB': str(self.main_path), 'HEY_BOSS_ISSUE_HOST': ''}, capture_output=True, check=True)
+        self.pull()
         with self.agent:self.agent.execute("UPDATE fleet_meta SET role='standalone' WHERE id=1")
         self.command(self.agent_path,'create','--title','Existing legacy parent',project=project)
         child=self.command(self.agent_path,'subtask','create','1','--title','Existing child',project=project)['issue']['number']

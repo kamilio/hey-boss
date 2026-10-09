@@ -26,6 +26,7 @@ class Planning(unittest.TestCase):
         self.env = dict(os.environ, HEY_BOSS_ISSUE_DB=str(self.db), GIT_CEILING_DIRECTORIES=str(self.root), PATH=str(self.bin)+':'+os.environ['PATH'])
         for key in ('HEY_BOSS_ISSUE_HOST', 'HEY_BOSS_AGENT_ID', 'CODEX_THREAD_ID', 'HEY_BOSS_ISSUE_PROJECT'):
             self.env.pop(key, None)
+        subprocess.run([str(BINARY), 'project', 'init', '--prs', 'false', '--worktree', 'false', '--yes', '--json'], cwd=self.checkout, env=self.env, capture_output=True, check=True)
         self.fake('exit 0')
 
     def fake(self, code):

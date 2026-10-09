@@ -31,6 +31,7 @@ class FleetTests(unittest.TestCase):
         environment = os.environ.copy()
         environment['HEY_BOSS_ISSUE_DB'] = str(self.main_path)
         environment.pop('HEY_BOSS_ISSUE_HOST', None)
+        subprocess.run([str(BINARY), 'project', 'init', '--project', 'Fleet tests', '--prs', 'false', '--worktree', 'false', '--yes', '--json'], cwd=self.root, env=environment, capture_output=True, check=True)
         subprocess.run([str(BINARY), 'issue', '--project', 'Fleet tests', '--agent', 'human:fixture', '--json', 'create', '--title', 'Original', '--body', 'Requirements'], cwd=self.root, env=environment, capture_output=True, check=True)
         self.main = fleet.connect_db(self.main_path)
         fleet.install_capture(self.main, 'controller', 'main')
@@ -83,7 +84,7 @@ class FleetTests(unittest.TestCase):
         with self.main:
             self.main.execute("DELETE FROM fleet_allocations")
             self.main.execute("UPDATE issues SET draft=1 WHERE project_id=?", (PROJECT,))
-            self.main.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,drafts_enabled,plan_template) VALUES(?,'prompt',0,1,0,'plans/{timestamp}.md')", (PROJECT,))
+            self.main.execute("UPDATE project_settings SET prompt='prompt',prs_enabled=0,version=version+1,drafts_enabled=0,plan_template='plans/{timestamp}.md' WHERE project_id=?", (PROJECT,))
             fleet.allocate(self.main, 'agent', self.workers)
         self.assertEqual(self.main.execute('SELECT count(*) FROM fleet_allocations').fetchone()[0], 0)
         with self.main:
@@ -101,7 +102,7 @@ class FleetTests(unittest.TestCase):
     def test_workflow_project_settings_replicate_and_legacy_rows_use_defaults(self):
         overrides = json.dumps({'worktree': 'Isolate {{number}}', 'main': 'Ship {{number}}'})
         with self.main:
-            self.main.execute('INSERT INTO project_settings(project_id,prompt,prs_enabled,version,worktree_enabled,prompt_overrides) VALUES(?,?,?,?,?,?)', (PROJECT, 'Shared instructions', 1, 1, 1, overrides))
+            self.main.execute('UPDATE project_settings SET prompt=?,prs_enabled=1,version=version+1,worktree_enabled=1,prompt_overrides=? WHERE project_id=?', ('Shared instructions', overrides, PROJECT))
             snapshot = fleet.export_snapshot(self.main, 'agent')
         with self.agent:
             fleet.apply_pull(self.agent, 'agent', snapshot, [])
@@ -354,7 +355,7 @@ class FleetTests(unittest.TestCase):
             fleet.allocate(self.main, 'agent', self.workers)
             boss = json.loads(self.main.execute("SELECT metadata FROM agents WHERE id='human:fixture'").fetchone()[0])
             boss['id'] = 'human:boss'
-            self.main.execute('INSERT INTO agents VALUES(?,?,0)', ('human:boss', json.dumps(boss)))
+            self.main.execute("UPDATE agents SET metadata=?,last_seen=0 WHERE id='human:boss'", (json.dumps(boss),))
             self.main.execute("UPDATE issues SET assignee='human:boss' WHERE number=1")
             fleet.allocate(self.main, 'agent', self.workers)
         self.assertEqual([r[0] for r in self.main.execute('SELECT issue_number FROM fleet_allocations ORDER BY issue_number')], [1, 2, 3])
@@ -711,6 +712,7 @@ class FleetTests(unittest.TestCase):
                 time.sleep(.1)
             self.fail('Worker lifecycle operation timed out')
         (self.root / 'mode.txt').write_text('delay')
+        command('project', 'init', '--project', 'Worker fixture', '--prs', 'false', '--worktree', 'false', '--yes', '--json')
         command('issue', '--project', 'Worker fixture', '--agent', 'human:fixture', '--json', 'create', '--title', 'Unfinished restart work')
         worker = subprocess.Popen([str(BINARY), 'worker', 'run', '--project', 'Worker fixture', '--directory', str(self.root), '--json'], env=environment, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         supervisor = None

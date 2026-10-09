@@ -154,6 +154,7 @@ class DestinationTests(unittest.TestCase):
         })
         environment.start()
         self.addCleanup(environment.stop)
+        subprocess.run([self.binary, 'project', 'init', '--project', 'github-drain-test', '--prs', 'false', '--worktree', 'false', '--yes', '--json'], cwd=self.root.name, capture_output=True, check=True)
         self.dest = drain.Destination(self.binary, "github-drain-test")
 
     def test_retries_reuse_copy_and_preserve_all_content(self):
