@@ -9,6 +9,7 @@ mod cli_request;
 mod companion;
 mod health_cli;
 mod issue_cli;
+mod job_cli;
 mod lookup_cli;
 mod mindmap_cli;
 mod notif_cli;
@@ -202,6 +203,9 @@ enum Command {
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
+    /// Durable cron job definitions, schedule previews and run history.
+    #[command(visible_alias = "jobs")]
+    Job(job_cli::Options),
     /// Persistent project Markdown artifacts, comments and resource links.
     #[command(visible_alias = "artifacts")]
     Artifact(artifact_cli::Options),
@@ -559,6 +563,17 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss issue: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Job(options) => {
+            if let Err(error) = job_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss job: {error}");
                 }
                 std::process::exit(error.exit_code());
             }
