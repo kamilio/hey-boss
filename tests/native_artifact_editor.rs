@@ -57,6 +57,29 @@ fn editor_rpc_preserves_markdown_and_deduplicates_uncertain_saves() {
     let root = std::env::temp_dir().join(format!("hb-editor-rpc-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let owner = hey_boss::database::Owner::host(&root.join("issues.db")).unwrap();
+    let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&root)
+        .env("HEY_BOSS_ISSUE_DB", root.join("issues.db"))
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .args([
+            "project",
+            "init",
+            "--project",
+            "Focus",
+            "--prs",
+            "false",
+            "--worktree",
+            "false",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stdout)
+    );
     let rpc = |request_id: &str, operation: Value| {
         let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .args([

@@ -81,6 +81,7 @@ impl Web {
             )
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .args([
                 "issue",
                 "web",
@@ -120,11 +121,32 @@ impl Web {
         web.token = boot["csrf"].as_str().unwrap().into();
         web
     }
+    fn init_project(&self, project: &str) {
+        let reply = self.action(
+            project,
+            json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}}),
+            None,
+        );
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+    }
     fn http(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Reply {
+        self.http_with_timeout(method, path, headers, body, Duration::from_secs(5))
+    }
+    fn http_with_timeout(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+        timeout: Duration,
+    ) -> Reply {
         let mut stream = TcpStream::connect(&self.authority).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
         let host = headers
             .iter()
             .find(|h| h.0.eq_ignore_ascii_case("host"))
@@ -776,6 +798,7 @@ fn markdown_preview_issue_and_comment_share_complete_rendering() {
 #[test]
 fn csrf_cross_origin_and_host_checks_apply_before_operations() {
     let web = Web::start();
+    web.init_project(&web.project);
     let body=json!({"project":web.project,"operation":{"action":"create","title":"unsafe","body":"","labels":[]},"request_id":null}).to_string();
     assert_eq!(
         web.http(
@@ -921,6 +944,7 @@ fn web_and_cli_share_ownership_revisions_and_project_counts() {
     assert_eq!(p["projects"][0]["closed"], 1);
     assert_eq!(p["projects"][0]["open"], 0);
     assert_eq!(p["labels"], json!(["bug"]));
+    web.init_project("named:Other");
     let other = web.action(
         "named:Other",
         json!({"action":"create","title":"Isolated","body":"","labels":[]}),
@@ -1169,6 +1193,7 @@ fn cross_project_create_command_matches_preview_and_claim_and_routes_outside_wor
     let command =
         "hey-boss issue create --project 'poe-code' --title '<title>' --body '<markdown>'";
     assert!(claimed["instructions"].as_str().unwrap().contains(command));
+    web.init_project("named:poe-code");
     let target = web.action(
         "named:poe-code",
         json!({"action":"create","title":"Register target","body":"","labels":[]}),
@@ -1333,19 +1358,40 @@ fn inbox_api_security_rendering_and_issue_relationships_do_not_mutate_issues() {
 #[test]
 fn unavailable_inbox_does_not_block_the_issue_service() {
     let web = Web::start();
-    let result = web.http(
-        "POST",
-        "/api/inbox",
-        &[
-            ("Content-Type", "application/json"),
-            ("X-Hey-Boss-CSRF", &web.token),
-        ],
-        br#"{"action":"list"}"#,
-    );
+    let result = std::thread::scope(|scope| {
+        let pending = scope.spawn(|| {
+            web.http_with_timeout(
+                "POST",
+                "/api/inbox",
+                &[
+                    ("Content-Type", "application/json"),
+                    ("X-Hey-Boss-CSRF", &web.token),
+                ],
+                br#"{"action":"list"}"#,
+                hey_boss::readiness::RECOVERY_WAIT + Duration::from_secs(5),
+            )
+        });
+        // Inbox waits for the companion to reconnect; unrelated requests must
+        // still finish within the ordinary five-second HTTP deadline.
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(web.http("GET", "/inbox.js", &[], b"").status, 200);
+        web.ok(json!({"action":"create","title":"Issues remain available","body":"","labels":[]}));
+        assert!(!pending.is_finished(), "Inbox skipped its recovery window");
+        pending.join().unwrap()
+    });
     assert_eq!(result.status, 503);
-    assert_eq!(result.json()["error"]["code"], "inbox_unavailable");
+    assert_eq!(result.json()["error"]["code"], "io_error");
+    assert!(
+        result.json()["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("readiness timed out")
+    );
     assert_eq!(web.http("GET", "/inbox.js", &[], b"").status, 200);
-    web.ok(json!({"action":"create","title":"Issues remain available","body":"","labels":[]}));
+    assert_eq!(
+        web.ok(json!({"action":"view","number":1}))["issue"]["title"],
+        "Issues remain available"
+    );
 }
 
 #[test]
