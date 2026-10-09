@@ -72,6 +72,8 @@ impl Checkpointer {
     }
 
     pub fn request(self: &Arc<Self>) {
+        // Keep Rust 1.98 compatibility; 1.99 renamed this operation to try_update.
+        #[allow(deprecated)]
         let previous = self
             .state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {

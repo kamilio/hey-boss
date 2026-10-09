@@ -92,6 +92,8 @@ impl Backend {
         };
         // IDs are minted under the companion's output lock. A monotonic scalar
         // fences canceled/completed work without an unbounded set of old IDs.
+        // Keep Rust 1.98 compatibility; 1.99 renamed this operation to try_update.
+        #[allow(deprecated)]
         if self
             .last_id
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |last| {
