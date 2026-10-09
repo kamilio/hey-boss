@@ -155,3 +155,13 @@ assert.equal(configurationProblems({...checkoutProblem,configuration_error:'Data
 console.log('Pending limits and actionable checkout errors passed');
 
 assert.equal(configurationProblems({...checkoutProblem,configuration_error:'github.com/acme/atlas: Git clone timed out; check connection'}).length,1,'Semicolons inside one diagnostic do not create unrelated error rows');
+
+const {jobConversation} = require('../src/issues/web/fleet.js');
+const jobEntry={machine:{host:'local',state:'disconnected'},run:{id:'job:one',kind:'job',state:'running',machine:'node-one',standalone:true},online:false};
+const jobMachine={host:'local',node:'node-one',state:'connected',heartbeat:99,workers:[]};
+assert.equal(jobConversation(jobEntry,{machines:[jobMachine]},100000).online,true,'Jobs are live without any ordinary workers');
+assert.equal(jobConversation(jobEntry,{machines:[{...jobMachine,heartbeat:80}]},100000).online,false,'Stale job machines remain offline');
+assert.equal(jobConversation(jobEntry,{machines:[]},100000).online,false,'Missing machine must not infer liveness from persisted running state');
+const ordinary={...jobEntry,run:{kind:'worker'}};
+assert.equal(jobConversation(ordinary,{machines:[jobMachine]},100000),ordinary,'Ordinary and Chief entries retain their lifecycle handling');
+console.log('Worker-independent job conversation liveness checks passed');
