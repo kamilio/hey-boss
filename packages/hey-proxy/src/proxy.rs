@@ -130,7 +130,13 @@ fn unbounded_model_wait(config: &Config) -> bool {
 }
 
 pub(crate) fn build_client(config: &Config) -> Result<reqwest::Client> {
+    // Workspace feature unification must not change forwarded bytes, headers,
+    // or fallback classification by enabling transparent decompression.
     let builder = reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15));
     let builder = if unbounded_model_wait(config) {
