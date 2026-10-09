@@ -80,6 +80,9 @@ def check(binary, mode):
             if mode == "tmux-failure":
                 (root / "fail").touch()
         project = "Title fixture"
+        subprocess.run([binary, "project", "init", "--project", project, "--prs", "false",
+                        "--worktree", "false", "--yes", "--json"], cwd=root, env=env,
+                       capture_output=True, check=True)
         title = f"hey-boss · {project} · {root}"
         terminal = Terminal(binary, ["run", "--project", project, "--directory", str(root)], root, env)
         dashboard = None
@@ -92,6 +95,7 @@ def check(binary, mode):
                 assert not log.exists(), "Missing pane renamed another window"
                 assert b"\x1b]1;" not in terminal.output
             else:
+                terminal.wait(lambda: log.exists() and len(log.read_text().splitlines()) == 5)
                 assert log.read_text().splitlines() == ["rename-window", "-t", "%42", "--", title]
                 assert b"\x1b]1;" not in terminal.output
             status = subprocess.run([binary, "worker", "--json", "status"], cwd=root, env=env,

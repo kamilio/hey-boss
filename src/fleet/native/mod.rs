@@ -21,9 +21,9 @@ mod service;
 mod supervisor;
 mod takeover;
 mod watch_delta;
-mod worker_history;
 #[cfg(test)]
 mod watcher_tests;
+mod worker_history;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(super) use authority::metadata;
