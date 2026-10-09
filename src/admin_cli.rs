@@ -462,6 +462,15 @@ fn request(root: &Path, operation: Value) -> io::Result<Request> {
 }
 fn seed(root: &Path, context: &Value) -> io::Result<Value> {
     let mut store = Store::open(&root.join("issues.db")).map_err(io::Error::other)?;
+    for name in ["Review sample", "Destination review"] {
+        let mut init = request(
+            root,
+            json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}}),
+        )?;
+        init.project.id = format!("named:{name}");
+        init.project.name = name.into();
+        store.execute(&init).map_err(io::Error::other)?;
+    }
     let mut call = |op| store.execute(&request(root, op)?).map_err(io::Error::other);
     let title = context["issue"]["title"]
         .as_str()
