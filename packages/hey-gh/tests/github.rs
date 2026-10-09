@@ -4625,7 +4625,7 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
             if w[0]["discovery_last_error"].is_string()
                 && w[0]["last_success_at_ms"].is_number()
                 && w[0]["ci_last_success_at_ms"].is_number()
-                && w[0]["policy_last_cycle"]["finished_at_ms"]
+                && w[0]["policy_last_cycle"]["started_at_ms"]
                     .as_u64()
                     .is_some_and(|completed| {
                         w[0]["policy_last_poll_at_ms"]
