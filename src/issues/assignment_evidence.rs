@@ -20,6 +20,7 @@ fn condensed(snapshot: &Value) -> Value {
         "ci_settled",
         "has_checks",
         "required_state",
+        "conflicts",
         "sources_match",
         "source_heads",
         "source_merges",
@@ -112,6 +113,19 @@ pub(super) fn bounded(mut status: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_status_keeps_conflicts_when_large_evidence_is_condensed() {
+        let url = "https://github.com/o/r/pull/1";
+        let status = bounded(json!({"prs":{url:{"evidence":{
+            "conflicts":"conflicting", "sources_match":true,
+            "reviews":[{"body":"x".repeat(128 * 1024)}]
+        }}}}));
+        assert_eq!(status["prs"][url]["evidence"]["conflicts"], "conflicting");
+        assert_eq!(status["prs"][url]["evidence"]["sources_match"], true);
+        assert_eq!(status["prs"][url]["evidence"]["truncated"], true);
+        assert!(status.to_string().len() <= 128 * 1024);
+    }
 
     #[test]
     fn condensed_review_only_status_keeps_absent_checks_explicit() {

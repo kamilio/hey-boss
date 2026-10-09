@@ -5,14 +5,21 @@ const {createServer} = require('node:http');
 const {resolve} = require('node:path');
 const {chromium, webkit} = require('playwright');
 const root = resolve('src/issues/web');
-const project = {id:'named:Badge QA',name:'Badge QA',open:5,closed:0,ready:0,blocked:0,deleted:0,unassigned:1,prs_enabled:true};
+const project = {id:'named:Badge QA',name:'Badge QA',open:7,closed:0,ready:0,blocked:0,deleted:0,unassigned:2,prs_enabled:true};
 const issues = [
   {title:'Recover the native stream after upstream closes',assignment:{kind:'agent',actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
   {title:'Expose the existing filesystem to packaged Workers',assignment:{kind:'boss'},assignee:'human:boss'},
-  {title:'Check required reviews and CI for the release',assignment:{kind:'github',waiting:true,actor:'codex:astra'},assignee:'watcher:github'},
+  {title:'Check required reviews and CI for the release',assignment:{kind:'github',waiting:true},assignee:'watcher:github'},
   {title:'Verify the new snapshot on the development machine',assignment:{kind:'machine',machine:'box',machine_name:'Devbox'}},
   {title:'An unassigned issue keeps comments in the same column',assignment:{kind:'unassigned'}},
-].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',comments:[],events:[],pull_requests:[],...i}));
+  {title:'Astra is resolving the PR conflicts',assignment:{kind:'github',waiting:false,actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
+  {title:'Merge conflicts released the watcher for pickup',assignment:{kind:'github',waiting:false},assignee:null},
+].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',body_html:'<p>Inspect the current owner and PR status.</p>',comments:[],events:[],pull_requests:[],...i}));
+for (const number of [3,6,7]) {
+  const issue=issues[number-1], url=`https://github.com/example/project/pull/${number}`;
+  issue.pull_requests=[{url,status:'open',purpose:'fix'}];
+  issue.github_status={monitoring:true,fetches:{[url]:{finished_at:Date.now()-60000}},prs:{[url]:{checked_at:Date.now(),evidence:{repository:'example/project',number,conflicts:number===3?'clean':'conflicting',complete:false,required:[]}}}};
+}
 const common={ok:true,csrf:'fixture',actor:{id:'human:boss'},boss:{id:'human:boss',name:'Boss'},project,projects:[project],labels:['needs-boss'],actor_models:{'codex:astra':'gpt-6-astra'},assignees:['codex:astra','human:boss','watcher:github'],assignment_machines:[{id:'box',name:'Devbox'}]};
 const requests=[];
 const server=createServer(async(req,res)=>{
@@ -20,9 +27,10 @@ const server=createServer(async(req,res)=>{
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):{}, op=data.operation||{};
     requests.push(op);
-    let result={...common,tasks:[],notices:[],attachments:[],unread:0};
+    let result={...common,tasks:[],notices:[],attachments:[],unread:0,comments:[],events:[],entries:[],next_before:null};
     if(op.action==='view') result={...result,issue:issues.find(i=>i.number===op.number),comments:[],events:[]};
-    else if(op.action==='list') result={...result,issues:issues.filter(i=>(!op.assignee||i.assignee===op.assignee||'machine:'+i.assignment.machine===op.assignee)&&(!op.label||i.labels.includes(op.label))),order_version:1};
+    else if(op.action==='list') result={...result,issues:issues.filter(i=>(!op.unassigned||!i.assignee)&&(!op.assignee||i.assignee===op.assignee||'machine:'+i.assignment.machine===op.assignee)&&(!op.label||i.labels.includes(op.label))),order_version:1};
+    else if(op.action==='assign') {res.statusCode=409;result={ok:false,error:{message:'Assignment changed; refresh before assigning'}};}
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
   }
   try {
@@ -44,11 +52,12 @@ const server=createServer(async(req,res)=>{
     for(const engine of [chromium,webkit]){
       const browser=await engine.launch({headless:true});
       try {
-        for(const touch of [false,true]){
-          const context=await browser.newContext({viewport:touch?{width:390,height:844}:{width:1440,height:1000},hasTouch:touch,isMobile:touch});
+        for(const width of [1440,768,390,320]){
+          const touch=width<768;
+          const context=await browser.newContext({viewport:{width,height:1000},hasTouch:touch,isMobile:touch});
           const page=await context.newPage(), errors=[]; page.setDefaultTimeout(5000);
           page.on('pageerror',e=>errors.push(e.stack));
-          const list=async()=>{await page.mouse.move(0,0);await page.goto(base);await page.locator('.assignment-badge').first().waitFor();};
+          const list=async()=>{await page.mouse.move(0,0);await page.goto(base);await page.locator('.assignment-badge').first().waitFor();await page.evaluate(()=>window.scrollTo(0,0));await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));};
           const badge=n=>page.locator(`[data-issue-number="${n}"] .assignment-badge`);
           const card=n=>page.locator('#assignment-card-'+n);
           await list();
@@ -100,6 +109,39 @@ const server=createServer(async(req,res)=>{
           await card(3).getByRole('button',{name:'Open GitHub watcher'}).click();
           await page.locator('.github-watcher-dialog').waitFor({state:'visible'});
           await page.keyboard.press('Escape');
+          const showOwner = async number => {
+            await badge(number).scrollIntoViewIfNeeded();
+            await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+            if(touch)await badge(number).tap();else {await badge(number).focus();await badge(number).press('ArrowDown');}
+            await card(number).waitFor({state:'visible'});
+          };
+          for (const [number,label,selection] of [[6,'Codex · gpt-6-astra','active'],[7,'Unassigned','active']]) {
+            await list();
+            await showOwner(number);
+            assert.equal(await card(number).locator('strong').innerText(),label);
+            const filter=card(number).getByRole('link',{name:'Filter by '+label});
+            if(touch)await filter.tap();else await filter.press('Enter');
+            await page.waitForFunction(owner=>model.route.owner===owner,number===6?'codex:astra':'unassigned');
+            await list();
+            await showOwner(number);
+            await card(number).getByRole('button',{name:'Open GitHub watcher'}).click();
+            await page.locator('.github-watcher-dialog').getByText('Merge conflicts',{exact:true}).waitFor();
+            await page.keyboard.press('Escape');
+            await page.locator(`[data-issue-number="${number}"] .issue-title`).click();
+            await page.locator('#issue-assignment').waitFor();
+            assert.equal(await page.locator('#issue-assignment').inputValue(),selection);
+            assert.equal(await page.locator('#issue-assignment option:checked').innerText(),label);
+            assert(await page.getByRole('button',{name:'Fetch now',exact:true}).isVisible());
+            if(number===6)assert.match(await page.getByRole('link',{name:'Agent conversation →'}).getAttribute('href'),/agent=codex%3Aastra/);
+            for(const scheme of ['light','dark']) {
+              await page.emulateMedia({colorScheme:scheme});
+              assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+              if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-owner-${number}.png`,fullPage:true});
+            }
+            await page.locator('#issue-assignment').selectOption('github');
+            await page.getByText('Assignment changed; refresh before assigning',{exact:true}).waitFor();
+            assert.equal(await page.locator('#issue-assignment').inputValue(),selection,'Failed changes restore actual owner');
+          }
           await list();
           await page.locator('[data-issue-number="1"] .list-label-filter').click();
           await page.waitForFunction(()=>model.route.label==='needs-boss');
@@ -115,13 +157,13 @@ const server=createServer(async(req,res)=>{
             assert.notEqual(colors[0],colors[1], 'Workers have a distinct green color');
             assert.notEqual(colors[3],colors[1], 'Machines have a distinct orange color');
             assert.notEqual(colors[0],colors[3], 'Machine and worker colors differ');
-            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${touch?'touch':'desktop'}-${scheme}-aligned.png`});
+            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-aligned.png`});
             if(touch)await badge(1).tap();else await badge(1).hover();
-            const box=await card(1).boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=(touch?390:1440));
-            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${touch?'touch':'desktop'}-${scheme}.png`});
+            const box=await card(1).boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=width);
+            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}.png`});
           }
           assert.deepEqual(errors,[]);
-          console.log(engine.name(),touch?'touch':'desktop','passed');
+          console.log(engine.name(),width,touch?'touch':'desktop','passed');
           await context.close();
         }
       }finally{await browser.close();}

@@ -401,9 +401,9 @@ function traceLinkForOrigin(origin, number, fallbackActor) {
   return null;
 }
 function listAssignment(issue) {
-  const a = IssueAssignments.current(issue);
+  const a = IssueAssignments.owner(issue), watching = IssueAssignments.current(issue).kind === 'github';
   const actor = a.actor || issue.assignee;
-  const historical = a.kind === 'unassigned';
+  const historical = a.kind === 'unassigned' && !watching;
   const lastCommit = issue.commits?.at(-1);
   const trace = historical
     ? traceLinkForOrigin(lastCommit?.origin, issue.number, issue.closed_by || lastCommit?.added_by)
@@ -412,9 +412,9 @@ function listAssignment(issue) {
   if (historical && !trace) return '';
   const description = historical ? {label:'Agent conversation', detail:'Last recorded work on this issue.'}
     : IssueAssignments.describe(issue, {actorName, bossName:model.boss.name});
-  const owner = a.kind === 'github' ? 'watcher:github' : a.kind === 'machine' ? 'machine:' + a.machine : actor || 'human:boss';
+  const owner = a.kind === 'github' ? 'watcher:github' : a.kind === 'machine' ? 'machine:' + a.machine : a.kind === 'unassigned' ? 'unassigned' : actor || 'human:boss';
   const href = routeHash({...model.route, issue:null, owner});
-  const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request'
+  const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request' : a.kind === 'unassigned' && !historical ? 'user'
     : actor?.startsWith('claude:') ? 'spark' : actor?.startsWith('codex:') ? 'codex' : 'code';
   const id = 'assignment-card-' + issue.number;
   const attrs = 'class="assignment-badge" data-assignment-kind="' + esc(a.kind) + '" data-assignment-card="' + id + '" aria-controls="' + id + '" aria-expanded="false" aria-haspopup="dialog" aria-keyshortcuts="ArrowDown"';
@@ -424,10 +424,11 @@ function listAssignment(issue) {
   return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(description.detail) + '</span>'
     + (historical ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
     + (trace ? '<a class="assignment-card-action" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
-    + (a.kind === 'github' ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')
+    + (watching ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')
     + '</span></span>';
 }
 let assignmentCardContext = null, assignmentCardTimer, assignmentPointerType = '', restoringAssignmentFocus = false;
+let assignmentPointerDown = false;
 function closeAssignmentCard(restoreFocus = false) {
   clearTimeout(assignmentCardTimer);
   if (!assignmentCardContext) return;
@@ -477,7 +478,7 @@ assignmentList.addEventListener('focusin', event => {
   if (trigger && !restoringAssignmentFocus) openAssignmentCard(trigger);
 });
 assignmentList.addEventListener('focusout', event => {
-  if (assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) closeAssignmentCard();
+  if (!assignmentPointerDown && assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) closeAssignmentCard();
 });
 assignmentList.addEventListener('click', event => {
   const trigger = event.target.closest('[data-assignment-card]');
@@ -505,8 +506,13 @@ document.addEventListener('keydown', event => {
 });
 document.addEventListener('pointerdown', event => {
   assignmentPointerType = event.pointerType;
+  // Safari may focus the page when clicking a popover button. Keep the card
+  // through pointerup so its action receives the click instead of the row below.
+  assignmentPointerDown = !!assignmentContains(event.target);
   if (!assignmentContains(event.target)) closeAssignmentCard();
 });
+document.addEventListener('pointerup', () => { assignmentPointerDown = false; });
+document.addEventListener('pointercancel', () => { assignmentPointerDown = false; });
 window.addEventListener('resize', () => closeAssignmentCard(true));
 window.addEventListener('scroll', event => {
   if (assignmentCardContext && !assignmentCardContext.card.contains(event.target)) closeAssignmentCard(true);
@@ -1358,7 +1364,7 @@ async function changeAssignment(select) {
     if(model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) await renderRoute();
   } catch(error) {
     toast(error.message,true);
-    if(select.isConnected) { select.disabled=false; select.value=assignment.kind==='github'?'github':assignment.kind==='boss'?'boss':assignment.kind==='machine'?'machine:'+assignment.machine:assignment.kind==='agent'?'active':'unassigned'; }
+    if(select.isConnected) { select.disabled=false; select.value=IssueAssignments.selectedTarget(issue); }
   } finally {
     restoreFocus();
   }

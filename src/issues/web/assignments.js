@@ -14,9 +14,25 @@
   function current(issue) {
     return issue.assignment || (issue.assignee === "watcher:github" ? {kind:"github", waiting:true} : issue.assignee === "human:boss" ? {kind:"boss"} : issue.assignee ? {kind:"agent", actor:issue.assignee} : {kind:"unassigned"});
   }
+  function owner(issue) {
+    const a = current(issue);
+    if (a.kind !== "github") return a;
+    if (a.actor) return {...a, kind:"agent"};
+    if (a.waiting || issue.state === "closed" || issue.deleted_at) return a;
+    return {...a, kind:a.machine ? "machine" : "unassigned"};
+  }
+  function selectedTarget(issue) {
+    const a = owner(issue);
+    if (a.kind === "unassigned" && current(issue).kind === "github") return "active";
+    return a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : a.kind;
+  }
   function describeAssignment(issue, {actorName, bossName}) {
-    const a = current(issue), machine = a.machine_name || a.machine;
-    if (a.kind === "github") return {label:"GitHub PR watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : a.actor ? `${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}.` : a.waiting ? "Waiting for new GitHub findings." : "New GitHub findings are queued for an agent.", icon:"pull-request"};
+    const a = owner(issue), machine = a.machine_name || a.machine;
+    if (current(issue).kind === "github") {
+      if (a.kind === "agent") return {label:actorName(a.actor), detail:`${actorName(a.actor)} is working${machine ? ` on ${machine}` : ""}. GitHub monitoring continues.`, icon:"user"};
+      if (a.kind === "github") return {label:"GitHub PR watcher", detail:issue.state === "closed" || issue.deleted_at ? "Monitoring stopped for this issue." : "Waiting for new GitHub findings.", icon:"pull-request"};
+      return {label:a.kind === "machine" ? machine : "Unassigned", detail:"New GitHub findings are queued for an agent.", icon:a.kind === "machine" ? "monitor" : "user"};
+    }
     if (a.kind === "machine") return {label:machine || "Machine", detail:"Waiting for an agent.", icon:"monitor"};
     if (a.kind === "agent") return {label:actorName(a.actor), detail:machine ? `Working on ${machine}.` : "Agent is working.", icon:"user"};
     if (a.kind === "boss") return {label:bossName, detail:"Assigned to you.", icon:"user"};
@@ -31,11 +47,11 @@
     const issue = value.issue, a = current(issue), description = describe(issue, helpers);
     const editable = ["open", "ready"].includes(issue.state) && !issue.deleted_at && !issue.draft && !issue.attempt_hold;
     const hasPr = issue.pull_requests?.some(watchablePr);
-    const selected = a.kind === "github" ? "github" : a.kind === "boss" ? "boss" : a.kind === "machine" ? `machine:${a.machine}` : a.kind === "agent" ? "active" : "unassigned";
-    const targets = [{id:"unassigned", name:"Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub PR watcher", disabled:!hasPr}];
+    const selected = selectedTarget(issue), assigned = owner(issue);
+    const targets = [{id:"unassigned", name:a.kind === "github" ? "Unassigned (stop monitoring)" : "Unassigned"}, {id:"boss", name:helpers.bossName}, {id:"github", name:"GitHub PR watcher", disabled:!hasPr}];
     for (const machine of value.assignment_machines || []) targets.push({id:`machine:${machine.id}`, name:machine.name || machine.host || machine.id});
-    if (a.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
-    if (a.kind === "agent") targets.unshift({id:"active", name:description.label, disabled:true});
+    if (assigned.kind === "machine" && !targets.some(t => t.id === selected)) targets.push({id:selected, name:description.label});
+    if (selected === "active") targets.unshift({id:"active", name:description.label, disabled:true});
     const options = targets.map(t => `<option value="${esc(t.id)}"${t.id === selected ? " selected" : ""}${t.disabled ? " disabled" : ""}>${esc(t.name)}</option>`).join("");
     const trace = a.actor && value.project?.id && issue.number ? '/agents/session#' + new URLSearchParams({project: value.project.id, issue: issue.number, agent: a.actor}) : null;
     const help = [issue.draft ? "Mark ready before assigning." : description.detail,
@@ -85,8 +101,9 @@
       const messages = [...new Set(sourceNames.flatMap(name => (evidence[name] || []).map(error => typeof error === "string" ? error : error.message)).filter(message => message && message !== snapshot.error))];
       const sourceErrors = messages.slice(0, 3).map(message => `<p class="github-status-error" role="status">${esc(message)}</p>`).join("");
       const changed = evidence.sources_match === false;
+      const conflicts = evidence.conflicts === "conflicting";
       const terminal = {closed:"Pull request closed without merging", merged:"Pull request merged", removed:"Pull request removed from this issue"}[snapshot.lifecycle];
-      const label = terminal || (changed ? "Refreshing changed pull request" : failureCount ? `${failureCount} required check${failureCount === 1 ? "" : "s"} failed${snapshot.error ? " (last recorded)" : policyIncomplete ? " (policy incomplete)" : ""}` : snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : evidence.ci_settled && evidence.has_checks === false ? "No checks reported" : evidence.complete ? "All checks finished" : "Checks in progress");
+      const label = terminal || (changed ? "Refreshing changed pull request" : conflicts ? `Merge conflicts${snapshot.error ? " (last recorded)" : ""}` : failureCount ? `${failureCount} required check${failureCount === 1 ? "" : "s"} failed${snapshot.error ? " (last recorded)" : policyIncomplete ? " (policy incomplete)" : ""}` : snapshot.error ? "Status unavailable" : incomplete ? "Status incomplete" : evidence.ci_settled && evidence.has_checks === false ? "No checks reported" : evidence.complete ? "All checks finished" : "Checks in progress");
       const checks = required.map(c => `<li><span class="github-check-state ${c.state === "failure" ? "failed" : ""}">${esc(checkState(c.state))}</span>${link(c.url, c.context)}</li>`).join("");
       const feedback = [...(evidence.reviews || []).filter(r => r.body), ...(evidence.comments || []).filter(c => c.body), ...(evidence.review_comments || []).filter(c => c.body)].slice(0, 5);
       const reviews = feedback.length ? `<details class="github-feedback"><summary>Recent review feedback</summary>${feedback.map(r => `<article><p>${esc(r.body)}</p>${r.html_url ? link(r.html_url, "View on GitHub") : ""}</article>`).join("")}</details>` : "";
@@ -95,7 +112,7 @@
       const summary = evidence.truncated ? `<p class="assignment-hint">Summary shown${omitted ? `; ${esc(omitted)} omitted` : ""}. View the PR on GitHub for full details.</p>` : "";
       const date = typeof snapshot.checked_at === "number" && Number.isFinite(snapshot.checked_at) && snapshot.checked_at > 0 ? new Date(snapshot.checked_at) : null;
       const observed = date && Number.isFinite(date.getTime()) ? `<p class="github-observed">Observed <time datetime="${date.toISOString()}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}</time></p>` : "";
-      return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${failed.length && !terminal && !changed ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${sourceErrors}${checks ? `<details><summary>${changed ? "Last recorded required checks" : "Required checks"}</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${summary}${observed}</article>`;
+      return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${(failureCount || conflicts) && !terminal && !changed ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${sourceErrors}${checks ? `<details><summary>${changed ? "Last recorded required checks" : "Required checks"}</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${summary}${observed}</article>`;
     }).join("");
     return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries}${omittedPrs}</section>`;
   }
@@ -191,7 +208,7 @@
       update(ctx);
     });
   }
-  const api = {current, describe, render, status, fetchOverview, initWatcher};
+  const api = {current, owner, selectedTarget, describe, render, status, fetchOverview, initWatcher};
   if (typeof module !== "undefined") module.exports = api;
   else root.IssueAssignments = api;
 })(globalThis);

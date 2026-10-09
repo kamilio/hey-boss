@@ -239,6 +239,10 @@ Issue details have one **Assignment** control: choose a machine, Boss, Unassigne
 or GitHub watcher. A machine assignment becomes an agent assignment when a worker
 claims it; the device remains visible. Explicit machine assignments survive
 reservation cleanup and reconnects. Changing to Unassigned clears that destination.
+PR monitoring stays enabled when findings release the watcher for pickup. The
+assignment badge and control show Unassigned, the reserved machine, or the current
+agent and model; watcher activity remains available separately. Choose
+**Unassigned (stop monitoring)** to clear the subscription.
 Stop an active worker before moving its task to another machine. Assignment edits
 check the issue revision and use stable request IDs across the supervisor tunnel.
 
