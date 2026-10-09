@@ -235,6 +235,18 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
         .job_dispatches("companion")
         .unwrap()
         .remove(0);
+    replica::apply_pull(
+        &companion.ctx.db().unwrap(),
+        "companion",
+        &replica::snapshot(&supervisor.ctx.db().unwrap(), "companion").unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert!(companion.ctx.db().unwrap().query_row(
+        "SELECT job_run_id=?1 AND NOT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?2 AND number=?3) FROM issues WHERE project_id=?2 AND number=?3",
+        rusqlite::params![dispatch.run.id,PROJECT,dispatch.run.task_number],
+        |r|r.get::<_,bool>(0),
+    ).unwrap());
     receive(&companion.ctx, &dispatch, MARKDOWN).unwrap();
     assert!(
         receive(&companion.ctx, &dispatch, "corrupt transfer").is_ok(),
@@ -255,6 +267,18 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
         .store
         .accept_job_report("companion", &terminal)
         .unwrap();
+    replica::apply_pull(
+        &companion.ctx.db().unwrap(),
+        "companion",
+        &replica::snapshot(&supervisor.ctx.db().unwrap(), "companion").unwrap(),
+        &[],
+    )
+    .unwrap();
+    assert!(companion.ctx.db().unwrap().query_row(
+        "SELECT state='closed' AND job_run_id=?1 FROM issues WHERE project_id=?2 AND number=?3",
+        rusqlite::params![dispatch.run.id,PROJECT,dispatch.run.task_number],
+        |r|r.get::<_,bool>(0),
+    ).unwrap());
     acknowledge(&companion.ctx, &terminal).unwrap();
     assert!(reports(&companion.ctx).unwrap().is_empty());
     receive(&companion.ctx, &dispatch, MARKDOWN).unwrap();

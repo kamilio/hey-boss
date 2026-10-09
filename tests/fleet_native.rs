@@ -1704,3 +1704,143 @@ fn completed_installation_reloads_companion_without_dropping_pending_changes() {
         "Companion kept executing the obsolete build: {outcome:?}"
     );
 }
+
+#[test]
+fn scheduled_service_timer_executes_due_job_without_workers() {
+    use serde_json::json;
+    const PROJECT: &str = "github.com/fixture/scheduled";
+    let f = Fixture::new();
+    projects::seed(&f.root.join("issues.db"), &[PROJECT]);
+    let checkout = f.root.join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    for args in [
+        vec!["init", "--quiet"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/fixture/scheduled.git",
+        ],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--no-verify",
+            "-m",
+            "Fixture",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let desired = f.root.join("fleet.yaml");
+    fs::write(&desired,json!({"machines":{"local":{"workers":[],"projects":{PROJECT:{"git":"https://github.com/fixture/scheduled.git","path":checkout}}}}}).to_string()).unwrap();
+    let markdown = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/jobs/fixtures/original.md");
+    f.cli(&[
+        "job",
+        "--project",
+        PROJECT,
+        "--agent",
+        "human:fixture",
+        "--json",
+        "create",
+        "--id",
+        "timer",
+        "--name",
+        "Timer fixture",
+        "--cron",
+        "* * * * *",
+        "--timezone",
+        "UTC",
+        "--harness",
+        "codex",
+        "--model",
+        "exact-model",
+        "--instructions",
+        markdown.to_str().unwrap(),
+    ]);
+    let db = hey_boss::database::Connection::connect(&f.root.join("issues.db")).unwrap();
+    // Exercise the real service timer with a controlled overdue timestamp.
+    db.execute(
+        "UPDATE scheduled_jobs SET next_at=?1 WHERE id='timer'",
+        [jiff::Timestamp::now().as_millisecond() - 60_000],
+    )
+    .unwrap();
+    let audit = f.root.join("launches.jsonl");
+    let mut supervisor = Service(
+        f.command(&["fleet", "supervisor"])
+            .env("HEY_BOSS_FLEET_DESIRED", &desired)
+            .env(
+                "HEY_BOSS_CODEX",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
+            )
+            .env("HEY_BOSS_FIXTURE_PROVIDER", "codex")
+            .env("HEY_BOSS_FIXTURE_EXPECT_MODEL", "exact-model")
+            .env("HEY_BOSS_FIXTURE_JOB_AUDIT", &audit)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut paused = false;
+    let number = loop {
+        let rows=db.query_collect("SELECT state,task_number,session_id,reason FROM scheduled_job_runs WHERE job_id='timer' AND state!='skipped'",[],|r|Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?))).unwrap();
+        if let Some((state, number, session, _)) = rows.first() {
+            // Pause only future occurrences; the already queued execution proceeds.
+            if !paused {
+                f.cli(&[
+                    "job",
+                    "--project",
+                    PROJECT,
+                    "--agent",
+                    "human:fixture",
+                    "--json",
+                    "pause",
+                    "timer",
+                    "--if-revision",
+                    "1",
+                ]);
+                paused = true;
+            }
+            if state == "succeeded" {
+                assert!(session.is_some());
+                break *number;
+            }
+            assert_ne!(state, "failed", "{rows:?}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Job service did not complete: {rows:?}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(fs::read_to_string(&audit).unwrap().lines().count(), 1);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM worker_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM issue_pickup_ready WHERE project_id=?1 AND number=?2",
+            rusqlite::params![PROJECT, number],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert!(db.query_row("SELECT state='closed' AND job_run_id IS NOT NULL FROM issues WHERE project_id=?1 AND number=?2",rusqlite::params![PROJECT,number],|r|r.get::<_,bool>(0)).unwrap());
+    supervisor.terminate();
+}
