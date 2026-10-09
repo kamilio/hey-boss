@@ -1,5 +1,7 @@
 use super::{Actor, BODY_LIMIT, Error, Operation, Project, Request, Result, identifier};
 use crate::database::Connection;
+#[path = "../jobs/store.rs"]
+mod jobs;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1440,6 +1442,7 @@ impl Store {
             db.execute_batch(super::chief::SCHEMA)?;
         }
         super::chief::migrate(&db)?;
+        jobs::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::ACTIVITY_INDEX)?;
         }
@@ -1634,7 +1637,10 @@ impl Store {
         }
         if matches!(
             r.operation,
-            Operation::Mindmap { .. } | Operation::Artifact { .. } | Operation::Attachment { .. }
+            Operation::Mindmap { .. }
+                | Operation::Artifact { .. }
+                | Operation::Attachment { .. }
+                | Operation::Job { .. }
         ) {
             validate(r)?;
             let companion: bool = self.db.query_row(
@@ -1649,10 +1655,17 @@ impl Store {
                 let path = self.db.path().ok_or_else(|| {
                     Error::invalid("Resource routing requires a persistent issue database")
                 })?;
-                return crate::fleet::authoritative_resource(r, Path::new(path));
+                let response = crate::fleet::authoritative_resource(r, Path::new(path))?;
+                if matches!(r.operation, Operation::Job { .. }) {
+                    self.cache_job_response(&response)?;
+                }
+                return Ok(response);
             }
         }
         let deadline = Instant::now() + CONTENTION_BUDGET;
+        if matches!(r.operation, Operation::Job { .. }) {
+            return self.execute_job_at(r, super::worker::now());
+        }
         if r.operation.writes() {
             self.execute_once(r, deadline, false)
         } else {
@@ -1976,6 +1989,7 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::Job { .. } => unreachable!("Jobs use their own guarded transaction"),
             Operation::ProjectInit { settings } => {
                 let operation = match settings {
                     None => Operation::ProjectSettings,

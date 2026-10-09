@@ -230,6 +230,9 @@ pub enum BatchAssignment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Job {
+        operation: crate::jobs::Operation,
+    },
     Attachment {
         operation: crate::attachments::Operation,
     },
@@ -628,6 +631,9 @@ pub struct ProjectInitSettings {
 
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::Job { operation } = self {
+            return operation.writes();
+        }
         if let Self::ProjectInit { settings } = self {
             return settings.is_some();
         }
@@ -679,6 +685,7 @@ impl Operation {
     pub fn number(&self) -> Option<i64> {
         match self {
             Self::Attachment { .. }
+            | Self::Job { .. }
             | Self::Artifact { .. }
             | Self::Batch { .. }
             | Self::Mindmap { .. }

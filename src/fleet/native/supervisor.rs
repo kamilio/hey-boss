@@ -1762,11 +1762,12 @@ impl Supervisor {
                 if !matches!(
                     request.operation,
                     crate::issues::Operation::Mindmap { .. }
+                        | crate::issues::Operation::Job { .. }
                         | crate::issues::Operation::Artifact { .. }
                         | crate::issues::Operation::Attachment { .. }
                 ) {
                     return Err(crate::issues::Error::invalid(
-                        "Only maps, artifacts and attachments use the authority relay",
+                        "Only jobs, maps, artifacts and attachments use the authority relay",
                     ));
                 }
                 crate::issues::Store::open(&self.ctx.path)?.execute(&request)

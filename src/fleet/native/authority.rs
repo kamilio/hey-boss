@@ -149,7 +149,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -238,6 +238,7 @@ impl Relay {
                     }
                     if request["request"]["kind"] == "capabilities" {
                         let flags = json!({
+                            "scheduled_jobs": message["capabilities"]["scheduled_jobs"] == true,
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
                             "issue_metadata": message["capabilities"]["issue_metadata"] == true,
@@ -317,6 +318,11 @@ impl Relay {
                     }
                     if message["capabilities"]["authority_rpc"] != true {
                         return Err(unsupported("authority_rpc", &message["build"]).into());
+                    }
+                    if request["request"]["kind"] == "resource"
+                        && request["request"]["request"]["operation"]["action"] == "job"
+                        && message["capabilities"]["scheduled_jobs"] != true {
+                        return Err(unsupported("scheduled_jobs", &message["build"]).into());
                     }
                     if !matches!(
                         request["request"]["kind"].as_str(),
@@ -590,6 +596,15 @@ mod tests {
         let capabilities = call(&ctx.state, &ctx.path, json!({"kind":"capabilities"})).unwrap();
         assert_eq!(capabilities["route"], "supervisor_tunnel");
         assert_eq!(capabilities["capabilities"]["issue_metadata"], false);
+        let job = json!({"kind":"resource","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"operation":{"action":"job","operation":{"command":"view","id":"daily"}}}});
+        let error = call(&ctx.state, &ctx.path, job).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "scheduled_jobs"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
+        assert!(output.lock().unwrap().is_empty());
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));
         for operation in [
             json!({"action":"status","number":1,"level":"green","comment":"Verified."}),
