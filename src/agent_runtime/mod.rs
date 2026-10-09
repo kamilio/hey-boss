@@ -245,7 +245,22 @@ impl AgentSession {
         client.start_session()?;
         Ok(client)
     }
-    fn connect(mut launch: Launch) -> io::Result<Self> {
+    /// Persist process custody before initialization or any user instructions.
+    pub(crate) fn launch_recorded(
+        launch: Launch,
+        record: impl FnOnce(u32) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let mut client = Self::connect_recorded(launch, Some(Box::new(record)))?;
+        client.start_session()?;
+        Ok(client)
+    }
+    fn connect(launch: Launch) -> io::Result<Self> {
+        Self::connect_recorded(launch, None)
+    }
+    fn connect_recorded(
+        mut launch: Launch,
+        record: Option<Box<dyn FnOnce(u32) -> io::Result<()> + '_>>,
+    ) -> io::Result<Self> {
         models::resolve(&mut launch)?;
         if launch.output_schema.is_some() && !launch.provider.capabilities().structured_output {
             return Err(io::Error::other("Provider has no native output schema"));
@@ -327,7 +342,10 @@ impl AgentSession {
             "PATH",
             std::env::join_paths(paths).map_err(io::Error::other)?,
         );
-        let process = Process::spawn(&mut command)?;
+        let process = match record {
+            Some(record) => Process::spawn_recorded(&mut command, record)?,
+            None => Process::spawn(&mut command)?,
+        };
         let mut client = Self {
             provider: launch.provider,
             model: launch.model,
