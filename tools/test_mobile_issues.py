@@ -20,6 +20,7 @@ class MobileIssuesTests(unittest.TestCase):
         self.path = self.root / 'issues.db'
         self.env = mock.patch.dict(os.environ, {'HEY_BOSS_ISSUE_DB': str(self.path)})
         self.env.start()
+        subprocess.run([str(fleet.BINARY), 'project', 'init', '--project', 'Phone tests', '--prs', 'false', '--worktree', 'false', '--yes', '--json'], cwd=self.root, capture_output=True, check=True)
         subprocess.run([str(fleet.BINARY), 'issue', '--project', 'Phone tests', '--agent', 'human:boss', '--json', 'create', '--title', 'Fixture'], capture_output=True, check=True)
         self.bridge = fleet.MobileIssues(self.path, 'machine')
         self.creation = {'requestID': 'phone-123', 'project': 'named:Phone tests', 'title': 'Over cellular', 'body': 'All text retained', 'labels': ['ready']}
