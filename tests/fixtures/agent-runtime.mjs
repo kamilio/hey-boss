@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -11,8 +11,14 @@ if (provider === 'codex') {
   }
 }
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
-let session = '00000000-0000-0000-0000-000000000001';
+let session = process.env.HEY_BOSS_FIXTURE_SESSION_ID ?? '00000000-0000-0000-0000-000000000001';
 let file;
+let selectedModel = args.includes('--model') ? args[args.indexOf('--model') + 1] : 'default-model';
+let selectedRoute = 'proxy';
+const expectedModel = process.env.HEY_BOSS_FIXTURE_EXPECT_MODEL;
+const modelFailure = process.env.HEY_BOSS_FIXTURE_MODEL_FAILURE;
+const discoveryFailure = process.env.HEY_BOSS_FIXTURE_DISCOVERY_FAILURE;
+const checkModel = model => { if (expectedModel && model !== expectedModel) throw new Error('Logical model selection was lost'); };
 let turn = 'fixture-turn';
 let streaming = false;
 let turnNumber = 0;
@@ -21,8 +27,21 @@ let output = '';
 let preflight;
 let nativeTool;
 if (provider === 'pi') {
-  file = args.includes('--session') ? args[args.indexOf('--session') + 1] : join(mkdtempSync(join(tmpdir(), 'hey-boss-pi-fixture-')), session + '.jsonl');
-  writeFileSync(file, JSON.stringify({ type: 'session', id: session }) + '\n');
+  if (args.includes('--session')) {
+    file = args[args.indexOf('--session') + 1];
+    const entries = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+    const saved = entries.findLast(e => e.type === 'model_change');
+    if (saved) { selectedModel = saved.modelId; selectedRoute = saved.provider; }
+  }
+}
+function ensurePiFile(persist = false) {
+  if (file && !persist) return;
+  if (!file) {
+    const root = process.env.HEY_BOSS_FIXTURE_ROOT ?? tmpdir();
+    mkdirSync(root, {recursive:true});
+    file = join(mkdtempSync(join(root, 'hey-boss-pi-fixture-')), session + '.jsonl');
+  }
+  writeFileSync(file, JSON.stringify({type:'session',id:session}) + '\n' + JSON.stringify({type:'model_change',modelId:selectedModel,provider:selectedRoute}) + '\n');
 }
 function complete(interrupted = false) {
   streaming = false;
@@ -38,6 +57,7 @@ function complete(interrupted = false) {
   }
 }
 function prompt(text) {
+  checkModel(selectedModel);
   streaming = true;
   output = text;
   if (text === 'owned identity') output = process.env.HEY_BOSS_AGENT_ID ?? 'missing';
@@ -45,7 +65,7 @@ function prompt(text) {
     goalTurns += 1;
     if (goalTurns === 2) output = JSON.stringify({status:'completed',summary:'Goal fixture verified'});
   }
-  if (provider === 'claude') send({type:'system',subtype:'init',session_id:session});
+  if (provider === 'claude' && modelFailure !== 'missing') send({type:'system',subtype:'init',session_id:session,model:modelFailure ? 'default-model' : selectedModel});
   if (provider === 'pi') send({type:'agent_start'});
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
@@ -171,9 +191,13 @@ for await (const chunk of process.stdin) {
     let result = {};
     if (r.method === 'thread/start' || r.method === 'thread/resume') {
       if (p.approvalPolicy !== 'on-request' || p.approvalsReviewer !== 'auto_review' || p.sandbox !== 'workspace-write') throw new Error('Thread must explicitly use Auto permissions, including on resume');
-      result = {thread:{id:session}};
+      checkModel(p.model ?? 'default-model');
+      if (modelFailure === 'reject') { send({id:r.id,error:{code:-32000,message:'Requested model unavailable'}}); continue; }
+      selectedModel = modelFailure === 'ignore' ? 'default-model' : (p.model ?? 'default-model');
+      result = {thread:{id:session},model:selectedModel};
     }
     if (r.method === 'turn/start') {
+      checkModel(p.model ?? 'default-model');
       turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}};
       if (p.input[0].text === 'start before ack') send({method:'turn/started',params:{threadId:session,turn:{id:turn}}});
       if (p.input[0].text === 'missing turn acknowledgement') result = {turn:{}};
@@ -182,6 +206,11 @@ for await (const chunk of process.stdin) {
         prompt('hold ambiguous acknowledgement');
         continue;
       }
+    }
+    if (r.method === 'model/list') {
+      if (discoveryFailure) { send({id:r.id,error:{code:-32000,message:'Model discovery unavailable'}}); continue; }
+      const pages = process.env.HEY_BOSS_FIXTURE_CATALOG_PAGES;
+      result = {data:[{model:p.cursor ? 'second-model' : 'catalog-model',displayName:'Catalog model'}],nextCursor:pages && (!p.cursor || pages === 'loop') ? 'next' : null};
     }
     if (r.method === 'turn/steer') result = {turnId:turn};
     if ((r.method === 'turn/steer' && p.input[0].text === 'reject steering') || (r.method === 'turn/interrupt' && output === 'hold rejected interrupt')) {
@@ -213,7 +242,7 @@ for await (const chunk of process.stdin) {
         setTimeout(() => complete(), 100);
         continue;
       }
-      send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:{}}});
+      send({type:'control_response',response:{subtype:'success',request_id:r.request_id,response:r.request.subtype === 'initialize' && !discoveryFailure ? {models:[{value:'moving-alias',resolvedModel:'catalog-model',displayName:'Catalog model'}]} : {}}});
       if (r.request.subtype === 'interrupt') complete(true);
     } else if (r.type === 'user') {
       // Claude may consume streaming input in the current tool loop and emit
@@ -253,7 +282,21 @@ for await (const chunk of process.stdin) {
       continue;
     }
     let data;
-    if (r.type === 'get_state') data = {sessionId:session,sessionFile:file,isStreaming:streaming};
+    if (r.type === 'get_available_models') {
+      if (discoveryFailure) { send({id:r.id,type:'response',command:r.type,success:false,error:'Model discovery unavailable'}); continue; }
+      data = {models:[{id:'catalog-model',provider:'proxy',name:'Catalog model'}]};
+    }
+    if (r.type === 'set_model') {
+      checkModel(r.modelId);
+      if (r.provider !== 'proxy') throw new Error('Wrong model route');
+      if (modelFailure === 'reject') { send({id:r.id,type:'response',command:r.type,success:false,error:'Model unavailable'}); continue; }
+      selectedModel = modelFailure === 'ignore' ? 'default-model' : r.modelId;
+      selectedRoute = r.provider;
+      ensurePiFile(true);
+      data = {id:selectedModel,provider:selectedRoute};
+    }
+    if (r.type === 'get_state') ensurePiFile();
+    if (r.type === 'get_state') data = {sessionId:session,sessionFile:file,isStreaming:streaming,model:{id:selectedModel,provider:selectedRoute}};
     if (r.type === 'get_state' && output === 'missing session acknowledgement') delete data.sessionId;
     send({id:r.id,type:'response',command:r.type,success:true,data});
     if (r.type === 'prompt') prompt(r.message);

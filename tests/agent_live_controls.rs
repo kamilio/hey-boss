@@ -25,6 +25,7 @@ fn scratch(provider: Provider) -> PathBuf {
 }
 fn launch(provider: Provider, root: &Path, binary: Option<PathBuf>) -> AgentSession {
     AgentSession::launch(Launch {
+        model: None,
         provider,
         binary,
         cwd: root.into(),

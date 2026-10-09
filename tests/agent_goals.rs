@@ -10,6 +10,7 @@ fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut session = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
             cwd: root,
@@ -48,6 +49,7 @@ fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
         assert_eq!(goal.status(), GoalStatus::Paused);
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut other = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
             cwd: root,
@@ -65,6 +67,7 @@ fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
         session.stop().unwrap();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut recovered = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
             cwd: root,
@@ -86,6 +89,7 @@ fn goals_continue_without_a_report_and_preserve_pause_and_resume() {
 fn queued_claude_instructions_must_finish_before_the_goal_completes() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut agent = AgentSession::launch(Launch {
+        model: None,
         provider: Provider::Claude,
         binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
         cwd: root,
@@ -127,6 +131,7 @@ fn queued_claude_instructions_must_finish_before_the_goal_completes() {
 fn buffered_claude_completions_preserve_queued_goal_scope() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut agent = AgentSession::launch(Launch {
+        model: None,
         provider: Provider::Claude,
         binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
         cwd: root,
@@ -203,6 +208,7 @@ fn real_goal_tools(providers: &[Provider]) {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut agent = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: None,
             cwd: root.clone(),

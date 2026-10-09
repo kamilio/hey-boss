@@ -2,6 +2,8 @@
 //! Codex uses app-server JSON-RPC, Claude uses the SDK control stream, and Pi
 //! uses RPC mode. All controls apply only to the child started by this client.
 mod goal;
+mod models;
+pub use models::{ModelCatalog, ModelChoice, ModelSelection};
 mod protocol;
 use crate::agent_process::Process;
 pub use goal::{GoalStatus, ManagedGoal};
@@ -128,8 +130,12 @@ pub struct SessionRef {
     pub provider: Provider,
     pub id: String,
     pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelSelection>,
 }
 pub struct Launch {
+    /// Exact logical model; None preserves the saved pin or the harness default.
+    pub model: Option<ModelSelection>,
     pub provider: Provider,
     pub binary: Option<PathBuf>,
     pub cwd: PathBuf,
@@ -210,6 +216,9 @@ pub struct State {
 
 pub struct AgentSession {
     provider: Provider,
+    model: Option<ModelSelection>,
+    model_catalog: Value,
+    model_verified: bool,
     process: Process,
     session: Option<SessionRef>,
     expected_session: Option<SessionRef>,
@@ -232,6 +241,12 @@ pub struct AgentSession {
 }
 impl AgentSession {
     pub fn launch(launch: Launch) -> io::Result<Self> {
+        let mut client = Self::connect(launch)?;
+        client.start_session()?;
+        Ok(client)
+    }
+    fn connect(mut launch: Launch) -> io::Result<Self> {
+        models::resolve(&mut launch)?;
         if launch.output_schema.is_some() && !launch.provider.capabilities().structured_output {
             return Err(io::Error::other("Provider has no native output schema"));
         }
@@ -272,6 +287,11 @@ impl AgentSession {
         };
         let mut command = protocol::command(launch.provider, &binary, launch.resume.as_ref());
         if launch.provider == Provider::Claude
+            && let Some(model) = &launch.model
+        {
+            command.arg("--model").arg(&model.id);
+        }
+        if launch.provider == Provider::Claude
             && let Some(schema) = &launch.output_schema
         {
             command
@@ -310,6 +330,9 @@ impl AgentSession {
         let process = Process::spawn(&mut command)?;
         let mut client = Self {
             provider: launch.provider,
+            model: launch.model,
+            model_catalog: Value::Null,
+            model_verified: false,
             process,
             session: None,
             expected_session: launch.resume,
@@ -334,19 +357,12 @@ impl AgentSession {
             Provider::Codex => {
                 client.rpc("initialize", json!({"clientInfo":{"name":"hey_boss","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}))?;
                 client.send(&json!({"method":"initialized","params":{}}))?;
-                let (method, params) = match &client.expected_session {
-                    Some(s) => ("thread/resume", json!({"threadId":s.id})),
-                    None => ("thread/start", json!({"ephemeral":false})),
-                };
-                let result = client.rpc(method, crate::codex_permissions::thread(params))?;
-                client.attach(required(&result["thread"], "id")?, None)?;
             }
             Provider::Claude => {
-                client.rpc("initialize", json!({"hooks":null}))?;
+                let result = client.rpc("initialize", json!({"hooks":null}))?;
+                client.model_catalog = result["models"].clone();
             }
-            Provider::Pi => {
-                client.refresh_pi()?;
-            }
+            Provider::Pi => {}
         }
         Ok(client)
     }
@@ -431,6 +447,9 @@ impl AgentSession {
                 let session = self.session.as_ref().unwrap();
                 let mut params =
                     json!({"threadId":session.id,"input":[{"type":"text","text":text}]});
+                if let Some(model) = &self.model {
+                    params["model"] = json!(model.id);
+                }
                 if let Some(schema) = schema {
                     params["outputSchema"] = schema;
                 }
@@ -726,6 +745,7 @@ impl AgentSession {
         }
         let reference = SessionRef {
             provider: self.provider,
+            model: self.model.clone(),
             id,
             path,
         };
@@ -740,6 +760,7 @@ impl AgentSession {
         let result = self.rpc("get_state", json!({}));
         self.refreshing_pi = false;
         let state = result?;
+        self.verify_model(&state["model"]["id"], &state["model"]["provider"])?;
         let id = required(&state, "sessionId").inspect_err(|_| self.uncertain = true)?;
         let streaming = state["isStreaming"]
             .as_bool()

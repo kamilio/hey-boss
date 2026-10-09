@@ -8,6 +8,7 @@ use std::{
 fn launch(provider: Provider, resume: Option<SessionRef>) -> AgentSession {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     AgentSession::launch(Launch {
+        model: None,
         provider,
         binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
         cwd: root,
@@ -446,6 +447,7 @@ fn codex_interruption_terminates_native_tools_before_reporting_success() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let mut session = AgentSession::launch(Launch {
+        model: None,
         provider: Provider::Codex,
         binary: Some(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
@@ -486,10 +488,12 @@ fn codex_interruption_terminates_native_tools_before_reporting_success() {
 fn cross_provider_resume_is_rejected_before_spawning() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let result = AgentSession::launch(Launch {
+        model: None,
         provider: Provider::Claude,
         binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
         cwd: root,
         resume: Some(SessionRef {
+            model: None,
             provider: Provider::Codex,
             id: "00000000-0000-0000-0000-000000000001".into(),
             path: None,
@@ -737,6 +741,7 @@ fn embedding_can_supply_the_owned_agents_explicit_identity() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut session = AgentSession::launch(Launch {
+            model: None,
             provider,
             binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
             cwd: root,
@@ -776,6 +781,7 @@ fn real_agents_complete_and_resume_the_exact_conversation() {
         eprintln!("Testing real {}", provider.name());
         let start = |resume| {
             AgentSession::launch(Launch {
+                model: None,
                 provider,
                 binary: None,
                 cwd: root.clone(),
