@@ -135,6 +135,8 @@ impl<W: Write> Bridge<W> {
         if let Request::Read { read } = &mut request {
             read.timeout_ms = remaining;
         }
+        // Keep Rust 1.98 compatibility; 1.99 renamed this operation to try_update.
+        #[allow(deprecated)]
         let id = self
             .serial
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))

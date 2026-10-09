@@ -505,6 +505,8 @@ impl Drop for ClientLease {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
+// Keep Rust 1.98 compatibility; 1.99 renamed fetch_update to try_update.
+#[allow(deprecated)]
 fn client_lease(active: &Arc<AtomicUsize>) -> Option<ClientLease> {
     active
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
