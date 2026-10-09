@@ -4767,6 +4767,7 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
     }
     func open(cli: String?) {
         self.cli = cli
+        render() // Re-evaluate freshness and reset times even when reusing cached data.
         if present { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
         if lastLoaded.map({ Date().timeIntervalSince($0) < 30 }) != true { refresh() }
         if present, timer == nil {
@@ -4787,7 +4788,7 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
                 guard accounts.schema_version == 1 else { throw StorageError(description: "Unsupported quota schema") }
                 var unique: [SubscriptionQuotaAccount] = []
                 for account in accounts.accounts where !unique.contains(account) { unique.append(account) }
-                self.rows = unique.map { SubscriptionQuotaRow(account: $0) }
+                self.rows = unique.map { account in self.rows.first { $0.account == account } ?? SubscriptionQuotaRow(account: account) }
                 if unique.isEmpty { self.message = "No subscriptions connected"; self.finish(); return }
                 self.render()
                 var pending = unique.count
@@ -4799,7 +4800,7 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
                             guard reading.schema_version == 1, reading.account == account else { throw StorageError(description: "Invalid quota account") }
                             self.rows[index].reading = reading
                             self.rows[index].message = ""
-                        } catch { self.rows[index].message = "Quota unavailable. Try refreshing." }
+                        } catch { self.rows[index].reading = nil; self.rows[index].message = "Quota unavailable. Try refreshing." }
                         pending -= 1
                         if pending == 0 { self.finish() } else { self.render() }
                     }
