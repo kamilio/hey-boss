@@ -134,6 +134,7 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         operation: serde_json::from_value(operation).unwrap(),
         request_id: None,
     };
+    store.execute(&request(json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}}))).unwrap();
     store
         .execute(&request(
             json!({"action":"create","title":"Synthetic watcher task","body":"","labels":[]}),

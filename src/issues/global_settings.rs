@@ -210,7 +210,7 @@ mod tests {
             operation: serde_json::from_value(operation).unwrap(),
             request_id: None,
         };
-        crate::database::Connection::open(&root.join("issues.db"))
+        crate::database::Connection::open(root.join("issues.db"))
             .unwrap()
             .execute(
                 "INSERT INTO projects(id,name,next_number) VALUES('named:Audit','Audit',1)",
