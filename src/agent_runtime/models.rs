@@ -32,12 +32,12 @@ fn valid(value: &str) -> bool {
 }
 pub(super) fn resolve(launch: &mut Launch) -> io::Result<()> {
     if let Some(saved) = &launch.resume {
-        if let Some(requested) = &launch.model {
-            if saved.model.as_ref() != Some(requested) {
-                return Err(io::Error::other(
-                    "Resume model differs from the saved model (or the legacy session has no model pin); resume with its saved selection",
-                ));
-            }
+        if let Some(requested) = &launch.model
+            && saved.model.as_ref() != Some(requested)
+        {
+            return Err(io::Error::other(
+                "Resume model differs from the saved model (or the legacy session has no model pin); resume with its saved selection",
+            ));
         }
         launch.model = saved.model.clone();
     }
@@ -90,17 +90,16 @@ impl AgentSession {
         Ok(())
     }
     pub(super) fn verify_model(&mut self, id: &Value, route: &Value) -> io::Result<()> {
-        if let Some(expected) = &self.model {
-            if id.as_str() != Some(expected.id.as_str())
-                || (self.provider == Provider::Pi && route.as_str() != expected.route.as_deref())
-            {
-                self.uncertain = true;
-                return Err(io::Error::other(format!(
-                    "{} did not confirm the requested logical model {}; use an exact supported model ID and check the configured route. No replacement session was started",
-                    self.provider.name(),
-                    expected.id
-                )));
-            }
+        if let Some(expected) = &self.model
+            && (id.as_str() != Some(expected.id.as_str())
+                || (self.provider == Provider::Pi && route.as_str() != expected.route.as_deref()))
+        {
+            self.uncertain = true;
+            return Err(io::Error::other(format!(
+                "{} did not confirm the requested logical model {}; use an exact supported model ID and check the configured route. No replacement session was started",
+                self.provider.name(),
+                expected.id
+            )));
         }
         self.model_verified = true;
         Ok(())
