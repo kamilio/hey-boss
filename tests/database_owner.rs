@@ -142,8 +142,29 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    fn initialize_project(&self) {
+        let output = self
+            .command(&[
+                "project",
+                "init",
+                "--project",
+                "Database owner",
+                "--prs",
+                "false",
+                "--worktree",
+                "false",
+                "--yes",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     fn create(&self, title: &str) {
-        self.connection().execute("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Database owner','Database owner',1)", []).unwrap();
         let output = self
             .command(&[
                 "issue",
@@ -206,6 +227,7 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
             .unwrap(),
     );
     let owner_pid = fixture.connection().owner_pid().unwrap();
+    fixture.initialize_project();
     fixture.create("Sandbox read test");
     let path = fixture.root.join("issues.db").canonicalize().unwrap();
     let identity = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
@@ -330,6 +352,7 @@ fn standalone_databases_in_one_directory_have_independent_services() {
         service: None,
         replacement: None,
     };
+    fixture.initialize_project();
     fixture.create("First database");
     fixture.replacement = Some(fixture.connection().owner_pid().unwrap());
     let second = fixture.root.join("second.db");
@@ -412,6 +435,7 @@ fn existing_service_owns_cli_writes_and_missing_service_recovers_automatically()
     let connection = fixture.connection();
     let pid = fixture.service.as_ref().unwrap().id();
     assert_eq!(connection.owner_pid().unwrap(), pid);
+    fixture.initialize_project();
     fixture.create("Before restart");
     assert_eq!(
         connection.owner_pid().unwrap(),

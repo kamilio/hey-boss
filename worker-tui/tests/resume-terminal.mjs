@@ -87,6 +87,13 @@ try {
   for (const [cols, rows] of [[120, 30], [80, 24], [48, 16]]) {
     await resumed.resize(cols, rows);
     await resumed.waitFor('0 available / 1 slots', {scope: 'screen', timeout: 5000});
+    // Resizing the PTY crops its old frame before the app redraws. The header
+    // survives that crop, so wait for the footer at its new position as well.
+    await until(async () => {
+      const screen = await resumed.screen();
+      return screen.size.cols === cols && screen.size.rows === rows
+        && screen.line(-2).includes('workers keep running') && screen.line(-1).includes('help');
+    }, `dashboard redraw at ${cols}x${rows}`);
     const screen = await capture(resumed, `resumed-${cols}`);
     assert.ok(!screen.contains('Finishing work before pause'));
     assert.ok(screen.contains('1 active'));

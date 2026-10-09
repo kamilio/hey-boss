@@ -26,7 +26,7 @@ impl Fixture {
         let store = Store::open(&root.join("issues.db")).unwrap();
         let db = Connection::open(root.join("issues.db")).unwrap();
         let mut f = Self { root, store, db };
-        f.run(json!({"action":"configure_project","prs_enabled":false}));
+        f.run(json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}}));
         f.run(json!({"action":"create","title":"Connector integration","body":"","labels":[]}));
         for title in ["Contract", "Independent settings", "OAuth"] {
             f.run(

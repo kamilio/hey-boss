@@ -2096,6 +2096,7 @@ fn session_environment_is_stable_and_overrides_are_explicit() {
             .env("GIT_CEILING_DIRECTORIES", &f.root)
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_AGENT_ID")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .env("CODEX_THREAD_ID", "restored-thread");
         cmd
     };
@@ -3827,6 +3828,7 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
                 .env("HEY_BOSS_ISSUE_DB", &f.db)
                 .env("GIT_CEILING_DIRECTORIES", &f.root)
                 .env_remove("HEY_BOSS_ISSUE_HOST")
+                .env_remove("HEY_BOSS_ISSUE_PROJECT")
                 .args([
                     "mm",
                     "add",
@@ -3897,6 +3899,7 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
                 .env("HEY_BOSS_ISSUE_DB", &f.db)
                 .env("GIT_CEILING_DIRECTORIES", &f.root)
                 .env_remove("HEY_BOSS_ISSUE_HOST")
+                .env_remove("HEY_BOSS_ISSUE_PROJECT")
                 .args([
                     "mm",
                     "show",
