@@ -203,3 +203,34 @@ session reference. On process recovery, launch the exact reference and call
 accounting are retained. A goal attached to one owned process cannot control a
 second process. `last_usage` retains the provider's last usage payload; it does
 not invent a cumulative token count across differing provider accounting formats.
+
+Explicit logical models use `Launch.model: Option<ModelSelection>`. Persist the
+whole `SessionRef`, including its model. Omitting the launch model inherits a
+saved pin; a different model, route or harness is refused. Legacy unpinned
+references retain their behavior and cannot acquire a model pin during resume.
+Codex sends the ID on thread start/resume and every turn; Claude uses `--model`
+and checks its initialization event before accepting results; Pi uses exact
+`set_model {provider, modelId}`, verifies its response and subsequent state, and
+checks the saved file before resuming. Missing acknowledgments and substituted
+models fail explicitly. Claude choices resolve moving aliases to concrete IDs.
+
+`AgentSession::discover_models` returns serializable choices for editors, merging
+caller-configured custom IDs with the harness catalog. `configured` and
+`advertised` are separate; catalog inclusion does not prove account entitlement.
+Failures return an explicit `error` alongside retained configured choices.
+Discovery starts no model turn and runs outside database transactions. The CLI
+exposes the same contract with `hey-boss agent models --provider codex`; use
+`--configured-model ID` to retain custom IDs, plus `--route NAME` for Pi.
+
+A Pi route names its existing configured provider entry point, not an account or
+proxy backend. Codex and Claude inherit their configured entry points and launch
+environment. This API does not edit global profiles, credentials or model routes;
+backend selection and fallback remain the proxy's responsibility. Unavailable
+models fail through the harness protocol or failed turn, never a replacement
+session. Callers must treat only completed turns as successful execution.
+
+Protocol verification: [Codex app-server](https://learn.chatgpt.com/docs/app-server)
+(`model/list`, thread and turn model overrides), Claude Code 2.1.294 (`--model`,
+initialize `models[].resolvedModel`, system-init `model`), and Pi 0.87.1's bundled
+RPC reference (`get_available_models`, `set_model`, `get_state`). Pi's RPC model
+change persists in its transcript without changing global model defaults.
