@@ -18,6 +18,7 @@ pub mod fleet;
 pub use hey_harvester::health;
 /// SQLite-backed project issues and durable agent ownership.
 pub mod issues;
+pub mod jobs;
 pub mod markdown;
 pub mod mindmap;
 pub mod notices;
