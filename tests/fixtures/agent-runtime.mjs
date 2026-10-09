@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -18,6 +18,7 @@ let selectedRoute = 'proxy';
 const expectedModel = process.env.HEY_BOSS_FIXTURE_EXPECT_MODEL;
 const modelFailure = process.env.HEY_BOSS_FIXTURE_MODEL_FAILURE;
 const discoveryFailure = process.env.HEY_BOSS_FIXTURE_DISCOVERY_FAILURE;
+if (process.env.HEY_BOSS_FIXTURE_JOB_HOLD || process.env.HEY_BOSS_FIXTURE_JOB_HOLD_INIT) setInterval(() => {}, 1000);
 const checkModel = model => { if (expectedModel && model !== expectedModel) throw new Error('Logical model selection was lost'); };
 let turn = 'fixture-turn';
 let streaming = false;
@@ -58,6 +59,7 @@ function complete(interrupted = false) {
 }
 function prompt(text) {
   checkModel(selectedModel);
+  if (process.env.HEY_BOSS_FIXTURE_JOB_AUDIT) appendFileSync(process.env.HEY_BOSS_FIXTURE_JOB_AUDIT, JSON.stringify({text,model:selectedModel,route:selectedRoute,pid:process.pid,session,run:process.env.HEY_BOSS_JOB_RUN})+'\n');
   streaming = true;
   output = text;
   if (text === 'owned identity') output = process.env.HEY_BOSS_AGENT_ID ?? 'missing';
@@ -70,6 +72,7 @@ function prompt(text) {
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
+  if (process.env.HEY_BOSS_FIXTURE_JOB_HOLD) return;
   if (text === 'question fixture' && provider === 'claude') {
     send({type:'control_request',request_id:'question',request:{subtype:'can_use_tool',tool_name:'AskUserQuestion',input:{questions:[{question:'Choose a color',options:[{label:'Blue'},{label:'Green'}],multiSelect:false}]}}});
     return;
@@ -228,6 +231,8 @@ for await (const chunk of process.stdin) {
       nativeTool.kill(); nativeTool = undefined;
       result = {terminated:true};
     }
+    if (process.env.HEY_BOSS_FIXTURE_JOB_HOLD_INIT && r.method === 'initialize') continue;
+    if (process.env.HEY_BOSS_FIXTURE_JOB_ACK_LOST && r.method === 'turn/start') { prompt(p.input[0].text); continue; }
     send({id:r.id,result});
     if (r.method === 'turn/start') prompt(p.input[0].text);
     if (r.method === 'turn/interrupt') complete(true);

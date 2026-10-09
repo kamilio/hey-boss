@@ -39,6 +39,36 @@ pub(crate) struct Process {
     reader: thread::JoinHandle<()>,
 }
 impl Process {
+    /// The child cannot start its harness until custody is durable. Closing the
+    /// parent's pipe before release exits the gate without executing anything.
+    /// `exec` preserves the PID/process-group identity recorded by the caller.
+    pub(crate) fn spawn_recorded(
+        command: &mut Command,
+        record: impl FnOnce(u32) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let mut gate = Command::new("/bin/sh");
+        gate.args([
+            "-c",
+            "IFS= read -r gate || exit 1; exec \"$@\"",
+            "hey-boss-job-gate",
+        ])
+        .arg(command.get_program())
+        .args(command.get_args());
+        if let Some(cwd) = command.get_current_dir() {
+            gate.current_dir(cwd);
+        }
+        for (name, value) in command.get_envs() {
+            if let Some(value) = value {
+                gate.env(name, value);
+            } else {
+                gate.env_remove(name);
+            }
+        }
+        let mut process = Self::spawn(&mut gate)?;
+        record(process.pid())?;
+        process.send(&serde_json::json!({"launch":true}))?;
+        Ok(process)
+    }
     pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
         command
             .process_group(0)
@@ -329,6 +359,40 @@ mod tests {
             }
         }
         process.stop().unwrap();
+    }
+
+    #[test]
+    fn launch_gate_does_not_execute_before_custody_is_committed() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-gate-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let marker = root.join("executed");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "touch \"$1\"; printf '{}\\n'; sleep 30",
+                "gate-fixture",
+            ])
+            .arg(&marker);
+        let rejected = Process::spawn_recorded(&mut command, |_| {
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!marker.exists());
+            Err(io::Error::other("custody could not be committed"))
+        });
+        assert!(rejected.is_err());
+        assert!(!marker.exists());
+        let mut process = Process::spawn_recorded(&mut command, |_| {
+            assert!(!marker.exists());
+            Ok(())
+        })
+        .unwrap();
+        process.receive(Duration::from_secs(3)).unwrap().unwrap();
+        assert!(marker.is_file());
+        process.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
