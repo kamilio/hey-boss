@@ -1114,6 +1114,11 @@ function draftUnavailable(issue, enabled) {
 function renderReadiness(value) {
   const i = value.issue, a = value.allocation;
   if (i.deleted_at) return "";
+  if (i.job_run_id) {
+    const result = /^Job (failed|cancelled|succeeded|running|pending)\b/.exec(i.status?.comment || "")?.[1];
+    const status = result ? result[0].toUpperCase() + result.slice(1) : i.state === "closed" ? "Succeeded" : i.assignee && !i.assignee.startsWith("job:") ? "Running" : "Pending";
+    return `<div class="side-section issue-readiness"><h2 class="side-heading">Scheduled job</h2><strong class="readiness-status">${esc(status)}</strong><p>This execution runs independently of worker slots. Its result stays linked to the job’s history.</p></div>`;
+  }
   if (i.attempt_hold) return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness</h2><strong class="readiness-status">Attempt protected · pickup paused</strong><p>The original attempt must be reconciled on ${esc(i.attempt_hold.host)} before another agent can start.</p></div>`;
   if(i.state === "open" && !i.draft && !i.plan && i.assignment && i.assignment.kind !== "unassigned") return "";
   const expired = a?.reason === "allocation_expired";
