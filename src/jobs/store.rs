@@ -126,6 +126,22 @@ fn get_run(db: &Connection, id: &str) -> Result<Run> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job run not found"))
 }
+// Indexed, bounded lookups keep controls truthful even when the latest
+// occurrence was skipped while an older execution still owns the job.
+fn job_summary(db: &Connection, job: Job) -> Result<Value> {
+    let last: Option<Run> = db.query_row(
+        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 ORDER BY sequence DESC LIMIT 1"),
+        [&job.id], run_row,
+    ).optional()?;
+    let active: Option<Run> = db.query_row(
+        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND state IN ('pending','running') LIMIT 1"),
+        [&job.id], run_row,
+    ).optional()?;
+    let mut value = serde_json::to_value(job)?;
+    value["last_run"] = serde_json::to_value(last)?;
+    value["active_run"] = serde_json::to_value(active)?;
+    Ok(value)
+}
 fn existing(db: &Connection, o: &Occurrence) -> Result<Option<Run>> {
     let sql = if o.request_key.is_some() {
         format!(
@@ -261,7 +277,9 @@ impl Store {
         if !operation.writes() {
             let tx = self.db.read_transaction()?;
             let response = match operation {
-                JobOperation::View { id } => json!({"job":get_job(&tx,&project.id,id)?}),
+                JobOperation::View { id } => {
+                    json!({"job":job_summary(&tx,get_job(&tx,&project.id,id)?)?})
+                }
                 JobOperation::List {
                     after,
                     limit,
@@ -269,7 +287,12 @@ impl Store {
                 } => {
                     let jobs=tx.query_collect(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE project_id=?1 AND id>?2 AND (?3 OR deleted_at IS NULL) ORDER BY id LIMIT ?4"),params![project.id,after.as_deref().unwrap_or(""),include_deleted,limit+1],job_row)?;
                     let next = (jobs.len() > *limit).then(|| jobs[limit - 1].id.clone());
-                    json!({"jobs":jobs.into_iter().take(*limit).collect::<Vec<_>>(),"next_cursor":next})
+                    let summaries = jobs
+                        .into_iter()
+                        .take(*limit)
+                        .map(|job| job_summary(&tx, job))
+                        .collect::<Result<Vec<_>>>()?;
+                    json!({"jobs":summaries,"next_cursor":next})
                 }
                 JobOperation::Preview {
                     cron,

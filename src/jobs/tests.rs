@@ -782,3 +782,116 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
             .unwrap()
     );
 }
+
+#[test]
+fn job_list_includes_latest_and_active_even_after_overlap_and_deletion() {
+    let mut f = Fixture::new();
+    f.create("overview", 0);
+    let run = f
+        .op(
+            JobOperation::RunNow {
+                id: "overview".into(),
+            },
+            1,
+        )
+        .unwrap()["run"]
+        .clone();
+    let list = f
+        .op(
+            JobOperation::List {
+                after: None,
+                limit: 10,
+                include_deleted: true,
+            },
+            2,
+        )
+        .unwrap();
+    assert_eq!(list["jobs"][0]["last_run"]["id"], run["id"]);
+    assert_eq!(list["jobs"][0]["active_run"]["id"], run["id"]);
+    f.op(
+        JobOperation::Stop {
+            id: "overview".into(),
+            run_id: run["id"].as_str().unwrap().into(),
+        },
+        3,
+    )
+    .unwrap();
+    f.op(
+        JobOperation::Delete {
+            id: "overview".into(),
+            if_revision: 1,
+        },
+        4,
+    )
+    .unwrap();
+    let list = f
+        .op(
+            JobOperation::List {
+                after: None,
+                limit: 10,
+                include_deleted: true,
+            },
+            5,
+        )
+        .unwrap();
+    assert_eq!(list["jobs"][0]["last_run"]["state"], "cancelled");
+    assert!(list["jobs"][0]["active_run"].is_null());
+}
+
+#[test]
+fn job_conversations_use_saved_execution_identity_and_hide_hidden_projects() {
+    let mut f = Fixture::new();
+    f.create("conversation", 0);
+    let run = f
+        .op(
+            JobOperation::RunNow {
+                id: "conversation".into(),
+            },
+            1,
+        )
+        .unwrap()["run"]
+        .clone();
+    let id = run["id"].as_str().unwrap();
+    f.store.db.execute("UPDATE scheduled_job_runs SET session_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',machine='node-one',state='running',started_at=2 WHERE id=?1",[id]).unwrap();
+    let reference = format!("job:{id}");
+    let saved = crate::issues::provenance::saved_run(&f.store.db, &reference)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved["machine"], "node-one");
+    assert_eq!(
+        saved["actor_id"],
+        "codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    );
+    assert_eq!(saved["standalone"], true);
+    assert_eq!(saved["number"], run["task_number"]);
+    let path = f
+        .root
+        .join("sessions/2026/10/09/rollout-test-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic result"}]}}).to_string()+"\n").unwrap();
+    let page = crate::agent_conversations::window_page(
+        &f.store.db,
+        &f.root,
+        &reference,
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(page["messages"][0]["text"], "Synthetic result");
+    let peer = Fixture::new();
+    peer.store.db.execute("INSERT INTO local_job_executions(run_id,generation,dispatch,report) VALUES(?1,1,?2,?3)",params![id,json!({"run":run,"node":"node-one"}).to_string(),json!({"session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","state":"succeeded","started_at":2,"finished_at":3}).to_string()]).unwrap();
+    let remote = crate::jobs::conversation::saved(&peer.store.db, &reference)
+        .unwrap()
+        .unwrap();
+    assert_eq!(remote["session_id"], saved["session_id"]);
+    assert_eq!(remote["machine"], "node-one");
+    assert_eq!(remote["state"], "succeeded");
+    f.store
+        .db
+        .execute("UPDATE projects SET hidden_at=3 WHERE id='named:Jobs'", [])
+        .unwrap();
+    assert!(
+        crate::issues::provenance::saved_run(&f.store.db, &reference)
+            .unwrap()
+            .is_none()
+    );
+}

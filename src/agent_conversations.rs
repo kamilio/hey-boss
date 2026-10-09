@@ -97,6 +97,7 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                 matches!(
                     k.as_str(),
                     "host"
+                        | "node"
                         | "hostname"
                         | "state"
                         | "heartbeat"
@@ -164,8 +165,11 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     let machine = status["machines"]
         .as_array()
         .and_then(|ms| {
-            ms.iter()
-                .find(|m| m["host"] == host || m["hostname"] == host)
+            ms.iter().find(|m| {
+                m["host"] == host
+                    || m["hostname"] == host
+                    || (run.starts_with("job:") && m["node"] == host)
+            })
         })
         .ok_or_else(|| Error::invalid("This device is no longer available"))?;
     let known = machine["workers"]
@@ -219,6 +223,10 @@ fn remote_history(
 }
 
 fn referenced_device(db: &Connection, machine: &Value, run: &str) -> Result<bool> {
+    if run.starts_with("job:") {
+        return Ok(crate::jobs::conversation::saved(db, run)?
+            .is_some_and(|r| r["machine"].is_string() && r["machine"] == machine["node"]));
+    }
     for host in [machine["host"].as_str(), machine["hostname"].as_str()]
         .into_iter()
         .flatten()
@@ -395,7 +403,9 @@ pub(crate) fn window_page(
 ) -> Result<Value> {
     let cursor = window.cursor;
     let metadata = crate::issues::provenance::saved_run(db, run)?;
-    let saved: Option<Option<String>> = if run.starts_with("session:") || run.starts_with("chief:")
+    let saved: Option<Option<String>> = if run.starts_with("session:")
+        || run.starts_with("chief:")
+        || run.starts_with("job:")
     {
         metadata
             .as_ref()
