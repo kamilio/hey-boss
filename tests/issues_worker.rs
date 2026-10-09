@@ -138,7 +138,10 @@ impl Fixture {
     fn wait(&self, predicate: impl Fn(&Value) -> bool) -> Value {
         // Several scenarios launch multiple real CLI/Node processes in order.
         // Three successful turns can exceed 15s on a busy developer machine.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        self.wait_for(Duration::from_secs(30), predicate)
+    }
+    fn wait_for(&self, timeout: Duration, predicate: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + timeout;
         loop {
             let status = self.cli(&["worker", "status"]);
             if predicate(&status) {
@@ -449,6 +452,28 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
         let path = f.root.join(name);
         fs::create_dir(&path).unwrap();
         fs::write(path.join("mode.txt"), "delay-unclaimed").unwrap();
+        let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&path)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .args([
+                "project",
+                "init",
+                "--prs",
+                "false",
+                "--worktree",
+                "false",
+                "--yes",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            initialized.status.success(),
+            "{}",
+            String::from_utf8_lossy(&initialized.stdout)
+        );
         let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&path)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
@@ -1686,7 +1711,10 @@ fn approval_request_after_an_outage_still_requires_human_action() {
         fs::write(f.root.join("mode.txt"), mode).unwrap();
         f.setup(&[]);
         let mut worker = f.worker();
-        let result = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        let result = f.wait_for(
+            hey_boss::readiness::RECOVERY_WAIT + Duration::from_secs(30),
+            |s| s["runs"][0]["finished_at"].is_number(),
+        );
         let run = &result["runs"][0];
         assert_eq!(run["state"], "blocked", "{mode}: {result}");
         assert!(run["retry_at"].is_null());
@@ -1707,7 +1735,10 @@ fn approval_hold_is_not_retried_automatically_even_after_delay() {
     fs::write(f.root.join("mode.txt"), "approval").unwrap();
     f.setup(&[]);
     let mut worker = f.worker();
-    let first = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    let first = f.wait_for(
+        hey_boss::readiness::RECOVERY_WAIT + Duration::from_secs(30),
+        |s| s["runs"][0]["finished_at"].is_number(),
+    );
     assert_eq!(first["runs"][0]["state"], "blocked", "{first}");
     let id = first["runs"][0]["id"].as_str().unwrap().to_owned();
     let db = rusqlite::Connection::open(&f.db).unwrap();
@@ -1982,7 +2013,10 @@ fn approval_blocks_without_auto_approving() {
     let f = Fixture::new("approval");
     f.setup(&[]);
     let mut w = f.worker();
-    let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    let s = f.wait_for(
+        hey_boss::readiness::RECOVERY_WAIT + Duration::from_secs(30),
+        |s| s["runs"][0]["finished_at"].is_number(),
+    );
     assert_eq!(s["runs"][0]["state"], "blocked");
     assert!(
         s["runs"][0]["summary"]
@@ -2207,6 +2241,30 @@ fn disconnected_mac_does_not_block_issue_completion_pickup_or_worker_stop_and_up
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     let f = Fixture::new("offline-updates");
+    let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&f.root)
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
+        .args([
+            "project",
+            "init",
+            "--project",
+            "Offline worker QA",
+            "--prs",
+            "false",
+            "--worktree",
+            "false",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stdout)
+    );
     let state = f.root.join("companion-state");
     fs::create_dir_all(&state).unwrap();
     fs::write(state.join("bridge-protocol"), "1").unwrap();
@@ -2240,7 +2298,7 @@ fn disconnected_mac_does_not_block_issue_completion_pickup_or_worker_stop_and_up
         })
     });
     for run in status["runs"].as_array().unwrap() {
-        assert_eq!(run["state"], "completed");
+        assert_eq!(run["state"], "completed", "{run}");
     }
     for number in ["1", "2", "3"] {
         assert_eq!(f.cli(&["view", number])["issue"]["state"], "closed");
