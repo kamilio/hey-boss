@@ -395,7 +395,7 @@ function traceLinkForOrigin(origin, number, fallbackActor) {
   const direct = HeyBossOrigin.conversation(origin, model.project.id);
   if (direct) return direct;
   const actor = origin?.actor_id || fallbackActor;
-  if (actor && !actor.startsWith("human:") && actor !== "watcher:github") {
+  if (actor && !actor.startsWith("human:") && !actor.startsWith("job:") && actor !== "watcher:github") {
     return "/agents/session#" + new URLSearchParams({ project: model.project.id, issue: number, agent: actor });
   }
   return null;
@@ -407,7 +407,7 @@ function listAssignment(issue) {
   const lastCommit = issue.commits?.at(-1);
   const trace = historical
     ? traceLinkForOrigin(lastCommit?.origin, issue.number, issue.closed_by || lastCommit?.added_by)
-    : actor && !actor.startsWith('human:') && actor !== 'watcher:github'
+    : actor && !actor.startsWith('human:') && !actor.startsWith('job:') && actor !== 'watcher:github'
       ? '/agents/session#' + new URLSearchParams({project:model.project.id, issue:issue.number, agent:actor}) : null;
   if (historical && !trace) return '';
   const description = historical ? {label:'Agent conversation', detail:'Last recorded work on this issue.'}

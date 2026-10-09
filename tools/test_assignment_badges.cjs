@@ -53,3 +53,17 @@ test('names are escaped and historical traces remain accessible', () => {
   assert.match(html,/Open agent/);
   assert.doesNotMatch(html,/Filter by/);
 });
+
+test('scheduled service ownership never invents an agent session', () => {
+  const issue={number:9,job_run_id:'run',assignment:{kind:'agent',actor:'job:run'}};
+  const html=context.render(issue);
+  assert.match(html,/Scheduled job/);
+  assert.match(html,/dedicated job service/);
+  assert.doesNotMatch(html,/Agent is working|Open agent conversation|agents\/session/);
+  const detail=context.IssueAssignments.render({issue,project:{id:'named:QA'}},{actorName:id=>id,bossName:'Boss'});
+  assert.doesNotMatch(detail,/Agent conversation|agents\/session/);
+  assert.equal(context.render({...issue,assignment:{kind:'unassigned'},closed_by:'job:run'}),'');
+  assert.doesNotMatch(context.IssueAssignments.describe({...issue,assignment:{kind:'unassigned'}},{actorName:id=>id,bossName:'Boss'}).detail,/pick this up/);
+  const running=context.render({...issue,assignment:{kind:'agent',actor:'codex:exact-session'}});
+  assert.match(running,/agent=codex%3Aexact-session/);
+});

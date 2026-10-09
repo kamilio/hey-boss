@@ -9,7 +9,7 @@ async page => {
   page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.route('**/fixture-instructions.md',r=>r.fulfill({path:'src/jobs/fixtures/original.md',contentType:'text/markdown'}));
-  for(const name of ['app.js','components.js'])await page.route(base+(paired?'/issue-web/':'/')+name,r=>r.fulfill({path:'src/issues/web/'+name,contentType:'text/javascript'}));
+  for(const name of ['app.js','components.js','assignments.js'])await page.route(base+(paired?'/issue-web/':'/')+name,r=>r.fulfill({path:'src/issues/web/'+name,contentType:'text/javascript'}));
   if(paired){const {code}=await(await page.request.get(base+'/fixture-pairing')).json();check((await page.request.post(base+'/api/pair',{data:{code}})).ok(),'Paired browser authenticated');}
   const project='named:Quick action QA';
   await page.goto(base+path+'?qa='+Date.now()+'#project='+encodeURIComponent(project));
@@ -26,6 +26,10 @@ async page => {
       check(!/Ready for agents|Move to draft/.test(await readiness.innerText()),`${surface} ${width} ${record.state}: no ordinary-pickup guidance`);
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${surface} ${width} ${record.state}: no horizontal overflow`);
       check((await page.locator('body').innerText()).includes('Unicode: żółw — 日本語.'),`${surface} ${width} ${record.state}: detail rendered`);
+      if(record.state==='pending') {
+        check(!(await page.locator('.issue-assignment').innerText()).includes('Agent is working'),`${surface} ${width}: queued service ownership is truthful`);
+        check(await page.locator('.issue-assignment .assignment-trace').count()===0,`${surface} ${width}: no session link before launch`);
+      }
       await readiness.scrollIntoViewIfNeeded();
       await page.screenshot({path:`/tmp/hb-scheduled-jobs-qa/${surface}-${width}-${record.state}.png`,fullPage:true});
     }
