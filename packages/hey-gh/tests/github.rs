@@ -4625,6 +4625,13 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
             if w[0]["discovery_last_error"].is_string()
                 && w[0]["last_success_at_ms"].is_number()
                 && w[0]["ci_last_success_at_ms"].is_number()
+                && w[0]["policy_last_cycle"]["finished_at_ms"]
+                    .as_u64()
+                    .is_some_and(|completed| {
+                        w[0]["policy_last_poll_at_ms"]
+                            .as_u64()
+                            .is_some_and(|started| completed >= started)
+                    })
             {
                 assert!(w[0]["last_error"].is_null());
                 assert!(w[0]["ci_last_error"].is_null());
@@ -4645,8 +4652,8 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
         1,
         "only the dedicated discovery loop scans GitHub"
     );
-    // Independent policy hydration may still be active after CI/details finish.
-    // Isolate the cached feed read before asserting that it spends no quota.
+    // All hydration lanes have published their observations. Stop polling before
+    // taking the baseline; aborting an active policy write does not undo it.
     api.stop().await;
     until(|| c.status().outstanding_requests == 0).await;
     let baseline = c
@@ -4672,7 +4679,7 @@ async fn background_discovery_failure_does_not_taint_successful_account_hydratio
             .as_str()
             .is_some_and(|message| message.starts_with("discovery:"))
     }));
-    assert_eq!(response["cursor"], baseline.cursor);
+    assert_eq!(response["cursor"], baseline.cursor, "{response}");
     assert!(response["changes"].as_array().unwrap().is_empty());
     assert_eq!(
         h.calls().len(),
