@@ -202,25 +202,20 @@ pub fn conversation(host: &str, run: &str, window: &Window) -> Result<Value> {
     if !crate::health::remote::valid_host(host) {
         return Err(Error::invalid("Invalid device"));
     }
-    let mut command = Command::new("ssh");
-    command.args(["-T","-o","BatchMode=yes","-o","ConnectTimeout=5","-o","StrictHostKeyChecking=yes",host,
-        "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; exec hey-boss fleet conversation"]);
-    command
-        .env("SFT_NO_BROWSER", "1")
-        .env("SSH_ASKPASS_REQUIRE", "never");
-    let mut result = transport(
-        command,
-        &serde_json::to_vec(
-            &json!({"run":run,"cursor":window.cursor,"before":window.before,"latest":window.latest,"at":window.at}),
-        )?,
-        Duration::from_secs(12),
-    )?;
-    crate::issues::provenance::enrich_conversation(
-        &database(&crate::issues::database_path()?)?,
-        run,
-        &mut result,
-    )?;
-    Ok(result)
+    // The supervisor already has an authenticated, live connection and enriches
+    // the response. Fresh SSH processes can fail from the web service's environment
+    // even while that device's heartbeat and saved history are available.
+    remote_history(host, run, window, crate::fleet::call)
+}
+
+fn remote_history(
+    host: &str,
+    run: &str,
+    window: &Window,
+    call: impl FnOnce(&Value) -> Result<Value>,
+) -> Result<Value> {
+    call(&json!({"kind":"conversation","host":host,"run":run,
+        "cursor":window.cursor,"before":window.before,"latest":window.latest,"at":window.at}))
 }
 
 fn referenced_device(db: &Connection, machine: &Value, run: &str) -> Result<bool> {
@@ -844,6 +839,26 @@ fn mobile_call(url: &str, token: &str, path: &str, body: Option<&Value>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_history_uses_the_authenticated_fleet_and_preserves_paging() {
+        let window = Window {
+            cursor: 41,
+            before: Some(123),
+            latest: false,
+            at: Some(70),
+        };
+        let saved = json!({"ok":true,"messages":[{"id":"70","role":"assistant","text":"Saved reply"}],"has_earlier":true,"older_cursor":20});
+        let result = remote_history("peer", "saved-run", &window, |request| {
+            assert_eq!(request, &json!({"kind":"conversation","host":"peer","run":"saved-run","cursor":41,"before":123,"latest":false,"at":70}));
+            Ok(saved.clone())
+        }).unwrap();
+        assert_eq!(result, saved);
+        let error = remote_history("peer", "saved-run", &Window::default(), |_| {
+            Err(Error::new("fleet_unavailable", "Offline"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "fleet_unavailable");
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     struct Fixture {
