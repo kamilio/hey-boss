@@ -27,3 +27,9 @@ Each occurrence atomically creates its task at the top of the project list. A pe
 Fleet status reports job-service capability independently of workers, using existing project checkouts and installed harnesses. Pi selections use the configured `route/model-id`; other harnesses use an exact model ID. Instructions load from the immutable Markdown revision with no added agent prompt.
 
 Owners are generation-fenced. A disconnect never releases ownership. A revoked, unsubmitted owner must acknowledge that it stopped before handoff; submitted work is never replayed. Process identity is committed before a launch gate opens, and submission intent is committed before sending instructions. After a service crash, surviving processes must be conclusively stopped before the attempt can finish. Unknown custody remains visible and blocks overlap.
+
+## Calendar
+
+The Jobs calendar has month, week and compact agenda views. Its display timezone is independent of each job's schedule timezone. Filters never change schedules. Upcoming entries open the editor; executions open their immutable revision, scheduled/actual times, recorded reason and task/session links. Deleted jobs retain their history.
+
+`calendar` reads 1–42 civil days in an explicit IANA timezone, returning counts and three sample entries per day. `calendar_entries` reads one day in pages of 100, with an exclusive `(at, key)` cursor. Both use the authoritative project and optional `job_id`; projections use the same Rust evaluator as preview, strictly after now and the definition's schedule boundary. History uses indexed half-open UTC ranges. Projects with more than 100 active schedules must select a job, keeping worst-case recurrence work bounded. Neither read creates tasks or fetches Markdown instructions.

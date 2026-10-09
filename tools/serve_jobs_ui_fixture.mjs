@@ -79,6 +79,16 @@ try {
     } finally {db.close();}
   });
   app.get('/fixture-instructions.md',(_req,res)=>res.sendFile(resolve('src/jobs/fixtures/original.md')));
+  app.post('/fixture-calendar-run',(req,res)=>{
+    const {run,state,at}=req.body;
+    if(!['pending','running','succeeded','failed','cancelled','skipped'].includes(state)||!Number.isSafeInteger(at))return res.sendStatus(400);
+    const db=new DatabaseSync(database);
+    try {
+      const reason={pending:'Chosen runtime is unavailable; waiting for a connected job service.',skipped:'overlap',failed:'Synthetic runtime failure',cancelled:'Stopped by user'}[state]||null;
+      const updated=db.prepare("UPDATE scheduled_job_runs SET scheduled_at=?,created_at=?,started_at=?,finished_at=?,state=?,reason=? WHERE id=? AND project_id='named:Jobs UI QA' AND (state='skipped')=(?='skipped')").run(at,at+120000,['running','succeeded','failed'].includes(state)?at+180000:null,['succeeded','failed','cancelled','skipped'].includes(state)?at+240000:null,state,reason,run,state);
+      res.status(updated.changes?200:400).json({ok:!!updated.changes});
+    }finally{db.close();}
+  });
   app.get('/fixture-pairing',(_req,res)=>res.json({code:store.pairing()}));
   server=app.listen(52049,'127.0.0.1');
   async function relay() {

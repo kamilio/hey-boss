@@ -47,7 +47,9 @@ const HeyBossJobs = (() => {
     try{mutation.pending=JSON.parse(sessionStorage.getItem('jobs-pending')||'null');}catch{}
     const read=(operation,ctx=context)=>post({project:ctx.project,operation:{action:'job',operation},...(ctx.host?{host:ctx.host}:{})});
     const hash=id=>new URLSearchParams({project:context.project,...(context.host?{host:context.host}:{}),...(id?{job:id}:{})});
-    const picker=new HeyBossUI.ProjectPicker({onSelect:project=>{if(leave())location.hash=new URLSearchParams({project,...(context.host?{host:context.host}:{})});}});
+    let calendarProject=null;
+    const calendar=HeyBossCalendar.mount({root:$('#jobs-calendar'),read,edit:id=>{if(leave())location.hash=hash(id);},links:run=>`${run.task_number?`<a href="/${mobile?'issues':''}#${esc(new URLSearchParams({project:run.snapshot.project_id,issue:run.task_number,...(context.host?{host:context.host}:{})}))}">Task #${run.task_number} ↗</a>`:''}${run.session_id?`<a href="/agents/session#${esc(new URLSearchParams({project:run.snapshot.project_id,host:machines.find(m=>m.node===run.machine)?.host||run.machine||'local',run:'job:'+run.id}))}">Session ↗</a>`:''}`});
+    const picker=new HeyBossUI.ProjectPicker({onSelect:project=>{if(leave())location.hash=new URLSearchParams({project,...(context.host?{host:context.host}:{}),...(!$('#jobs-calendar').hidden?{view:'calendar'}:{})});}});
     function leave(){return !dirty||confirm('Discard your unsaved job changes?');}
     function pendingUI(){
       $('#jobs-retry').hidden=!mutation.pending;
@@ -160,13 +162,19 @@ const HeyBossJobs = (() => {
     async function navigate(){
       clearTimeout(refreshTimer);generation++;detailGeneration++;dirty=false;
       const params=new URLSearchParams(location.hash.slice(1));context={project:HeyBossUI.projectId(boot.project?.id||boot.projects[0]?.id),host:mobile?null:params.get('host')||boot.backend_host||null};
+      const calendarView=params.get('view')==='calendar';
+      $('#jobs-calendar').hidden=!calendarView;$('.jobs-layout').hidden=calendarView;
+      $('#jobs-view-list').setAttribute('aria-pressed',String(!calendarView));$('#jobs-view-calendar').setAttribute('aria-pressed',String(calendarView));
+      if(calendarView&&context.project){const identity=JSON.stringify(context);calendar.show(calendarProject!==identity);calendarProject=identity;}else calendar.hide();
       picker.update(boot.projects,boot.projects.find(p=>p.id===context.project)||{id:context.project,name:context.project});$('#nav-jobs').setAttribute('aria-current','page');const nav=$('#nav-jobs').closest('.app-navigation');nav.scrollLeft=$('#nav-jobs').offsetLeft-nav.clientWidth/2;
       pendingUI();rows=[];next=null;renderList();if(!context.project){$('#jobs-status').textContent='Choose a project to manage jobs.';return;}
       await Promise.all([load(),service(),open(params.get('job'))]);scheduleRefresh();
     }
-    function scheduleRefresh(){clearTimeout(refreshTimer);if(!document.hidden)refreshTimer=setTimeout(async()=>{if(!busy){await load();if(selected)await loadHistory();await service();}scheduleRefresh();},15000);}
+    function scheduleRefresh(){clearTimeout(refreshTimer);if(!document.hidden)refreshTimer=setTimeout(async()=>{if(!busy){await load();if(selected)await loadHistory();await service();calendar.refresh();}scheduleRefresh();},15000);}
     function newJob(){if(leave())location.hash=hash('new');}
     $('#job-new').onclick=newJob;$('#job-empty-new').onclick=newJob;
+    $('#jobs-view-list').onclick=()=>{if(leave())location.hash=hash(selected?.id);};
+    $('#jobs-view-calendar').onclick=()=>{if(leave()){const params=hash();params.set('view','calendar');location.hash=params;}};
     $('#jobs-refresh').onclick=async()=>{message('');await load();await service();if(selected)await loadHistory();};$('#jobs-more').onclick=()=>load(false);$('#jobs-deleted').onchange=()=>load();
     $('#job-retry').onclick=()=>act(null,mutation.pending?.project,true);
     $('#jobs-list').onclick=event=>{if(event.target.closest('a')&&!leave())event.preventDefault();};
