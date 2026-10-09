@@ -20,6 +20,7 @@ mod service;
 mod supervisor;
 mod takeover;
 mod watch_delta;
+mod worker_history;
 #[cfg(test)]
 mod watcher_tests;
 

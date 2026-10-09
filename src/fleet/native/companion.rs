@@ -338,10 +338,14 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         }
     };
     startup.phase("workers");
-    let workers = ctx.workers()?;
+    crate::issues::worker_history::install(&db)?;
+    let mut history_versions = std::collections::HashMap::new();
+    let workers = ctx.workers_incremental(&mut history_versions)?;
+    let mut history = super::worker_history::History::new(&workers);
+    let mut incremental_history = false;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"worker_history_v1":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -399,6 +403,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         };
         match message["kind"].as_str() {
             Some("configure") => {
+                incremental_history = message["worker_history_v1"] == true;
                 relay.configure(&message);
                 reply(&output, control::configure_companion(&ctx, &message)?)?;
             }
@@ -483,11 +488,19 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 )?;
             }
             Some("ping") => {
+                let mut workers = if incremental_history {
+                    ctx.workers_incremental(&mut history_versions)?
+                } else {
+                    ctx.workers()?
+                };
+                if incremental_history {
+                    history.encode(&mut workers);
+                }
                 // Acknowledgment precedes observation of the stopped Chief.
                 let chief_ownership = crate::chief_ownership::read(&db)?;
                 reply(
                     &output,
-                    json!({"kind":"heartbeat","watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"workers":ctx.workers()?,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
+                    json!({"kind":"heartbeat","watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
                 )?;
             }
             _ => return Err(invalid("Unknown fleet message kind")),

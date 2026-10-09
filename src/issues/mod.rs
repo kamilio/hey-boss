@@ -19,6 +19,7 @@ mod reviewed_evidence;
 mod store;
 pub mod web;
 pub mod worker;
+pub(crate) mod worker_history;
 mod worker_approvals;
 mod worker_infrastructure;
 mod worker_results;

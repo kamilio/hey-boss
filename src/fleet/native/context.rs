@@ -111,10 +111,20 @@ impl Context {
         ids: Option<&std::collections::HashSet<String>>,
     ) -> Result<Vec<Value>> {
         let store = Store::open(&self.path)?;
-        let mut workers = match ids {
+        let workers = match ids {
             Some(ids) => store.fleet_workers_for(Some(ids))?,
             None => store.fleet_workers()?,
         };
+        self.enrich_workers(workers)
+    }
+    pub fn workers_incremental(
+        &self,
+        versions: &mut std::collections::HashMap<String, i64>,
+    ) -> Result<Vec<Value>> {
+        let workers = Store::open(&self.path)?.fleet_workers_incremental(versions)?;
+        self.enrich_workers(workers)
+    }
+    fn enrich_workers(&self, mut workers: Vec<Value>) -> Result<Vec<Value>> {
         let role: String =
             self.db()?
                 .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
