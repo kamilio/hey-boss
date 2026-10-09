@@ -152,8 +152,10 @@ fn refused_or_ignored_model_selection_never_runs_a_default() {
 fn model_catalog_retains_custom_ids_and_reports_discovery_failures() {
     for provider in [Provider::Codex, Provider::Claude, Provider::Pi] {
         let custom = model(provider, "configured-custom");
-        let catalog =
-            AgentSession::discover_models(launch(provider, None, None), &[custom.clone()]);
+        let catalog = AgentSession::discover_models(
+            launch(provider, None, None),
+            std::slice::from_ref(&custom),
+        );
         assert!(catalog.error.is_none(), "{:?}", catalog.error);
         assert!(
             catalog
@@ -171,7 +173,7 @@ fn model_catalog_retains_custom_ids_and_reports_discovery_failures() {
         config
             .env
             .insert("HEY_BOSS_FIXTURE_DISCOVERY_FAILURE".into(), "1".into());
-        let catalog = AgentSession::discover_models(config, &[custom.clone()]);
+        let catalog = AgentSession::discover_models(config, std::slice::from_ref(&custom));
         assert!(catalog.error.is_some());
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].selection, custom);
@@ -324,7 +326,7 @@ fn claude_alias_catalog_without_resolved_ids_is_an_explicit_capability_failure()
         .env
         .insert("HEY_BOSS_FIXTURE_LEGACY_MODELS".into(), "1".into());
     let custom = model(Provider::Claude, "configured-custom");
-    let catalog = AgentSession::discover_models(config, &[custom.clone()]);
+    let catalog = AgentSession::discover_models(config, std::slice::from_ref(&custom));
     assert!(
         catalog
             .error
