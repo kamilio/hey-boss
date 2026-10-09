@@ -11,6 +11,8 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
         try! files.createDirectory(at: directory, withIntermediateDirectories: true)
     }
     try! files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path)
+    // Companion notifications keep their durable broker; the menu app gets its own listener.
+    let socketName = files.fileExists(atPath: binaries.appendingPathComponent("hey-boss.companion").path) ? "desktop.sock" : "daemon.sock"
     let config = binaries.appendingPathComponent("hey-boss.state")
     try! Data(state.path.utf8).write(to: config, options: .atomic)
     try! files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: config.path)
@@ -31,7 +33,7 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
         "EnvironmentVariables": ["HEY_BOSS_STATE_DIR": state.path, "HEY_BOSS_CLI_PATH": binaries.appendingPathComponent("hey-boss").path],
         "LimitLoadToSessionType": "Aqua",
         "RunAtLoad": true,
-        "Sockets": ["Listener": ["SockPathName": state.appendingPathComponent("daemon.sock").path, "SockPathMode": 0o600, "SockType": "stream"]],
+        "Sockets": ["Listener": ["SockPathName": state.appendingPathComponent(socketName).path, "SockPathMode": 0o600, "SockType": "stream"]],
         "StandardOutPath": state.appendingPathComponent("daemon.log").path,
         "StandardErrorPath": state.appendingPathComponent("daemon.log").path,
         "ProcessType": "Interactive"
