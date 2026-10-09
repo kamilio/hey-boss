@@ -16,7 +16,7 @@ ${app.slice(app.indexOf('function traceLinkForOrigin('),app.indexOf('function re
 this.render = listAssignment;`, context);
 for (const [kind,owner,symbol] of [['boss','human:boss','hat'],['machine','machine:box','monitor'],['agent','codex:session','codex'],['github','watcher:github','pull-request']]) {
   test(`${kind} badge filters exact owner and moves details into a card`, () => {
-    const html = context.render({number:7,assignment:{kind,machine:'box',machine_name:'Devbox',actor:kind==='agent'?'codex:session':null}});
+    const html = context.render({number:7,assignment:{kind,machine:'box',machine_name:'Devbox',waiting:kind==='github',actor:kind==='agent'?'codex:session':null}});
     assert.match(html,/class="[^"]*assignment-badge/);
     assert.match(html,new RegExp(`data-assignment-icon="${symbol}"`));
     assert.match(html,/popover="manual"/);
@@ -30,8 +30,21 @@ for (const [kind,owner,symbol] of [['boss','human:boss','hat'],['machine','machi
 }
 test('watcher card includes its active agent conversation', () => {
   const html=context.render({number:7,assignment:{kind:'github',actor:'codex:session'}});
+  assert.match(html,/data-assignment-kind="agent"/);
+  assert.match(html,/data-assignment-icon="codex"/);
+  assert.match(html,/owner=codex%3Asession/);
+  assert.doesNotMatch(html,/Filter by GitHub PR watcher/);
   assert.match(html,/agent=codex%3Asession/);
   assert.match(html,/Open agent/);
+});
+
+test('released watcher shows unassigned ownership and keeps status accessible', () => {
+  const html=context.render({number:7,assignee:null,assignment:{kind:'github',waiting:false}});
+  assert.match(html,/data-assignment-kind="unassigned"/);
+  assert.match(html,/owner=unassigned/);
+  assert.match(html,/>Unassigned<\/strong>/);
+  assert.match(html,/data-open-watcher="7"/);
+  assert.doesNotMatch(html,/Open agent conversation|Filter by GitHub PR watcher/);
 });
 test('names are escaped and historical traces remain accessible', () => {
   assert.doesNotMatch(context.render({number:1,assignment:{kind:'machine',machine:'box',machine_name:'<img src=x>'}}),/<img/);

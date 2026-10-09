@@ -23,6 +23,35 @@ test('watcher distinguishes waiting, pending pickup, and active work', () => {
   assert.match(describe({waiting: false}).detail, /queued/);
   assert.match(describe({actor: 'codex:123', machine_name: 'Devbox'}).detail, /Codex.*Devbox/);
   assert.equal(describe({waiting: true}).label, 'GitHub PR watcher');
+  assert.equal(describe({waiting: false}).label, 'Unassigned');
+  assert.equal(describe({actor: 'codex:123', machine_name: 'Devbox'}).label, 'Codex');
+});
+
+test('watcher assignment selector shows the current owner while retaining the watcher destination', () => {
+  for (const [extra, selected, label] of [
+    [{waiting:true}, 'github', 'GitHub PR watcher'],
+    [{waiting:false}, 'active', 'Unassigned'],
+    [{actor:'codex:123', machine_name:'Devbox'}, 'active', 'Codex'],
+    [{waiting:false, machine:'box', machine_name:'Devbox'}, 'machine:box', 'Devbox'],
+  ]) {
+    const issue = {...base, assignment:{kind:'github', ...extra}};
+    const html = assignments.render({issue, project:{id:'named:QA'}}, helpers);
+    assert.match(html, new RegExp(`value="${selected}"[^>]* selected[^>]*>${label}</option>`));
+    assert.match(html, /value="github"/);
+    assert.match(html, /data-action="refresh_github"/);
+    assert.match(html, /value="unassigned"[^>]*>Unassigned \(stop monitoring\)<\/option>/);
+    if (extra.actor) assert.match(html, /agent=codex%3A123/);
+  }
+});
+
+test('confirmed conflicts stay visible alongside CI and incomplete fetches', () => {
+  const status = extra => assignments.status({...base, github_status:{prs:{
+    'https://github.com/o/r/pull/1':{evidence:{conflicts:'conflicting', required:[], complete:false, ...extra}},
+  }}}, helpers);
+  assert.match(status({}), /class="github-check-summary failed">Merge conflicts/);
+  assert.match(status({required:[{context:'tests',state:'failure'}]}), /Merge conflicts/);
+  assert.match(status({policy_errors:[{message:'Policy unavailable'}]}), /Merge conflicts/);
+  assert.doesNotMatch(status({sources_match:false}), />Merge conflicts/);
 });
 
 test('one assignment control preserves Boss and explains when GitHub is unavailable', () => {
