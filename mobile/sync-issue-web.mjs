@@ -12,7 +12,7 @@ let shell=readFileSync(new URL('app-shell.html',source),'utf8')
  .replace('<a id="nav-admin"','<a hidden id="nav-admin"')
  .replace('<a id="nav-workers"','<a hidden id="nav-workers"')
  .replace(/<!--[^]*?-->/g,'');
-for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)||['index.html','mindmap.html','artifacts.html','merged-prs.html'].includes(name))){
+for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)||['index.html','mindmap.html','artifacts.html','merged-prs.html','jobs.html'].includes(name))){
  let value=readFileSync(new URL(name,source));
  if(name==='routes.js')value=Buffer.from(value.toString().replace('/* ROUTE_DEFINITIONS */ []',readFileSync(new URL('routes.json',source),'utf8')));
  if(name.endsWith('.html')){

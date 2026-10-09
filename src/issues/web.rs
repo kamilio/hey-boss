@@ -625,6 +625,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/mindmap-map.js"),
             )),
+            "/jobs" => Some(("text/html; charset=utf-8", include_bytes!("web/jobs.html"))),
+            "/jobs.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/jobs.js"),
+            )),
+            "/jobs.css" => Some(("text/css; charset=utf-8", include_bytes!("web/jobs.css"))),
             "/agents" | "/agents/session" | "/workers" => {
                 Some(("text/html; charset=utf-8", include_bytes!("web/fleet.html")))
             }
@@ -719,6 +725,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/agents"
                     | "/agents/session"
                     | "/merged-prs"
+                    | "/jobs"
                     | "/artifacts"
                     | "/skills"
                     | "/admin"
@@ -872,6 +879,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if request.method() == &Method::Post
         && [
             "/api/action",
+            "/api/jobs/runtime",
             "/api/preview",
             "/api/inbox",
             "/api/fleet",
@@ -905,6 +913,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/jobs/runtime" {
+            return json_response(crate::jobs::web::runtime(serde_json::from_slice(&bytes)?)?);
         }
         if path == "/api/skills" {
             return json_response(crate::skill::manager::act(serde_json::from_slice(&bytes)?)?);

@@ -17,9 +17,9 @@ export function webRoutes(app,{auth,bridge}){
   pending.set(id,{id,kind,payload,device:req.device.id,res,timer,bytes:size});bytes+=size;
   res.on('close',()=>{clearTimeout(timer);remove(id);});
  }
- for(const route of ['/issues','/mm','/merged-prs'])app.get(route,auth,(req,res)=>res.sendFile(fileURLToPath(new URL(`../dist/issue-web/${route==='/merged-prs'?'merged-prs':route==='/mm'?'mindmap':'index'}.html`,import.meta.url))));
+ for(const route of ['/issues','/mm','/merged-prs','/jobs'])app.get(route,auth,(req,res)=>res.sendFile(fileURLToPath(new URL(`../dist/issue-web/${route==='/jobs'?'jobs':route==='/merged-prs'?'merged-prs':route==='/mm'?'mindmap':'index'}.html`,import.meta.url))));
  app.get('/api/bootstrap',auth,(req,res)=>relay(req,res,'bootstrap'));
- for(const [route,kind] of [['action','action'],['mm','action'],['preview','preview'],['inbox','inbox']])app.post('/api/'+route,auth,(req,res)=>relay(req,res,kind));
+ for(const [route,kind] of [['jobs/runtime','jobs/runtime'],['action','action'],['mm','action'],['preview','preview'],['inbox','inbox']])app.post('/api/'+route,auth,(req,res)=>relay(req,res,kind));
  app.get('/api/bridge/web',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,kind,payload})=>({id,kind,payload}))}));
  app.post('/api/bridge/web/:id/result',bridge,(req,res)=>{
   const request=remove(req.params.id);

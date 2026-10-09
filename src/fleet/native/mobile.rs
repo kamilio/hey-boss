@@ -268,6 +268,7 @@ impl Mobile {
                 value["backend_host"] = Value::Null;
                 value
             }
+            Some("jobs/runtime") => crate::jobs::web::runtime(payload.clone())?,
             Some("preview") => {
                 let body = payload["body"]
                     .as_str()
