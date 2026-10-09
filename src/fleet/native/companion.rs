@@ -247,9 +247,7 @@ impl Incoming {
         }
     }
     fn next(&mut self) -> Result<Option<Value>> {
-        if self.handling_ping {
-            self.ping.store(false, Ordering::Release);
-        }
+        self.finish_ping();
         let message = self
             .messages
             .as_ref()
@@ -258,6 +256,12 @@ impl Incoming {
             .map_err(|_| invalid("Fleet input reader exited"))??;
         self.handling_ping = message.as_ref().is_some_and(|m| m["kind"] == "ping");
         Ok(message)
+    }
+    fn finish_ping(&mut self) {
+        if self.handling_ping {
+            self.ping.store(false, Ordering::Release);
+            self.handling_ping = false;
+        }
     }
 }
 impl Drop for Incoming {
@@ -511,10 +515,10 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 }
                 // Acknowledgment precedes observation of the stopped Chief.
                 let chief_ownership = crate::chief_ownership::read(&db)?;
-                reply(
-                    &output,
-                    json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?}),
-                )?;
+                let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
+                // The peer can send its next ping as soon as it receives this reply.
+                input.finish_ping();
+                reply(&output, heartbeat)?;
             }
             _ => return Err(invalid("Unknown fleet message kind")),
         }
@@ -703,6 +707,37 @@ mod tests {
         assert_eq!(input.next().unwrap().unwrap()["kind"], "pull");
         assert_eq!(input.next().unwrap().unwrap()["kind"], "ping");
         drop(writer);
+        assert!(input.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn heartbeat_completion_accepts_next_ping_before_consumer_resumes() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, received) = mpsc::sync_channel(2);
+        let mut input = Incoming::start(
+            reader,
+            replies,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+        );
+        send(&mut writer, json!({"kind":"ping"})).unwrap();
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "ping");
+        input.finish_ping();
+        // The main consumer has sent its heartbeat but has not called next yet.
+        // An authority reply proves the reader handled the follow-up ping first.
+        send(&mut writer, json!({"kind":"ping"})).unwrap();
+        send(
+            &mut writer,
+            json!({"kind":"authority_reply","id":"barrier"}),
+        )
+        .unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap()["id"],
+            "barrier"
+        );
+        drop(writer);
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "ping");
         assert!(input.next().unwrap().is_none());
     }
 
