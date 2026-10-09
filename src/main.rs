@@ -286,6 +286,17 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    /// Discover logical models using the configured harness (JSON, no inference).
+    Models {
+        #[arg(long, value_enum)]
+        provider: hey_boss::agent_runtime::Provider,
+        /// Retain saved custom model IDs even when discovery fails.
+        #[arg(long)]
+        configured_model: Vec<String>,
+        /// Configured Pi provider entry point for the retained custom IDs.
+        #[arg(long)]
+        route: Option<String>,
+    },
     /// Inspect a live worktree owner, approve a draft issue link, or deliver a saved comment.
     Coordinate(hey_boss::issues::Coordinate),
     /// Read local issue-owned worktrees, excluding verified stale owners.
@@ -559,6 +570,37 @@ fn run() -> std::io::Result<()> {
                 None => health_cli::run(action),
             };
         }
+        Command::Agent(AgentAction::Models {
+            provider,
+            configured_model,
+            route,
+        }) => {
+            use hey_boss::agent_runtime::{AgentSession, Launch, ModelSelection};
+            let configured: Vec<_> = configured_model
+                .iter()
+                .map(|id| ModelSelection {
+                    id: id.clone(),
+                    route: route.clone(),
+                })
+                .collect();
+            let catalog = AgentSession::discover_models(
+                Launch {
+                    provider: *provider,
+                    model: None,
+                    binary: None,
+                    cwd: std::env::current_dir()?,
+                    resume: None,
+                    env: Default::default(),
+                    output_schema: None,
+                },
+                &configured,
+            );
+            println!("{}", serde_json::to_string_pretty(&catalog)?);
+            return match catalog.error {
+                Some(error) => Err(std::io::Error::other(error)),
+                None => Ok(()),
+            };
+        }
         Command::Agent(AgentAction::Configure { binary }) => {
             if binary.is_empty()
                 && agent_permissions::configure_pending(&std::env::current_exe()?.canonicalize()?)?
@@ -817,6 +859,16 @@ mod tests {
     fn agent_commands_are_grouped_and_legacy_names_still_parse() {
         for args in [
             vec!["agent", "list", "--json"],
+            vec![
+                "agent",
+                "models",
+                "--provider",
+                "pi",
+                "--route",
+                "proxy",
+                "--configured-model",
+                "custom-id",
+            ],
             vec!["agent", "overview", "--json"],
             vec!["agent", "configure"],
             vec!["agent", "control", "--thread", "thread-1", "inspect"],
