@@ -4,6 +4,8 @@ use crate::jobs::{
     Occurrence, Operation as JobOperation, Run, Snapshot, files, schedule::Schedule,
 };
 use std::path::PathBuf;
+#[path = "runner_store.rs"]
+mod runner;
 
 const SCHEMA:&str="
 CREATE TABLE IF NOT EXISTS scheduled_jobs(
@@ -41,7 +43,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?; tx.commit()?;
     }
-    Ok(())
+    runner::migrate(db)
 }
 fn authority(db: &Connection) -> Result<()> {
     if db.query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
@@ -240,6 +242,22 @@ impl Store {
         authority(&self.db)?;
         let project = request_project(&self.db, request)?;
         let root = self.job_root()?;
+        if let JobOperation::RunNow { id } = operation {
+            let key = request
+                .request_id
+                .as_deref()
+                .ok_or_else(|| Error::invalid("Run now requires a stable request_id"))?;
+            let occurrence = self.manual_job(&project.id, id, key, now)?;
+            let run = self.enqueue_job(&occurrence)?;
+            return Ok(with_project(json!({"run":run}), &project));
+        }
+        if let JobOperation::Stop { id, run_id } = operation {
+            self.stop_scheduled_job(&project.id, id, run_id, now)?;
+            return Ok(with_project(
+                json!({"run":get_run(&self.db, run_id)?,"stop_requested":true}),
+                &project,
+            ));
+        }
         if !operation.writes() {
             let tx = self.db.read_transaction()?;
             let response = match operation {
@@ -515,6 +533,17 @@ impl Store {
         };
         let state = if overlap { "skipped" } else { "pending" };
         tx.execute("INSERT INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,task_number,created_at,finished_at,snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![id,o.snapshot.job_id,o.snapshot.revision,o.snapshot.project_id,o.scheduled_at,if o.request_key.is_some(){"manual"}else{"scheduled"},o.request_key,state,overlap.then_some("overlap"),task_number,o.observed_at,overlap.then_some(o.observed_at),serde_json::to_string(&o.snapshot)?])?;
+        if let Some(number) = task_number {
+            // Publish the marker with the task and occurrence, never in a later tick.
+            tx.execute(
+                "UPDATE issues SET job_run_id=?3 WHERE project_id=?1 AND number=?2",
+                params![o.snapshot.project_id, number, id],
+            )?;
+            tx.execute(
+                "INSERT INTO scheduled_job_owners(run_id,generation) VALUES(?1,1)",
+                [&id],
+            )?;
+        }
         if o.request_key.is_none() {
             tx.execute(
                 "UPDATE scheduled_jobs SET next_at=?2 WHERE id=?1",

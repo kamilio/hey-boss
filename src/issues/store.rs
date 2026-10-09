@@ -150,6 +150,7 @@ fn retry_contention<T>(deadline: Instant, mut operation: impl FnMut() -> Result<
 // These additive migrations shipped independently. Verify the actual columns,
 // not just user_version, so a partial upgrade can be repaired without data loss.
 const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
+    ("issues", "job_run_id", "TEXT"),
     ("requests", "created_at", "INTEGER NOT NULL DEFAULT 0"),
     ("requests", "archive_key", "TEXT"),
     ("requests", "payload_hash", "TEXT"),
@@ -405,11 +406,11 @@ fn comment_page_budget(
         json!({"ok":true,"project":project,"number":number,"comments":comments,"comment_count":total,"sort":sort,"next_offset":if next < total as u64 { Some(next) } else { None }}),
     )
 }
-const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers,attempt_hold,archive_key";
+const COLUMNS: &str = "number,title,body,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,sort_order,draft,plan,(SELECT count(*) FROM issue_agent_launches launches WHERE launches.project_id=issues.project_id AND launches.issue_number=issues.number) AS agent_launch_count,(SELECT json_object('id',id,'author',author,'level',level,'comment',comment,'created_at',created_at) FROM issue_status_updates s WHERE s.project_id=issues.project_id AND s.issue_number=issues.number ORDER BY created_at DESC,id DESC LIMIT 1) AS status,origin,manual_blocked,blockers,attempt_hold,archive_key,job_run_id";
 
 // Keep list/registry reads off issue records whose bodies can span hundreds of
 // overflow pages. All persisted summary fields fit in this covering index.
-const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target,archive_key,archived_comments)";
+const SUMMARY_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_list_summary ON issues(project_id,sort_order,number,title,state,assignee,created_by,closed_by,created_at,updated_at,closed_at,deleted_at,version,labels,draft,plan,origin,manual_blocked,blockers,attempt_hold,assignment_target,archive_key,archived_comments,job_run_id)";
 
 #[cfg(test)]
 fn list_query(search: bool, owner: Option<&str>, unassigned: bool) -> String {
@@ -483,10 +484,13 @@ struct Issue {
     blocker_numbers: Vec<i64>,
     #[serde(default)]
     attempt_hold: Option<Value>,
+    #[serde(default)]
+    job_run_id: Option<String>,
 }
 fn row_issue(row: &crate::database::Row<'_>) -> rusqlite::Result<Issue> {
     let labels: String = row.get(12)?;
     Ok(Issue {
+        job_run_id: row.get("job_run_id")?,
         archive_key: row.get("archive_key")?,
         attempt_hold: row
             .get::<_, Option<String>>("attempt_hold")?
@@ -1468,7 +1472,7 @@ impl Store {
             tx.execute_batch(include_str!("subtask-readiness.sql"))?;
             tx.commit()?;
         }
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0 AND instr(sql,'archived_comments')>0)", [], |r| r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0 AND instr(sql,'archived_comments')>0 AND instr(sql,'job_run_id')>0)", [], |r| r.get::<_,bool>(0))? {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch("DROP INDEX IF EXISTS issue_list_summary")?;
             tx.execute_batch(SUMMARY_INDEX)?;

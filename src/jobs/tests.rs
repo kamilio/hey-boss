@@ -82,6 +82,45 @@ use std::path::PathBuf;
 const H: i64 = 3_600_000;
 
 #[test]
+fn scheduled_tasks_never_enter_regular_pickup_after_unassignment_or_restart() {
+    let mut f = Fixture::new();
+    f.create("job", 0);
+    let run = reserve(&mut f, H);
+    f.store
+        .db
+        .execute("UPDATE issues SET draft=0,assignee=NULL", [])
+        .unwrap();
+    f.reopen();
+    assert!(
+        !f.store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=?2)",
+                params![run.snapshot.project_id, run.task_number],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap(),
+        "a dedicated job task must never enter the ordinary worker pool"
+    );
+    // New work created by the session is ordinary work.
+    let followup = task(&f.store.db, &run.snapshot, "followup").unwrap();
+    f.store
+        .db
+        .execute("UPDATE issues SET draft=0 WHERE number=?1", [followup])
+        .unwrap();
+    assert!(
+        f.store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE number=?1)",
+                [followup],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+}
+
+#[test]
 fn edits_pause_resume_delete_schedule_forward_and_keep_revisions() {
     let mut f = Fixture::new();
     let created = f.create("job", 0);
@@ -562,4 +601,184 @@ fn history_pages_keep_stable_cursors_across_new_runs_and_restart() {
     assert_eq!(second["runs"][0]["id"], ids[1]);
     assert_eq!(second["runs"][1]["id"], ids[0]);
     assert!(second["next_cursor"].is_null());
+}
+
+#[test]
+fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
+    use crate::jobs::execution::Report;
+    let mut f = Fixture::new();
+    f.create("job", 0);
+    let old = task(
+        &f.store.db,
+        &f.store.due_jobs(H, 10).unwrap()[0].snapshot,
+        "old",
+    )
+    .unwrap();
+    let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
+    let run = f.store.enqueue_job(&occurrence).unwrap();
+    assert!(f.store.db.query_row("SELECT a.sort_order<b.sort_order FROM issues a,issues b WHERE a.number=?1 AND b.number=?2",params![run.task_number,old],|r|r.get::<_,bool>(0)).unwrap());
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT body FROM issues WHERE number=?1",
+                [run.task_number],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        ORIGINAL
+    );
+    assert!(f.store.assign_job(&run.id, "first").unwrap());
+    assert!(!f.store.assign_job(&run.id, "second").unwrap());
+    f.reopen();
+    assert!(
+        !f.store.assign_job(&run.id, "second").unwrap(),
+        "restart/disconnect never releases an owner"
+    );
+    let dispatch = f.store.job_dispatches("first").unwrap().remove(0);
+    let mut ack = Report::pending(&dispatch);
+    ack.state = "released".into();
+    ack.finished_at = Some(H + 1);
+    assert!(
+        f.store.accept_job_report("first", &ack).is_err(),
+        "release needs an explicit revoke"
+    );
+    f.store.revoke_job(&run.id, "first", 1).unwrap();
+    assert!(
+        !f.store.assign_job(&run.id, "second").unwrap(),
+        "revoke is not acknowledgement"
+    );
+    assert!(f.store.accept_job_report("first", &ack).unwrap());
+    assert!(f.store.assign_job(&run.id, "second").unwrap());
+    let second = f.store.job_dispatches("second").unwrap().remove(0);
+    assert_eq!(second.generation, 2);
+    ack.state = "running".into();
+    ack.started_at = Some(H + 2);
+    ack.finished_at = None;
+    ack.session_id = Some("old-session".into());
+    assert!(!f.store.accept_job_report("first", &ack).unwrap());
+    let mut report = Report::pending(&second);
+    report.state = "running".into();
+    report.started_at = Some(H + 3);
+    report.session_id = Some("exact-session".into());
+    f.store.accept_job_report("second", &report).unwrap();
+    report.state = "succeeded".into();
+    report.finished_at = Some(H + 4);
+    f.store.accept_job_report("second", &report).unwrap();
+    assert_eq!(
+        get_run(&f.store.db, &run.id).unwrap().session_id.as_deref(),
+        Some("exact-session")
+    );
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT state FROM issues WHERE number=?1",
+                [run.task_number],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "closed"
+    );
+    assert_eq!(
+        f.store
+            .db
+            .query_row("SELECT count(*) FROM worker_runs", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
+    use crate::jobs::execution::Report;
+    let mut f = Fixture::new();
+    f.create("job", 0);
+    f.op(
+        JobOperation::SetEnabled {
+            id: "job".into(),
+            if_revision: 1,
+            enabled: false,
+        },
+        1,
+    )
+    .unwrap();
+    let run = f.op(JobOperation::RunNow { id: "job".into() }, H).unwrap()["run"].clone();
+    assert_eq!(
+        f.op(JobOperation::RunNow { id: "job".into() }, H + 1)
+            .unwrap()["run"]["id"],
+        run["id"]
+    );
+    let occurrence = f
+        .store
+        .manual_job("named:Jobs", "job", "other", H + 1)
+        .unwrap();
+    assert_eq!(f.store.enqueue_job(&occurrence).unwrap().state, "skipped");
+    let id = run["id"].as_str().unwrap();
+    f.store.assign_job(id, "local").unwrap();
+    let dispatch = f.store.job_dispatches("local").unwrap().remove(0);
+    f.op(
+        JobOperation::Stop {
+            id: "job".into(),
+            run_id: id.into(),
+        },
+        H + 2,
+    )
+    .unwrap();
+    assert!(f.store.job_dispatches("local").unwrap()[0].revoke);
+    assert_eq!(
+        get_run(&f.store.db, id).unwrap().state,
+        "pending",
+        "stop waits for the process acknowledgement"
+    );
+    let mut report = Report::pending(&dispatch);
+    report.state = "released".into();
+    report.finished_at = Some(H + 3);
+    f.store.accept_job_report("local", &report).unwrap();
+    assert_eq!(get_run(&f.store.db, id).unwrap().state, "cancelled");
+    assert!(!get_job(&f.store.db, "named:Jobs", "job").unwrap().enabled);
+    let state: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT state FROM issues WHERE number=?1",
+            [run["task_number"].as_i64().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "open");
+    let occurrence = f
+        .store
+        .manual_job("named:Jobs", "job", "failed", H + 4)
+        .unwrap();
+    let run = f.store.enqueue_job(&occurrence).unwrap();
+    f.store.assign_job(&run.id, "local").unwrap();
+    let mut report = Report::pending(&f.store.job_dispatches("local").unwrap().remove(0));
+    report.state = "failed".into();
+    report.finished_at = Some(H + 5);
+    report.reason = Some("Chosen model is unavailable".into());
+    f.store.accept_job_report("local", &report).unwrap();
+    assert_eq!(get_run(&f.store.db, &run.id).unwrap().state, "failed");
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT state FROM issues WHERE number=?1",
+                [run.task_number],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        "open"
+    );
+    assert!(
+        !f.store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE number=?1)",
+                [run.task_number],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
 }

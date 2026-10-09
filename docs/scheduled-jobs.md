@@ -1,6 +1,6 @@
 # Scheduled jobs
 
-`hey-boss job --help` manages durable definitions and reads run history. No timer or worker-pool pickup is enabled by this foundation. Run-now execution and automatic dispatch belong to the independent job runner.
+`hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs through an independent service, including with no saved workers or a paused, stopped or saturated worker pool.
 
 Create requires a stable ID, project, name, cron, explicit IANA timezone, harness, logical model and user-written `.md` instructions. Edit replaces definition fields with an `--if-revision` guard; omitted instructions retain the prior file. Pause, resume and delete also require that guard. Delete retains revisions and history, and does not stop active work.
 
@@ -14,12 +14,16 @@ Create requires a stable ID, project, name, cron, explicit IANA timezone, harnes
 
 ## Persistence and routing
 
-The existing resource API accepts `{"action":"job","operation":...}`; `hey-boss job rpc` accepts the inner operation. Commands are `create`, `edit`, `set_enabled`, `delete`, `view`, `list`, `preview`, `next`, `history`, `revision`, and `run`. See `src/jobs/mod.rs` for the typed wire contract. All reads/mutations on companions use the authenticated supervisor tunnel and require its `scheduled_jobs` capability. There is no replica-write fallback. Mutations require a request ID and retain durable, content-bound receipts; the CLI derives one deterministically unless supplied.
+The existing resource API accepts `{"action":"job","operation":...}`; `hey-boss job rpc` accepts the inner operation. Commands are `create`, `edit`, `set_enabled`, `delete`, `view`, `list`, `preview`, `next`, `history`, `revision`, `run`, `run_now`, and `stop`. See `src/jobs/mod.rs` for the typed wire contract. All reads/mutations on companions use the authenticated supervisor tunnel and require its `scheduled_jobs` capability. There is no replica-write fallback. Mutations require a request ID and retain durable, content-bound receipts; the CLI derives one unless supplied; Run Now creates a fresh key for each invocation and prints its retry key on uncertain failure.
 
 Markdown bytes are never normalized or stored as database prompt text. References point to SHA-256-named `.md` files beside the database in its `.jobs` directory. Files are published and fsynced before references commit. Revisions are immutable and retained after edits/deletion. A revision/run read transfers and verifies its exact bytes, then fsyncs the companion copy before acknowledging. The runner must fetch a run on its destination before launch; cached instructions can subsequently be loaded offline. Failed/crashed saves can leave unreferenced content-addressed files, which must not be removed while an in-flight save could reference them.
 
-## Runner integration
+## Execution
 
-`Store::due_jobs(now, limit)` uses the due index and computes at most 100 decisions outside a write transaction. `manual_job(project, id, request_key, now)` prepares a manual occurrence with its own stable deduplication key; paused jobs may run manually. `commit_job_occurrence` rechecks the revision/cursor and commits a run plus the runner's task-creation callback in one transaction. The callback receives the same database transaction, immutable snapshot and run ID; it must reserve the task for the independent runner before returning its number and must perform no network/process work. Launch happens after commit. This module intentionally never calls the callback from a timer.
+Run Now can execute a paused schedule without enabling it. Use the same request ID to retry an uncertain request; overlapping scheduled/manual occurrences are recorded as skipped. Stop takes an exact run ID and cancels only its owned process group. Pause/delete affect future scheduling and retain current executions and history.
 
-Scheduled identity is unique per job and UTC occurrence, manual identity per job and request key. Retried commits return the original identity before examining later edits. A partial unique active-run index prevents overlapping execution. `start_job_run` records machine/session/start; `finish_job_run` records terminal state/reason/finish. Only a started run may succeed; pending launch failures/cancellations are retained. History uses a stable descending sequence cursor, 100 rows per page, with its own job-scoped index.
+Each occurrence atomically creates its task at the top of the project list. A persisted, immutable job marker excludes it from ordinary pickup even after unassignment, failure or restart. Follow-up tasks use the ordinary pool. Success closes the execution task; failure/cancellation leaves an open task with an explicit result.
+
+Fleet status reports job-service capability independently of workers, using existing project checkouts and installed harnesses. Pi selections use the configured `route/model-id`; other harnesses use an exact model ID. Instructions load from the immutable Markdown revision with no added agent prompt.
+
+Owners are generation-fenced. A disconnect never releases ownership. A revoked, unsubmitted owner must acknowledge that it stopped before handoff; submitted work is never replayed. Process identity is committed before a launch gate opens, and submission intent is committed before sending instructions. After a service crash, surviving processes must be conclusively stopped before the attempt can finish. Unknown custody remains visible and blocks overlap.

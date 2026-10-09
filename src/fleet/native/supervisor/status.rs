@@ -50,6 +50,7 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
     if result["role"] == "agent" {
         result["role"] = json!("companion");
     }
+    result["jobs"] = value.get("jobs").cloned().unwrap_or(Value::Null);
     result["worker_count"] = json!(workers.map(Vec::len));
     result["workers_omitted"] = json!(workers.map(|w| w.len().saturating_sub(20)));
     result["workers"] = workers
@@ -197,7 +198,7 @@ impl Supervisor {
         if matches!(view, "summary" | "machines") {
             // Supervisor changes are already authoritative. Its outbox is a
             // replication journal, not a queue awaiting supervisor acceptance.
-            let local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"conflicts":conflicts,"build":state.build});
+            let local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"conflicts":conflicts,"build":state.build,"jobs":state.machines.get("local").map(|m| &m["jobs"])});
             let machines: Vec<_> = std::iter::once((&local, Some(&state.local)))
                 .chain(
                     state
