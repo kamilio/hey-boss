@@ -8,6 +8,7 @@ use super::{
 use serde_json::{Value, json};
 use std::os::fd::AsRawFd;
 mod status;
+mod utilities;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::{BufRead, BufReader, Read, Write},
@@ -40,6 +41,7 @@ struct State {
 }
 pub(super) struct Supervisor {
     pub ctx: Context,
+    utilities: Arc<Mutex<BTreeMap<String, utilities::Run>>>,
     state: Mutex<State>,
     // Serialize disk snapshots without serializing in-memory peer progress.
     persistence: Mutex<()>,
@@ -70,6 +72,7 @@ impl Supervisor {
         let build = Context::running_build().to_owned();
         Ok(Arc::new(Self {
             ctx,
+            utilities: Arc::new(Mutex::new(BTreeMap::new())),
             persistence: Mutex::new(()),
             configuration: Mutex::new(()),
             state: Mutex::new(State {
@@ -1122,7 +1125,7 @@ impl Supervisor {
         )?;
         let mut projects = super::projects::desired(&self.ctx, host)?;
         let mut revision = super::projects::revision(&self.ctx.node, &workers, &projects);
-        self.update(host,json!({"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
+        self.update(host,json!({"utils_v1":hello["capabilities"]["utils_v1"],"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         let github = if hello["capabilities"]["github_reads_v1"] == true {
             Some(super::github_reads::Backend::new(hey_gh::ApiClient::new(
@@ -1325,6 +1328,7 @@ impl Supervisor {
                         )?;
                     }
                 }
+                Some("utility") => self.utility_reply(host, &message),
                 Some("conversation" | "takeover" | "steer") => {
                     if let Some(waiter) = self
                         .state
@@ -1810,6 +1814,9 @@ impl Supervisor {
 
     fn authoritative(&self, value: &Value) -> crate::issues::Result<Value> {
         match value["kind"].as_str() {
+            Some("utils_resolve" | "utils_start" | "utils_poll") => self
+                .utility_request(value)
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
             Some("issue_archive") => {
                 let key = value["key"]
                     .as_str()
@@ -1909,6 +1916,7 @@ impl Supervisor {
             return Ok(());
         }
         let result = match request["kind"].as_str() {
+            Some("utils_resolve" | "utils_start" | "utils_poll") => self.utility_request(&request),
             Some("status") => self.status_request(&request),
             Some("overview") => self.overview(),
             Some("conversation" | "takeover" | "steer") => self.conversation(&request),
@@ -2155,6 +2163,71 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utilities_route_by_config_and_poll_without_blocking_sync() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(&app.ctx.desired, "machines: {local: {}, peer: {}}\nutils:\n  echo: {command: cat, destination: local}\n  remote: {command: cat, destination: peer}\n").unwrap();
+        let request = json!({"kind":"utils_start","name":"echo","args":[],"stdin":STANDARD.encode(b"binary\0\xff")});
+        let resolved = app
+            .authoritative(&json!({"kind":"utils_resolve","name":"echo"}))
+            .unwrap();
+        assert_eq!(resolved["utility"]["command"], "cat");
+        let started = app.authoritative(&request).unwrap();
+        let poll = json!({"kind":"utils_poll","id":started["id"]});
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = app.authoritative(&poll).unwrap();
+            if result["done"] == true {
+                assert_eq!(
+                    crate::utilities::decode(&result["stdout"]).unwrap(),
+                    b"binary\0\xff"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.authoritative(&poll).is_err());
+        let mut remote = request.clone();
+        remote["name"] = json!("remote");
+        assert!(
+            app.authoritative(&remote)
+                .unwrap_err()
+                .to_string()
+                .contains("disconnected")
+        );
+        let (tx, rx) = mpsc::sync_channel(2);
+        app.state
+            .lock()
+            .unwrap()
+            .connections
+            .insert("peer".into(), (1, tx));
+        assert!(
+            app.authoritative(&remote)
+                .unwrap_err()
+                .to_string()
+                .contains("Upgrade")
+        );
+        app.state
+            .lock()
+            .unwrap()
+            .machines
+            .insert("peer".into(), json!({"utils_v1":true}));
+        let started = app.authoritative(&remote).unwrap();
+        let message = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(message["utility"]["command"], "cat");
+        let response = json!({"id":started["id"],"result":{"ok":true,"done":true,"code":0,"stdout":"","stderr":""}});
+        let poll = json!({"kind":"utils_poll","id":started["id"]});
+        app.utility_reply("wrong-host", &response);
+        assert_eq!(app.authoritative(&poll).unwrap()["done"], false);
+        app.utility_reply("peer", &response);
+        assert_eq!(app.authoritative(&poll).unwrap()["done"], true);
+        remote["name"] = json!("missing");
+        assert!(app.authoritative(&remote).is_err());
+    }
 
     #[test]
     fn idle_listener_wakes_when_a_request_arrives() {
@@ -2404,6 +2477,7 @@ mod tests {
         drop(crate::issues::Store::open(&ctx.path).unwrap());
         replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
         let app = Supervisor {
+            utilities: Arc::new(Mutex::new(BTreeMap::new())),
             ctx,
             persistence: Mutex::new(()),
             configuration: Mutex::new(()),

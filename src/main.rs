@@ -173,8 +173,11 @@ enum Command {
     Proxy,
     /// Configure or diagnose this machine's Git identity and commit signing.
     Environment(hey_boss::environment::Options),
-    /// Git shortcuts and your connected main Mac's clipboard.
-    #[command(subcommand)]
+    /// Configured scripts, Git shortcuts, and clipboard utilities.
+    #[command(
+        subcommand,
+        after_help = "Add named commands to utils in ~/.hey-boss/fleet.yaml on the supervisor:\n  pbcopy: {command: pbcopy, destination: macbook}\nRun: hey-boss utils NAME [ARGS...]\nArguments are forwarded unchanged, including --help. Omit destination to run here."
+    )]
     Utils(utils_cli::Action),
     /// List agents, open their overview, configure access, and control threads.
     #[command(subcommand)]
@@ -453,6 +456,9 @@ fn run() -> std::io::Result<()> {
     // paths, `--`, proxy help, signals, and the proxy's original exit status.
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "proxy") {
         return proxy_cli::run(std::env::args_os().skip(2));
+    }
+    if let Some(result) = utils_cli::configured() {
+        return result;
     }
     let (args, git_args) = utils_cli::cli_args();
     let cli = Cli::parse_from(args).canonicalize();

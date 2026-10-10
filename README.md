@@ -7,6 +7,27 @@ Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
 
 `command | hey-boss utils copy` sends UTF-8 text (up to 128 KiB) to your connected main Mac's clipboard; `hey-boss utils paste > file` retrieves it without adding a newline. `pbcopy`/`pbpaste` are aliases. Clipboard transfers use the existing companion bridge, are never queued or cached, and fail when disconnected.
 
+Add custom utilities to the supervisor's `~/.hey-boss/fleet.yaml` (also editable in the fleet configuration editor):
+
+```yaml
+utils:
+  pbcopy: {command: pbcopy, destination: macbook}
+  check: {command: '~/scripts/check-project'}
+```
+
+Run `hey-boss utils check --verbose 'project name'` from any connected machine.
+Every argument is appended unchanged, including flags, empty arguments, and `--`;
+`--help` after a configured name goes to the command. `command` is a shell command
+or script path, with optional fixed arguments; quote paths containing spaces.
+Configured names override built-ins. Without `destination`, the command inherits
+the caller's directory, environment, and terminal. A destination names an existing
+`machines` key (`local` means the supervisor); its command runs in that user's home
+through the existing fleet tunnel, without caller-to-destination SSH setup.
+Destination runs are noninteractive: piped stdin and both output streams preserve
+binary bytes, output is returned on completion, and the exit code is forwarded.
+Each stream and the arguments are limited to 1 MiB; runs stop after five minutes.
+Disconnected destinations fail without queuing or retrying execution.
+
 The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
 and Pi sessions through one API, including resume, activity, steering, interruption,
 explicit approvals/input, and provider-neutral goal continuation. Choose Codex,

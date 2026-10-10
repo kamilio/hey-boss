@@ -349,7 +349,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let mut incremental_history = false;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"worker_history_v1":true,"job_execution":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"utils_v1":true,"worker_history_v1":true,"job_execution":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -490,6 +490,16 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                     &output,
                     json!({"kind":message["kind"],"id":message["id"],"result":result}),
                 )?;
+            }
+            Some("utility") => {
+                let output = output.clone();
+                std::thread::spawn(move || {
+                    let result = crate::utilities::execute(&message);
+                    let _ = reply(
+                        &output,
+                        json!({"kind":"utility","id":message["id"],"result":result}),
+                    );
+                });
             }
             Some("job_dispatch") => {
                 let dispatch = serde_json::from_value(message["dispatch"].clone())?;

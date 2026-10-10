@@ -31,6 +31,8 @@ fn read_text(path: &Path) -> Result<String> {
 #[serde(deny_unknown_fields)]
 struct Document {
     machines: BTreeMap<String, Machine>,
+    #[serde(default)]
+    utils: BTreeMap<String, crate::utilities::Definition>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +67,28 @@ fn parse(text: &str) -> Result<Value> {
     }
     let yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
     let doc: Document = serde_yaml_ng::from_value(yaml)?;
+    for (name, utility) in &doc.utils {
+        if name.is_empty()
+            || name.len() > 128
+            || name == "help"
+            || !name.as_bytes()[0].is_ascii_alphanumeric()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        {
+            return Err(invalid(
+                "Utility names must start with a letter or digit and use letters, digits, hyphens or underscores; help is reserved",
+            ));
+        }
+        utility.validate()?;
+        if let Some(host) = &utility.destination
+            && !doc.machines.contains_key(host)
+        {
+            return Err(invalid(
+                "Utility destination must name a configured machine",
+            ));
+        }
+    }
     let mut machines = serde_json::Map::new();
     let mut ids = HashSet::new();
     for (host, machine) in doc.machines {
@@ -142,7 +166,11 @@ fn parse(text: &str) -> Result<Value> {
         }
         machines.insert(host, value);
     }
-    Ok(json!({"machines":machines}))
+    let mut value = json!({"machines":machines});
+    if !doc.utils.is_empty() {
+        value["utils"] = json!(doc.utils);
+    }
+    Ok(value)
 }
 
 fn validate_transition(old: &Value, new: &Value) -> Result<()> {
@@ -589,6 +617,17 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
 }
 
 fn changes(old: &Value, new: &Value) -> Vec<Value> {
+    let mut changes = vec![];
+    for (name, utility) in new["utils"].as_object().into_iter().flatten() {
+        if old["utils"].get(name) != Some(utility) {
+            changes.push(json!({"utility":name,"host":utility["destination"].as_str().unwrap_or("caller"),"action":if old["utils"].get(name).is_some() {"update"} else {"add"}}));
+        }
+    }
+    for (name, _) in old["utils"].as_object().into_iter().flatten() {
+        if new["utils"].get(name).is_none() {
+            changes.push(json!({"utility":name,"action":"remove"}));
+        }
+    }
     let flatten = |doc: &Value| -> BTreeMap<(String, String), Value> {
         doc["machines"]
             .as_object()
@@ -606,7 +645,6 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
     };
     let old = flatten(old);
     let new = flatten(new);
-    let mut changes = vec![];
     for ((host, id), worker) in &new {
         if old.get(&(host.clone(), id.clone())) != Some(worker) {
             changes.push(json!({"host":host,"worker":id,"action":if old.contains_key(&(host.clone(),id.clone())) {"update"} else {"add"}}));
@@ -622,6 +660,21 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utilities_round_trip_and_validate_destination() {
+        let text = "machines: {local: {}, macbook: {}}\nutils:\n  pbcopy: {command: pbcopy, destination: macbook}\n  check: {command: 'git status --short'}\n";
+        let doc = parse(text).unwrap();
+        assert_eq!(doc["utils"]["pbcopy"]["destination"], "macbook");
+        assert_eq!(changes(&json!({}), &doc).len(), 2);
+        assert_eq!(changes(&doc, &json!({}))[0]["action"], "remove");
+        assert_eq!(
+            parse(&serde_yaml_ng::to_string(&compact(&doc)).unwrap()).unwrap(),
+            doc
+        );
+        assert!(parse(&text.replace("destination: macbook", "destination: missing")).is_err());
+        assert!(parse(&text.replace("command: pbcopy", "command: ''")).is_err());
+        assert!(parse(&text.replace("  pbcopy:", "  --bad:")).is_err());
+    }
     use super::*;
     use serde_json::json;
 

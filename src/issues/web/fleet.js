@@ -1007,7 +1007,7 @@ if (typeof document !== 'undefined') (() => {
     configBusy=true;configButtons();$('config-status').textContent=save?'Saving configuration…':'Checking configuration…';
     try{const data=await configRequest({text,revision:configRevision,save});
       if(save){configRevision=data.revision;configOriginal=data.text;configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent='Saved. Machines will apply this configuration automatically.';await refresh();}
-      else{configPreview=text;$('config-changes').replaceChildren(...(data.changes||[]).map(change=>element('li','',({add:'Add',update:'Update',drain:'Drain and remove'})[change.action]+' '+change.worker+' on '+change.host)));$('config-status').textContent=data.changes?.length?'Valid YAML. Review the changes below.':'Valid YAML. No worker changes.';}
+      else{configPreview=text;$('config-changes').replaceChildren(...(data.changes||[]).map(change=>element('li','',({add:'Add',update:'Update',drain:'Drain and remove',remove:'Remove'})[change.action]+' '+(change.utility?'utility '+change.utility:change.worker)+(change.host?' on '+change.host:''))));$('config-status').textContent=data.changes?.length?'Valid YAML. Review the changes below.':'Valid YAML. No worker or utility changes.';}
     }catch(error){configPreview=undefined;$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
   }
   $('config-validate').onclick=()=>submitConfig(false);$('config-save').onclick=()=>submitConfig(true);
