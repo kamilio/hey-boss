@@ -1,9 +1,105 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::Subcommand;
+use serde_json::json;
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+
+// Intercept before clap so even --help and a leading -- belong to the script.
+pub fn configured() -> Option<std::io::Result<()>> {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.get(1)? != "utils" {
+        return None;
+    }
+    let name = args.get(2)?.to_str()?;
+    if name.starts_with('-') || name == "help" {
+        return None;
+    }
+    let builtin = matches!(
+        name,
+        "gcn" | "gpn" | "copy" | "paste" | "pbcopy" | "pbpaste"
+    );
+    // Preserve installation-free built-ins when there is no fleet connection.
+    let socket = match hey_boss::fleet::socket_path() {
+        Ok(socket) => socket,
+        Err(error) => return Some(Err(error)),
+    };
+    if builtin && !socket.exists() && !socket.with_file_name("fleet-authority.sock").exists() {
+        return None;
+    }
+    let result = (|| -> std::io::Result<Option<hey_boss::utilities::Definition>> {
+        let result = hey_boss::fleet::call(&json!({"kind":"utils_resolve","name":name}))
+            .map_err(std::io::Error::other)?;
+        if result["utility"].is_null() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_value(result["utility"].clone())?))
+    })();
+    match result {
+        Ok(Some(definition)) => Some(run_configured(name, &definition, &args[3..])),
+        Ok(None) if builtin => None,
+        Ok(None) => Some(Err(std::io::Error::other(format!(
+            "Unknown utility {name}; add it to utils in fleet.yaml"
+        )))),
+        Err(error) => Some(Err(error)),
+    }
+}
+
+fn run_configured(
+    name: &str,
+    definition: &hey_boss::utilities::Definition,
+    args: &[OsString],
+) -> std::io::Result<()> {
+    if definition.destination.is_none() {
+        return Err(definition.launch(args)?.exec());
+    }
+    let mut input = Vec::new();
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin()
+            .lock()
+            .take(hey_boss::utilities::LIMIT as u64 + 1)
+            .read_to_end(&mut input)?;
+    }
+    if input.len() > hey_boss::utilities::LIMIT {
+        return Err(std::io::Error::other("Utility stdin exceeds 1 MiB"));
+    }
+    let args: Vec<_> = args
+        .iter()
+        .map(|arg| STANDARD.encode(arg.as_bytes()))
+        .collect();
+    let call = |request| hey_boss::fleet::call(&request).map_err(std::io::Error::other);
+    let started =
+        call(json!({"kind":"utils_start","name":name,"args":args,"stdin":STANDARD.encode(input)}))?;
+    let id = started["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("Invalid utility run response"))?;
+    let deadline = std::time::Instant::now()
+        + hey_boss::utilities::TIMEOUT
+        + std::time::Duration::from_secs(10);
+    loop {
+        let result = call(json!({"kind":"utils_poll","id":id}))?;
+        if result["done"] == true {
+            let stdout = hey_boss::utilities::decode(&result["stdout"])?;
+            let stderr = hey_boss::utilities::decode(&result["stderr"])?;
+            let code = result["code"]
+                .as_i64()
+                .filter(|code| (0..=255).contains(code))
+                .ok_or_else(|| std::io::Error::other("Invalid utility exit status"))?;
+            std::io::stdout().lock().write_all(&stdout)?;
+            std::io::stderr().lock().write_all(&stderr)?;
+            std::process::exit(code as i32);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::other(
+                "Utility result timed out; execution was not retried",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
 
 #[derive(Subcommand)]
 pub enum Action {
