@@ -30,6 +30,9 @@ pub fn configured() -> Option<std::io::Result<()>> {
     if builtin && !socket.exists() && !socket.with_file_name("fleet-authority.sock").exists() {
         return None;
     }
+    // Companion routing reads fleet metadata through the installed database owner.
+    // Built-ins without a fleet still return above without initializing services.
+    hey_boss::database::use_service();
     let result = (|| -> std::io::Result<Option<hey_boss::utilities::Definition>> {
         let result = hey_boss::fleet::call(&json!({"kind":"utils_resolve","name":name}))
             .map_err(std::io::Error::other)?;
