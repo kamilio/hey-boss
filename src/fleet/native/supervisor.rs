@@ -2225,6 +2225,12 @@ mod tests {
         assert_eq!(app.authoritative(&poll).unwrap()["done"], false);
         app.utility_reply("peer", &response);
         assert_eq!(app.authoritative(&poll).unwrap()["done"], true);
+        let failed = app.authoritative(&remote).unwrap();
+        app.utility_reply("peer", &json!({"id":failed["id"],"result":{"ok":false,"error":"Utility output exceeds 1 MiB"}}));
+        let error = app
+            .authoritative(&json!({"kind":"utils_poll","id":failed["id"]}))
+            .unwrap_err();
+        assert!(error.message.contains("Utility output exceeds 1 MiB"));
         remote["name"] = json!("missing");
         assert!(app.authoritative(&remote).is_err());
     }

@@ -22,6 +22,11 @@ impl Supervisor {
             if let Some(result) = &run.result {
                 let result = result.clone();
                 runs.remove(id);
+                if result["ok"] == false {
+                    return Err(invalid(
+                        result["error"].as_str().unwrap_or("Utility failed"),
+                    ));
+                }
                 return Ok(result);
             }
             return Ok(json!({"ok":true,"done":false}));
