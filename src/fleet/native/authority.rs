@@ -149,7 +149,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"utils_v1":true,"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -238,6 +238,7 @@ impl Relay {
                     }
                     if request["request"]["kind"] == "capabilities" {
                         let flags = json!({
+                            "utils_v1": message["capabilities"]["utils_v1"] == true,
                             "scheduled_jobs": message["capabilities"]["scheduled_jobs"] == true,
                             "authority_rpc": message["capabilities"]["authority_rpc"] == true,
                             "issue_numbers": message["capabilities"]["issue_numbers"] == true,
@@ -327,10 +328,14 @@ impl Relay {
                     if !matches!(
                         request["request"]["kind"].as_str(),
                         Some(
-                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "worker_signal" | "chief_run" | "issue_archive"
+                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "worker_signal" | "chief_run" | "issue_archive" | "utils_resolve" | "utils_start" | "utils_poll"
                         )
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());
+                    }
+                    if matches!(request["request"]["kind"].as_str(), Some("utils_resolve" | "utils_start" | "utils_poll"))
+                        && message["capabilities"]["utils_v1"] != true {
+                        return Err(unsupported("utils_v1", &message["build"]).into());
                     }
                     if request["request"]["kind"] == "issue_archive"
                         && message["capabilities"]["issue_archives"] != true {
@@ -758,6 +763,46 @@ mod tests {
         );
         drop(relay);
         assert!(!socket.exists());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn utility_requests_cross_the_companion_relay_without_changing_payloads() {
+        let (root, ctx, store) = test_context();
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let relay = Relay::start(&ctx, output.clone()).unwrap();
+        relay.configure(&json!({"capabilities":{"authority_rpc":true}}));
+        let error = call(&ctx.state, &ctx.path, json!({"kind":"utils_start"})).unwrap_err();
+        assert_eq!(error.details.unwrap()["required_capability"], "utils_v1");
+        assert!(output.lock().unwrap().is_empty());
+        relay.configure(&json!({"capabilities":{"authority_rpc":true,"utils_v1":true}}));
+        for kind in ["utils_resolve", "utils_start", "utils_poll"] {
+            output.lock().unwrap().clear();
+            let request =
+                json!({"kind":kind,"name":"script","args":["AP8="],"stdin":"AP8=","id":"run"});
+            let client_ctx = ctx.clone();
+            let sent = request.clone();
+            let client = thread::spawn(move || call(&client_ctx.state, &client_ctx.path, sent));
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let envelope = loop {
+                if let Ok(value) = serde_json::from_slice::<Value>(&output.lock().unwrap()) {
+                    break value;
+                }
+                assert!(
+                    !client.is_finished(),
+                    "Utility rejected before forwarding: {:?}",
+                    client.join().unwrap()
+                );
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(envelope["request"], request);
+            let result = json!({"ok":true,"done":true,"stdout":"AP8=","stderr":"","code":37});
+            relay.receive(json!({"id":envelope["id"],"result":result}));
+            assert_eq!(client.join().unwrap().unwrap(), result);
+        }
+        drop(relay);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
