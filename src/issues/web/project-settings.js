@@ -33,7 +33,7 @@ function addPromptEditors(sections) {
     $("#project-" + group + "-prompts").append(branch);
   }
 }
-let projectSettingsTab = "instructions";
+let projectSettingsTab = "configuration";
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -54,6 +54,8 @@ function selectProjectSettingsTab(tab, focus = false) {
   document.getElementById(tab.getAttribute("aria-controls")).scrollTop = 0;
   $(".settings-preview").scrollTop = 0;
   projectSettingsTab = tab.id.replace('settings-tab-', '');
+  $(".project-settings-body").dataset.settingsTab = projectSettingsTab;
+  $(".settings-preview").hidden = projectSettingsTab === "configuration";
   $(".project-settings-body").scrollTop = 0;
   updateWorkflowBranches();
   if (projectSettingsOriginal) previewProjectInstructions();
@@ -93,6 +95,8 @@ function projectSettingsDraft() {
     prompt_overrides: {layout: projectPromptLayout, ...Object.fromEntries(workflowPromptKeys.map(key => [key, $("#project-prompt-" + key).value.trim() ? $("#project-prompt-" + key).value : null]))},
     prs_enabled: $("#project-prs").checked,
     drafts_enabled: $("#project-drafts").checked,
+    artifacts_enabled: $("#project-artifacts").checked,
+    mindmaps_enabled: $("#project-mindmaps").checked,
     plan_template: $("#project-plan-template").value,
   };
 }
@@ -148,7 +152,7 @@ $("#project-settings-trigger").onclick = async () => {
       input.value = value.prompt_overrides[key] ?? "";
       input.placeholder = projectPromptDefaults[key];
     }
-    $("#project-drafts").checked = value.drafts_enabled;
+    for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
     $("#project-plan-template").value = value.plan_template;
     projectSettingsOriginal = projectSettingsDraft();
     setProjectSettingsDisabled(false);
@@ -210,6 +214,10 @@ function previewProjectInstructions() {
   const sequence = ++projectPreviewSequence,
     project = projectSettingsProject,
     draft = projectSettingsDraft();
+  if (projectSettingsTab === "configuration") {
+    $("#project-instructions-preview").setAttribute("aria-busy", "false");
+    return;
+  }
   $("#project-instructions-preview").setAttribute("aria-busy", "true");
   projectPreviewTimer = setTimeout(async () => {
     try {
@@ -265,7 +273,7 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
   });
 }
 
-$("#project-drafts").onchange = projectSettingsChanged;
+for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;

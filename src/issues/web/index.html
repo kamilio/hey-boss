@@ -358,12 +358,31 @@
           </button>
         </div>
         <div class="project-settings-tabs" role="tablist" aria-label="Project settings">
-          <button type="button" role="tab" id="settings-tab-instructions" aria-controls="settings-panel-instructions" aria-selected="true" tabindex="0">Instructions</button>
+          <button type="button" role="tab" id="settings-tab-configuration" aria-controls="settings-panel-configuration" aria-selected="true" tabindex="0">Configuration</button>
+          <button type="button" role="tab" id="settings-tab-instructions" aria-controls="settings-panel-instructions" aria-selected="false" tabindex="-1">Instructions</button>
           <button type="button" role="tab" id="settings-tab-planning" aria-controls="settings-panel-planning" aria-selected="false" tabindex="-1">Planning</button>
           <button type="button" role="tab" id="settings-tab-workflow" aria-controls="settings-panel-workflow" aria-selected="false" tabindex="-1">Workflow</button>
         </div>
         <div class="project-settings-body">
-          <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0">
+          <div id="settings-panel-configuration" role="tabpanel" aria-labelledby="settings-tab-configuration" tabindex="0">
+            <div class="project-configuration-grid">
+              <section class="settings-section configuration-card"><h3>Workflow</h3><p class="field-help">Choose how this project handles code changes.</p>
+                <label class="draft-choice"><input type="checkbox" id="project-prs" aria-describedby="project-prs-help" /><span><strong>Use pull requests</strong><span id="project-prs-help">Use pull request instructions when delivering changes. When off, use the direct-push instructions in Workflow.</span></span></label>
+                <label class="draft-choice"><input type="checkbox" id="project-worktree" aria-describedby="project-worktree-help" /><span><strong>Allow worktrees</strong><span id="project-worktree-help">Workers use the existing checkout by default. Enable this to let workers choose a dedicated worktree for new tasks.</span></span></label>
+              </section>
+              <section class="settings-section configuration-card"><h3>Project resources</h3><p class="field-help">Turn off creation for resources this project does not use. Existing content stays available.</p>
+                <label class="draft-choice"><input type="checkbox" id="project-drafts" aria-describedby="project-drafts-help" /><span><strong>Allow draft issues</strong><span id="project-drafts-help">Keep work as drafts before it is ready for agents. Existing drafts can still be marked ready.</span></span></label>
+                <label class="draft-choice"><input type="checkbox" id="project-artifacts" aria-describedby="project-artifacts-help" /><span><strong>Allow artifacts</strong><span id="project-artifacts-help">Create documents for plans, notes, and decisions. Existing documents remain editable.</span></span></label>
+                <label class="draft-choice"><input type="checkbox" id="project-mindmaps" aria-describedby="project-mindmaps-help" /><span><strong>Allow mindmaps</strong><span id="project-mindmaps-help">Create mindmap nodes to organize ideas and relationships. Existing nodes remain available.</span></span></label>
+              </section>
+              <section class="settings-section configuration-card configuration-planning"><h3>Terminal planning</h3>
+                <label class="field-label" for="project-plan-template">Plan file template</label>
+              <input class="text-input" id="project-plan-template" aria-describedby="plan-template-help" />
+              <p class="field-help" id="plan-template-help">Used for terminal planning with --interactive. File changes sync to the linked issue. Choose a repository-relative path with {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
+              </section>
+            </div>
+          </div>
+          <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0" hidden>
 <section class="settings-section" aria-labelledby="settings-base-title">
               <h3 id="settings-base-title">Implementation</h3>
               <p class="field-help" id="project-prompt-live-help">Saving prompt edits also updates running agents that use these instructions, including connected devices. They keep their progress and session. Workspace and delivery instructions are added automatically.</p>
@@ -383,18 +402,11 @@
                 <div class="branch-footer"><span id="project-source-plan">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="plan">Use default</button></div>
               </div>
             </section>
-<section class="settings-section planning-settings" aria-labelledby="settings-drafts-title"><h3 id="settings-drafts-title">Drafts &amp; planning</h3>
-              <label class="draft-choice"><input type="checkbox" id="project-drafts" aria-describedby="project-drafts-help" /><span><strong>Allow draft issues</strong><span id="project-drafts-help">Keep work in the project before it is ready for agents. Existing drafts stay saved when this is turned off and can still be marked ready.</span></span></label>
-              <label class="field-label" for="project-plan-template">Plan file template</label>
-              <input class="text-input" id="project-plan-template" aria-describedby="plan-template-help" />
-              <p class="field-help" id="plan-template-help">Used for terminal planning with --interactive. File changes sync to the linked issue. Choose a repository-relative path with {timestamp}, {number}, or {year}, {month}, {day}, {hour}, {minute}, {second}.</p>
-            </section>
+
           </div>
           <div id="settings-panel-workflow" role="tabpanel" aria-labelledby="settings-tab-workflow" tabindex="0" hidden>
 <section class="settings-section" aria-labelledby="settings-workspace-title">
- <div class="settings-section-heading"><div><h3 id="settings-workspace-title">Workspace</h3><p class="field-help">Allow workers to choose a dedicated worktree or the existing checkout.</p></div>
- <label class="workflow-toggle"><input type="checkbox" id="project-worktree" aria-describedby="project-worktree-help" /><span>Allow worktrees</span></label></div>
- <p class="field-help" id="project-worktree-help">Workers use the existing checkout by default. When allowed, --worktree selects a dedicated worktree. Turning this off prevents workers from using worktrees for new tasks.</p>
+ <h3 id="settings-workspace-title">Workspace</h3>
  <p class="field-help">Use <code>{{worktree_name}}</code> for the matching branch and directory name, or <code>{{worktree_path}}</code> for its path beside the checkout. Names use the project, up to 15 characters of the issue title, and the issue number. Retries reuse the same worktree.</p>
  <div class="workflow-branches"><div class="workflow-branch" data-branch="worktree"><div class="branch-heading"><label for="project-prompt-worktree"><small>Worker uses --worktree</small><strong>Dedicated worktree</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-worktree" rows="3" maxlength="32000" aria-describedby="project-source-worktree"></textarea>
@@ -402,8 +414,7 @@
   <textarea class="text-input workflow-prompt" id="project-prompt-checkout" rows="3" maxlength="32000" aria-describedby="project-source-checkout"></textarea>
   <div class="branch-footer"><span id="project-source-checkout">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="checkout">Use default</button></div></div></div></section>
 <section class="settings-section" aria-labelledby="settings-delivery-title">
- <div class="settings-section-heading"><div><h3 id="settings-delivery-title">Delivery</h3><p class="field-help">Choose how agents publish their changes.</p></div>
- <label class="workflow-toggle"><input type="checkbox" id="project-prs" /><span>Use pull requests</span></label></div>
+ <h3 id="settings-delivery-title">Delivery</h3>
  <div class="workflow-branches"><div class="workflow-branch" data-branch="prs"><div class="branch-heading"><label for="project-prompt-prs"><small>If pull requests are enabled</small><strong>Open pull requests</strong></label><span class="branch-state">Inactive</span></div>
   <textarea class="text-input workflow-prompt" id="project-prompt-prs" rows="3" maxlength="32000" aria-describedby="project-source-prs"></textarea>
   <div class="branch-footer"><span id="project-source-prs">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="prs">Use default</button></div></div><div class="workflow-branch" data-branch="main"><div class="branch-heading"><label for="project-prompt-main"><small>Otherwise</small><strong>Push to main</strong></label><span class="branch-state">Inactive</span></div>

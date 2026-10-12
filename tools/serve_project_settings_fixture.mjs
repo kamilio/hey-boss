@@ -26,7 +26,7 @@ const server = createServer((req, res) => {
       window.saved = []; window.failSave = false; window.failLoad = false;
       window.fixtureSettings = {version:1,prompt:'Fixture implementation',chief_prompt:'Fixture chief',
         chief_default_prompt:'Fixture chief',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
-        drafts_enabled:true,plan_template:'plans/{number}.md',
+        drafts_enabled:true,artifacts_enabled:true,mindmaps_enabled:true,plan_template:'plans/{number}.md',
         prompt_defaults:${JSON.stringify(promptDefaults)},prompt_sections:${JSON.stringify(Object.keys(promptDefaults).map(key => ({key,title:key,help:'Fixture prompt section'})))},prompt_overrides:{chief_wrapper:'Legacy {{project}} wrapper: {{prompt}}'}};
       async function api(request) {
         if (request.action === 'project_settings') {
@@ -44,4 +44,5 @@ const server = createServer((req, res) => {
       }
     </script><script src="/project-settings.js"></script></html>`);
 });
-server.listen(59642, '127.0.0.1', () => console.log('Settings fixture: http://127.0.0.1:59642'));
+const port = Number(process.env.HEY_BOSS_SETTINGS_FIXTURE_PORT || 59642);
+server.listen(port, '127.0.0.1', () => console.log(`Settings fixture: http://127.0.0.1:${port}`));

@@ -115,7 +115,7 @@
     container.innerHTML = html; detailsHTML = html; detailsArtifacts = artifacts; detailsNode = node.id;
     if (!automaticPr) {
       HeyBossAttachments.mount($("#node-attachments"), {project:node.project_id,target:{kind:"node",id:node.id},csrf});
-      HeyBossArtifacts.mount($("#node-artifacts"), {project:node.project_id,node:node.id,csrf,artifacts:node.artifacts || []});
+      HeyBossArtifacts.mount($("#node-artifacts"), {project:node.project_id,node:node.id,csrf,artifacts:node.artifacts || [],artifacts_enabled:node.project_id===graph.project.id?graph.artifacts_enabled:undefined});
     }
     if (!same) container.scrollTop = 0;
     restoreFocus(container, focus);
