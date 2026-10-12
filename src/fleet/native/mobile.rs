@@ -439,7 +439,12 @@ impl Mobile {
         let status = super::local_request(&self.ctx, json!({"kind":"overview"}))?;
         let mut machines = vec![];
         for m in status["machines"].as_array().into_iter().flatten() {
-            let workers=m["workers"].as_array().into_iter().flatten().map(|w|json!({"id":w["id"],"pid":w["pid"],"managed":w["managed"],"retiring":w["retiring"],"desired_concurrency":w["desired_concurrency"],"intent":w["intent"],"active":w["active"],"free":w["free"],"eligible":w["eligible"],"error":w["error"],"retry_at":w["retry_at"],"config":{"provider":w["config"]["provider"],"name":w["config"]["name"],"enabled":w["config"]["enabled"],"concurrency":w["config"]["concurrency"],"projects":w["config"]["projects"],"directory":w["config"]["directory"],"directories":w["config"]["directories"]},"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})).collect::<Vec<_>>();
+            let workers = m["workers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|w| mobile_worker(w, visible))
+                .collect::<Vec<_>>();
             machines.push(json!({"host":m["host"],"hostname":m["hostname"],"state":m["state"],"heartbeat":m["heartbeat"],"desired_revision":m["desired_revision"],"applied_revision":m["applied_revision"],"configuration_error":m["configuration_error"],"projects":m["projects"],"project_retries":m["project_retries"],"workspace":m["workspace"],"workers":workers}));
         }
         self.call(
@@ -579,8 +584,23 @@ pub(super) fn run(ctx: Context) {
     let _ = web_bridge.join();
 }
 
+fn mobile_worker(w: &Value, visible: &BTreeSet<String>) -> Value {
+    json!({"id":w["id"],"pid":w["pid"],"managed":w["managed"],"retiring":w["retiring"],"desired_concurrency":w["desired_concurrency"],"intent":w["intent"],"active":w["active"],"job_active":w["job_active"],"free":w["free"],"eligible":w["eligible"],"error":w["error"],"retry_at":w["retry_at"],"config":{"provider":w["config"]["provider"],"name":w["config"]["name"],"enabled":w["config"]["enabled"],"concurrency":w["config"]["concurrency"],"projects":w["config"]["projects"],"directory":w["config"]["directory"],"directories":w["config"]["directories"]},"runs":w["runs"].as_array().into_iter().flatten().filter(|r|visible.contains(r["project_id"].as_str().unwrap_or(""))).collect::<Vec<_>>()})
+}
+
 #[cfg(test)]
 mod web_tests {
+    #[test]
+    fn mobile_preserves_jobs_separately_from_task_capacity() {
+        let worker = super::mobile_worker(
+            &serde_json::json!({"id":"worker","active":0,"job_active":2,"free":1,"runs":[{"project_id":"hidden"}]}),
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(worker["job_active"], 2);
+        assert_eq!(worker["active"], 0);
+        assert_eq!(worker["free"], 1);
+        assert!(worker["runs"].as_array().unwrap().is_empty());
+    }
     use super::*;
     #[test]
     fn web_operations_keep_desktop_restrictions() {

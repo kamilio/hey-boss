@@ -70,6 +70,7 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
                                 "pid",
                                 "build",
                                 "active",
+                                "job_active",
                                 "free",
                                 "eligible",
                                 "upgrading",
@@ -92,6 +93,21 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
         })
         .unwrap_or(Value::Null);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn summary_preserves_jobs_separately_from_task_capacity() {
+        let workers = vec![
+            json!({"id":"worker","active":0,"job_active":2,"free":1,"config":{"concurrency":1}}),
+        ];
+        let summary = machine(&json!({"host":"local"}), Some(&workers));
+        assert_eq!(summary["workers"][0]["job_active"], 2);
+        assert_eq!(summary["workers"][0]["active"], 0);
+        assert_eq!(summary["workers"][0]["free"], 1);
+    }
 }
 
 impl Supervisor {
