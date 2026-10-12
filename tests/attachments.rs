@@ -40,6 +40,153 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn issue_views_and_lookup_expose_readable_attachment_paths_locally_and_over_ssh() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+    let server = Fixture::new("view-server");
+    let client = Fixture::new("view-client");
+    let mut store = server.store();
+    call(
+        &mut store,
+        json!({"action":"create","title":"When disabling job","body":"","labels":[]}),
+    );
+    let bytes = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j8x8AAAAASUVORK5CYII=").unwrap();
+    let uploaded = files(
+        &mut store,
+        json!({"command":"upload","target":{"kind":"issue","id":"1"},"name":"Pasted image.png","data":STANDARD.encode(&bytes)}),
+    );
+    let id = uploaded["attachment"]["id"].as_str().unwrap();
+    std::fs::write(client.0.join("ssh"), "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$ATTACHMENT_SERVER_DB\"\nexec \"$ATTACHMENT_TEST_BINARY\" issue rpc\n").unwrap();
+    std::fs::set_permissions(client.0.join("ssh"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let cli = |args: &[&str], remote: bool| {
+        let binary = env!("CARGO_BIN_EXE_hey-boss");
+        let output = Command::new(binary)
+            .args(args)
+            .env(
+                "HEY_BOSS_ISSUE_DB",
+                if remote {
+                    client.0.join("issues.db")
+                } else {
+                    server.0.join("issues.db")
+                },
+            )
+            .env("HEY_BOSS_ISSUE_PROJECT", "named:Files")
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env("ATTACHMENT_TEST_BINARY", binary)
+            .env("ATTACHMENT_SERVER_DB", server.0.join("issues.db"))
+            .env(
+                "PATH",
+                format!("{}:{}", client.0.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    for remote in [false, true] {
+        let scope: &[&str] = if remote {
+            &["--host", "files.test"]
+        } else {
+            &[]
+        };
+        let mut previous = None;
+        for command in [
+            vec!["issue", "view", "1"],
+            vec!["issue", "view", "1", "--compact"],
+            vec![
+                "lookup",
+                "http://hey-boss.test/#project=named%3AFiles&issue=1",
+            ],
+        ] {
+            let mut args = command;
+            args.extend_from_slice(scope);
+            args.push("--json");
+            let value: Value = serde_json::from_str(&cli(&args, remote)).unwrap();
+            assert_eq!(
+                value["attachments"].as_array().map(Vec::len),
+                Some(1),
+                "{value}"
+            );
+            let file = &value["attachments"][0];
+            assert_eq!(file["id"], id);
+            assert_eq!(file["name"], "Pasted image.png");
+            let path = std::path::PathBuf::from(file["path"].as_str().expect("attachment path"));
+            assert!(path.is_absolute());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert!(
+                path.starts_with(
+                    if remote { &client.0 } else { &server.0 }
+                        .canonicalize()
+                        .unwrap()
+                )
+            );
+            if let Some(previous) = &previous {
+                assert_eq!(&path, previous, "reuse the same local file");
+            }
+            previous = Some(path.clone());
+            args.pop();
+            if !args.contains(&"--compact") {
+                let text = cli(&args, remote);
+                assert!(text.contains("Pasted image.png"), "{text}");
+                assert!(text.contains(path.to_str().unwrap()), "{text}");
+            }
+            assert_eq!(value["issue"]["version"], 1);
+        }
+    }
+    files(&mut store, json!({"command":"remove","id":id}));
+    let value: Value = serde_json::from_str(&cli(
+        &["issue", "view", "1", "--host", "files.test", "--json"],
+        true,
+    ))
+    .unwrap();
+    assert_eq!(
+        value["attachments"],
+        json!([]),
+        "a cached file must not resurrect a removed attachment"
+    );
+    let broken = files(
+        &mut store,
+        json!({"command":"upload","target":{"kind":"issue","id":"1"},"name":"Missing image.png","data":STANDARD.encode(&bytes)}),
+    );
+    std::fs::remove_file(
+        server
+            .0
+            .join("issues.attachments")
+            .join(broken["attachment"]["id"].as_str().unwrap()),
+    )
+    .unwrap();
+    let value: Value =
+        serde_json::from_str(&cli(&["issue", "view", "1", "--json"], false)).unwrap();
+    assert_eq!(value["attachments"].as_array().unwrap().len(), 1);
+    assert_eq!(value["attachments_complete"], false);
+    assert!(value["attachments"][0]["path"].is_null());
+    assert!(value["attachments"][0]["error"].is_string());
+    let text = cli(&["issue", "view", "1"], false);
+    assert!(
+        text.contains("Missing image.png") && text.contains("Unavailable:"),
+        "{text}"
+    );
+    std::fs::write(client.0.join("ssh"), "#!/bin/sh\nbody=$(cat)\ncase \"$body\" in\n  *'\"action\":\"attachment\"'*) printf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"fleet_unavailable\",\"message\":\"Attachment service offline\"}}'; exit 0;;\nesac\nexport HEY_BOSS_ISSUE_DB=\"$ATTACHMENT_SERVER_DB\"\nprintf '%s\\n' \"$body\" | \"$ATTACHMENT_TEST_BINARY\" issue rpc\n").unwrap();
+    let value: Value = serde_json::from_str(&cli(
+        &["issue", "view", "1", "--host", "files.test", "--json"],
+        true,
+    ))
+    .unwrap();
+    assert_eq!(value["issue"]["title"], "When disabling job");
+    assert!(value["attachments"].is_null());
+    assert_eq!(value["attachments_complete"], false);
+    assert_eq!(value["attachments_error"], "Attachment service offline");
+    let text = cli(&["issue", "view", "1", "--host", "files.test"], true);
+    assert!(
+        text.contains("Attachments unavailable: Attachment service offline"),
+        "{text}"
+    );
+}
+
+#[test]
 fn files_are_disk_backed_project_scoped_and_survive_restart_for_all_targets() {
     let f = Fixture::new("targets");
     let mut s = f.store();
