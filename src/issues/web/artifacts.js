@@ -157,9 +157,10 @@ const HeyBossArtifacts = (() => {
   function mount(root,context) {
     if(!root)return;
     const render = artifacts => {
+      root.hidden=context.artifacts_enabled===false && !artifacts.length;
       root.classList.add("artifact-relationship");
       root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a>${mobile?"":`<button type="button" data-open-native="${esc(a.id)}" aria-label="Edit ${esc(a.title)} in native editor" title="Edit in native editor">${HeyBossUI.icon("edit")}</button>`}<button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a data-create-artifact class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
-      $("[data-create-artifact]",root).hidden=context.artifacts_enabled===false;
+      $(".artifact-attachment-actions",root).hidden=context.artifacts_enabled===false;
       const error=e=>{const p=$("[role=alert]",root);p.hidden=false;p.textContent=e.message;};
       const target=context.issue?{issue:context.issue}:{node:context.node};
       root.querySelectorAll("[data-open-native]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await openNative(context,{id:b.dataset.openNative});}catch(e){error(e);}finally{b.disabled=false;}});
@@ -631,7 +632,7 @@ const HeyBossArtifacts = (() => {
         },15000);
       }
       HeyBossAttachments.mount($("#resource-attachments"),{...context,target:{kind:issue?"issue":"node",id:issue?String(issue):resource.id},readonly:!!resource.deleted_at});
-      mount($("#resource-artifacts"),{...context,...(issue?{issue:Number(issue)}:{node:resource.id}),artifacts:links.artifacts});
+      mount($("#resource-artifacts"),{...context,...(issue?{issue:Number(issue)}:{node:resource.id}),artifacts:links.artifacts,artifacts_enabled:links.artifacts_enabled});
       $("#resource-status").textContent="";
     }catch(e){if(ticket===resourceGeneration)$("#resource-status").textContent=e.message;}
   }

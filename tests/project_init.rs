@@ -515,6 +515,15 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
     let saved = f.json(&init);
     assert_eq!(saved["artifacts_enabled"], false);
     assert_eq!(saved["mindmaps_enabled"], false);
+    let listed = f.json(&["issue", "--project", "Resources", "--json", "projects"]);
+    let resource = listed["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "named:Resources")
+        .unwrap();
+    assert_eq!(resource["artifacts_enabled"], false);
+    assert_eq!(resource["mindmaps_enabled"], false);
     let text = f.run(&["issue", "--project", "Resources", "settings", "show"]);
     assert!(text.status.success());
     let text = String::from_utf8(text.stdout).unwrap();
@@ -548,6 +557,17 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         "false",
         "--json",
     ]);
+    assert_eq!(other["artifacts_enabled"], true);
+    assert_eq!(other["mindmaps_enabled"], true);
+    let listed = f.json(&["issue", "--project", "Other", "--json", "projects"]);
+    let projects = listed["projects"].as_array().unwrap();
+    let resource = projects
+        .iter()
+        .find(|p| p["id"] == "named:Resources")
+        .unwrap();
+    assert_eq!(resource["artifacts_enabled"], true);
+    assert_eq!(resource["mindmaps_enabled"], false);
+    let other = projects.iter().find(|p| p["id"] == "named:Other").unwrap();
     assert_eq!(other["artifacts_enabled"], true);
     assert_eq!(other["mindmaps_enabled"], true);
 }

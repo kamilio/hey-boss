@@ -22,7 +22,7 @@ const server = createServer((req, res) => {
       const $ = selector => document.querySelector(selector);
       const model = {project:{id:'fixture',name:'Settings fixture'}};
       const detailCache = new Map();
-      const renderRoute = async () => {}, updateHeader = () => {}, toast = () => {};
+      const refreshProjects = async () => {}, renderRoute = async () => {}, updateHeader = () => {}, toast = () => {};
       window.saved = []; window.failSave = false; window.failLoad = false;
       window.fixtureSettings = {version:1,prompt:'Fixture implementation',chief_prompt:'Fixture chief',
         chief_default_prompt:'Fixture chief',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
