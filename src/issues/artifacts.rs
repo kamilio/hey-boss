@@ -19,6 +19,57 @@ fn row(r: &crate::database::Row<'_>) -> rusqlite::Result<Value> {
         json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?,"version":r.get::<_,i64>(3)?,"archived":r.get::<_,bool>(4)?,"created_at":r.get::<_,i64>(5)?,"updated_at":r.get::<_,i64>(6)?}),
     )
 }
+
+// The list query supplies only a small prefix, never a whole document. Parse it
+// as Markdown so links, formatting and front matter don't leak into the excerpt.
+fn preview(source: &str, title: &str) -> String {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let mut text = String::new();
+    let mut heading = String::new();
+    let mut in_heading = false;
+    let mut skip = false;
+    for event in Parser::new_ext(source, crate::markdown::parser_options()) {
+        match event {
+            Event::Start(Tag::MetadataBlock(_) | Tag::CodeBlock(_)) => skip = true,
+            Event::End(TagEnd::MetadataBlock(_) | TagEnd::CodeBlock) => skip = false,
+            _ if skip => continue,
+            Event::Start(Tag::Heading { .. }) => {
+                in_heading = true;
+                heading.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if !heading.trim().eq_ignore_ascii_case(title.trim()) {
+                    text.push_str(&heading);
+                    text.push(' ');
+                }
+                in_heading = false;
+            }
+            Event::Text(value) | Event::Code(value) => {
+                if in_heading {
+                    heading.push_str(&value);
+                } else {
+                    text.push_str(&value);
+                }
+            }
+            Event::SoftBreak
+            | Event::HardBreak
+            | Event::End(TagEnd::Paragraph | TagEnd::Item | TagEnd::TableCell) => text.push(' '),
+            _ => {}
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= 240 {
+        return text;
+    }
+    let mut short: String = text.chars().take(240).collect();
+    if let Some(boundary) = short.rfind(char::is_whitespace)
+        && short[boundary..].chars().count() < 30
+    {
+        short.truncate(boundary);
+    }
+    short.push('…');
+    short
+}
 pub(super) fn get(db: &Connection, p: &str, id: &str) -> Result<Value> {
     let mut artifact = db.query_row("SELECT id,title,body,version,archived,created_at,updated_at FROM artifacts WHERE project_id=?1 AND id=?2",params![p,id],row).optional()?.ok_or_else(||Error::new("not_found","Artifact not found in this project"))?;
     let origin: Option<String> = db.query_row(
@@ -202,7 +253,7 @@ pub(super) fn execute(
             archived,
             offset,
         } => {
-            let mut stmt=db.prepare("SELECT id,title,'',version,archived,created_at,updated_at FROM artifacts WHERE project_id=?1 AND archived=?2 AND (?3='' OR instr(lower(title),lower(?3))>0 OR instr(lower(body),lower(?3))>0) ORDER BY updated_at DESC,id LIMIT 51 OFFSET ?4")?;
+            let mut stmt=db.prepare("SELECT id,title,'',version,archived,created_at,updated_at,substr(body,1,4096) FROM artifacts WHERE project_id=?1 AND archived=?2 AND (?3='' OR instr(lower(title),lower(?3))>0 OR instr(lower(body),lower(?3))>0) ORDER BY updated_at DESC,id LIMIT 51 OFFSET ?4")?;
             let mut rows = stmt
                 .query_map(
                     params![
@@ -211,7 +262,14 @@ pub(super) fn execute(
                         query.as_deref().unwrap_or(""),
                         *offset as i64
                     ],
-                    row,
+                    |r| {
+                        let mut value = row(r)?;
+                        value["preview"] = json!(preview(
+                            &r.get::<_, String>(7)?,
+                            value["title"].as_str().unwrap()
+                        ));
+                        Ok(value)
+                    },
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let more = rows.len() > 50;
@@ -475,6 +533,23 @@ pub(super) fn execute_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_skip_non_prose_and_preserve_inline_text() {
+        assert_eq!(
+            preview("# Only a title\n\n```rust\nlet x = 1;\n```", "Only a title"),
+            ""
+        );
+        assert_eq!(
+            preview(
+                "<script>alert(1)</script>\n\n## Decisions\n\n- **Ship** &amp; learn\n- Keep `a<b` readable",
+                "Plan"
+            ),
+            "Decisions Ship & learn Keep a<b readable"
+        );
+        assert_eq!(preview("  \n\t", "Empty"), "");
+        assert_eq!(preview(&"界".repeat(400), "Unicode").chars().count(), 241);
+    }
 
     #[test]
     fn map_documents_batch_selected_nodes_without_scanning_other_cards() {
