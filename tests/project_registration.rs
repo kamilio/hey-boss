@@ -412,13 +412,19 @@ fn named_checkout_binding_separates_projects_sharing_a_repository() {
 }
 
 #[test]
-fn worktree_marker_overrides_the_shared_checkout_binding() {
+fn checkout_markers_do_not_change_other_worktrees() {
     let f = Fixture::new();
     let repo = f.root.join("repo");
-    let linked = f.root.join("linked");
+    let linked = repo.join(".worktrees/linked");
     fs::create_dir(&repo).unwrap();
     for args in [
         vec!["init", "-q"],
+        vec![
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/poe2.git",
+        ],
         vec![
             "-c",
             "user.name=QA",
@@ -456,10 +462,8 @@ fn worktree_marker_overrides_the_shared_checkout_binding() {
         ],
     )["project"]
         .clone();
-    assert_eq!(
-        f.json(&linked, &["issue", "list", "--json"])["project"],
-        main
-    );
+    assert_eq!(f.init(&linked)["project"]["id"], "github.com/example/poe2");
+    assert!(!linked.join(".hey-boss").exists());
     let legacy = f.json(
         &linked,
         &[
@@ -480,6 +484,26 @@ fn worktree_marker_overrides_the_shared_checkout_binding() {
         f.json(&linked, &["issue", "list", "--json"])["project"],
         legacy
     );
+    assert_eq!(f.json(&repo, &["issue", "list", "--json"])["project"], main);
+    assert_eq!(
+        f.json(
+            &linked,
+            &[
+                "project",
+                "init",
+                "--project",
+                "github.com/example/poe2",
+                "--yes",
+                "--prs",
+                "true",
+                "--worktree",
+                "true",
+                "--json"
+            ]
+        )["project"]["id"],
+        "github.com/example/poe2"
+    );
+    assert!(!linked.join(".hey-boss").exists());
     assert_eq!(f.json(&repo, &["issue", "list", "--json"])["project"], main);
     // Broken bindings must never silently redirect a command to the other project.
     fs::write(linked.join(".hey-boss"), "broken").unwrap();
