@@ -55,11 +55,11 @@ falls back to a replica mutation.
 Guarded `issue reopen NUMBER --supervisor --request-id ID`
 uses the same tunnel when `issue_reopen` is advertised. It requires unassigned,
 unreserved work with no unfinished attempt. Unresolved dependencies remain
-blocked; see [Chief reopen guards](chief-metadata-routing.md) for manual holds
+blocked; see [Supervisor reopen guards](supervisor-metadata-routing.md) for manual holds
 and retry behavior.
 
 Title, body and label edits use the explicit `--supervisor` route described in
-[Chief metadata routing](chief-metadata-routing.md). That route also supports
+[Supervisor metadata routing](supervisor-metadata-routing.md). That route also supports
 drafting. Ordinary reads remain local
 replica snapshots, which can lag behind the authoritative store.
 

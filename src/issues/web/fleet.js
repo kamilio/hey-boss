@@ -31,23 +31,15 @@ function projectView(data, now = Date.now()) {
   const groups = new Map();
   for (const machine of data.machines || []) {
     const online = machine.state === 'connected' && now / 1000 - (machine.heartbeat || 0) <= 15;
-    for (const worker of machine.workers || []) for (const run of [...(worker.runs || []), ...(worker.chiefs || [])]) {
+    for (const worker of machine.workers || []) for (const run of worker.runs || []) {
+      if (run.kind === 'chief') continue;
       const id = run.project_id;
-      if (!groups.has(id)) groups.set(id, {id, name: run.project_name || id || 'Project', active: [], history: [], chiefs: []});
+      if (!groups.has(id)) groups.set(id, {id, name: run.project_name || id || 'Project', active: [], history: []});
       const entry = {run, machine, worker, online: online && worker.pid > 0};
-      groups.get(id)[run.kind === 'chief' ? 'chiefs' : run.finished_at == null ? 'active' : 'history'].push(entry);
+      groups.get(id)[run.finished_at == null ? 'active' : 'history'].push(entry);
     }
   }
   return [...groups.values()].sort((a,b) => Number(b.active.length > 0) - Number(a.active.length > 0) || a.name.localeCompare(b.name));
-}
-function chiefState(entry, now = Date.now()) {
-  if (!entry.online) return entry.worker.pid > 0 ? 'Device disconnected' : 'Worker stopped';
-  if (entry.run.state === 'running') return entry.run.queued || entry.run.next_at <= now ? 'Running · 1 queued' : 'Running';
-  if (entry.run.enabled === false) return 'Disabled';
-  if (entry.worker.config?.enabled === false) return 'Paused';
-  const minutes = Math.max(0, Math.ceil((entry.run.next_at - now) / 60000));
-  if (['blocked','failed'].includes(entry.run.state)) return retryLabel({retry_at:entry.run.next_at}, now);
-  return 'Waiting · ' + (minutes ? `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left` : 'Due now');
 }
 function infrastructureLabel(run) {
   return ['GitHub quota exhausted', 'GitHub authentication failed', 'GitHub permission denied', 'GitHub request failed', 'Worker environment check failed', 'Database service unavailable', 'Model proxy unavailable', 'Approval service unavailable'].find(label => (run.summary || '').startsWith(label)) || 'Infrastructure unavailable';
@@ -69,7 +61,6 @@ function retryLabel(run, now = Date.now()) {
 function agentState(entry) {
   if (entry.run.state === 'attempt_held') return 'Task attempt protected';
   if (!entry.online && entry.run.finished_at == null) return 'Last seen';
-  if (entry.run.kind === 'chief') return entry.run.state === 'running' ? 'Running' : entry.run.state === 'idle' ? 'Completed' : ['failed','blocked'].includes(entry.run.state) ? 'Failed' : 'Stopped';
   if (entry.run.retry_at != null) return retryLabel(entry.run);
   if (entry.run.state === 'infrastructure_blocked') return infrastructureLabel(entry.run);
   return ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',blocked:'Needs attention',needs_input:'Needs your answer',approval_required:'Needs approval',interrupted:'Interrupted',failed:'Needs attention',stopped:'Stopped',cancelled:'Stopped',unclaimed:'Not started',timed_out:'Interrupted'})[entry.run.state] || 'Working';
@@ -184,7 +175,7 @@ function jobConversation(entry,data,now=Date.now()) {
   const machine=(data.machines||[]).find(m=>m.node===entry.run.machine||m.host===entry.machine.host);
   return {...entry,machine:machine||entry.machine,online:!!machine&&machine.state==='connected'&&now/1000-(machine.heartbeat||0)<=15};
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, chiefState, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
+if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -275,28 +266,10 @@ if (typeof document !== 'undefined') (() => {
       title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':holds.length?'Scheduled retries':'Recent work'));
       const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
       heading.append(title,issues);section.append(heading);
-      for(const entry of group.chiefs){
-        const {run,machine,worker}=entry;
-        const chief=element('section','chief-panel');
-        const top=element('div','chief-heading');
-        top.append(element('h3','','Chief'),element('span','agent-state '+(entry.online&&run.state==='running'?'is-live':'is-quiet'),chiefState(entry)));
-        const owner=element('p','chief-owner',(worker.config?.name||'Worker '+worker.id.slice(0,8))+' · '+(machine.hostname||machine.host));
-        chief.append(top,element('p','agent-model',runLabel(run)),owner);
-        if(run.started_at!=null){
-          const last=element('div','chief-last-pass');
-          const outcome=run.state==='running'?'Current pass':run.state==='idle'?'Last pass · Completed':['failed','blocked'].includes(run.state)?'Last pass · Failed':'Last pass · '+run.state;
-          const time=element('time','',new Date(run.finished_at??run.started_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}));time.dateTime=new Date(run.finished_at??run.started_at).toISOString();
-          last.append(element('span','',outcome),time);chief.append(last);
-          if(run.summary||run.last_event)chief.append(element('p','agent-preview',run.summary||run.last_event));
-        }
-        if(run.session_id){const a=element('a','chief-conversation',run.state==='running'?'Open conversation →':'Read last conversation →');a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;chief.append(a);}
-        section.append(chief);
-      }
       if(holds.length){section.append(element('h3','agents-section-label','Scheduled retries'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
-      if(group.active.length||group.chiefs.length)section.append(element('h3','agents-section-label','Active agents'));
+      if(group.active.length)section.append(element('h3','agents-section-label','Active agents'));
       if(group.active.length){const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);}
-      if(!group.active.length&&group.chiefs.length)section.append(element('p','chief-owner','No active issue agents.'));
-      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id)||(!group.active.length&&!group.chiefs.length&&!holds.length);section.append(history);}
+      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id)||(!group.active.length&&!holds.length);section.append(history);}
       return section;
     });
     if(!sections.length){const empty=element('section','agents-empty');empty.append(element('div','empty-orbit','✧'),element('h2','','Room for your next idea'),element('p','','When an agent picks up a task, its conversation will appear here.'));sections.push(empty);}
@@ -341,20 +314,19 @@ if (typeof document !== 'undefined') (() => {
     }
     function worker(entry,label,showLimit){
       const {worker:w,device:d,usage:u,phase}=entry;
-      const runs=(w.runs||[]).filter(r=>r.finished_at==null),chiefs=(w.chiefs||[]).filter(r=>r.state==='running');
+      const runs=(w.runs||[]).filter(r=>r.finished_at==null);
       const row=element('details','activity-worker');row.dataset.worker=w.id;row.dataset.key=d.machine.host+':worker:'+w.id;row.open=expanded.has(row.dataset.key);
       const summary=element('summary','activity-worker-summary');summary.dataset.focus=row.dataset.key;
       const identity=element('span','activity-worker-name');identity.append(element('strong','',label));
       const slots=showLimit?capacityControls(d.machine,w):element('span','activity-worker-slots',d.online?u.occupied+' running':'Last known');
       const current=element('span','activity-worker-current');
       if(runs.length){const line=element('span','activity-current-line');line.append(element('span','activity-current-title',(runs[0].number?'#'+runs[0].number+' · ':'')+(runs[0].title||'Working')+(runs.length>1?' · +'+(runs.length-1)+' more':'')),runtime(runs[0]));current.append(line,element('span','activity-current-note',activity(runs[0])));}
-      else current.append(element('span','activity-current-note',u.occupied?'Working · task details unavailable':chiefs.length?'Organizing project queue':u.available?'Waiting for a task':phase.note));
+      else current.append(element('span','activity-current-note',u.occupied?'Working · task details unavailable':u.available?'Waiting for a task':phase.note));
       summary.append(identity,element('span','worker-state is-'+phase.group,phase.label),slots,current);row.append(summary);
       const detail=element('div','activity-worker-detail');
       if(runs.length){const tasks=element('div','activity-tasks');for(const run of runs)tasks.append(task(run,entry));detail.append(tasks);}
       if(u.occupied>runs.length)detail.append(element('p','activity-note',(u.occupied-runs.length)+' more running agents; task details are unavailable.'));
       if(phase.group==='attention')detail.append(element('p','activity-note activity-problem',phase.note));
-      if(chiefs.length){const organizers=element('details','activity-organizers');organizers.dataset.key=row.dataset.key+':organizers';organizers.open=expanded.has(organizers.dataset.key);organizers.append(element('summary','','Organizers · outside agent slots'));for(const chief of chiefs)organizers.append(task(chief,entry));detail.append(organizers);}
       const footer=element('div','activity-worker-footer');
       footer.append(element('span','',u.running?[u.available?u.available+' available':null,u.paused?u.paused+' paused':null].filter(Boolean).join(' · '):(w.config?.projects||[]).map(projectLabel).join(', ')));
       const edit=element('a','','Worker settings →');edit.href='/workers#view=configuration&find='+encodeURIComponent(w.id);edit.dataset.focus=row.dataset.key+':settings';footer.append(edit);detail.append(footer,removalActions(d.machine,w));row.append(detail);return row;
@@ -378,7 +350,7 @@ if (typeof document !== 'undefined') (() => {
         const usage=group.entries.reduce((n,e)=>{n.occupied+=e.usage.occupied;n.capacity+=e.usage.capacity;return n;},{occupied:0,capacity:0});
         const current=group.entries.flatMap(e=>(e.worker.runs||[]).filter(r=>r.finished_at==null));
         summary.append(element('h3','',scopeLabel(group)),group.entries.length===1?capacityControls(d.machine,group.entries[0].worker):element('span','scope-worker-count','Agent limit: '+group.entries.reduce((n,e)=>n+workerLimitState(e.worker,d.machine).limit,0)),element('span','scope-usage',d.online?usage.occupied+' '+(usage.occupied===1?'agent':'agents')+' running':'Last known'));
-        const preview=current.length?(current[0].number?'#'+current[0].number+' · ':'')+(current[0].title||'Working')+(current.length>1?' · +'+(current.length-1)+' more tasks':''):usage.occupied?'Working · task details unavailable':group.entries.some(e=>e.phase.group==='attention')?'Needs attention':group.entries.some(e=>(e.worker.chiefs||[]).some(c=>c.state==='running'))?'Organizing project queue':group.entries.some(e=>e.usage.available)?'Waiting for a task':'Pickup paused';
+        const preview=current.length?(current[0].number?'#'+current[0].number+' · ':'')+(current[0].title||'Working')+(current.length>1?' · +'+(current.length-1)+' more tasks':''):usage.occupied?'Working · task details unavailable':group.entries.some(e=>e.phase.group==='attention')?'Needs attention':group.entries.some(e=>e.usage.available)?'Waiting for a task':'Pickup paused';
         const taskPreview=element('span','scope-current-task');taskPreview.append(element('span','scope-current-title',preview));if(current.length)taskPreview.append(runtime(current[0]));summary.append(taskPreview);scope.append(summary);
         const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','',group.entries.length===1?'Agents':'Agent limit'),element('span','','Current task · latest activity'));scope.append(labels);
         for(const entry of group.entries)scope.append(worker(entry,group.labels.get(entry.worker.id),group.entries.length>1));section.append(scope);
@@ -504,7 +476,7 @@ if (typeof document !== 'undefined') (() => {
       const facts=element('dl','worker-facts');
       for(const [key,value] of [['Desired state',({running:'Pick up tasks',pause:'Paused',stop:'Stopped',drain:'Drain and stop'})[w.intent]||'Unknown'],['Worker ID',w.id],['Working directory',w.config?.directory||'Discovered per project'],...Object.entries(w.config?.directories||{}).map(([p,v])=>[projectLabel(p),v])]){facts.append(element('dt','',key),element('dd','',value));}body.append(facts);
       const tasks=element('div','worker-tasks');
-      for(const run of [...(w.runs||[]),...(w.chiefs||[])].filter(r=>r.kind==='chief'?r.state==='running':r.finished_at==null)){const a=element('a','worker-task');a.href=link({machine:m,run});a.append(element('strong','',run.title||run.project_name||'Chief'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(a);}
+      for(const run of (w.runs||[]).filter(r=>r.kind!=='chief'&&r.finished_at==null)){const a=element('a','worker-task');a.href=link({machine:m,run});a.append(element('strong','',run.title||run.project_name||'Agent'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(a);}
       if(tasks.childNodes.length)body.append(element('h4','','Current tasks'),tasks);
       const actions=element('div','device-actions');
       for(const [signal,label] of w.retiring?[]:w.pid>0?[[w.config?.enabled?'pause':'resume',w.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']]){const b=element('button','button small',label);b.type='button';Object.assign(b.dataset,{signal,worker:w.id,host:m.host,focus:m.host+':'+w.id+':'+signal});actions.append(b);}
@@ -582,9 +554,9 @@ if (typeof document !== 'undefined') (() => {
         if(worker.error)row.append(element('p','device-note',worker.error));
         if(online&&running&&!active&&worker.config?.enabled&&worker.eligible===0)row.append(element('p','device-note','Waiting for eligible issues.'));
         const tasks=element('div','worker-tasks');
-        for(const run of [...(worker.runs||[]),...(worker.chiefs||[])].filter(r=>r.kind==='chief'?r.state==='running':r.finished_at==null)){
+        for(const run of (worker.runs||[]).filter(r=>r.kind!=='chief'&&r.finished_at==null)){
           const task=element('a','worker-task');task.href=link({machine,run});
-          task.append(element('strong','',run.title||run.project_name||'Chief'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(task);
+          task.append(element('strong','',run.title||run.project_name||'Agent'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(task);
         }
         if(tasks.childNodes.length)row.append(tasks);
       }
@@ -624,7 +596,7 @@ if (typeof document !== 'undefined') (() => {
       }
     }
     const resource=HeyBossRoutes.resolve();
-    selected=projectView(data).flatMap(p=>[...p.active,...p.history,...p.chiefs]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
+    selected=projectView(data).flatMap(p=>[...p.active,...p.history]).find(e=>resource?.entity==='agent'&&(e.machine.host===resource.host||e.machine.hostname===resource.host)&&e.run.id===resource.id);
     if(!selected&&resource?.entity==='agent'&&resource.project){
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
@@ -633,7 +605,7 @@ if (typeof document !== 'undefined') (() => {
     selected=jobConversation(selected,data);
     const {run,machine}=selected;
     document.title=(run.title||'Conversation')+' · Hey Boss';
-    $('session-title').textContent=run.kind==='chief'?'Chief · '+(run.project_name||'Organizing project'):run.title||'Preparing your task';
+    $('session-title').textContent=run.title||'Preparing your task';
     $('session-context').textContent=runLabel(run)+' · '+(run.project_name||'Project')+' · '+(machine.hostname||machine.host);
     $('session-state').replaceChildren(stateBadge(selected));
     $('session-issue').hidden=!run.number;
@@ -676,10 +648,10 @@ if (typeof document !== 'undefined') (() => {
   function renderTakeover() {
     if(!selected)return;
     const state=savedTakeover(selected), button=$('takeover-open');
-    button.hidden=selected.run.kind==='chief'||selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
+    button.hidden=selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
     button.disabled=takeoverBusy||steerBusy||!selected.online;
     button.textContent=state?.pending?'Check takeover':'Take over';
-    $('steer-open').hidden=selected.run.kind==='chief'||selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
+    $('steer-open').hidden=selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
     $('steer-open').disabled=steerBusy||!selected.online;
     $('steer-open').title=selected.online?'Add an instruction while this agent keeps working':'Reconnect this device to steer its agent';
     $('takeover-note').hidden=!state?.pending;

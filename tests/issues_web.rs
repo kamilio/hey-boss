@@ -569,6 +569,20 @@ fn chief_route_requires_csrf_json_and_a_request_object() {
     );
     assert_eq!(reply.status, 400);
     assert_eq!(reply.json()["error"]["message"], "Expected a Chief request");
+    let retired = web.http(
+        "POST",
+        path,
+        &[
+            ("X-Hey-Boss-CSRF", &web.token),
+            ("Content-Type", "application/json"),
+        ],
+        br#"{"project":"legacy","id":"manual"}"#,
+    );
+    assert_eq!(retired.status, 400);
+    assert_eq!(
+        retired.json()["error"]["message"],
+        "Chief has been retired; use Jobs"
+    );
 }
 
 #[test]

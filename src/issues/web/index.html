@@ -361,7 +361,6 @@
           <button type="button" role="tab" id="settings-tab-instructions" aria-controls="settings-panel-instructions" aria-selected="true" tabindex="0">Instructions</button>
           <button type="button" role="tab" id="settings-tab-planning" aria-controls="settings-panel-planning" aria-selected="false" tabindex="-1">Planning</button>
           <button type="button" role="tab" id="settings-tab-workflow" aria-controls="settings-panel-workflow" aria-selected="false" tabindex="-1">Workflow</button>
-          <button type="button" role="tab" id="settings-tab-chief" aria-controls="settings-panel-chief" aria-selected="false" tabindex="-1">Chief</button>
         </div>
         <div class="project-settings-body">
           <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0">
@@ -411,25 +410,6 @@
   <textarea class="text-input workflow-prompt" id="project-prompt-main" rows="3" maxlength="32000" aria-describedby="project-source-main"></textarea>
   <div class="branch-footer"><span id="project-source-main">Built-in default</span><button class="button link-button" type="button" data-reset-prompt="main">Use default</button></div></div></div></section>
 <details class="settings-section"><summary>Live updates and continuation</summary><div id="project-runtime-prompts"></div></details>
-          </div>
-          <div id="settings-panel-chief" role="tabpanel" aria-labelledby="settings-tab-chief" tabindex="0" hidden>
-<section class="settings-section chief-settings" aria-labelledby="settings-chief-title">
-              <div class="settings-section-heading"><div><h3 id="settings-chief-title">Chief</h3><p class="field-help">An organizing agent for this project.</p></div>
-                <label class="workflow-toggle"><input type="checkbox" id="project-chief" aria-describedby="project-chief-help" /><span>Enable Chief</span></label>
-              </div>
-              <p class="field-help" id="project-chief-help">Starts a fresh conversation every hour while a worker monitors this project. If a pass is still running, one pass waits and starts as soon as it finishes. Uses no issue slots.</p>
-              <div class="chief-cadence"><span id="project-chief-state">Disabled</span><span>Hourly · Fresh conversation</span></div>
-              <details id="project-chief-actions"><summary>Manual run</summary>
-                <p class="field-help">Run with the saved settings. Repeated requests keep at most one pass waiting.</p>
-                <button class="button" id="project-chief-run" type="button">Run Chief now</button>
-                <p class="field-help" id="project-chief-run-status" role="status"></p>
-              </details>
-              <details id="project-chief-instructions" open><summary>Chief instructions</summary>
-                <label class="field-label" for="project-chief-prompt">Organizing prompt</label>
-                <textarea class="text-input" id="project-chief-prompt" rows="7" maxlength="32000" required aria-describedby="project-chief-prompt-help"></textarea>
-                <div class="branch-footer"><span id="project-chief-prompt-help">Separate from worker instructions. Each pass ends automatically.</span><button class="button link-button" id="project-chief-reset" type="button">Use default</button></div>
-              </details>
-            </section>
           </div>
 <aside class="settings-preview" aria-labelledby="settings-preview-title">
             <div class="preview-heading"><span class="preview-eyebrow" id="project-preview-label">IMPLEMENTATION PREVIEW</span><h3 id="settings-preview-title">What the agent receives <span id="project-goal-indicator" class="goal-indicator" hidden>/goal</span></h3>

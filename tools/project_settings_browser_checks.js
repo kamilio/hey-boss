@@ -13,7 +13,7 @@ async (page) => {
   await page.goto('http://127.0.0.1:59642');
   await page.evaluate(() => { window.fixtureSettings.prompt_overrides.layout = '{{delivery}}\n\n{{task}}'; });
   await open();
-  check(await page.getByRole('tab').count() === 4, 'Four editor tabs');
+  check(await page.getByRole('tab').count() === 3, 'Three editor tabs');
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
   check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Instructions selected initially');
   check(await page.locator('#project-prompt-layout').count() === 0, 'Prompt sequence editor is removed');
@@ -34,50 +34,34 @@ async (page) => {
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited implementation');
   check(await page.locator('#project-preview-choices').innerText() === 'Existing checkout · Pull requests', 'Workflow preview uses unsaved edits');
   await tab('Workflow').press('End');
-  check(await tab('Chief').getAttribute('aria-selected') === 'true', 'End selects last tab');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Fixture chief');
-  check(await page.locator('#project-prompt-chief_wrapper').count() === 0, 'Chief has no wrapper editor');
-  check(await page.evaluate(() => !!window.fixtureSettings.prompt_overrides.chief_wrapper), 'Legacy saved wrapper is present but ignored by the preview');
-  if (!await page.locator('#project-chief-prompt').isVisible()) await page.locator('#project-chief-instructions summary').click();
-  await page.locator('#project-chief-prompt').fill('Fixture chief {{project}}');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Fixture chief {{project}}');
-  check(true, 'Chief preview preserves literal template syntax');
-  check(await page.locator('.settings-preview').isVisible(), 'Chief preview visible');
-  await tab('Chief').press('ArrowRight');
+  check(await tab('Workflow').getAttribute('aria-selected') === 'true', 'End selects last tab');
+  check(await tab('Chief').count() === 0, 'Retired editor is absent');
+  await tab('Workflow').press('ArrowRight');
   check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Arrow wraps around');
   check(await page.locator('#project-prompt').inputValue() === 'Edited implementation', 'Draft survives tab switches');
   await tab('Instructions').press('ArrowLeft');
-  await tab('Chief').press('Home');
+  await tab('Workflow').press('Home');
   check(await tab('Instructions').evaluate(el => el === document.activeElement), 'Home focuses first tab');
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
   check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && saved[0].plan_template === 'plans/edited-{number}.md'), 'Save includes all tab edits');
+  check(await page.evaluate(() => !('chief_enabled' in saved[0]) && !('chief_prompt' in saved[0])), 'Saving settings never restores retired configuration');
   check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');
   await open();
   check(await page.locator('#project-prompt-layout, [data-reset-prompt="layout"]').count() === 0, 'Reopening does not recreate the sequence editor');
-  await tab('Chief').click();
-  await page.locator('#project-chief-prompt').fill('');
-  await page.locator('#project-chief-instructions summary').click();
+  await page.locator('#project-prompt').fill('');
   await tab('Planning').click();
   await page.getByRole('button', {name:'Save',exact:true}).click();
-  check(await tab('Chief').getAttribute('aria-selected') === 'true', 'Invalid hidden field reveals its tab');
-  check(await page.locator('#project-chief-prompt').evaluate(el => el === document.activeElement && el.closest('details').open), 'Invalid field opens details and receives focus');
+  check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Invalid hidden field reveals its tab');
+  check(await page.locator('#project-prompt').evaluate(el => el === document.activeElement), 'Invalid field receives focus');
   check(await page.evaluate(() => saved.length === 1), 'Invalid form does not save');
-  await tab('Instructions').click();
-  await page.locator('#project-prompt').fill('');
-  await tab('Chief').click();
-  await page.getByRole('button', {name:'Save',exact:true}).click();
-  check(await page.locator('#project-prompt').evaluate(el => el === document.activeElement), 'Multiple invalid tabs focus the first field');
-  await page.locator('#project-prompt').fill('Edited implementation');
-  await tab('Chief').click();
-  await page.locator('#project-chief-prompt').fill('Edited chief');
-  await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited chief');
+  await page.locator('#project-prompt').fill('Edited implementation again');
   await page.evaluate(() => { window.failSave = true; });
   await tab('Workflow').click();
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-error').innerText() === 'Fixture save failed', 'Save error stays visible across tabs');
-  await tab('Chief').click();
-  check(await page.locator('#project-chief-prompt').inputValue() === 'Edited chief', 'Failed save preserves draft');
+  await tab('Instructions').click();
+  check(await page.locator('#project-prompt').inputValue() === 'Edited implementation again', 'Failed save preserves draft');
   await page.getByRole('button', {name:'Cancel',exact:true}).click();
   check(await page.locator('#project-settings-trigger').evaluate(el => el === document.activeElement), 'Closing restores trigger focus');
   await page.evaluate(() => { window.failSave = false; });
@@ -86,7 +70,7 @@ async (page) => {
   for (const theme of ['light','dark']) for (const width of [1280, 768, 390, 320]) {
     await page.emulateMedia({colorScheme:theme});
     await page.setViewportSize({width,height:800});
-    for (const name of ['Instructions','Planning','Workflow','Chief']) {
+    for (const name of ['Instructions','Planning','Workflow']) {
       await tab(name).click();
       check(await page.locator('.settings-preview').isVisible(), name + ' retains preview at ' + width);
       if (width >= 800) check(await page.locator('.settings-preview').evaluate(el => {
@@ -96,13 +80,13 @@ async (page) => {
       check(await page.locator('#project-settings-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1), `${name} fits at ${width}px`);
       check(await page.getByRole('button', {name:'Save',exact:true}).evaluate(el => {const r=el.getBoundingClientRect();return r.bottom<=innerHeight && r.top>=0;}), `Save visible for ${name} at ${width}px`);
     }
-    await tab('Chief').click();
+    await tab('Workflow').click();
     await page.waitForFunction(() => document.querySelector('#project-instructions-preview').getAttribute('aria-busy') === 'false');
-    check(await page.locator('#project-instructions-preview').textContent() === await page.locator('#project-chief-prompt').inputValue(), 'Chief preview equals configured prompt');
-    await page.screenshot({path:`output/playwright/chief-settings-${theme}-${width}.png`});
+    check(await page.locator('#project-instructions-preview').textContent() === await page.locator('#project-prompt').inputValue(), 'Implementation preview preserves configured text');
+    await page.screenshot({path:`/tmp/hey-boss-settings-qa/settings-${theme}-${width}.png`});
     if (width < 800) {
       await page.locator('.settings-preview').scrollIntoViewIfNeeded();
-      await page.screenshot({path:`output/playwright/chief-preview-${theme}-${width}.png`});
+      await page.screenshot({path:`/tmp/hey-boss-settings-qa/preview-${theme}-${width}.png`});
     }
   }
   await page.getByRole('button', {name:'Cancel',exact:true}).click();

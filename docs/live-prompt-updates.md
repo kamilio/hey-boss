@@ -1,7 +1,7 @@
 # Updating instructions during a task
 
 Project settings → Instructions starts with the **Implementation prompt**. Edit
-section wording under **Task context sections** or the Workflow and Chief tabs.
+section wording under **Task context sections** or the Workflow tab.
 Defaults live in `src/issues/prompts/*.md`.
 **Use default** removes an override. Sections without applicable context are
 omitted. Preview and worker launches use the same layout. Existing saved layouts

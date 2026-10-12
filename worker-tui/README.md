@@ -52,7 +52,7 @@ after ten seconds. Output retention is bounded.
 
 `hey-boss auto-workers watch` gives dedicated projects their own tabs, followed by one
 **Shared** tab for all workers serving multiple projects (or all projects). Its
-label shows the worker and unique-project counts. Shared agents and Chiefs stay
+label shows the worker and unique-project counts. Shared agents stay
 together, with project names on their rows and completed attempts under History.
 Tab / Shift+Tab cycles through tabs; w lists only the selected tab's workers.
 Pause and stop target the selected agent's worker; graceful removal targets the

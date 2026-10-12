@@ -100,7 +100,7 @@ fn ordinary_issue_output_omits_absent_and_disabled_settings() {
             assert!(!output.contains(label), "{args:?}: {output}");
         }
     }
-    f.text(&["settings", "set", "--prs-enabled", "--worktree", "--chief"]);
+    f.text(&["settings", "set", "--prs-enabled", "--worktree"]);
     let output = f.text(&["unassign", "1"]);
     assert!(output.starts_with("Settings QA (named:Settings QA)\nPRs enabled: true\n#1"));
     assert!(!output.contains("Worktrees"));
@@ -118,27 +118,23 @@ fn settings_output_distinguishes_worktree_permission_and_preserves_prompts_and_j
         "set",
         "--worktree",
         "--prs-enabled",
-        "--chief",
-        "--chief-prompt",
-        "Organize.\nKeep Markdown.",
         "--prompt",
         "Shared instructions.",
     ]);
     assert!(
-        output.contains("Worktrees allowed: true\nPRs enabled: true\nChief enabled: true\n"),
+        output.contains("Worktrees allowed: true\nPRs enabled: true\n"),
         "{output}"
     );
-    assert!(output.contains(
-        "Chief prompt: Organize.\nKeep Markdown.\nShared prompt: Shared instructions.\n"
-    ));
-    let output = f.text(&["settings", "set", "--no-worktree", "--no-prs", "--no-chief"]);
+    assert!(output.contains("Shared prompt: Shared instructions.\n"));
+    let output = f.text(&["settings", "set", "--no-worktree", "--no-prs"]);
     for label in ["Worktrees", "PRs enabled:", "Chief enabled:"] {
         assert!(!output.contains(label), "{output}");
     }
     let json: Value = serde_json::from_str(&f.text(&["settings", "show", "--json"])).unwrap();
-    for key in ["worktree_enabled", "prs_enabled", "chief_enabled"] {
+    for key in ["worktree_enabled", "prs_enabled"] {
         assert_eq!(json[key], false, "{key}");
     }
-    assert_eq!(json["chief_prompt"], "Organize.\nKeep Markdown.");
+    assert!(json.get("chief_prompt").is_none());
+    assert!(json.get("chief_enabled").is_none());
     assert_eq!(json["prompt"], "Shared instructions.");
 }

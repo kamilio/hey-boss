@@ -64,7 +64,7 @@ try {
   }
   issue(['create','--title','Published delivery awaiting review','--body','Original requirements remain unchanged.']);
   issue(['pr','add','1','https://github.com/example/repo/pull/1','--purpose','fix']);
-  const worker = start(['worker','run','--project','Requirements handoff QA','--directory',root,'--prs','--no-chief'],workerBinary);
+  const worker = start(['worker','run','--project','Requirements handoff QA','--directory',root,'--prs'],workerBinary);
   let status, finished;
   for (let attempt=0; !finished; attempt++) {
     await delay(200);

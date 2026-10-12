@@ -275,18 +275,6 @@ fn outline(settings: &Value, prs: bool, worktree: bool, all: bool) {
             );
         }
     }
-    if all || settings["chief_enabled"] == true {
-        println!();
-        line(&format!(
-            "Chief ({})",
-            if settings["chief_enabled"] == true {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        ));
-        line(settings["chief_prompt"].as_str().unwrap_or_default());
-    }
 }
 
 // Keep previews readable in a narrow terminal and neutralize control characters
