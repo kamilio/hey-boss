@@ -627,6 +627,8 @@ pub enum Operation {
 pub struct ProjectInitSettings {
     pub prs_enabled: bool,
     pub worktree_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drafts_enabled: Option<bool>,
     pub if_version: i64,
 }
 

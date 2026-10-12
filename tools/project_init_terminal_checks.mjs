@@ -52,6 +52,8 @@ try {
     await session.send('y\r');
     await session.waitFor('Use worktrees?');
     await session.send('n\r');
+    await session.waitFor('Allow draft issues?');
+    await session.send('n\r');
     await session.waitFor('Save project?');
     const history = (await session.history()).join('\n');
     assert(history.includes('Pull request (default)'));
@@ -67,10 +69,13 @@ try {
     const saved = read(project, 'settings', 'show');
     assert.equal(saved.prs_enabled, true);
     assert.equal(saved.worktree_enabled, false);
+    assert.equal(saved.drafts_enabled, false);
     const rerun = await pilot.newSession({command: binary, args: ['project', 'init', '--project', project], cwd: root, env, cols, rows: 28});
     await rerun.waitFor('Use pull requests? [Y/n]');
     await rerun.send('\r');
     await rerun.waitFor('Use worktrees? [y/N]');
+    await rerun.send('\r');
+    await rerun.waitFor('Allow draft issues? [y/N]');
     await rerun.send('\r');
     await rerun.waitFor('Save project?');
     await rerun.send('n\r');
@@ -117,6 +122,7 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
   const session = await pilot.newSession({command: binary, args: ['project', 'init', '--project', 'Terminal 80'], cwd: root, env, cols: 80, rows: 24});
   await session.waitFor('Use pull requests?'); await session.send('n\r');
   await session.waitFor('Use worktrees?'); await session.send('y\r');
+  await session.waitFor('Allow draft issues?'); await session.send('\r');
   await session.waitFor('Save project?');
   const edit = spawnSync(binary, ['issue', '--project', 'Terminal 80', '--agent', 'human:qa', 'settings', 'set', '--prompt', 'Concurrent custom prompt.'], {cwd: root, env, encoding:'utf8'});
   assert.equal(edit.status, 0, edit.stderr);
@@ -136,6 +142,7 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
     await named.send(`${name}\r`);
     await named.waitFor('Use pull requests?'); await named.send('n\r');
     await named.waitFor('Use worktrees?'); await named.send('y\r');
+    await named.waitFor('Allow draft issues?'); await named.send('n\r');
     await named.waitFor('Save project?');
     await capture(named, `named-review-${cols}`);
     await named.send('y\r');
@@ -146,11 +153,17 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
     assert.equal(found.status, 0, found.stderr);
     assert.equal(JSON.parse(found.stdout).project.name, name);
     assert.equal(JSON.parse(found.stdout).prs_enabled, false);
+    assert.equal(JSON.parse(found.stdout).drafts_enabled, false);
+    const rejectedDraft = await pilot.newSession({command: binary, args: ['issue', '--agent', 'human:qa', 'create', '--title', 'Rejected draft', '--draft'], cwd: checkout, env, cols, rows: 28});
+    assert.equal(await rejectedDraft.waitForExit({timeout: 10000}), 2);
+    const draftError = (await rejectedDraft.history()).join('\n').replace(/\s+/g, ' ');
+    assert(draftError.includes(`Project "${name}" is not using drafts. Use regular tasks.`));
+    await capture(rejectedDraft, `draft-disabled-${cols}`);
     const cancelled = await pilot.newSession({command: binary, args: ['project', 'init', '--project', `Cancelled ${cols}`], cwd: checkout, env, cols, rows: 28});
     await cancelled.waitFor('Use pull requests?'); await cancelled.send('q\r');
     assert.equal(await cancelled.waitForExit({timeout: 10000}), 0);
     assert.equal(await readFile(join(checkout, '.hey-boss'), 'utf8'), marker);
-    checks.push(`Custom name retains case, binds checkout, disables PRs and survives cancellation at ${cols} columns`);
+    checks.push(`Custom name binds checkout, disables PRs/drafts, rejects draft creation and survives cancellation at ${cols} columns`);
   }
   console.log(JSON.stringify({passed: checks.length, checks}));
 } finally {

@@ -1999,7 +1999,8 @@ impl Store {
                     None => Operation::ProjectSettings,
                     Some(settings) => serde_json::from_value(json!({
                         "action":"configure_project", "prs_enabled":settings.prs_enabled,
-                        "worktree_enabled":settings.worktree_enabled, "if_version":settings.if_version
+                        "worktree_enabled":settings.worktree_enabled, "drafts_enabled":settings.drafts_enabled,
+                        "if_version":settings.if_version
                     }))?,
                 };
                 registry::execute(&tx, &project, &operation, actor)?
