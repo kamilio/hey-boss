@@ -583,6 +583,19 @@ fn chief_route_requires_csrf_json_and_a_request_object() {
         retired.json()["error"]["message"],
         "Chief has been retired; use Jobs"
     );
+    let before = web.ok(json!({"action":"project_settings"}));
+    for legacy in [
+        json!({"action":"configure_project","chief_enabled":true}),
+        json!({"action":"configure_project","chief_prompt":"Legacy instructions"}),
+    ] {
+        let reply = web.action(&web.project, legacy, None);
+        assert_eq!(reply.status, 400);
+        assert_eq!(
+            reply.json()["error"]["message"],
+            "Chief has been retired; use Jobs"
+        );
+        assert_eq!(web.ok(json!({"action":"project_settings"})), before);
+    }
 }
 
 #[test]
