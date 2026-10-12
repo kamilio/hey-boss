@@ -928,6 +928,18 @@ fn calendar_uses_preview_across_zones_boundaries_and_dst() {
             "2026-12-01T00:00:00Z",
         ),
         (
+            "0 * * * *",
+            "America/New_York",
+            "2026-03-07",
+            "2026-03-01T00:00:00Z",
+        ),
+        (
+            "0 * * * *",
+            "America/New_York",
+            "2026-10-31",
+            "2026-10-01T00:00:00Z",
+        ),
+        (
             "30 2 * * *",
             "America/New_York",
             "2026-03-07",
@@ -965,6 +977,12 @@ fn calendar_uses_preview_across_zones_boundaries_and_dst() {
         let result = calendar(&mut f, "calendar", start, 7, zone, now, Value::Null).unwrap();
         let mut actual = vec![];
         for day in result["days"].as_array().unwrap() {
+            let expected_items = usize::from(day["count"].as_u64().unwrap() > 0);
+            assert_eq!(day["item_count"], expected_items);
+            assert_eq!(day["entries"].as_array().unwrap().len(), expected_items);
+            if expected_items > 0 {
+                assert_eq!(day["entries"][0]["occurrence_count"], day["count"]);
+            }
             let detail = calendar(
                 &mut f,
                 "calendar_entries",
@@ -1086,6 +1104,22 @@ fn calendar_keeps_history_snapshots_and_actual_times_after_edit_pause_delete() {
         history["entries"][0]["snapshot"]["definition"]["name"],
         "Schedule fixture"
     );
+    let summary = calendar(
+        &mut f,
+        "calendar",
+        "1970-01-01",
+        1,
+        "UTC",
+        6 * H,
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(summary["days"][0]["item_count"], 1);
+    assert_eq!(summary["days"][0]["entries"][0]["occurrence_count"], 2);
+    assert_eq!(
+        summary["days"][0]["entries"][0]["state_counts"],
+        json!({"pending":1,"skipped":1})
+    );
 }
 
 #[test]
@@ -1108,7 +1142,10 @@ fn calendar_dense_days_are_counted_and_paginated_without_gaps() {
     }
     let summary = calendar(&mut f, "calendar", "1970-01-02", 1, "UTC", 0, Value::Null).unwrap();
     assert_eq!(summary["days"][0]["count"], 2880);
-    assert_eq!(summary["days"][0]["entries"].as_array().unwrap().len(), 3);
+    assert_eq!(summary["days"][0]["item_count"], 2);
+    let items = summary["days"][0]["entries"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().all(|entry| entry["occurrence_count"] == 1440));
     let mut cursor = Value::Null;
     let mut keys = std::collections::BTreeSet::new();
     loop {
@@ -1149,6 +1186,73 @@ fn calendar_dense_days_are_counted_and_paginated_without_gaps() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn calendar_groups_history_and_upcoming_by_job_without_hiding_other_jobs() {
+    let mut f = Fixture::new();
+    f.create("hourly", 0);
+    let first = reserve(&mut f, H);
+    reserve(&mut f, 2 * H); // Skipped because the first execution is still pending.
+    f.store
+        .db
+        .execute(
+            "UPDATE scheduled_job_runs SET state='failed' WHERE id=?1",
+            [&first.id],
+        )
+        .unwrap();
+    f.create("other", 2 * H);
+    let result = calendar(
+        &mut f,
+        "calendar",
+        "1970-01-01",
+        1,
+        "UTC",
+        2 * H,
+        Value::Null,
+    )
+    .unwrap();
+    let day = &result["days"][0];
+    assert_eq!(day["count"], 44);
+    assert_eq!(day["item_count"], 2);
+    let items = day["entries"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    let hourly = items
+        .iter()
+        .find(|item| item["snapshot"]["job_id"] == "hourly")
+        .unwrap();
+    assert_eq!(hourly["occurrence_count"], 23);
+    assert_eq!(
+        hourly["state_counts"],
+        json!({"failed":1,"skipped":1,"scheduled":21})
+    );
+    assert_eq!(hourly["scheduled_at"], H);
+    assert_eq!(hourly["last_at"], 23 * H);
+    let detail = calendar(
+        &mut f,
+        "calendar_entries",
+        "1970-01-01",
+        1,
+        "UTC",
+        2 * H,
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(detail["entries"].as_array().unwrap().len(), 44);
+    f.create("third", 2 * H);
+    f.create("fourth", 2 * H);
+    let summary = calendar(
+        &mut f,
+        "calendar",
+        "1970-01-01",
+        1,
+        "UTC",
+        2 * H,
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(summary["days"][0]["item_count"], 4);
+    assert_eq!(summary["days"][0]["entries"].as_array().unwrap().len(), 3);
 }
 
 #[test]

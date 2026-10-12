@@ -1,5 +1,8 @@
 const assert=require('node:assert/strict');
-const {range,shift,dayKey}=require('../src/issues/web/jobs-calendar.js');
+const {range,shift,dayKey,groupSummary}=require('../src/issues/web/jobs-calendar.js');
+assert.deepEqual(groupSummary({scheduled:21,succeeded:2,failed:1}),{state:'failed',text:'1 failed · 2 succeeded · 21 scheduled'});
+assert.deepEqual(groupSummary({scheduled:24}),{state:'scheduled',text:'24 scheduled'});
+assert.deepEqual(groupSummary({running:1,skipped:2}),{state:'running',text:'1 running · 2 skipped'});
 assert.deepEqual(range('2026-12-31','month'),{start:'2026-11-30',days:35});
 assert.deepEqual(range('2027-01-01','week'),{start:'2026-12-28',days:7});
 assert.deepEqual(range('2026-03-08','agenda'),{start:'2026-03-02',days:7});

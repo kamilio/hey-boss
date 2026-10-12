@@ -60,7 +60,7 @@ async page => {
  check((await api({command:'view',id})).job.enabled,'Keyboard switch enables the saved job');
  await page.locator('[data-filter="disabled"]').click();check(await page.locator('[data-job-toggle="'+id+'"]').count()===0,'Disabled filter excludes enabled jobs');
  await page.locator('[data-filter="enabled"]').click();await page.locator('[data-job-toggle="'+id+'"]').click();
- await page.waitForFunction(()=>document.querySelectorAll('.job-row').length===0);
+ await page.waitForFunction(id=>!document.querySelector('[data-job-toggle="'+id+'"]'),id);
  await page.locator('[data-filter="disabled"]').click();
  await page.locator('#jobs-search').fill('nonexistent job');check(await page.locator('.job-row').count()===0,'Search filters jobs');
  await page.locator('#jobs-search').fill('repository');
