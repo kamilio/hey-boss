@@ -19,10 +19,24 @@
 #project-settings-state {
   display: block;
 }
+#project-settings-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+#project-settings-title > :not(#project-settings-name),
+#project-settings-close {
+  flex-shrink: 0;
+}
 #project-settings-name {
+  min-width: 0;
   margin: 0;
-  padding: 0 24px 16px;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--muted);
 }
 .project-settings-tabs {
   display: flex;
@@ -111,8 +125,13 @@
   overflow-y: auto;
 }
 @media (max-width: 600px) {
-  #project-settings-name {
-    padding: 0 16px 12px;
+  #project-settings-form .dialog-heading {
+    gap: 10px;
+  }
+  #project-settings-form #project-settings-title {
+    gap: 6px;
+    font-size: 16px;
+    letter-spacing: -0.3px;
   }
   .project-settings-tabs {
     padding: 0 12px;
