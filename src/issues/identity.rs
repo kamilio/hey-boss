@@ -144,19 +144,11 @@ fn git_project_with_binding(
     if let Some(project) = binding::read(Path::new(&git.worktree))? {
         return Ok((project, true));
     }
-    inherited_git_selection(git, machine)
+    Ok((ordinary_git_project(git, machine), false))
 }
 
-fn inherited_git_project(git: &crate::agents::GitInfo, machine: &str) -> Result<Project> {
-    inherited_git_selection(git, machine).map(|(project, _)| project)
-}
-
-fn inherited_git_selection(git: &crate::agents::GitInfo, machine: &str) -> Result<(Project, bool)> {
-    if git.worktree != git.repository_root
-        && let Some(project) = binding::read(Path::new(&git.repository_root))?
-    {
-        return Ok((project, true));
-    }
+// A custom identity belongs to one checkout, never to its sibling worktrees.
+fn ordinary_git_project(git: &crate::agents::GitInfo, machine: &str) -> Project {
     let id = git
         .origin
         .clone()
@@ -172,7 +164,7 @@ fn inherited_git_selection(git: &crate::agents::GitInfo, machine: &str) -> Resul
         })
         .unwrap_or("repository")
         .to_owned();
-    Ok((Project { id, name }, false))
+    Project { id, name }
 }
 
 fn env(name: &str) -> Option<String> {
