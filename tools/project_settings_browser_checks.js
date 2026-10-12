@@ -11,12 +11,12 @@ async (page) => {
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   await page.goto('http://127.0.0.1:59642');
+  await page.evaluate(() => { window.fixtureSettings.prompt_overrides.layout = '{{delivery}}\n\n{{task}}'; });
   await open();
   check(await page.getByRole('tab').count() === 4, 'Four editor tabs');
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
   check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Instructions selected initially');
-  check(await page.locator('#project-prompt-layout').isVisible(), 'Prompt sequence is visible before task wording');
-  await page.locator('#project-prompt-layout').fill('{{delivery}}\n\n{{task}}');
+  check(await page.locator('#project-prompt-layout').count() === 0, 'Prompt sequence editor is removed');
   await page.getByText('Task context sections', {exact:true}).click();
   await page.locator('#project-prompt-handoff').fill('Short handoff for {{number}}.');
   for (const key of ['subtask', 'github', 'dependencies', 'plan_document']) {
@@ -52,11 +52,9 @@ async (page) => {
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
   check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && saved[0].plan_template === 'plans/edited-{number}.md'), 'Save includes all tab edits');
-  check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Sequence and context overrides save together');
+  check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');
   await open();
-  check(await page.locator('#project-prompt-layout').inputValue() === '{{delivery}}\n\n{{task}}', 'Sequence survives reopening');
-  await page.locator('[data-reset-prompt="layout"]').click();
-  check(await page.locator('#project-prompt-layout').inputValue() === '' && (await page.locator('#project-prompt-layout').getAttribute('placeholder')).includes('{{workspace}}'), 'Reset restores the default sequence');
+  check(await page.locator('#project-prompt-layout, [data-reset-prompt="layout"]').count() === 0, 'Reopening does not recreate the sequence editor');
   await tab('Chief').click();
   await page.locator('#project-chief-prompt').fill('');
   await page.locator('#project-chief-instructions summary').click();

@@ -1,10 +1,11 @@
 # Updating instructions during a task
 
-Project settings → Instructions starts with **Prompt sequence**. Arrange or omit
-section variables there; edit their wording under **Task context sections** or
-the Workflow and Chief tabs. Defaults live in `src/issues/prompts/*.md`.
+Project settings → Instructions starts with the **Implementation prompt**. Edit
+section wording under **Task context sections** or the Workflow and Chief tabs.
+Defaults live in `src/issues/prompts/*.md`.
 **Use default** removes an override. Sections without applicable context are
-omitted. Preview and worker launches use the same layout.
+omitted. Preview and worker launches use the same layout. Existing saved layouts
+are preserved when editing settings; the sequence has no editor.
 
 Variables expand once: task text containing `{{number}}` is kept literal when
 inserted into another section. GitHub evidence is retrieved with `hey-gh`; it

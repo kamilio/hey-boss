@@ -365,7 +365,6 @@
         </div>
         <div class="project-settings-body">
           <div id="settings-panel-instructions" role="tabpanel" aria-labelledby="settings-tab-instructions" tabindex="0">
-<div id="project-layout-prompts"></div>
 <section class="settings-section" aria-labelledby="settings-base-title">
               <h3 id="settings-base-title">Implementation</h3>
               <p class="field-help" id="project-prompt-live-help">Saving prompt edits also updates running agents that use these instructions, including connected devices. They keep their progress and session. Workspace and delivery instructions are added automatically.</p>
@@ -373,7 +372,7 @@
               <textarea class="text-input" id="project-prompt" rows="3" required maxlength="32000" aria-describedby="project-prompt-live-help"></textarea>
               <p class="field-help">{{issue_command}} retrieves the issue. Use {{number}} for its number. Start with /goal to enable a goal. {{create_issue_command poe-code}} creates an issue in poe-code.</p>
             </section>
-<details class="settings-section"><summary>Task context sections</summary><p class="field-help">Edit section wording here; arrange or omit sections in Prompt sequence above. Use {{number}}, {{project}}, and shell-quoted {{project_arg}} for task values.</p><div id="project-context-prompts"></div></details>
+<details class="settings-section"><summary>Task context sections</summary><p class="field-help">Use {{number}}, {{project}}, and shell-quoted {{project_arg}} for task values.</p><div id="project-context-prompts"></div></details>
           </div>
           <div id="settings-panel-planning" role="tabpanel" aria-labelledby="settings-tab-planning" tabindex="0" hidden>
 <section class="settings-section" aria-labelledby="settings-plan-title">
