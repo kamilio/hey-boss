@@ -5,7 +5,7 @@ const source = new URL('../src/issues/web/', import.meta.url);
 const index = readFileSync(new URL('index.html', source), 'utf8');
 const dialog = index.match(/<dialog\s+id="project-settings-dialog"[^]*?<\/dialog>/)[0];
 const prompts = new URL('../src/issues/prompts/', import.meta.url);
-const promptDefaults = Object.fromEntries(readdirSync(prompts).filter(name => name.endsWith('.md') && !['worker.md', 'chief.md'].includes(name)).map(name => [name.slice(0, -3), readFileSync(new URL(name, prompts), 'utf8').trimEnd()]));
+const promptDefaults = Object.fromEntries(readdirSync(prompts).filter(name => name.endsWith('.md') && name !== 'worker.md').map(name => [name.slice(0, -3), readFileSync(new URL(name, prompts), 'utf8').trimEnd()]));
 const server = createServer((req, res) => {
   if (/^\/[\w-]+\.(css|js)$/.test(req.url)) {
     try {

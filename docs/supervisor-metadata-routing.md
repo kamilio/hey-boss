@@ -1,4 +1,4 @@
-# Chief metadata through the connected supervisor
+# Metadata through the connected supervisor
 
 Use `hey-boss issue --supervisor` from a connected companion to read the current
 issue and apply guarded metadata changes over its existing authenticated fleet
@@ -13,7 +13,7 @@ connection; no socket inspection or SSH configuration is necessary.
 ```sh
 hey-boss issue view 1341 --supervisor --project github.com/poe-platform/poe-code --json
 hey-boss issue edit 1341 --supervisor --remove-label 'rework needed' \
-  --request-id chief-cleanup-1341-v8 \
+  --request-id metadata-cleanup-1341-v8 \
   --project github.com/poe-platform/poe-code --json
 ```
 

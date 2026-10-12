@@ -1,11 +1,10 @@
-//! Supervisor-owned Chief assignments. Revoke, acknowledge, then hand off.
+//! Revoke legacy scheduler ownership during mixed-version upgrades.
 use crate::{
     database::Connection,
     issues::{Error, Result},
 };
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,41 +17,40 @@ pub(crate) struct Assignment {
 }
 
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
-    if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_chief_ownership','chief_owner_insert','chief_owner_update')", [], |r| r.get::<_,i64>(0))? == 3 {
+    if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_chief_ownership','chief_retired_insert','chief_retired_update')", [], |r| r.get::<_,i64>(0))? == 3 {
         return Ok(());
     }
     db.execute_batch("CREATE TABLE IF NOT EXISTS fleet_chief_ownership(project_id TEXT PRIMARY KEY,node TEXT NOT NULL,worker_id TEXT NOT NULL,generation INTEGER NOT NULL,revoking INTEGER NOT NULL DEFAULT 0);")?;
+    db.execute_batch(
+        "DROP TRIGGER IF EXISTS chief_owner_insert; DROP TRIGGER IF EXISTS chief_owner_update;",
+    )?;
     for (name, operation) in [
-        ("chief_owner_insert", "INSERT"),
+        ("chief_retired_insert", "INSERT"),
         (
-            "chief_owner_update",
+            "chief_retired_update",
             "UPDATE OF state,owner_pid,owner_start,pid,process_start,last_event,session_id",
         ),
     ] {
-        // Enforce ownership for older workers too, while binaries roll forward.
-        db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS {name} BEFORE {operation} ON project_chiefs WHEN NEW.state='running' AND (SELECT role FROM fleet_meta WHERE id=1)<>'standalone' AND NOT EXISTS(SELECT 1 FROM fleet_chief_ownership a JOIN fleet_meta m ON m.id=1 AND m.node=a.node WHERE a.project_id=NEW.project_id AND a.worker_id=NEW.worker_id AND a.revoking=0) BEGIN SELECT RAISE(ABORT,'Chief is not assigned to this worker by the supervisor'); END;"))?;
+        // Fence every old launch path while binaries roll forward.
+        db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS {name} BEFORE {operation} ON project_chiefs WHEN NEW.state='running' BEGIN SELECT RAISE(ABORT,'Chief has been retired; use Jobs'); END;"))?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn allowed(db: &Connection, project: &str, worker: &str) -> Result<bool> {
     Ok(db.query_row("SELECT (SELECT role FROM fleet_meta WHERE id=1)='standalone' OR EXISTS(SELECT 1 FROM fleet_chief_ownership a JOIN fleet_meta m ON m.id=1 AND m.node=a.node WHERE a.project_id=?1 AND a.worker_id=?2 AND a.revoking=0)", params![project,worker], |r| r.get(0))?)
 }
 
 pub(crate) fn stop_unassigned(db: &Connection) -> Result<()> {
-    // A companion enforces revocation even when its worker has not reloaded
-    // yet. Retain the reservation until the owning worker records completion.
-    let children=db.prepare("SELECT c.pid,c.process_start FROM project_chiefs c WHERE c.state='running' AND c.pid IS NOT NULL AND c.process_start IS NOT NULL AND (SELECT role FROM fleet_meta WHERE id=1)<>'standalone' AND NOT EXISTS(SELECT 1 FROM fleet_chief_ownership a JOIN fleet_meta m ON m.id=1 AND m.node=a.node WHERE a.project_id=c.project_id AND a.worker_id=c.worker_id AND a.revoking=0)")?.query_map([], |r| Ok((r.get::<_,u32>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    // These rows are machine-local. Verify process identities before stopping
+    // an old scheduler's child; never signal the issue worker or its agents.
+    let children = db.query_collect("SELECT pid,process_start FROM project_chiefs WHERE state='running' AND pid IS NOT NULL AND process_start IS NOT NULL", [], |r| -> rusqlite::Result<_> { Ok((r.get::<_,u32>(0)?,r.get::<_,String>(1)?)) })?;
     for (pid, start) in children {
         crate::issues::worker::stop_group(pid, &start)?;
-    }
-    // Older workers retain the last local worker assignment even between
-    // passes. Move only finished reservations to the supervisor's choice;
-    // active owners must still record their own completion. Probe first so
-    // normal heartbeats do not acquire the database writer.
-    let idle = db.prepare("SELECT c.project_id,a.worker_id FROM project_chiefs c JOIN fleet_chief_ownership a ON a.project_id=c.project_id JOIN fleet_meta m ON m.id=1 AND m.node=a.node AND m.node=c.machine JOIN issue_workers w ON w.id=a.worker_id WHERE a.revoking=0 AND c.state<>'running' AND c.owner_pid IS NULL AND c.pid IS NULL AND c.worker_id IS NOT a.worker_id")?.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (project, worker) in idle {
-        db.execute("UPDATE project_chiefs SET worker_id=?2 WHERE project_id=?1 AND machine=(SELECT node FROM fleet_meta WHERE id=1) AND state<>'running' AND owner_pid IS NULL AND pid IS NULL AND worker_id IS NOT ?2 AND EXISTS(SELECT 1 FROM fleet_chief_ownership a JOIN fleet_meta m ON m.id=1 AND m.node=a.node JOIN issue_workers w ON w.id=a.worker_id WHERE a.project_id=?1 AND a.worker_id=?2 AND a.revoking=0)", params![project,worker])?;
+        if crate::agents::process_identity(pid).as_deref() != Some(&start) {
+            db.execute("UPDATE project_chiefs SET state='stopped',queued=0,pid=NULL,process_start=NULL,owner_pid=NULL,owner_start=NULL,finished_at=coalesce(finished_at,?3) WHERE pid=?1 AND process_start=?2 AND state='running'", params![pid,start,crate::issues::worker::now()])?;
+        }
     }
     Ok(())
 }
@@ -118,380 +116,96 @@ pub(crate) fn apply(db: &Connection, assignments: &[Assignment]) -> Result<()> {
     Ok(())
 }
 
-fn running(worker: &Value, project: &str) -> bool {
-    worker["chiefs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|c| c["project_id"] == project && c["state"] == "running")
-}
-fn eligible(machine: &Value, worker: &Value, project: &str) -> bool {
-    machine["state"] == "connected"
-        && machine["chief_ownership"].is_array()
-        && worker["pid"].as_u64().is_some_and(|p| p > 0)
-        && worker["config"]["enabled"] == true
-        && worker["stop_requested"] != true
-        && worker["upgrading"] != true
-        && worker["chief_projects"]
-            .as_array()
-            .is_some_and(|p| p.iter().any(|id| id == project))
-        && worker["config"]["projects"]
-            .as_array()
-            .is_some_and(|p| p.is_empty() || p.iter().any(|id| id == project))
-}
-fn choose(project: &str, machines: &[Value]) -> Option<(String, String)> {
-    let mut candidates = Vec::new();
-    for m in machines {
-        for w in m["workers"].as_array().into_iter().flatten() {
-            if eligible(m, w, project)
-                && let (Some(node), Some(worker)) = (m["node"].as_str(), w["id"].as_str())
-            {
-                candidates.push((!running(w, project), node.to_owned(), worker.to_owned()));
-            }
-        }
+pub(crate) fn reconcile(db: &Connection) -> Result<()> {
+    // Persist revocations so older companions stop their owned pass too.
+    // Probe first: healthy heartbeats must not acquire the writer lock.
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_chief_ownership WHERE revoking=0)",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        db.execute(
+            "UPDATE fleet_chief_ownership SET revoking=1,generation=generation+1 WHERE revoking=0",
+            [],
+        )?;
     }
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, node, worker)| (node, worker))
-}
-
-fn desired(
-    project: &str,
-    enabled: bool,
-    previous: Option<&Assignment>,
-    machines: &[Value],
-) -> Option<Assignment> {
-    if let Some(old) = previous {
-        let owner = machines
-            .iter()
-            .find(|m| m["node"] == old.node && m["state"] == "connected");
-        // A network partition is not proof that the old process stopped.
-        let Some(owner) = owner else {
-            return Some(old.clone());
-        };
-        if !old.revoking {
-            if enabled
-                && owner["workers"].as_array().into_iter().flatten().any(|w| {
-                    w["id"] == old.worker_id
-                        && (eligible(owner, w, project)
-                            || (w["intent"] == "drain"
-                                && w["stop_requested"] != true
-                                && w["pid"].as_u64().is_some_and(|pid| pid > 0)
-                                && running(w, project)))
-                })
-            {
-                return Some(old.clone());
-            }
-            return Some(Assignment {
-                revoking: true,
-                generation: old.generation + 1,
-                ..old.clone()
-            });
-        }
-        let acknowledged = owner["chief_ownership"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|a| {
-                serde_json::from_value::<Assignment>(a.clone())
-                    .ok()
-                    .as_ref()
-                    == Some(old)
-            });
-        let active = owner["workers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|w| running(w, project));
-        if !enabled || !acknowledged || active {
-            return Some(old.clone());
-        }
-    } else if !enabled
-        || machines.iter().any(|m| {
-            !m["chief_ownership"].is_array()
-                && m["workers"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|w| running(w, project))
-        })
-    {
-        return None;
-    }
-    choose(project, machines)
-        .map(|(node, worker_id)| Assignment {
-            project_id: project.into(),
-            node,
-            worker_id,
-            generation: previous.map_or(1, |a| a.generation + 1),
-            revoking: false,
-        })
-        .or_else(|| previous.cloned())
-}
-
-pub(crate) fn reconcile(db: &Connection, machines: &[Value]) -> Result<()> {
-    let old = read(db)?;
-    let mut projects: BTreeMap<String,bool> = db.prepare("SELECT p.id,coalesce(s.chief_enabled,0)=1 AND p.hidden_at IS NULL FROM projects p LEFT JOIN project_settings s ON s.project_id=p.id")?.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-    for a in &old {
-        projects.entry(a.project_id.clone()).or_insert(false);
-    }
-    let next = projects
-        .into_iter()
-        .filter_map(|(p, enabled)| {
-            desired(
-                &p,
-                enabled,
-                old.iter().find(|a| a.project_id == p),
-                machines,
-            )
-        })
-        .collect::<Vec<_>>();
-    if next == old {
-        return Ok(());
-    }
-    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
-    if read(&tx)? == old {
-        apply(&tx, &next)?;
-    }
-    tx.commit()?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use std::{fs, os::unix::process::CommandExt, process::Command};
+
     #[test]
-    fn unchanged_assignment_batches_use_bounded_database_round_trips() {
+    fn retired_ownership_only_revokes_and_unchanged_polls_are_read_only() {
         let root = std::env::temp_dir().join(format!(
-            "hb-chief-owner-batch-{}",
+            "hb-retired-owner-{}",
             crate::issues::worker::random_id().unwrap()
         ));
-        std::fs::create_dir(&root).unwrap();
+        fs::create_dir_all(&root).unwrap();
         let path = root.join("issues.db");
         drop(crate::issues::Store::open(&path).unwrap());
-        let setup = Connection::open(&path).unwrap();
-        setup.execute_batch("WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<4096)
-            INSERT INTO fleet_chief_ownership SELECT 'unrelated-'||id,'elsewhere','worker',1,0 FROM ids;").unwrap();
-        let assignments = (0..256)
-            .map(|i| Assignment {
-                project_id: format!("selected-{i}"),
-                node: "node".into(),
-                worker_id: "worker".into(),
-                generation: 2,
-                revoking: i % 2 == 0,
-            })
-            .collect::<Vec<_>>();
-        apply(&setup, &assignments).unwrap();
-        setup
-            .execute_batch(
-                "CREATE TABLE assignment_writes(project TEXT);
-            CREATE TRIGGER ownership_write_audit AFTER UPDATE ON fleet_chief_ownership
-            BEGIN INSERT INTO assignment_writes VALUES(NEW.project_id); END;",
-            )
-            .unwrap();
-        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
-        let mut measurements = Vec::new();
-        for count in [1, 256] {
-            let (db, transport) = crate::database::tests::measured_connection(&path);
-            let tx =
-                crate::database::Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
-                    .unwrap();
-            apply(&tx, &assignments[..count]).unwrap();
-            tx.commit().unwrap();
-            drop(db);
-            let (commands, steps) = transport.join().unwrap();
-            eprintln!("{count} unchanged Chief assignments: {commands} RPCs, {steps} query steps");
-            measurements.push((count, commands, steps));
-        }
-        owner.stop();
-        let writes: i64 = setup
-            .query_row("SELECT count(*) FROM assignment_writes", [], |r| r.get(0))
-            .unwrap();
-        drop(setup);
-        std::fs::remove_dir_all(root).unwrap();
-        assert_eq!(writes, 0);
-        for (count, commands, steps) in measurements {
-            assert!(commands <= 5, "{count} assignments used {commands} RPCs");
-            assert!(
-                steps < count as i64 * 50 + 100,
-                "Unrelated ownership rows were scanned: {steps} steps for {count} assignments"
-            );
-        }
-    }
-
-    fn machine(node: &str) -> Value {
-        json!({"node":node,"state":"connected","chief_ownership":[],"workers":[{"id":format!("worker-{node}"),"pid":123,"config":{"enabled":true,"projects":["project"]},"chief_projects":["project"],"chiefs":[]}]})
-    }
-    #[test]
-    fn graceful_removal_keeps_the_chief_until_its_current_pass_finishes() {
-        let mut machines = vec![machine("a"), machine("b")];
-        let owner = desired("project", true, None, &machines).unwrap();
-        machines[0]["workers"][0]["config"]["enabled"] = json!(false);
-        machines[0]["workers"][0]["intent"] = json!("drain");
-        machines[0]["workers"][0]["chiefs"] = json!([{"project_id":"project","state":"running"}]);
-        assert_eq!(
-            desired("project", true, Some(&owner), &machines),
-            Some(owner.clone())
-        );
-        machines[0]["workers"][0]["chiefs"][0]["state"] = json!("idle");
-        assert!(
-            desired("project", true, Some(&owner), &machines)
-                .unwrap()
-                .revoking
-        );
-        assert!(
-            desired("project", false, Some(&owner), &machines)
-                .unwrap()
-                .revoking
-        );
-    }
-
-    #[test]
-    fn supervisor_selects_one_and_retains_it_across_reconnects() {
-        let mut machines = vec![machine("b"), machine("a")];
-        let owner = desired("project", true, None, &machines).unwrap();
-        assert_eq!(owner.node, "a");
-        machines.reverse();
-        assert_eq!(
-            desired("project", true, Some(&owner), &machines),
-            Some(owner.clone())
-        );
-        machines[0]["state"] = json!("disconnected");
-        assert_eq!(
-            desired("project", true, Some(&owner), &machines),
-            Some(owner)
-        );
-    }
-    #[test]
-    fn handoff_requires_revocation_acknowledgment_and_stopped_chief() {
-        let mut machines = vec![machine("a"), machine("b")];
-        let owner = desired("project", true, None, &machines).unwrap();
-        machines[0]["workers"][0]["config"]["enabled"] = json!(false);
-        let revoked = desired("project", true, Some(&owner), &machines).unwrap();
-        assert!(revoked.revoking);
-        assert_eq!(
-            desired("project", true, Some(&revoked), &machines),
-            Some(revoked.clone())
-        );
-        machines[0]["chief_ownership"] = json!([revoked]);
-        machines[0]["workers"][0]["chiefs"] = json!([{"project_id":"project","state":"running"}]);
-        assert_eq!(
-            desired("project", true, Some(&revoked), &machines),
-            Some(revoked.clone())
-        );
-        machines[0]["workers"][0]["chiefs"] = json!([]);
-        let replacement = desired("project", true, Some(&revoked), &machines).unwrap();
-        assert_eq!(replacement.node, "b");
-        assert!(!replacement.revoking);
-        assert!(replacement.generation > revoked.generation);
-    }
-    #[test]
-    fn replicas_fence_other_workers_and_ignore_stale_assignments() {
-        let root = std::env::temp_dir().join(format!(
-            "hb-chief-owner-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let a_path = root.join("a.db");
-        let b_path = root.join("b.db");
-        drop(crate::issues::Store::open(&a_path).unwrap());
-        drop(crate::issues::Store::open(&b_path).unwrap());
-        let a = Connection::open(&a_path).unwrap();
-        let b = Connection::open(&b_path).unwrap();
-        a.execute("UPDATE fleet_meta SET role='agent',node='a'", [])
-            .unwrap();
-        b.execute("UPDATE fleet_meta SET role='agent',node='b'", [])
-            .unwrap();
-        let first = Assignment {
-            project_id: "project".into(),
-            node: "a".into(),
-            worker_id: "selected".into(),
-            generation: 1,
-            revoking: false,
-        };
-        apply(&a, std::slice::from_ref(&first)).unwrap();
-        apply(&b, std::slice::from_ref(&first)).unwrap();
-        assert!(allowed(&a, "project", "selected").unwrap());
-        assert!(!allowed(&a, "project", "other").unwrap());
-        assert!(!allowed(&b, "project", "selected").unwrap());
-        let revoked = Assignment {
-            generation: 2,
-            revoking: true,
-            ..first.clone()
-        };
-        apply(&a, std::slice::from_ref(&revoked)).unwrap();
-        apply(&a, std::slice::from_ref(&first)).unwrap();
-        assert!(!allowed(&a, "project", "selected").unwrap());
-        assert!(
-            apply(
-                &a,
-                &[Assignment {
-                    revoking: false,
-                    ..revoked
-                }]
-            )
-            .is_err()
-        );
-        let next = Assignment {
-            node: "b".into(),
-            generation: 3,
-            ..first
-        };
-        apply(&a, std::slice::from_ref(&next)).unwrap();
-        apply(&b, std::slice::from_ref(&next)).unwrap();
-        assert!(!allowed(&a, "project", "selected").unwrap());
-        assert!(allowed(&b, "project", "selected").unwrap());
-        let sibling = Assignment {
-            project_id: "sibling".into(),
-            ..next.clone()
-        };
-        {
-            let tx =
-                crate::database::Transaction::new_unchecked(&a, TransactionBehavior::Immediate)
-                    .unwrap();
-            assert!(
-                apply(
-                    &tx,
-                    &[
-                        sibling.clone(),
-                        Assignment {
-                            node: "conflicting".into(),
-                            ..next.clone()
-                        }
-                    ]
-                )
-                .is_err()
-            );
-        }
-        assert_eq!(
-            read(&a).unwrap(),
-            vec![next.clone()],
-            "A rejected batch must roll back earlier writes"
-        );
-        assert!(apply(&a, &[sibling.clone(), sibling.clone()]).is_err());
-        assert_eq!(read(&a).unwrap(), vec![next.clone()]);
-        apply(
-            &a,
-            &[
-                Assignment {
-                    generation: 1,
-                    node: "stale".into(),
-                    ..next.clone()
-                },
-                sibling.clone(),
-            ],
+        let db = Connection::open(&path).unwrap();
+        db.execute(
+            "INSERT INTO fleet_chief_ownership VALUES('project','peer','worker',4,0)",
+            [],
         )
         .unwrap();
-        assert_eq!(read(&a).unwrap(), vec![next, sibling]);
-        drop(a);
-        drop(b);
-        std::fs::remove_dir_all(root).unwrap();
+        reconcile(&db).unwrap();
+        let assignments = read(&db).unwrap();
+        assert!(assignments[0].revoking);
+        assert_eq!(assignments[0].generation, 5);
+        db.execute_batch("CREATE TRIGGER no_more_writes BEFORE UPDATE ON fleet_chief_ownership BEGIN SELECT RAISE(ABORT,'unexpected write'); END;").unwrap();
+        reconcile(&db).unwrap();
+        assert_eq!(read(&db).unwrap(), assignments);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retired_child_stops_without_terminating_the_issue_worker() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-retired-child-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("issues.db");
+        drop(crate::issues::Store::open(&path).unwrap());
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "DROP TRIGGER chief_retired_insert;
+            INSERT INTO projects(id,name,next_number) VALUES('project','Project',1);",
+        )
+        .unwrap();
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut unrelated = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = crate::agents::process_identity(child.id()).unwrap();
+        db.execute("INSERT INTO project_chiefs(project_id,machine,cwd,state,pid,process_start) VALUES('project','local','','running',?1,?2)", params![child.id(),start]).unwrap();
+        let stopped = stop_unassigned(&db);
+        // Always reap both test processes, including on an assertion failure.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let exited = child.try_wait().unwrap().is_some();
+        let unaffected = unrelated.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+        stopped.unwrap();
+        assert!(exited);
+        assert!(unaffected);
     }
 }

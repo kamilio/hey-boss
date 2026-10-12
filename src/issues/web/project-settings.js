@@ -33,8 +33,7 @@ function addPromptEditors(sections) {
     $("#project-" + group + "-prompts").append(branch);
   }
 }
-let chiefDefaultPrompt = "", projectSettingsTab = "instructions";
-let chiefRunPending = false, chiefRunRequest = null;
+let projectSettingsTab = "instructions";
 let projectSettingsVersion = 0,
   projectSettingsProject = null,
   projectSettingsFocus = null,
@@ -89,8 +88,6 @@ $("#project-settings-form").addEventListener("invalid", event => {
 function projectSettingsDraft() {
   return {
     prompt: $("#project-prompt").value,
-    chief_enabled: $("#project-chief").checked,
-    chief_prompt: $("#project-chief-prompt").value,
     worktree_enabled: $("#project-worktree").checked,
     // The sequence has no editor; retain saved layouts in previews and unrelated edits.
     prompt_overrides: {layout: projectPromptLayout, ...Object.fromEntries(workflowPromptKeys.map(key => [key, $("#project-prompt-" + key).value.trim() ? $("#project-prompt-" + key).value : null]))},
@@ -104,9 +101,6 @@ function projectSettingsChanged() {
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
   updateWorkflowBranches();
-  $("#project-chief-state").textContent = $("#project-chief").checked ? "Enabled" : "Disabled";
-  $(".chief-settings").classList.toggle("chief-enabled", $("#project-chief").checked);
-  $("#project-chief-run").disabled = chiefRunPending || projectSettingsSaving || !projectSettingsOriginal?.chief_enabled || changed;
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
   $("#project-settings-form button[type=submit]").disabled =
     projectSettingsSaving || !projectSettingsOriginal || !changed;
@@ -124,9 +118,6 @@ $("#project-settings-trigger").onclick = async () => {
   projectSettingsProject = model.project.id;
   projectSettingsFocus = $("#project-settings-trigger");
   projectSettingsOriginal = null;
-  chiefRunRequest = null;
-  $("#project-chief-actions").open = false;
-  $("#project-chief-run-status").textContent = "";
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-name").title = model.project.name;
   $("#project-settings-error").hidden = true;
@@ -146,10 +137,6 @@ $("#project-settings-trigger").onclick = async () => {
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
     $("#project-prompt").value = value.prompt;
-    $("#project-chief").checked = value.chief_enabled;
-    $("#project-chief-prompt").value = value.chief_prompt;
-    chiefDefaultPrompt = value.chief_default_prompt;
-    $("#project-chief-instructions").open = true;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
     $("#project-preview-workspace").value = "checkout";
@@ -175,25 +162,6 @@ $("#project-settings-trigger").onclick = async () => {
   }
 };
 $("#project-settings-close").onclick = closeProjectSettings;
-$("#project-chief-run").onclick = async () => {
-  if (chiefRunPending || $("#project-chief-run").disabled) return;
-  const project = projectSettingsProject, sequence = projectSettingsSequence;
-  chiefRunPending = true;
-  chiefRunRequest ||= {project, id: HeyBossUI.requestId()};
-  projectSettingsChanged();
-  $("#project-chief-run-status").textContent = "Queuing Chief…";
-  try {
-    await post("/api/fleet/chief", chiefRunRequest);
-    if (sequence !== projectSettingsSequence) return;
-    chiefRunRequest = null;
-    $("#project-chief-run-status").textContent = "Chief queued. If a pass is running, one fresh pass will follow it.";
-  } catch (error) {
-    if (sequence === projectSettingsSequence) $("#project-chief-run-status").textContent = error.message;
-  } finally {
-    chiefRunPending = false;
-    projectSettingsChanged();
-  }
-};
 $("#project-settings-cancel").onclick = closeProjectSettings;
 $("#project-settings-dialog").addEventListener("cancel", (event) => {
   event.preventDefault();
@@ -245,10 +213,7 @@ function previewProjectInstructions() {
   $("#project-instructions-preview").setAttribute("aria-busy", "true");
   projectPreviewTimer = setTimeout(async () => {
     try {
-      const value = projectSettingsTab === "chief" ? {
-        prompt: draft.chief_prompt,
-        use_goal: false,
-      } : await api(
+      const value = await api(
         {
           action: "preview_worker",
           task_kind: projectSettingsTab === "planning" ? "plan" : "implement",
@@ -302,31 +267,22 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 
 $("#project-drafts").onchange = projectSettingsChanged;
 $("#project-plan-template").oninput = projectSettingsChanged;
-$("#project-chief").onchange = projectSettingsChanged;
-$("#project-chief-prompt").oninput = () => { projectSettingsChanged(); previewProjectInstructions(); };
-$("#project-chief-reset").onclick = () => {
-  $("#project-chief-prompt").value = chiefDefaultPrompt;
-  projectSettingsChanged();
-  previewProjectInstructions();
-};
-
 function setProjectSettingsDisabled(disabled) {
-  $("#project-chief-run").disabled = disabled || chiefRunPending || !projectSettingsOriginal?.chief_enabled;
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
-  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt], #project-chief-reset")) input.disabled = disabled;
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt]")) input.disabled = disabled;
   $("#project-preview-workspace").disabled = disabled;
 }
 function updateWorkflowBranches() {
-  const plan = projectSettingsTab === "planning", chief = projectSettingsTab === "chief";
-  $("#project-preview-label").textContent = chief ? "CHIEF PREVIEW" : plan ? "PLAN PREVIEW" : "IMPLEMENTATION PREVIEW";
-  $("#project-preview-help").textContent = chief ? "Chief instructions. Updates as you edit." : plan ? "Plan instructions. Updates as you edit." : "Includes workspace and delivery instructions. Updates as you edit.";
-  $("#project-preview-worker").hidden = plan || chief;
+  const plan = projectSettingsTab === "planning";
+  $("#project-preview-label").textContent = plan ? "PLAN PREVIEW" : "IMPLEMENTATION PREVIEW";
+  $("#project-preview-help").textContent = plan ? "Plan instructions. Updates as you edit." : "Includes workspace and delivery instructions. Updates as you edit.";
+  $("#project-preview-worker").hidden = plan;
   const allowed = $("#project-worktree").checked;
   $("#project-preview-workspace option[value=worktree]").disabled = !allowed;
   if (!allowed) $("#project-preview-workspace").value = "checkout";
-  const active = chief ? [] : plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
-  $("#project-preview-workspace").disabled = plan || chief || projectSettingsSaving || !projectSettingsOriginal;
+  const active = plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
+  $("#project-preview-workspace").disabled = plan || projectSettingsSaving || !projectSettingsOriginal;
   $("#project-preview-workspace-help").textContent = plan ? "Plan tasks use their own prompt without workspace or delivery instructions." : "Preview only. Each worker chooses its own workspace.";
   for (const key of workflowPromptKeys) {
     const branch = document.querySelector(`[data-branch="${key}"]`);
@@ -336,7 +292,7 @@ function updateWorkflowBranches() {
     $("#project-source-" + key).textContent = custom ? "Project override" : "Built-in default";
     branch.querySelector("[data-reset-prompt]").hidden = !custom;
   }
-  $("#project-preview-choices").textContent = chief ? "Chief · Organizing pass" : plan ? "Plan · Linked artifacts" : `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
+  $("#project-preview-choices").textContent = plan ? "Plan · Linked artifacts" : `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
 }
 $("#project-preview-workspace").onchange = () => {
   updateWorkflowBranches();

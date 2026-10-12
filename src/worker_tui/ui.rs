@@ -139,11 +139,7 @@ fn multiline(value: &Value) -> Vec<Line<'static>> {
 }
 
 fn run_label(run: &Value) -> String {
-    if run["kind"] == "chief" {
-        format!("{} Chief", text(&run["project_name"]))
-    } else {
-        format!("{} #{}", text(&run["project_name"]), run["number"])
-    }
+    format!("{} #{}", text(&run["project_name"]), run["number"])
 }
 
 fn run_state(run: &Value) -> String {
@@ -189,18 +185,6 @@ fn activity(run: &Value, now_ms: i64) -> Vec<Line<'static>> {
         } else {
             format!("Automatic retry in {seconds}s; saved session retained")
         }));
-    }
-    if run["kind"] == "chief" {
-        lines.push(Line::from("Chief · no issue slots"));
-        if let Some(session) = run["session_id"].as_str() {
-            lines.push(Line::from(format!(
-                "Codex {}",
-                text(&Value::String(session.into()))
-            )));
-        }
-        if let Some(pid) = run["pid"].as_u64() {
-            lines.push(Line::from(format!("Process {pid}")));
-        }
     }
     if run["finished_at"].is_null()
         && run["state"] == "awaiting_claim"
@@ -641,11 +625,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
             if compact_sessions {
                 return ListItem::new(Line::from(vec![
                     Span::styled(project, Style::default().fg(MUTED)),
-                    Span::raw(if r["kind"] == "chief" {
-                        "Chief ".into()
-                    } else {
-                        format!("#{} ", r["number"])
-                    }),
+                    Span::raw(format!("#{} ", r["number"])),
                     Span::styled(status.clone(), Style::default().fg(color(&status))),
                     Span::raw(format!(" · {}", text(&r["title"]))),
                 ]));
@@ -804,7 +784,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
                 c.name,
                 c.worker_id,
                 if c.graceful {
-                    "Stops new pickup now. Current agents and Chief finish before this worker is removed."
+                    "Stops new pickup now. Current agents finish before this worker is removed."
                 } else if c.stop {
                     "Stops this worker and its active Codex sessions."
                 } else {

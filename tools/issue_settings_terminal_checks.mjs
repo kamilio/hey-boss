@@ -45,7 +45,7 @@ try {
   for (const cols of [48, 80, 120]) {
     for (const mode of ['disabled', 'prs', 'settings']) {
       run(['settings', 'set', mode === 'disabled' ? '--no-prs' : '--prs-enabled',
-        '--worktree', '--chief', '--chief-prompt', 'Organize.\nKeep Markdown.', '--prompt', 'Shared instructions.']);
+        '--worktree', '--prompt', 'Shared instructions.']);
       const args = mode === 'settings' ? ['settings', 'show'] : ['view', '1'];
       const session = await pilot.newSession({command: binary, args: [...prefix, ...args], cwd: root, env, cols, rows: 24});
       assert.equal(await session.waitForExit({timeout: 10000}), 0);
@@ -57,9 +57,8 @@ try {
       assert(!screen.text.includes('Worktrees enabled:'));
       if (mode === 'settings') {
         assert(screen.text.includes('Worktrees allowed: true'));
-        assert(screen.text.includes('Chief enabled: true'));
+        assert(!screen.text.includes('Chief'));
         assert(screen.text.includes('Shared prompt: Shared instructions.'));
-        assert(screen.text.includes('Subtask scheduling: sequential'));
       } else {
         assert(screen.text.includes('#1 [open] Readable issue'));
         assert(screen.text.includes('Comments: 0 shown · 0 total'));

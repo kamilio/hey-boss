@@ -56,7 +56,7 @@
     } else if(id==="guide") {
       source("WEB GUIDANCE","Page discovery guide",data.guide.text,data.guide.source);
     } else if(id==="assembled") {
-      $("#content").innerHTML=heading("LIVE PREVIEW","Complete agent input","The actual worker preview for the selected project and issue, including applicable project overrides and delivery instructions.")+`<div class="toolbar"><label>Workflow <select id="workflow"><option value="checkout">Implement · existing checkout · main</option><option value="worktree">Implement · worktree · PR</option><option value="plan">Plan · artifact</option><option value="chief">Chief · organizing pass</option></select></label><button class="button" id="refresh-assembled">Refresh</button></div><div id="assembled-output"><div class="empty">Loading expanded prompt…</div></div>`;
+      $("#content").innerHTML=heading("LIVE PREVIEW","Complete agent input","The actual worker preview for the selected project and issue, including applicable project overrides and delivery instructions.")+`<div class="toolbar"><label>Workflow <select id="workflow"><option value="checkout">Implement · existing checkout · main</option><option value="worktree">Implement · worktree · PR</option><option value="plan">Plan · artifact</option></select></label><button class="button" id="refresh-assembled">Refresh</button></div><div id="assembled-output"><div class="empty">Loading expanded prompt…</div></div>`;
       $("#workflow").addEventListener("change",assembled);$("#refresh-assembled").addEventListener("click",assembled);
       await assembled();
     } else if(id.startsWith("command:")) {
@@ -77,14 +77,8 @@
   }
   async function assembled() {
     const run=++sequence;const workflow=$("#workflow")?.value||"checkout";
-    if(!issue&&workflow!=="chief"){$("#assembled-output").innerHTML='<div class="empty">Choose a project with an issue to preview its full agent input.</div>';return;}
+    if(!issue){$("#assembled-output").innerHTML='<div class="empty">Choose a project with an issue to preview its full agent input.</div>';return;}
     try {
-      if(workflow==="chief") {
-        const settings=await api({action:"project_settings"});
-        if(run!==sequence||!$("#assembled-output"))return;
-        const text=settings.chief_prompt;
-        $("#assembled-output").innerHTML=panel("Chief input",text,counts(text),"expanded");return;
-      }
       const config={projects:[$("#project").value],prs_enabled:workflow==="worktree",worktree_enabled:workflow==="worktree"};
       const result=await api({action:"preview_worker",config,number:issue.number,task_kind:workflow==="plan"?"plan":"implement",worktree_allowed:workflow==="worktree"});
       if(run!==sequence||!$("#assembled-output"))return;

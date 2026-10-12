@@ -247,7 +247,7 @@ impl Dashboard {
                 .project_workers()
                 .into_iter()
                 .flat_map(|worker| {
-                    ["runs", "chiefs"]
+                    ["runs"]
                         .into_iter()
                         .flat_map(move |key| worker[key].as_array().into_iter().flatten())
                 })
@@ -260,7 +260,7 @@ impl Dashboard {
         if self.snapshot["worker_id"].as_str() != self.worker_id.as_deref() {
             return vec![];
         }
-        ["runs", "chiefs"]
+        ["runs"]
             .into_iter()
             .filter_map(|key| self.snapshot[key].as_array())
             .flatten()
@@ -318,7 +318,7 @@ impl Dashboard {
             .project_workers()
             .into_iter()
             .find(|w| {
-                ["runs", "chiefs"]
+                ["runs"]
                     .iter()
                     .flat_map(|key| w[*key].as_array().into_iter().flatten())
                     .any(|r| r["id"].as_str() == self.run_id.as_deref())

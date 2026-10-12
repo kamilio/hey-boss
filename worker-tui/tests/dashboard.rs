@@ -513,9 +513,9 @@ fn shared_pool_has_one_tab_for_five_projects_and_stable_worker_controls() {
         .as_array_mut()
         .unwrap()
         .reverse();
-    second["runs"] = json!([]);
+    second["runs"] = json!([{ "id":"shared-run", "project_id":"named:E", "finished_at":null }]);
     second["chiefs"] =
-        json!([{ "id":"chief", "kind":"chief", "project_id":"named:E", "finished_at":null }]);
+        json!([{ "id":"legacy", "kind":"chief", "project_id":"named:E", "finished_at":null }]);
     value["workers"].as_array_mut().unwrap().push(second);
     let mut app = Dashboard::default();
     app.apply(value.clone());
@@ -538,12 +538,12 @@ fn shared_pool_has_one_tab_for_five_projects_and_stable_worker_controls() {
     value["workers"].as_array_mut().unwrap().reverse();
     app.apply(value.clone());
     assert_eq!(app.selected_tab, selected);
-    assert_eq!(app.run_id.as_deref(), Some("chief"));
+    assert_eq!(app.run_id.as_deref(), Some("shared-run"));
     app.history = true;
-    value["workers"][0]["chiefs"][0]["finished_at"] = json!(42);
+    value["workers"][0]["runs"][0]["finished_at"] = json!(42);
     app.apply(value);
     assert_eq!(app.runs().len(), 1);
-    assert_eq!(app.run_id.as_deref(), Some("chief"));
+    assert_eq!(app.run_id.as_deref(), Some("shared-run"));
     app.navigate_worker(1);
     app.confirm_remove();
     assert_eq!(app.confirmation.as_ref().unwrap().worker_id, "one");

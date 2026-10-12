@@ -51,7 +51,7 @@ fn infrastructure_holds_have_readable_history_at_terminal_sizes() {
 }
 
 #[test]
-fn running_chief_is_selectable_and_visible_without_using_issue_slots() {
+fn retired_chief_is_absent_from_legacy_snapshots_at_all_sizes() {
     let mut app = Dashboard::default();
     app.apply(json!({
         "worker_id": "test", "workers": [{
@@ -65,7 +65,8 @@ fn running_chief_is_selectable_and_visible_without_using_issue_slots() {
             "last_event": "Checking attached PRs"
         }], "fleet": {"supervisor_connection": {"state": "local"}}
     }));
-    assert_eq!(app.run_id.as_deref(), Some("chief:poe2"));
+    assert!(app.run_id.is_none());
+    assert!(app.runs().is_empty());
     for (width, height) in [(48, 12), (80, 24), (120, 36)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| ui::render(frame, &app)).unwrap();
@@ -78,12 +79,12 @@ fn running_chief_is_selectable_and_visible_without_using_issue_slots() {
                     + "\n"
             })
             .collect();
-        assert!(text.contains("Chief"), "{width} × {height}: {text}");
+        assert!(!text.contains("Chief"), "{width} × {height}: {text}");
         assert!(text.contains("0 busy · 2 available"), "{text}");
         assert!(!text.contains("poe2 #null"), "{text}");
         if width >= 80 {
-            assert!(text.contains("Checking attached PRs"), "{text}");
-            assert!(text.contains("chief-thread"), "{text}");
+            assert!(!text.contains("Checking attached PRs"), "{text}");
+            assert!(!text.contains("chief-thread"), "{text}");
         }
     }
     app.history = true;

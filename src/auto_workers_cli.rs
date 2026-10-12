@@ -46,7 +46,7 @@ enum Action {
         #[arg(long = "directory", short = 'C', required = true)]
         directories: Vec<std::path::PathBuf>,
     },
-    /// Stop new pickup, then remove the worker once its agents and Chief finish.
+    /// Stop new pickup, then remove the worker once its agents finish.
     Remove { id: String },
     /// Show this machine's saved workers and the configuration file to edit.
     Config,

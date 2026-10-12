@@ -34,12 +34,12 @@ explicit approvals/input, and provider-neutral goal continuation. Choose Codex,
 Claude Code or Pi in **Worker settings → Agent**, or pass `--provider claude|pi`
 to `worker run` or `auto-workers add`. Existing workers default to Codex; changes
 apply to newly picked issues. Each provider must be installed and authenticated
-on its worker's machine. Chief and interactive planning continue using Codex.
+on its worker's machine. Interactive planning continues using Codex.
 
 Run `hey-boss auto-workers run` to start or resume saved workers, then
 `hey-boss auto-workers watch` to open their dashboard.
 Tab / Shift+Tab switches project tabs; `a` adds a worker, and `w` then `d` removes
-one after its current agents and Chief finish. Reopening the dashboard reuses the
+one after its current agents finish. Reopening the dashboard reuses the
 same workers. Separate checkouts and shared multi-project pools retain their own
 slots. See [per-machine configuration and live controls](docs/auto-workers.md).
 
@@ -510,39 +510,6 @@ Quiet hours in **Settings** silence Mac popups and phone pushes daily, initially
 22:00–07:00. Change the times and time zone, or turn the schedule off. Requests
 stay in the inbox; muted notifications are not replayed in the morning. The
 schedule syncs to connected devices and the phone relay.
-
-## Chief
-
-Enable a project's **Chief** in Project settings or with `hey-boss worker run --chief`.
-It is disabled by default. While a worker monitors that project, Chief runs one
-organizing pass each hour, outside issue concurrency. Its separate prompt covers
-issues, PR readiness, and mindmap maintenance; workers handle code changes.
-Chief starts a fresh conversation for every pass, including after worker restarts.
-The next pass is due one hour after a pass starts. If Chief is still running,
-one pending pass starts immediately after it finishes; missed hours never build
-a backlog. Ordinary failures retry with exponential backoff from 30 seconds
-to five minutes. Chief uses no goal or pass deadline.
-
-Run it manually with `hey-boss worker run-chief --project PROJECT`, or open
-Project settings → Chief → Manual run. Manual requests use the saved settings
-and share the same single pending slot as scheduled passes.
-
-`hey-boss issue settings set --chief --chief-prompt 'Review issues and PRs, then stop.'`
-sets the project prompt. Use `--no-chief` to disable it; an active pass is stopped.
-The fleet supervisor selects one worker for each project's Chief across all
-machines. It retains that assignment across reconnects. Before moving ownership,
-it revokes the old assignment and waits for that machine to acknowledge it and
-report that its Chief has stopped. A disconnected machine keeps ownership until
-it reconnects; another Chief is not started while the old one may still be running.
-Standalone workers sharing a database share one Chief reservation per project.
-Stopping a worker stops its owned Chief too. Chief startup failures and thread
-crashes are recorded through the supervising worker, which retains results until
-they are saved. Worker reloads recover abandoned passes and start a fresh conversation. Chief uses no issue slots and has no pass deadline.
-
-Chief can use `hey-boss issue --supervisor` for authoritative issue inspection and
-guarded metadata edits through a companion's existing fleet connection. This
-requires no work claim or SSH hostname. See [supported operations and retry
-semantics](docs/chief-metadata-routing.md).
 
 For a detail read without expanding commit or attachment history, use
 `hey-boss issue view NUMBER --compact --json` (also supports `--supervisor`).

@@ -10,7 +10,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  let snapshot=null,seen=0;const pending=new Map();
  const visible=()=>new Set(store.issueProjects().map(p=>p.id));
  const filtered=()=>{
-  const projects=visible();return {...snapshot,signals:snapshot?.signals||[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,desired_revision:m.desired_revision,applied_revision:m.applied_revision,configuration_error:m.configuration_error,projects:m.projects,workspace:m.workspace,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,intent:w.intent,managed:w.managed,retiring:w.retiring,active:w.active,free:w.free,eligible:w.eligible,error:w.error,retry_at:w.retry_at,config:{provider:w.config?.provider,name:w.config?.name,enabled:w.config?.enabled,concurrency:w.config?.concurrency,projects:w.config?.projects,directory:w.config?.directory,directories:w.config?.directories},chiefs:(w.chiefs||[]).filter(r=>projects.has(r.project_id)),runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
+  const projects=visible();return {...snapshot,signals:snapshot?.signals||[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,desired_revision:m.desired_revision,applied_revision:m.applied_revision,configuration_error:m.configuration_error,projects:m.projects,workspace:m.workspace,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,intent:w.intent,managed:w.managed,retiring:w.retiring,active:w.active,free:w.free,eligible:w.eligible,error:w.error,retry_at:w.retry_at,config:{provider:w.config?.provider,name:w.config?.name,enabled:w.config?.enabled,concurrency:w.config?.concurrency,projects:w.config?.projects,directory:w.config?.directory,directories:w.config?.directories},runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
  };
  const page=fileURLToPath(new URL('../dist/agent-web/fleet.html',import.meta.url));
  for(const route of ['/agents','/agents/session','/workers'])app.get(route,auth,(req,res)=>res.sendFile(page));
@@ -26,8 +26,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
    if(!Number.isSafeInteger(issue)||issue<=0||typeof agent!=='string'||!agent.startsWith('codex:')||agent.length>128)throw new HubError(400,'Invalid assignment request');
   }else if((before!==null&&(!Number.isSafeInteger(before)||before<0))||(req.query.latest!=null&&!['0','1'].includes(req.query.latest))||!Number.isSafeInteger(cursor)||cursor<0||typeof host!=='string'||typeof run!=='string')throw new HubError(400,'Invalid conversation request');
   if(at!==null&&(!Number.isSafeInteger(at)||at<0))throw new HubError(400,'Invalid invocation cursor');
-  const entry=filtered().machines.find(m=>m.host===host||m.hostname===host)?.workers.flatMap(w=>[...w.runs,...w.chiefs]).find(r=>r.id===run);
-  if(entry?.kind==='chief'&&!['conversation','assignment'].includes(action))throw new HubError(400,'Chief conversations are read-only');
+  const entry=filtered().machines.find(m=>m.host===host||m.hostname===host)?.workers.flatMap(w=>w.runs).find(r=>r.id===run);
   // Historical origin references are validated by the authoritative supervisor.
   const project=entry?.project_id||(['conversation','assignment'].includes(action)&&visible().has(input.project)?input.project:null);
   if(!project)throw new HubError(404,'This conversation is no longer available');
@@ -40,7 +39,6 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  function requestFleet(req,res,action){
   if(!snapshot||now()-seen>15000)throw new HubError(503,'Connect your supervisor to edit worker configuration.');
   const input=req.method==='GET'?{}:req.body;
-  if(action==='chief_run'&&(typeof input.project!=='string'||!visible().has(input.project)||typeof input.id!=='string'||!/^[a-zA-Z0-9_-]{1,128}$/.test(input.id)))throw new HubError(400,'Choose a visible project and a request ID.');
   if(action==='configuration'&&req.method==='POST'){
    if(Buffer.byteLength(JSON.stringify(input))>1048576)throw new HubError(400,'Configuration request is too large.');
    if(input.retry_project!==undefined){
@@ -57,7 +55,7 @@ export function agentRoutes(app,{auth,bridge,store,now}) {
  app.get('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
  app.post('/api/fleet/configuration',auth,(req,res)=>requestFleet(req,res,'configuration'));
  app.post('/api/fleet',auth,(req,res)=>requestFleet(req,res,'signal'));
- app.post('/api/fleet/chief',auth,(req,res)=>requestFleet(req,res,'chief_run'));
+ app.post('/api/fleet/chief',auth,()=>{throw new HubError(410,'Chief has been retired; use Jobs');});
  app.get('/api/fleet/conversation',auth,(req,res)=>requestAgent(req,res,'conversation'));
  app.get('/api/fleet/assignment',auth,(req,res)=>requestAgent(req,res,'assignment'));
  app.post('/api/fleet/takeover',auth,(req,res)=>requestAgent(req,res,'takeover'));

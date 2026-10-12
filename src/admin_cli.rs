@@ -440,7 +440,6 @@ pub fn catalog() -> Value {
         ("checkout", "Existing checkout", hey_boss::issues::worker::DEFAULT_CHECKOUT_PROMPT),
         ("main", "Push to main", hey_boss::issues::worker::DEFAULT_MAIN_PROMPT),
         ("prs", "Pull request", hey_boss::issues::worker::DEFAULT_PRS_PROMPT),
-        ("chief", "Chief", include_str!("issues/prompts/chief.md").trim_ascii_end()),
     ].map(|(id,title,text)|json!({"id":id,"title":title,"text":text,"source":format!("src/issues/prompts/{id}.md")})).to_vec();
     let defaults = hey_boss::issues::worker::prompt_defaults();
     for section in hey_boss::issues::worker::prompt_sections()

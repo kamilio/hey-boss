@@ -14,10 +14,9 @@ test('agent history requires pairing, registered projects, bounded requests and 
  const snapshot={ok:true,machines:[{host:'local',state:'connected',heartbeat:Date.now()/1000,workers:[{pid:1,config:{provider:'pi'},chiefs:[{id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas',state:'idle',next_at:123},{id:'chief:private',project_id:'named:Hidden'}],runs:[{id:'run',project_id:'named:Atlas',title:'Fix reconnect'},{id:'private',project_id:'named:Hidden'}]}]}]};
  assert.equal((await call('/api/bridge/agents/status',snapshot,bridge)).status,200);
  const status=await(await call('/api/fleet/status',null,headers)).json();assert.equal(status.machines[0].workers[0].runs.length,1);
- assert.equal(status.machines[0].workers[0].chiefs.length,1);
+ assert.equal(status.machines[0].workers[0].chiefs,undefined);
  assert.equal(status.machines[0].workers[0].config.provider,'pi');
- assert.equal(status.machines[0].workers[0].chiefs[0].next_at,123);
- assert.equal((await call('/api/fleet/takeover',{host:'local',run:'chief:local:named:Atlas'},headers)).status,400);
+ assert.equal((await call('/api/fleet/takeover',{host:'local',run:'chief:local:named:Atlas'},headers)).status,404);
  assert.equal((await call('/api/fleet/conversation?host=local&run=private',null,headers)).status,404);
  assert.equal((await call('/api/fleet/assignment?project=named%3AAtlas&issue=4&agent=codex%3Aexact')).status,401);
  assert.equal((await call('/api/fleet/assignment?project=named%3AHidden&issue=4&agent=codex%3Aexact',null,headers)).status,404);
@@ -63,15 +62,8 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal(pending[0].run,'old');assert.equal(pending[0].at,123);assert.equal(pending[0].project,'named:Atlas');
  await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:false,error:'This origin is not recorded'},bridge);
  assert.equal((await historical).status,503,'The supervisor must confirm the saved origin before serving history');
- const chiefInput={project:'named:Atlas',id:'manual-chief'};
- assert.equal((await call('/api/fleet/chief',chiefInput)).status,401);
- assert.equal((await call('/api/fleet/chief',{...chiefInput,project:'named:Hidden'},headers)).status,400);
- assert.equal((await call('/api/fleet/chief',chiefInput,{...headers,Origin:'https://evil.example'})).status,403);
- const chief=call('/api/fleet/chief',chiefInput,headers);
- for(let i=0;i<20;i++){pending=(await(await call('/api/bridge/agents',null,bridge)).json()).requests;if(pending.length)break;await new Promise(r=>setTimeout(r,10));}
- assert.equal(pending[0].action,'chief_run');assert.equal(pending[0].project,'named:Atlas');assert.equal(pending[0].signal_id,'manual-chief');
- await call('/api/bridge/agents/'+pending[0].id+'/result',{ok:true,queued:true},bridge);
- assert.equal((await(await chief).json()).queued,true);
+ assert.equal((await call('/api/fleet/chief',{project:'named:Atlas',id:'legacy'},headers)).status,410);
+ assert.equal((await(await call('/api/bridge/agents',null,bridge)).json()).requests.length,0,'Retired controls must not enqueue work');
  store.setIssueProjects([]);assert.equal((await call('/api/fleet/conversation?host=local&run=run',null,headers)).status,404);
 });
 

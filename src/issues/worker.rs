@@ -456,7 +456,7 @@ impl Worker {
         let mut store = retry_database_busy(|| Store::open(&path))?;
         // Never free a slot until the old owned process has actually stopped.
         retry_database_busy(|| recover(&mut store, &machine))?;
-        retry_database_busy(|| store.recover_chiefs(&machine, worker_id.as_deref()))?;
+        retry_database_busy(|| store.stop_retired_chiefs())?;
         let upgrading = Arc::new(AtomicBool::new(false));
         let executable = std::env::current_exe()?;
         let original_executable = executable_identity(&executable);
@@ -467,8 +467,6 @@ impl Worker {
             let drain_marker = path.with_added_extension("drain-for-update");
             let mut update_pending = false;
             let mut handles: Vec<(String, thread::JoinHandle<()>)> = vec![];
-            let mut chiefs: Vec<super::chief::Task> = vec![];
-            let mut last_chief = Instant::now() - Duration::from_secs(5);
             let mut abandoned = Vec::new();
             let mut last_recovery = Instant::now();
             while !stopped.load(Ordering::Relaxed) {
@@ -488,20 +486,6 @@ impl Worker {
                     }
                 }
                 handles = active;
-                let mut chief_finished = false;
-                chiefs.retain_mut(|task| match task.poll(&store) {
-                    Ok(finished) => {
-                        chief_finished |= finished;
-                        !finished
-                    }
-                    Err(error) => {
-                        reconnect_store(&mut store, &path, &error);
-                        crate::worker_tui::diagnostics::report(format_args!(
-                            "Chief result: {error}"
-                        ));
-                        true
-                    }
-                });
                 abandoned.retain_mut(|(id, next, delay)| {
                     if Instant::now() < *next {
                         return true;
@@ -543,7 +527,6 @@ impl Worker {
                 }
                 if update_pending {
                     if handles.is_empty()
-                        && chiefs.is_empty()
                         && abandoned.is_empty()
                         && worker_id
                             .as_deref()
@@ -570,27 +553,6 @@ impl Worker {
                         ));
                     }
                     last_recovery = Instant::now();
-                }
-                if chief_finished || last_chief.elapsed() >= Duration::from_secs(5) {
-                    loop {
-                        match store.reserve_chief(&machine, worker_id.as_deref()) {
-                            Ok(Some(job)) => {
-                                chiefs.push(super::chief::Task::start(
-                                    path.clone(),
-                                    job,
-                                    stopped.clone(),
-                                ));
-                            }
-                            Ok(None) => break,
-                            Err(error) => {
-                                crate::worker_tui::diagnostics::report(format_args!(
-                                    "Chief scheduler: {error}"
-                                ));
-                                break;
-                            }
-                        }
-                    }
-                    last_chief = Instant::now();
                 }
                 match store.worker_reserve(&machine, worker_id.as_deref()) {
                     Ok(Some(job)) => {
@@ -619,12 +581,6 @@ impl Worker {
                 // the shutdown delay while the same writer remains locked.
                 if let Err(e) = finalize_abandoned(&mut store, &machine, &id) {
                     crate::worker_tui::diagnostics::report(format_args!("Worker recovery: {e}"));
-                }
-            }
-            for mut task in chiefs {
-                task.join();
-                if let Err(error) = retry_database_busy(|| task.poll(&store)) {
-                    crate::worker_tui::diagnostics::report(format_args!("Chief result: {error}"));
                 }
             }
         });
@@ -2105,20 +2061,6 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch agent → manual claim → implement → finish",
         v["config"]["tags"], v["eligible"]
     );
-    if let Some(chiefs) = v["chiefs"].as_array() {
-        for chief in chiefs {
-            println!(
-                "{} Chief · {} · no issue slots · Codex {} · {}",
-                chief["project_name"].as_str().unwrap_or(""),
-                chief["state"].as_str().unwrap_or(""),
-                chief["session_id"].as_str().unwrap_or("launching"),
-                chief["last_event"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| chief["summary"].as_str().unwrap_or(""))
-            );
-        }
-    }
     if let Some(runs) = v["runs"].as_array() {
         let active = runs.iter().filter(|run| run["finished_at"].is_null());
         let recent = runs

@@ -959,12 +959,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             return json_response(crate::fleet::call(&value)?);
         }
         if path == "/api/fleet/chief" {
-            let mut value: Value = serde_json::from_slice(&bytes)?;
+            let value: Value = serde_json::from_slice(&bytes)?;
             if !value.is_object() {
                 return Err(Error::invalid("Expected a Chief request"));
             }
-            value["kind"] = json!("chief_run");
-            return json_response(crate::fleet::call(&value)?);
+            return Err(Error::invalid("Chief has been retired; use Jobs"));
         }
         if path == "/api/fleet/configuration" {
             let mut value: Value = serde_json::from_slice(&bytes)?;
