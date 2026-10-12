@@ -150,7 +150,7 @@ const paths = {
   edit: '<path d="m15 4 5 5M4 20l1-6L17 2l5 5L10 19l-6 1Z"/>',
   spark:
     '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5L12 3Z"/>',
-  link: '<path d="m10 13 4-4M8 16l-2 2a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0M14 8l2-2a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/>',
+  link: '<path d="m10 8 3-3a4.24 4.24 0 0 1 6 6l-3 3M14 16l-3 3a4.24 4.24 0 0 1-6-6l3-3M8 16l8-8"/>',
 };
 const icon = (name) =>
   `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.issue}</svg>`;
