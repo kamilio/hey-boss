@@ -15,6 +15,60 @@ fn run(store: &mut Store, operation: Value) -> Value {
 }
 
 #[test]
+fn library_previews_are_readable_bounded_and_follow_edits_and_archiving() {
+    let dir = std::env::temp_dir().join(format!("hb-artifact-previews-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("issues.db");
+    let mut store = Store::open(&path).unwrap();
+    projects::seed(&path, &["named:Artifacts"]);
+    let body = format!(
+        "---\nowner: private metadata\n---\n# Launch plan\n\nA **clear** [decision](https://example.com) with `code`.\n\n{}",
+        "世界 ".repeat(20000)
+    );
+    let created = run(
+        &mut store,
+        json!({"command":"create","title":"Launch plan","body":body}),
+    );
+    let id = &created["artifact"]["id"];
+    let list = run(&mut store, json!({"command":"list"}));
+    let item = &list["artifacts"][0];
+    assert_eq!(item["body"], "");
+    let preview = item["preview"].as_str().expect("list has a preview");
+    assert!(
+        preview.starts_with("A clear decision with code. 世界"),
+        "{preview}"
+    );
+    assert!(preview.chars().count() <= 241);
+    assert!(preview.ends_with('…'));
+    assert!(serde_json::to_vec(&list).unwrap().len() < 2000);
+    run(
+        &mut store,
+        json!({"command":"edit","id":id,"body":"Fresh text\n\nSecond paragraph.","if_version":1}),
+    );
+    let searched = run(&mut store, json!({"command":"list","query":"Second"}));
+    assert_eq!(
+        searched["artifacts"][0]["preview"],
+        "Fresh text Second paragraph."
+    );
+    run(
+        &mut store,
+        json!({"command":"archive","id":id,"archived":true,"if_version":2}),
+    );
+    assert!(
+        run(&mut store, json!({"command":"list"}))["artifacts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        run(&mut store, json!({"command":"list","archived":true}))["artifacts"][0]["preview"],
+        "Fresh text Second paragraph."
+    );
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup() {
     let dir = std::env::temp_dir().join(format!("hey-boss-artifact-delete-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
