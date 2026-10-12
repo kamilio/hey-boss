@@ -19,6 +19,17 @@
   --danger: #b64559;
   --shadow: 0 12px 36px #263c6310, 0 1px 3px #263c6305;
   --ring: 0 0 0 3px #6375c32b;
+  --control-radius: 9px;
+  --control-font-size: 12px;
+  --control-height: 37px;
+  --control-padding-y: 8px;
+  --control-padding-x: 14px;
+  --primary-bg: #4655b5;
+  --primary-hover: #37469c;
+  --primary-text: #fff;
+  --primary-border: #4250a9;
+  --warning: #af740e;
+  --active: #168179;
   font-synthesis: none;
 }
 @media (prefers-color-scheme: dark) {
@@ -41,6 +52,8 @@
     --danger: #f298a9;
     --shadow: 0 12px 36px #0002, 0 1px 3px #0002;
     --ring: 0 0 0 3px #9faeff40;
+    --warning: #e5b75d;
+    --active: #80cfca;
   }
 }
 * {
@@ -387,18 +400,18 @@ h1 {
   font-size: 13px;
 }
 .button {
-  min-height: 37px;
+  min-height: var(--control-height);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 8px 14px;
+  padding: var(--control-padding-y) var(--control-padding-x);
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--control-radius);
   background: var(--solid);
   box-shadow: 0 1px 2px #21345604;
   font-weight: 550;
-  font-size: 12px;
+  font-size: var(--control-font-size);
   white-space: nowrap;
 }
 .button:hover {
@@ -406,15 +419,15 @@ h1 {
   border-color: #7182a53d;
 }
 .button.primary {
-  background: #4655b5;
-  color: #fff;
-  border-color: #4250a9;
+  background: var(--primary-bg);
+  color: var(--primary-text);
+  border-color: var(--primary-border);
   box-shadow:
     0 2px 4px #25327712,
     inset 0 1px 0 #ffffff12;
 }
 .button.primary:hover {
-  background: #37469c;
+  background: var(--primary-hover);
 }
 .button.primary .keycap {
   background: #ffffff15;

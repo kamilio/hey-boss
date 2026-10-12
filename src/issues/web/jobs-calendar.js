@@ -13,6 +13,7 @@ const HeyBossCalendar=(()=>{
     return {start:key(start),days:Math.ceil(((end-start)/86400000+1)/7)*7};
   }
   function shift(anchor,mode,delta){const date=civil(anchor);if(mode==='month')date.setUTCMonth(date.getUTCMonth()+delta,1);else date.setUTCDate(date.getUTCDate()+delta*7);return key(date);}
+  function groupSummary(counts){const states=['failed','running','pending','skipped','cancelled','succeeded','scheduled'].filter(state=>counts[state]);return {state:states[0]||'scheduled',text:states.map(state=>`${counts[state].toLocaleString()} ${state}`).join(' · ')};}
   function mount({root,read,edit,links}){
     const $=s=>root.querySelector(s);
     let zone=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',anchor=dayKey(Date.now(),zone),mode=matchMedia('(max-width:640px)').matches?'agenda':'month',job=null,seq=0,detailSeq=0,active=false,currentDays=[],dayEntries=[],cursor=null,openedDay=null,filterAfter=null,filterSeq=0,filtersBusy=false;
@@ -24,14 +25,20 @@ const HeyBossCalendar=(()=>{
       <div class="calendar-filters"><label>Job<select id="calendar-job"><option value="">All jobs · including past runs</option></select></label><button class="button" id="calendar-jobs-more" hidden>More job filters</button><label class="calendar-zone">Display timezone<select id="calendar-zone">${[...new Set([zone,'UTC',...(Intl.supportedValuesOf?.('timeZone')||[])])].map(z=>`<option ${z===zone?'selected':''}>${esc(z)}</option>`).join('')}</select></label><button class="icon-button" id="calendar-refresh" aria-label="Refresh calendar"><span data-icon="refresh"></span></button></div>
       <div class="calendar-legend" aria-label="Entry states">${Object.entries(labels).map(([state,label])=>`<span class="calendar-state ${state}">${label}</span>`).join('')}</div><p id="calendar-status" role="status" aria-live="polite"></p><div id="calendar-grid"></div>
       <dialog id="calendar-dialog" aria-labelledby="calendar-dialog-title"><div class="calendar-dialog-heading"><h2 id="calendar-dialog-title"></h2><button class="icon-button" id="calendar-close" aria-label="Close event details">×</button></div><div id="calendar-detail"></div><button class="button" id="calendar-more" hidden>Show next 100 entries</button></dialog>`;
-    const dialog=$('#calendar-dialog');
+    const dialog=$('#calendar-dialog');let openedGroup=null;
     function query(command,start,days,position=null){return {command,start,days,timezone:zone,job_id:job,cursor:position};}
-    function eventMarkup(entry,index,prefix){return `<button class="calendar-event ${esc(entry.state)}" data-entry="${prefix}:${index}" aria-label="${esc(labels[entry.state]+' · '+entry.snapshot.definition.name+' · '+format(entry.scheduled_at))}" title="${esc(labels[entry.state]+' · '+entry.snapshot.definition.name+' · '+format(entry.scheduled_at))}"><time>${esc(clock(entry.scheduled_at))}</time><span>${esc(entry.snapshot.definition.name)}</span><small>${esc(labels[entry.state])}</small></button>`;}
+    function eventMarkup(entry,index,prefix){
+      const grouped=entry.occurrence_count>1,summary=grouped?groupSummary(entry.state_counts):null;
+      const cadence=/^\d+ \* /.test(entry.snapshot.definition.cron)?'Hourly · ':'';
+      const label=grouped?`${cadence}${entry.occurrence_count.toLocaleString()} runs`:clock(entry.scheduled_at);
+      const description=grouped?`${entry.snapshot.definition.name} · ${label} · ${summary.text} · ${format(entry.scheduled_at)} – ${format(entry.last_at)}`:labels[entry.state]+' · '+entry.snapshot.definition.name+' · '+format(entry.scheduled_at);
+      return `<button class="calendar-event ${esc(summary?.state||entry.state)} ${grouped?'calendar-group':''}" data-entry="${prefix}:${index}" aria-label="${esc(description)}" title="${esc(description)}"><time>${esc(label)}</time><span>${esc(entry.snapshot.definition.name)}</span><small>${esc(summary?.text||labels[entry.state])}</small></button>`;
+    }
     function render(){
       const selectedMonth=anchor.slice(0,7),today=dayKey(Date.now(),zone),count=currentDays.reduce((sum,d)=>sum+d.count,0);
       $('#calendar-status').textContent=count?`${count.toLocaleString()} ${count===1?'occurrence':'occurrences'} · Scheduled times in ${zone}`:`No occurrences in this period · ${zone}`;
       $('#calendar-grid').className='calendar-grid '+mode;
-      $('#calendar-grid').innerHTML=(mode==='month'?'<div class="calendar-weekdays" aria-hidden="true">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<span>${d}</span>`).join('')+'</div>':'')+currentDays.map((day,i)=>`<section class="calendar-day ${day.date.slice(0,7)!==selectedMonth&&mode==='month'?'outside':''} ${day.date===today?'today':''}" aria-label="${esc(civilLabel(day.date,{weekday:'long',month:'long',day:'numeric',year:'numeric'}))}"><h3><button data-day="${i}" ${day.date===today?'aria-current="date"':''}><span class="calendar-day-weekday">${esc(civilLabel(day.date,{weekday:'short'}))}</span><span class="calendar-day-number">${civil(day.date).getUTCDate()}</span><span class="calendar-day-month">${esc(civilLabel(day.date,{month:'short'}))}</span></button><small>${day.count?day.count.toLocaleString():''}</small></h3><div class="calendar-day-events">${day.entries.map((e,n)=>eventMarkup(e,n,String(i))).join('')}${day.count>day.entries.length?`<button class="calendar-overflow" data-day="${i}">+${(day.count-day.entries.length).toLocaleString()} more <span class="calendar-overflow-label">· View day</span></button>`:day.count===0?'<p class="calendar-day-empty">No occurrences</p>':''}</div></section>`).join('');
+      $('#calendar-grid').innerHTML=(mode==='month'?'<div class="calendar-weekdays" aria-hidden="true">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<span>${d}</span>`).join('')+'</div>':'')+currentDays.map((day,i)=>`<section class="calendar-day ${day.date.slice(0,7)!==selectedMonth&&mode==='month'?'outside':''} ${day.date===today?'today':''}" aria-label="${esc(civilLabel(day.date,{weekday:'long',month:'long',day:'numeric',year:'numeric'}))}"><h3><button data-day="${i}" ${day.date===today?'aria-current="date"':''}><span class="calendar-day-weekday">${esc(civilLabel(day.date,{weekday:'short'}))}</span><span class="calendar-day-number">${civil(day.date).getUTCDate()}</span><span class="calendar-day-month">${esc(civilLabel(day.date,{month:'short'}))}</span></button><small>${day.item_count?(day.item_count.toLocaleString()+' '+(day.item_count===1?'job':'jobs')):''}</small></h3><div class="calendar-day-events">${day.entries.map((e,n)=>eventMarkup(e,n,String(i))).join('')}${day.item_count>day.entries.length?`<button class="calendar-overflow" data-day="${i}">+${(day.item_count-day.entries.length).toLocaleString()} more jobs <span class="calendar-overflow-label">· View day</span></button>`:day.count===0?'<p class="calendar-day-empty">No occurrences</p>':''}</div></section>`).join('');
     }
     async function refresh(quiet=false){
       if(!active)return;
@@ -60,14 +67,15 @@ const HeyBossCalendar=(()=>{
       finally{if(generation===filterSeq){filtersBusy=false;$('#calendar-jobs-more').disabled=false;}}
     }
     function showDialog(title){$('#calendar-dialog-title').textContent=title;$('#calendar-more').hidden=true;if(!dialog.open)dialog.showModal();}
-    async function openDay(day,more=false){
-      const generation=++detailSeq;openedDay=day;showDialog(civilLabel(day.date,{weekday:'long',month:'long',day:'numeric',year:'numeric'}));
+    async function openDay(day,more=false,group=null){
+      if(!more)openedGroup=group;
+      const generation=++detailSeq;openedDay=day;const dateLabel=civilLabel(day.date,{weekday:'long',month:'long',day:'numeric',year:'numeric'});showDialog(openedGroup?openedGroup.snapshot.definition.name:dateLabel);
       if(!more){dayEntries=[];cursor=null;$('#calendar-detail').textContent='Loading occurrences…';}
       $('#calendar-more').disabled=true;
       try {
-        const result=await read(query('calendar_entries',day.date,1,more?cursor:null));if(generation!==detailSeq||!dialog.open)return;
+        const result=await read({...query('calendar_entries',day.date,1,more?cursor:null),job_id:openedGroup?.snapshot.job_id||job});if(generation!==detailSeq||!dialog.open)return;
         dayEntries.push(...result.entries);cursor=result.next_cursor;
-        $('#calendar-detail').innerHTML=`<p class="job-help">Scheduled times · ${esc(zone)}</p><div class="calendar-day-list">${dayEntries.length?dayEntries.map((e,n)=>eventMarkup(e,n,'day')).join(''):'<p class="job-help">No occurrences on this day.</p>'}</div>`;
+        $('#calendar-detail').innerHTML=`<p class="job-help">${openedGroup?esc(dateLabel)+' · ':''}Scheduled times · ${esc(zone)}</p><div class="calendar-day-list">${dayEntries.length?dayEntries.map((e,n)=>eventMarkup(e,n,'day')).join(''):'<p class="job-help">No occurrences on this day.</p>'}</div>`;
         $('#calendar-more').textContent='Show next 100 entries';$('#calendar-more').hidden=!cursor;
       }catch(e){if(generation===detailSeq){$('#calendar-detail').textContent='Could not load this day. '+e.message;$('#calendar-more').textContent='Retry day';$('#calendar-more').hidden=false;}}
       finally{if(generation===detailSeq)$('#calendar-more').disabled=false;}
@@ -85,7 +93,7 @@ const HeyBossCalendar=(()=>{
       const button=event.target.closest('button');if(!button)return;
       if(button.dataset.mode){mode=button.dataset.mode;refresh();}
       if(button.dataset.day!=null)openDay(currentDays[Number(button.dataset.day)]);
-      if(button.dataset.entry){const [group,index]=button.dataset.entry.split(':');inspect(group==='day'?dayEntries[Number(index)]:currentDays[Number(group)].entries[Number(index)]);}
+      if(button.dataset.entry){const [group,index]=button.dataset.entry.split(':'),entry=group==='day'?dayEntries[Number(index)]:currentDays[Number(group)].entries[Number(index)];if(entry.occurrence_count>1)openDay(currentDays[Number(group)],false,entry);else inspect(entry);}
       if(button.hasAttribute('data-calendar-retry'))refresh();
       if(button.dataset.editJob){dialog.close();edit(button.dataset.editJob);}
     };
@@ -105,6 +113,6 @@ const HeyBossCalendar=(()=>{
       refresh(){if(active&&!dialog.open)refresh(true);}
     };
   }
-  return {range,shift,dayKey,mount};
+  return {range,shift,dayKey,groupSummary,mount};
 })();
 if(typeof module!=='undefined')module.exports=HeyBossCalendar;

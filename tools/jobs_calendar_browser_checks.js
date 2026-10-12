@@ -49,7 +49,9 @@ async page=>{
  await page.keyboard.press('Enter');await page.locator('#calendar-dialog').waitFor({state:'visible'});await page.keyboard.press('Escape');check(await page.locator('#calendar-dialog').isHidden(),'Escape closes accessible dialog');
  for(const record of runs){
   await page.locator('#calendar-job').selectOption(record.id);await ready();
-  const event=page.locator('#calendar-grid .calendar-event.'+record.state).first();await event.click();
+  const group=page.locator('#calendar-grid .calendar-group').first();
+  if(await group.count()){await group.click();await page.locator('.calendar-day-list .calendar-event').first().waitFor();}
+  const event=page.locator((await group.count()?'.calendar-day-list':'#calendar-grid')+' .calendar-event.'+record.state).first();await event.click();
   await page.waitForFunction(()=>document.querySelector('.calendar-facts'));
   const text=await page.locator('#calendar-detail').textContent();
   check(text.includes('Schedule timezone')&&text.includes('Scheduled time')&&text.includes('Actual start')&&text.includes('Actual finish'),'Separate schedule and actual '+record.state);
@@ -76,12 +78,21 @@ async page=>{
  const current=(await api({command:'view',id:daily.id})).job;await api({command:'delete',id:daily.id,if_revision:current.revision});await page.locator('#calendar-refresh').click();await ready();check(await page.locator('.calendar-event.scheduled').count()===0,'Deletion clears projections');
  const historyJob=(await api({command:'view',id:runs[4].id})).job;await api({command:'delete',id:historyJob.id,if_revision:historyJob.revision});await page.locator('#calendar-refresh').click();await ready();await page.locator('#calendar-job').selectOption(historyJob.id);await ready();check(await page.locator('.calendar-event.cancelled').count()===1,'Deleted job history retained');
  await page.locator('#calendar-job').selectOption(hourly.id);await ready();
- await page.locator('#calendar-next').click();await ready();await page.locator('.calendar-overflow').first().click();await page.waitForFunction(()=>document.querySelector('.calendar-day-list .calendar-event'));
+ await page.locator('#calendar-next').click();await ready();
+ check(await page.locator('.calendar-overflow').count()===0,'Hourly runs do not create day overflow');
+ check(await page.locator('.calendar-day').evaluateAll(days=>days.every(day=>day.querySelectorAll('.calendar-event').length===1)),'One hourly job item per day');
+ check((await page.locator('.calendar-group').first().textContent()).includes('24 runs'),'Grouped item shows occurrence count');
+ await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-grouped-hourly.png`,fullPage:true});
+ await page.locator('.calendar-group').first().click();await page.waitForFunction(()=>document.querySelector('.calendar-day-list .calendar-event'));
  check(await page.locator('.calendar-day-list .calendar-event').count()>=23,'Dense hourly day expands all entries');await page.keyboard.press('Escape');
  const dense=(await create('-dense','Minute density test','* * * * *','UTC')).job;
- await page.locator('#calendar-refresh').click();await ready();await page.locator('#calendar-job').selectOption(dense.id);await ready();await page.locator('.calendar-overflow').first().click();await page.waitForFunction(()=>document.querySelectorAll('.calendar-day-list .calendar-event').length===100);
+ await page.locator('#calendar-refresh').click();await ready();await page.locator('#calendar-job').selectOption(dense.id);await ready();await page.locator('.calendar-group').first().click();await page.waitForFunction(()=>document.querySelectorAll('.calendar-day-list .calendar-event').length===100);
  await page.locator('#calendar-more').click();await page.waitForFunction(()=>document.querySelectorAll('.calendar-day-list .calendar-event').length===200);
  check(true,'Dense day pages 100 entries');await page.keyboard.press('Escape');
+ await page.locator('#calendar-job').selectOption('');await ready();
+ const hourlyGroup=page.locator('.calendar-group').filter({hasText:'Hourly build check'}).first();await hourlyGroup.click();await page.waitForFunction(()=>document.querySelector('.calendar-day-list .calendar-event'));
+ check(await page.locator('.calendar-day-list .calendar-event span').evaluateAll(names=>names.every(name=>name.textContent==='Hourly build check')),'Group detail is scoped to its job even in All jobs');
+ await page.keyboard.press('Escape');
  let fail=true;
  const failure=async route=>{if(route.request().postDataJSON()?.operation?.operation?.command==='calendar'&&fail)return route.fulfill({json:{ok:false,error:{message:'Synthetic offline failure'}}});return route.continue();};
  await page.route('**/api/action',failure);await page.locator('#calendar-refresh').click();await page.waitForFunction(()=>document.querySelector('[data-calendar-retry]'));
