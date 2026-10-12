@@ -53,7 +53,7 @@ const HeyBossCalendar=(()=>{
       try{
         const result=await read({command:'list',include_deleted:true,after:reset?null:filterAfter,limit:50});if(generation!==filterSeq)return;
         if(reset)$('#calendar-job').innerHTML='<option value="">All jobs · including past runs</option>';
-        for(const row of result.jobs){const option=document.createElement('option');option.value=row.id;option.textContent=row.snapshot.definition.name+(row.deleted_at?' · Deleted':row.enabled?'':' · Paused');$('#calendar-job').append(option);}
+        for(const row of result.jobs){const option=document.createElement('option');option.value=row.id;option.textContent=row.snapshot.definition.name+(row.deleted_at?' · Deleted':row.enabled?'':' · Disabled');$('#calendar-job').append(option);}
         if(job&&!Array.from($('#calendar-job').options).some(o=>o.value===job)){const option=new Option('Selected job',job);$('#calendar-job').append(option);}
         $('#calendar-job').value=job||'';filterAfter=result.next_cursor;$('#calendar-jobs-more').textContent='More job filters';$('#calendar-jobs-more').hidden=!filterAfter;
       }catch(e){if(generation===filterSeq){$('#calendar-jobs-more').hidden=false;$('#calendar-jobs-more').textContent='Retry job filters';}}

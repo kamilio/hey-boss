@@ -66,7 +66,8 @@ async page=>{
  await page.locator('#calendar-job').selectOption(daily.id);await ready();
  await page.locator('#calendar-grid .calendar-event.scheduled').first().click();await page.waitForFunction(()=>document.querySelector('#job-name'));
  check(await page.locator('#job-name').inputValue()==='Morning release review','Upcoming opens editor');
- await page.getByRole('button',{name:'Pause schedule',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.textContent==='Resume schedule');
+ await page.getByRole('switch',{name:'Disable job',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.getAttribute('aria-checked')==='false');
+ await page.getByRole('button',{name:'Close job details'}).click();
  await page.locator('#jobs-view-calendar').click();await ready();check(await page.locator('.calendar-event.scheduled').count()===0,'Pause clears projections');
  const saved=(await api({command:'view',id:daily.id})).job;
  const edited=(await api({command:'edit',id:daily.id,if_revision:saved.revision,definition:{...saved.snapshot.definition,name:'Edited morning review',cron:'0 10 * * *'},markdown:null})).job;

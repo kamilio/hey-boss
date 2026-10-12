@@ -1,5 +1,22 @@
 const assert = require('node:assert/strict');
-const {summary, modelChoices, availability, Mutation} = require('../src/issues/web/jobs.js');
+const {summary, modelChoices, availability, Mutation, scheduleState, filterJobs, scheduleFields, scheduleCron} = require('../src/issues/web/jobs.js');
+assert.deepEqual(scheduleFields('30 17 * * 1-5'),{frequency:'weekdays',time:'17:30'});
+assert.deepEqual(scheduleFields('0 * * * *'),{frequency:'hourly',time:'09:00'});
+assert.equal(scheduleFields('*/7 2-8 * JAN MON').frequency,'custom','Complex schedules must remain exact');
+assert.equal(scheduleCron('weekdays','17:30'),'30 17 * * 1-5');
+assert.equal(scheduleCron('weekly','09:05'),'5 9 * * 1');
+assert.equal(summary('5 9 * * 1'),'Mondays at 09:05');
+const jobs=[
+ {id:'on',enabled:true,deleted_at:null,snapshot:{definition:{name:'Chief',model:'gpt',cron:'0 * * * *'}},last_run:{state:'failed'}},
+ {id:'off',enabled:false,deleted_at:null,snapshot:{definition:{name:'Weekly review',model:'claude',cron:'0 9 * * 1'}},active_run:{state:'running'}},
+ {id:'gone',enabled:false,deleted_at:123,snapshot:{definition:{name:'Old',model:'gpt',cron:'0 * * * *'}}}
+];
+assert.equal(scheduleState(jobs[0]),'Enabled','Failed execution must not disable a schedule');
+assert.equal(scheduleState(jobs[1]),'Disabled','An active execution must not make a disabled schedule appear enabled');
+assert.equal(scheduleState(jobs[2]),'Deleted');
+assert.deepEqual(filterJobs(jobs,'disabled','').map(j=>j.id),['off'],'Deleted is distinct from disabled');
+assert.deepEqual(filterJobs(jobs,'enabled',' CHIEF ').map(j=>j.id),['on']);
+assert.deepEqual(filterJobs(jobs,'all','claude').map(j=>j.id),['off']);
 assert.equal(summary('0 9 * * 1-5'), 'Weekdays at 09:00');
 assert.equal(summary('30 8 * * *'), 'Every day at 08:30');
 assert.match(summary('*/7 2-8 * JAN MON'), /Minute/);
