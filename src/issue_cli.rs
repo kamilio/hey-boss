@@ -1782,11 +1782,9 @@ pub(crate) fn print_text(value: &Value) {
             }
         }
     }
-    for (key, label) in [("prompt", "Shared prompt")] {
-        let prompt = markdown(&value[key]);
-        if !prompt.trim().is_empty() {
-            println!("{label}: {prompt}");
-        }
+    let prompt = markdown(&value["prompt"]);
+    if !prompt.trim().is_empty() {
+        println!("Shared prompt: {prompt}");
     }
     if let Some(config) = value.get("config") {
         println!(
