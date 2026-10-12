@@ -338,7 +338,6 @@ impl Store {
         )?);
         Ok(config)
     }
-
 }
 // Callers constrain projects separately so their queries can use project indexes.
 const ELIGIBLE: &str =

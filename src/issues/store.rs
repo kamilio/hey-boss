@@ -220,8 +220,16 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("project_settings", "chief_prompt", "TEXT"),
     ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "plan", "TEXT"),
-    ("project_settings", "artifacts_enabled", "INTEGER NOT NULL DEFAULT 1"),
-    ("project_settings", "mindmaps_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    (
+        "project_settings",
+        "artifacts_enabled",
+        "INTEGER NOT NULL DEFAULT 1",
+    ),
+    (
+        "project_settings",
+        "mindmaps_enabled",
+        "INTEGER NOT NULL DEFAULT 1",
+    ),
     (
         "project_settings",
         "drafts_enabled",
