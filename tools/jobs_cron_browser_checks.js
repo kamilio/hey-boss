@@ -55,7 +55,8 @@ async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
  await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
  await page.locator('.job-cron-reference summary').click();await page.locator('.job-schedule-editor').evaluate(el=>el.scrollIntoView({block:'start'}));await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-cron-guide.png`});
  await page.locator('#job-close').click();await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);await page.locator('#jobs-search').fill('30 9 * * 1,3,5');
- check(await page.locator('.job-row').count()===1,'List searches the raw cron expression');check((await page.locator('.job-cron-caption').textContent())==='30 9 * * 1,3,5','List displays the saved cron');
+ await page.locator('.job-card[href$="job='+id+'"]').waitFor({state:'visible'});
+ check((await page.locator('.job-cron-caption').allTextContents()).every(value=>value==='30 9 * * 1,3,5'),'List searches the raw cron expression');check((await page.locator('.job-row').filter({has:page.locator('.job-card[href$="job='+id+'"]')}).locator('.job-cron-caption').textContent())==='30 9 * * 1,3,5','List displays the saved cron');
  await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-cron-list.png`});
  await page.reload();await page.locator('.job-card[href$="job='+id+'"]').click();await preview();check(await page.locator('#job-cron').inputValue()==='30 9 * * 1,3,5','Reload retains persisted schedule');
  await page.locator('#job-delete').click();await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Deleted'));
