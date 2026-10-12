@@ -186,6 +186,18 @@ fn ordinary_commands_reject_unknown_projects_without_registering_them() {
 }
 
 #[test]
+fn existing_state_directory_is_not_a_project_binding() {
+    let f = Fixture::new();
+    fs::create_dir(f.root.join(".hey-boss")).unwrap();
+    let nested = f.root.join("workspace/project");
+    fs::create_dir_all(&nested).unwrap();
+    assert_eq!(f.json(&f.root, &["issue", "projects", "--json"])["ok"], true);
+    let initialized = f.init(&nested);
+    assert_eq!(f.json(&nested, &["issue", "list", "--json"])["project"], initialized["project"]);
+    assert!(f.root.join(".hey-boss").is_dir());
+}
+
+#[test]
 fn commands_reuse_nearest_registered_parent_and_do_not_match_sibling_names() {
     let f = Fixture::new();
     let parent = f.root.join("parent");

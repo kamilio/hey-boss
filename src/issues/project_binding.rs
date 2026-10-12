@@ -26,7 +26,13 @@ fn contents(root: &Path) -> Result<Option<Vec<u8>>> {
             )));
         }
     };
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    // Older installations keep their state in ~/.hey-boss. Directories are
+    // not checkout markers, including when walking up from a nested folder.
+    if metadata.is_dir() {
+        return Ok(None);
+    }
+    if !metadata.is_file() {
         return Err(Error::invalid(format!(
             "{} must be a regular file",
             path.display()
