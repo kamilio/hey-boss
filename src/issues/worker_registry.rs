@@ -1,7 +1,7 @@
 //! Independent worker instances and first-class project instructions/PR links.
 use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
@@ -190,6 +190,45 @@ fn directory(db: &Connection, p: &Project) -> Result<String> {
 fn runtime(db: &Connection, c: &Settings, p: &Project) -> Result<ProjectConfig> {
     let defaults = project_settings(db, p)?;
     configured_runtime(c, &defaults, checkout(db, c, p)?)
+}
+
+impl Store {
+    /// Jobs use a live worker's workspace policy, independently of task capacity.
+    pub(crate) fn job_worker_projects(&self, id: &str) -> Result<BTreeMap<String, ProjectConfig>> {
+        let row: Option<(String, u32, String)> = self.db.query_row(
+            "SELECT config,owner_pid,owner_start FROM issue_workers w WHERE id=?1 AND owner_pid IS NOT NULL AND owner_start IS NOT NULL AND stop_requested=0 AND json_extract(config,'$.enabled')=1 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime r WHERE r.worker_id=w.id AND r.owner_pid=w.owner_pid AND r.owner_start=w.owner_start)",
+            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).optional()?;
+        let Some((config, pid, start)) = row else {
+            return Ok(BTreeMap::new());
+        };
+        if crate::agents::process_identity(pid).as_deref() != Some(&start) {
+            return Ok(BTreeMap::new());
+        }
+        let settings: Settings = serde_json::from_str(&config)?;
+        let projects = self.db.query_collect(
+            "SELECT id,name FROM projects WHERE hidden_at IS NULL ORDER BY id",
+            [],
+            |r| {
+                Ok::<_, rusqlite::Error>(Project {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                })
+            },
+        )?;
+        let mut result = BTreeMap::new();
+        for project in projects {
+            if !settings.projects.is_empty() && !settings.projects.contains(&project.id) {
+                continue;
+            }
+            let config = runtime(&self.db, &settings, &project)?;
+            let path = Path::new(&config.cwd);
+            if path.is_dir() && worker::checkout_matches_project(path, &project.id)? {
+                result.insert(project.id, config);
+            }
+        }
+        Ok(result)
+    }
 }
 
 fn configured_runtime(c: &Settings, defaults: &Value, cwd: String) -> Result<ProjectConfig> {
@@ -443,9 +482,9 @@ fn worker_overview_for(
         return Ok(Vec::new());
     }
     // Both metadata tables are additive; older installations may have neither.
-    let (builds_exist, runtime_exists): (bool, bool) = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds'),EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime')",
-        [], |r| Ok((r.get(0)?, r.get(1)?)),
+    let (builds_exist, runtime_exists, jobs_exist): (bool, bool, bool) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_builds'),EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='issue_worker_runtime'),EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_job_executions')",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let build = if builds_exist {
         "(SELECT build FROM issue_worker_builds b WHERE b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start)"
@@ -457,13 +496,18 @@ fn worker_overview_for(
     } else {
         "0"
     };
+    let job_active = if jobs_exist {
+        "(SELECT count(*) FROM local_job_executions e WHERE json_extract(e.dispatch,'$.run.worker_id')=w.id AND json_extract(e.report,'$.state') IN ('pending','running') AND e.owner_pid IS NOT NULL)"
+    } else {
+        "0"
+    };
     // Keep scoped lookups indexable even when most registrations are unrelated.
     let scope = if ids.is_some() {
         "WHERE w.id IN (SELECT value FROM json_each(?1))"
     } else {
         ""
     };
-    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start,{upgrading} FROM issue_workers w {scope} ORDER BY updated_at DESC,id LIMIT ?2"))?;
+    let mut stmt=db.prepare(&format!("SELECT id,config,version,kind,owner_pid,updated_at,(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),{build},owner_start,{upgrading},{job_active} FROM issue_workers w {scope} ORDER BY updated_at DESC,id LIMIT ?2"))?;
     let rows = stmt
         .query_map(
             params![
@@ -482,13 +526,14 @@ fn worker_overview_for(
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, bool>(9)?,
+                    r.get::<_, u32>(10)?,
                 ))
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let workers: Vec<Value> = rows.into_iter().map(|(id,c,v,k,pid,at,active,build,start,upgrading)| {
+    let workers: Vec<Value> = rows.into_iter().map(|(id,c,v,k,pid,at,active,build,start,upgrading,job_active)| {
         let build = build.filter(|_| pid.zip(start.as_deref()).is_some_and(|(pid,start)| crate::agents::process_identity(pid).as_deref() == Some(start)));
-        Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":upgrading,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active,"build":build}))
+        Ok(json!({"id":id,"config":serde_json::from_str::<Settings>(&c)?,"upgrading":upgrading,"version":v,"kind":k,"pid":pid,"updated_at":at,"active":active,"job_active":job_active,"build":build}))
     }).collect::<Result<_>>()?;
     Ok(workers)
 }

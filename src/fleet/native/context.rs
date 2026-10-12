@@ -36,6 +36,9 @@ pub(super) struct Context {
 }
 impl Context {
     pub fn new() -> Result<Self> {
+        Self::with_database(None)
+    }
+    pub fn with_database(database: Option<&Path>) -> Result<Self> {
         let home =
             PathBuf::from(std::env::var_os("HOME").ok_or_else(|| invalid("HOME is missing"))?);
         let state = std::env::var_os("HEY_BOSS_FLEET_STATE")
@@ -48,7 +51,10 @@ impl Context {
             .map(PathBuf::from)
             .unwrap_or(std::env::current_exe()?)
             .canonicalize()?;
-        let path = crate::issues::database_path_for_installation(&binary)?;
+        let path = match database {
+            Some(path) => path.to_owned(),
+            None => crate::issues::database_path_for_installation(&binary)?,
+        };
         let node = crate::issues::identity::machine()?;
         drop(Store::open(&path)?);
         fs::create_dir_all(&state)?;

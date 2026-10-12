@@ -7,7 +7,7 @@ async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
  page.on('dialog',dialog=>dialog.accept());
- const runtime=route=>{const provider=route.request().postDataJSON().provider||'codex';return route.fulfill({json:{ok:true,machine:'fixture-device',machines:[{state:'connected',heartbeat:Date.now()/1000,jobs:{available:true,checkouts:{[project]:'/fixture'},runtimes:{codex:{available:true},claude:{available:true},pi:{available:false}}},workers:[]}],catalog:{provider,error:provider==='pi'?'Pi runtime is unavailable':null,models:provider==='pi'?[]:[{selection:{id:provider+'-exact'},label:provider+' exact',advertised:true}]}}});};
+ const runtime=route=>{const provider=route.request().postDataJSON().provider||'codex';return route.fulfill({json:{ok:true,machine:'fixture-device',machines:[{state:'connected',heartbeat:Date.now()/1000,jobs:{available:true,workers:[{id:'pool',projects:[project]}],runtimes:{codex:{available:true},claude:{available:true},pi:{available:false}}},workers:[]}],catalog:{provider,error:provider==='pi'?'Pi runtime is unavailable':null,models:provider==='pi'?[]:[{selection:{id:provider+'-exact'},label:provider+' exact',advertised:true}]}}});};
  await page.route('**/api/jobs/runtime',runtime);
  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
  if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();check((await page.request.post(origin+'/api/pair',{data:{code}})).ok(),'Authenticated paired surface');}
@@ -16,7 +16,7 @@ async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  await page.waitForFunction(()=>!document.querySelector('#job-new').disabled);
  check(await page.evaluate(()=>isSecureContext)===!ordinaryHTTP,'Browser context matches the tested origin');
  if(ordinaryHTTP)check(await page.evaluate(()=>typeof crypto.randomUUID==='undefined'&&typeof crypto.getRandomValues==='function'),'Ordinary HTTP uses real browser crypto restrictions');
- check(await page.locator('#jobs-service').textContent()==='Ready to run','Absent worker pool keeps Jobs available');
+ check(await page.locator('#jobs-service').textContent()==='Ready to run · Uses no task slots','Running worker makes Jobs available without task slots');
  let writes=0;const watch=req=>{if(req.url().endsWith('/api/action')&&['create','edit','run_now','stop','delete','set_enabled'].includes(req.postDataJSON()?.operation?.operation?.command))writes++;};page.on('request',watch);
  await page.getByRole('button',{name:'New job',exact:true}).click();
  await page.locator('#job-name').fill('Weekday repository review');
@@ -125,8 +125,8 @@ async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  await page.getByRole('button',{name:'Refresh run history',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#job-history a[href^="/agents/session"]'));
  const sessionHref=await page.locator('#job-history a[href^="/agents/session"]').getAttribute('href');
- const task=page.locator('#job-history a').first();check((await task.getAttribute('href')).includes('issue='),'History links generated task');
- const taskHref=await task.getAttribute('href');
+ check(await page.locator('#job-history a[href*="issue="]').count()===0,'Job history creates no task link');
+ check(completed.task_number===null,'Job execution has no generated task');
  for(const width of [1440,768,390])for(const theme of ['light','dark']){
   await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme});await page.waitForTimeout(220);
   await page.locator('#job-dialog').evaluate(el=>el.scrollTop=0);
@@ -137,8 +137,6 @@ async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  await page.goto(origin+sessionHref);await page.waitForFunction(()=>document.body.textContent.includes('Synthetic saved job result.'));
  check(await page.locator('#takeover-open').isHidden(),'Job session is read-only');
  check(await page.locator('#steer-open').isHidden(),'Job session has no worker steering controls');
- await page.goto(origin+taskHref);await page.waitForFunction(()=>document.querySelector('.issue-readiness')?.textContent.includes('Scheduled job'));
- check((await page.locator('.issue-readiness').innerText()).includes('Cancelled'),'Generated task has read-only execution provenance');
  await page.goto(origin+'/jobs#'+params({project,job:id}));await page.waitForFunction(()=>document.querySelector('#job-delete'));
  await page.getByRole('button',{name:'Run now',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#job-stop').hidden);
  await page.getByRole('button',{name:'Delete job',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Deleted')&&document.querySelector('#job-history')?.textContent.includes('cancelled'));

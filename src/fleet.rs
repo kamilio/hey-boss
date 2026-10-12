@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 mod native;
+pub(crate) use native::WorkerJobs;
 mod signal;
 pub use signal::queue_signal;
 

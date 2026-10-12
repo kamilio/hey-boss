@@ -75,11 +75,111 @@ fn task(db: &Connection, s: &Snapshot, _run: &str) -> Result<i64> {
 fn reserve(f: &mut Fixture, now: i64) -> Run {
     let due = f.store.due_jobs(now, 100).unwrap();
     assert_eq!(due.len(), 1);
-    f.store.commit_job_occurrence(&due[0], task).unwrap()
+    f.store.enqueue_job(&due[0]).unwrap()
 }
 use sha2::Digest;
 use std::path::PathBuf;
 const H: i64 = 3_600_000;
+
+#[test]
+fn scheduled_and_manual_runs_do_not_create_issues_or_consume_issue_numbers() {
+    let mut f = Fixture::new();
+    f.create("scheduled", 0);
+    let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
+    let run = f.store.enqueue_job(&occurrence).unwrap();
+    assert!(run.task_number.is_none());
+    f.create("manual", 0);
+    let manual = f
+        .op(
+            JobOperation::RunNow {
+                id: "manual".into(),
+            },
+            H,
+        )
+        .unwrap();
+    assert!(manual["run"]["task_number"].is_null());
+    assert_eq!(
+        f.store
+            .db
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.store
+            .db
+            .query_row(
+                "SELECT next_number FROM projects WHERE id='named:Jobs'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.store
+            .db
+            .query_row("SELECT count(*) FROM scheduled_job_owners", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn old_job_history_and_ownership_survive_migration_without_new_tasks() {
+    let mut f = Fixture::new();
+    f.create("legacy", 0);
+    let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
+    let number = task(&f.store.db, &occurrence.snapshot, "legacy").unwrap();
+    let run = f.store.enqueue_job(&occurrence).unwrap();
+    f.store
+        .db
+        .execute(
+            "UPDATE scheduled_job_runs SET task_number=?2 WHERE id=?1",
+            params![run.id, number],
+        )
+        .unwrap();
+    f.store.assign_job(&run.id, "remote", "pool").unwrap();
+    let columns = RUN_COLUMNS.replace(",worker_id", "");
+    // Recreate the pre-change table, including its issue-required CHECK.
+    f.store.db.execute_batch("CREATE TEMP TABLE old_runs AS SELECT * FROM scheduled_job_runs; CREATE TEMP TABLE old_owners AS SELECT * FROM scheduled_job_owners; DROP TABLE scheduled_job_owners; DROP TABLE scheduled_job_runs;").unwrap();
+    let old_schema = SCHEMA.replace(",worker_id TEXT", "").replace("CHECK(state<>'skipped' OR (task_number IS NULL AND finished_at IS NOT NULL))", "CHECK((state='skipped' AND task_number IS NULL AND finished_at IS NOT NULL) OR (state<>'skipped' AND task_number IS NOT NULL))");
+    f.store.db.execute_batch(&old_schema).unwrap();
+    f.store.db.execute_batch(&format!("INSERT INTO scheduled_job_runs({columns},job_id,job_revision,project_id) SELECT {columns},job_id,job_revision,project_id FROM old_runs; CREATE TABLE scheduled_job_owners(run_id TEXT PRIMARY KEY REFERENCES scheduled_job_runs(id),node TEXT,generation INTEGER NOT NULL,revoking INTEGER NOT NULL DEFAULT 0,stop_requested INTEGER NOT NULL DEFAULT 0); INSERT INTO scheduled_job_owners SELECT * FROM old_owners; DROP TABLE old_runs; DROP TABLE old_owners;")).unwrap();
+    f.reopen();
+    let saved = get_run(&f.store.db, &run.id).unwrap();
+    assert_eq!(saved.task_number, Some(number));
+    assert_eq!(saved.snapshot, run.snapshot);
+    assert_eq!(
+        f.store.job_owner(&run.id).unwrap(),
+        Some(("remote".into(), 1, false))
+    );
+    assert!(
+        f.store
+            .db
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none()
+    );
+    f.create("new", H);
+    let next = f
+        .store
+        .manual_job("named:Jobs", "new", "manual", H + 1)
+        .unwrap();
+    assert!(f.store.enqueue_job(&next).unwrap().task_number.is_none());
+    assert_eq!(
+        f.store
+            .db
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
 
 #[test]
 fn scheduled_tasks_never_enter_regular_pickup_after_unassignment_or_restart() {
@@ -139,7 +239,7 @@ fn edits_pause_resume_delete_schedule_forward_and_keep_revisions() {
         )
         .unwrap();
     assert_eq!(edited["job"]["next_at"], 2 * H);
-    assert!(f.store.commit_job_occurrence(&prepared, task).is_err());
+    assert!(f.store.enqueue_job(&prepared).is_err());
     assert!(
         f.op(
             JobOperation::SetEnabled {
@@ -225,7 +325,7 @@ fn downtime_coalesces_overlap_is_recorded_and_other_jobs_remain_independent() {
     assert_eq!(due.len(), 2);
     let mut runs = Vec::new();
     for occurrence in due {
-        runs.push(f.store.commit_job_occurrence(&occurrence, task).unwrap());
+        runs.push(f.store.enqueue_job(&occurrence).unwrap());
     }
     assert_eq!(runs.iter().filter(|r| r.state == "skipped").count(), 1);
     let skipped = runs.iter().find(|r| r.state == "skipped").unwrap();
@@ -244,36 +344,29 @@ fn downtime_coalesces_overlap_is_recorded_and_other_jobs_remain_independent() {
         .unwrap();
     let due = f.store.due_jobs(102 * H, 10).unwrap();
     let job = due.iter().find(|d| d.snapshot.job_id == "job").unwrap();
-    assert_eq!(
-        f.store.commit_job_occurrence(job, task).unwrap().state,
-        "pending"
-    );
+    assert_eq!(f.store.enqueue_job(job).unwrap().state, "pending");
 }
 #[test]
 fn atomic_creation_retries_manual_keys_and_immutable_execution_snapshot() {
     let mut f = Fixture::new();
     f.create("job", 0);
     let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
-    assert!(
-        f.store
-            .commit_job_occurrence(&occurrence, |db, s, r| {
-                task(db, s, r)?;
-                Err(Error::invalid("Synthetic rollback"))
-            })
-            .is_err()
-    );
+    f.store.db.execute_batch("CREATE TEMP TRIGGER reject_job_owner BEFORE INSERT ON scheduled_job_owners BEGIN SELECT RAISE(ABORT,'Synthetic rollback'); END;").unwrap();
+    assert!(f.store.enqueue_job(&occurrence).is_err());
     assert_eq!(
         f.store
             .db
-            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .query_row("SELECT count(*) FROM scheduled_job_runs", [], |r| r
+                .get::<_, i64>(0))
             .unwrap(),
         0
     );
-    let a = f.store.commit_job_occurrence(&occurrence, task).unwrap();
-    let b = f
-        .store
-        .commit_job_occurrence(&occurrence, |_, _, _| panic!("must deduplicate"))
+    f.store
+        .db
+        .execute_batch("DROP TRIGGER reject_job_owner")
         .unwrap();
+    let a = f.store.enqueue_job(&occurrence).unwrap();
+    let b = f.store.enqueue_job(&occurrence).unwrap();
     assert_eq!(a.id, b.id);
     f.store
         .finish_job_run(&a.id, "cancelled", Some("fixture"), H + 1)
@@ -282,7 +375,7 @@ fn atomic_creation_retries_manual_keys_and_immutable_execution_snapshot() {
         .store
         .manual_job("named:Jobs", "job", "button-1", H + 2)
         .unwrap();
-    let m = f.store.commit_job_occurrence(&manual, task).unwrap();
+    let m = f.store.enqueue_job(&manual).unwrap();
     assert_eq!(m.trigger, "manual");
     f.op(
         JobOperation::Edit {
@@ -298,13 +391,7 @@ fn atomic_creation_retries_manual_keys_and_immutable_execution_snapshot() {
         .store
         .manual_job("named:Jobs", "job", "button-1", H + 4)
         .unwrap();
-    assert_eq!(
-        f.store
-            .commit_job_occurrence(&retry, |_, _, _| panic!())
-            .unwrap()
-            .id,
-        m.id
-    );
+    assert_eq!(f.store.enqueue_job(&retry).unwrap().id, m.id);
     f.reopen();
     assert_eq!(f.store.job_instructions(&m.snapshot).unwrap(), ORIGINAL);
     let loaded = f
@@ -325,7 +412,7 @@ fn atomic_creation_retries_manual_keys_and_immutable_execution_snapshot() {
     );
 }
 #[test]
-fn concurrent_occurrence_commits_create_one_task_and_identity() {
+fn concurrent_occurrence_commits_create_one_execution_without_a_task() {
     let mut f = Fixture::new();
     f.create("job", 0);
     let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
@@ -339,7 +426,7 @@ fn concurrent_occurrence_commits_create_one_task_and_identity() {
             std::thread::spawn(move || {
                 let mut s = Store::open(&path).unwrap();
                 b.wait();
-                s.commit_job_occurrence(&o, task).unwrap().id
+                s.enqueue_job(&o).unwrap().id
             })
         })
         .collect();
@@ -350,7 +437,7 @@ fn concurrent_occurrence_commits_create_one_task_and_identity() {
             .db
             .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1
+        0
     );
 }
 #[test]
@@ -499,10 +586,7 @@ fn preview_and_reads_do_not_create_tasks_and_invalid_edits_do_not_change_jobs() 
         .store
         .manual_job("named:Jobs", "job", "paused-manual", 2 * H)
         .unwrap();
-    assert_eq!(
-        f.store.commit_job_occurrence(&manual, task).unwrap().state,
-        "pending"
-    );
+    assert_eq!(f.store.enqueue_job(&manual).unwrap().state, "pending");
 }
 #[test]
 fn companion_storage_rejects_direct_mutations_and_request_content_reuse() {
@@ -563,7 +647,7 @@ fn history_pages_keep_stable_cursors_across_new_runs_and_restart() {
             .store
             .manual_job("named:Jobs", "job", &format!("click-{n}"), n * H)
             .unwrap();
-        let run = f.store.commit_job_occurrence(&occurrence, task).unwrap();
+        let run = f.store.enqueue_job(&occurrence).unwrap();
         f.store
             .finish_job_run(&run.id, "cancelled", None, n * H + 1)
             .unwrap();
@@ -586,7 +670,7 @@ fn history_pages_keep_stable_cursors_across_new_runs_and_restart() {
         .store
         .manual_job("named:Jobs", "job", "another-click", 5 * H)
         .unwrap();
-    f.store.commit_job_occurrence(&occurrence, task).unwrap();
+    f.store.enqueue_job(&occurrence).unwrap();
     f.reopen();
     let second = f
         .op(
@@ -604,7 +688,7 @@ fn history_pages_keep_stable_cursors_across_new_runs_and_restart() {
 }
 
 #[test]
-fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
+fn runner_fences_handoff_and_late_reports_without_changing_issues() {
     use crate::jobs::execution::Report;
     let mut f = Fixture::new();
     f.create("job", 0);
@@ -616,23 +700,13 @@ fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
     .unwrap();
     let occurrence = f.store.due_jobs(H, 10).unwrap().remove(0);
     let run = f.store.enqueue_job(&occurrence).unwrap();
-    assert!(f.store.db.query_row("SELECT a.sort_order<b.sort_order FROM issues a,issues b WHERE a.number=?1 AND b.number=?2",params![run.task_number,old],|r|r.get::<_,bool>(0)).unwrap());
-    assert_eq!(
-        f.store
-            .db
-            .query_row(
-                "SELECT body FROM issues WHERE number=?1",
-                [run.task_number],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
-        ORIGINAL
-    );
-    assert!(f.store.assign_job(&run.id, "first").unwrap());
-    assert!(!f.store.assign_job(&run.id, "second").unwrap());
+    assert!(run.task_number.is_none());
+    assert_eq!(old, 1);
+    assert!(f.store.assign_job(&run.id, "first", "pool").unwrap());
+    assert!(!f.store.assign_job(&run.id, "second", "pool").unwrap());
     f.reopen();
     assert!(
-        !f.store.assign_job(&run.id, "second").unwrap(),
+        !f.store.assign_job(&run.id, "second", "pool").unwrap(),
         "restart/disconnect never releases an owner"
     );
     let dispatch = f.store.job_dispatches("first").unwrap().remove(0);
@@ -645,11 +719,11 @@ fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
     );
     f.store.revoke_job(&run.id, "first", 1).unwrap();
     assert!(
-        !f.store.assign_job(&run.id, "second").unwrap(),
+        !f.store.assign_job(&run.id, "second", "pool").unwrap(),
         "revoke is not acknowledgement"
     );
     assert!(f.store.accept_job_report("first", &ack).unwrap());
-    assert!(f.store.assign_job(&run.id, "second").unwrap());
+    assert!(f.store.assign_job(&run.id, "second", "pool").unwrap());
     let second = f.store.job_dispatches("second").unwrap().remove(0);
     assert_eq!(second.generation, 2);
     ack.state = "running".into();
@@ -669,16 +743,13 @@ fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
         get_run(&f.store.db, &run.id).unwrap().session_id.as_deref(),
         Some("exact-session")
     );
+    assert_eq!(get_run(&f.store.db, &run.id).unwrap().state, "succeeded");
     assert_eq!(
         f.store
             .db
-            .query_row(
-                "SELECT state FROM issues WHERE number=?1",
-                [run.task_number],
-                |r| r.get::<_, String>(0)
-            )
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        "closed"
+        1
     );
     assert_eq!(
         f.store
@@ -691,7 +762,7 @@ fn runner_owns_top_task_and_fences_handoff_and_late_reports() {
 }
 
 #[test]
-fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
+fn manual_overlap_stop_pause_and_failure_keep_honest_run_status() {
     use crate::jobs::execution::Report;
     let mut f = Fixture::new();
     f.create("job", 0);
@@ -716,7 +787,7 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
         .unwrap();
     assert_eq!(f.store.enqueue_job(&occurrence).unwrap().state, "skipped");
     let id = run["id"].as_str().unwrap();
-    f.store.assign_job(id, "local").unwrap();
+    f.store.assign_job(id, "local", "pool").unwrap();
     let dispatch = f.store.job_dispatches("local").unwrap().remove(0);
     f.op(
         JobOperation::Stop {
@@ -738,22 +809,13 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
     f.store.accept_job_report("local", &report).unwrap();
     assert_eq!(get_run(&f.store.db, id).unwrap().state, "cancelled");
     assert!(!get_job(&f.store.db, "named:Jobs", "job").unwrap().enabled);
-    let state: String = f
-        .store
-        .db
-        .query_row(
-            "SELECT state FROM issues WHERE number=?1",
-            [run["task_number"].as_i64().unwrap()],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(state, "open");
+    assert!(run["task_number"].is_null());
     let occurrence = f
         .store
         .manual_job("named:Jobs", "job", "failed", H + 4)
         .unwrap();
     let run = f.store.enqueue_job(&occurrence).unwrap();
-    f.store.assign_job(&run.id, "local").unwrap();
+    f.store.assign_job(&run.id, "local", "pool").unwrap();
     let mut report = Report::pending(&f.store.job_dispatches("local").unwrap().remove(0));
     report.state = "failed".into();
     report.finished_at = Some(H + 5);
@@ -763,13 +825,9 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_task_status() {
     assert_eq!(
         f.store
             .db
-            .query_row(
-                "SELECT state FROM issues WHERE number=?1",
-                [run.task_number],
-                |r| r.get::<_, String>(0)
-            )
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        "open"
+        0
     );
     assert!(
         !f.store
@@ -1298,7 +1356,7 @@ fn calendar_history_cursor_handles_equal_times_and_deleted_jobs() {
             .store
             .manual_job("named:Jobs", "job", &format!("manual-{i}"), H)
             .unwrap();
-        let run = f.store.commit_job_occurrence(&occurrence, task).unwrap();
+        let run = f.store.enqueue_job(&occurrence).unwrap();
         f.store.db.execute("UPDATE scheduled_job_runs SET state='succeeded',started_at=?2,finished_at=?3 WHERE id=?1",params![run.id,H+500,H+1500]).unwrap();
     }
     f.op(

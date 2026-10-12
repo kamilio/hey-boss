@@ -24,12 +24,12 @@ CREATE TABLE IF NOT EXISTS scheduled_job_runs(
  sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,job_id TEXT NOT NULL,job_revision INTEGER NOT NULL,
  project_id TEXT NOT NULL,scheduled_at INTEGER NOT NULL,trigger TEXT NOT NULL CHECK(trigger IN('scheduled','manual')),request_key TEXT,
  state TEXT NOT NULL CHECK(state IN('pending','running','skipped','succeeded','failed','cancelled')),reason TEXT,
- task_number INTEGER,machine TEXT,session_id TEXT,created_at INTEGER NOT NULL,started_at INTEGER,finished_at INTEGER,
+ task_number INTEGER,machine TEXT,session_id TEXT,created_at INTEGER NOT NULL,started_at INTEGER,finished_at INTEGER,worker_id TEXT,
  snapshot TEXT NOT NULL CHECK(json_valid(snapshot)),
  FOREIGN KEY(job_id,job_revision) REFERENCES scheduled_job_revisions(job_id,revision),
  FOREIGN KEY(project_id,task_number) REFERENCES issues(project_id,number),
  CHECK((trigger='scheduled' AND request_key IS NULL) OR (trigger='manual' AND request_key IS NOT NULL)),
- CHECK((state='skipped' AND task_number IS NULL AND finished_at IS NOT NULL) OR (state<>'skipped' AND task_number IS NOT NULL)));
+ CHECK(state<>'skipped' OR (task_number IS NULL AND finished_at IS NOT NULL)));
 CREATE UNIQUE INDEX IF NOT EXISTS scheduled_job_occurrence ON scheduled_job_runs(job_id,scheduled_at) WHERE trigger='scheduled';
 CREATE UNIQUE INDEX IF NOT EXISTS scheduled_job_manual ON scheduled_job_runs(job_id,request_key) WHERE trigger='manual';
 CREATE UNIQUE INDEX IF NOT EXISTS scheduled_job_active ON scheduled_job_runs(job_id) WHERE state IN('pending','running');
@@ -45,12 +45,69 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?; tx.commit()?;
     }
+    migrate_worker_runs(db)?;
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='scheduled_job_calendar')",[],|r|r.get::<_,bool>(0))? {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_calendar ON scheduled_job_runs(project_id,scheduled_at,id); CREATE INDEX IF NOT EXISTS scheduled_job_calendar_job ON scheduled_job_runs(project_id,job_id,scheduled_at,id);")?;
         tx.commit()?;
     }
-    runner::migrate(db)
+    runner::migrate(db)?;
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_job_workers')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS local_job_workers(worker_id TEXT PRIMARY KEY,owner_pid INTEGER NOT NULL,owner_start TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS local_jobs_worker_active ON local_job_executions(json_extract(dispatch,'$.run.worker_id')) WHERE json_extract(report,'$.state') IN ('pending','running');")?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn migrate_worker_runs(db: &Connection) -> Result<()> {
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('scheduled_job_runs') WHERE name='worker_id')", [], |r| r.get::<_, bool>(0))? {
+        return Ok(());
+    }
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    let sequence: Option<i64> = tx
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name='scheduled_job_runs'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // Owners are the only incoming foreign key. Preserve their fences while
+    // replacing the old constraint that required every run to have an issue.
+    let owners = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_job_owners')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )?;
+    if owners {
+        tx.execute_batch("CREATE TEMP TABLE saved_job_owners AS SELECT * FROM scheduled_job_owners; DROP TABLE scheduled_job_owners;")?;
+    }
+    let start = SCHEMA
+        .find("CREATE TABLE IF NOT EXISTS scheduled_job_runs(")
+        .unwrap();
+    let end = SCHEMA[start..].find("CREATE UNIQUE INDEX").unwrap() + start;
+    tx.execute_batch(
+        &SCHEMA[start..end].replace("scheduled_job_runs(", "scheduled_job_runs_new("),
+    )?;
+    tx.execute_batch("INSERT INTO scheduled_job_runs_new(sequence,id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,snapshot) SELECT sequence,id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,snapshot FROM scheduled_job_runs; DROP TABLE scheduled_job_runs; ALTER TABLE scheduled_job_runs_new RENAME TO scheduled_job_runs;")?;
+    tx.execute_batch(SCHEMA)?;
+    if let Some(sequence) = sequence {
+        tx.execute("INSERT INTO sqlite_sequence(name,seq) SELECT 'scheduled_job_runs',?1 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='scheduled_job_runs')", [sequence])?;
+        tx.execute(
+            "UPDATE sqlite_sequence SET seq=max(seq,?1) WHERE name='scheduled_job_runs'",
+            [sequence],
+        )?;
+    }
+    if owners {
+        tx.execute_batch("CREATE TABLE scheduled_job_owners(run_id TEXT PRIMARY KEY REFERENCES scheduled_job_runs(id),node TEXT,generation INTEGER NOT NULL,revoking INTEGER NOT NULL DEFAULT 0,stop_requested INTEGER NOT NULL DEFAULT 0); INSERT INTO scheduled_job_owners SELECT * FROM saved_job_owners; DROP TABLE saved_job_owners;")?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 fn authority(db: &Connection) -> Result<()> {
     if db.query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
@@ -105,7 +162,7 @@ fn get_job(db: &Connection, project: &str, id: &str) -> Result<Job> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job not found in this project"))
 }
-const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at";
+const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,worker_id";
 fn run_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         sequence: r.get(0)?,
@@ -117,6 +174,7 @@ fn run_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Run> {
         state: r.get(6)?,
         reason: r.get(7)?,
         task_number: r.get(8)?,
+        worker_id: r.get(14)?,
         machine: r.get(9)?,
         session_id: r.get(10)?,
         created_at: r.get(11)?,
@@ -533,13 +591,8 @@ impl Store {
             request_key: Some(key.into()),
         })
     }
-    /// The runner creates and reserves its task using this transaction. Failure rolls back both.
-    /// The callback must do only database work; launch the harness after commit.
-    pub fn commit_job_occurrence(
-        &mut self,
-        o: &Occurrence,
-        create_task: impl FnOnce(&Connection, &Snapshot, &str) -> Result<i64>,
-    ) -> Result<Run> {
+    /// Publish one execution and its ownership fence, without changing issues.
+    pub fn enqueue_job(&mut self, o: &Occurrence) -> Result<Run> {
         authority(&self.db)?;
         if let Some(saved) = existing(&self.db, o)? {
             return Ok(saved);
@@ -562,19 +615,9 @@ impl Store {
             ));
         }
         let overlap:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE job_id=?1 AND state IN('pending','running'))",[&o.snapshot.job_id],|r|r.get(0))?;
-        let task_number = if overlap {
-            None
-        } else {
-            Some(create_task(&tx, &o.snapshot, &id)?)
-        };
         let state = if overlap { "skipped" } else { "pending" };
-        tx.execute("INSERT INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,task_number,created_at,finished_at,snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![id,o.snapshot.job_id,o.snapshot.revision,o.snapshot.project_id,o.scheduled_at,if o.request_key.is_some(){"manual"}else{"scheduled"},o.request_key,state,overlap.then_some("overlap"),task_number,o.observed_at,overlap.then_some(o.observed_at),serde_json::to_string(&o.snapshot)?])?;
-        if let Some(number) = task_number {
-            // Publish the marker with the task and occurrence, never in a later tick.
-            tx.execute(
-                "UPDATE issues SET job_run_id=?3 WHERE project_id=?1 AND number=?2",
-                params![o.snapshot.project_id, number, id],
-            )?;
+        tx.execute("INSERT INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,created_at,finished_at,snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,o.snapshot.job_id,o.snapshot.revision,o.snapshot.project_id,o.scheduled_at,if o.request_key.is_some(){"manual"}else{"scheduled"},o.request_key,state,overlap.then_some("overlap"),o.observed_at,overlap.then_some(o.observed_at),serde_json::to_string(&o.snapshot)?])?;
+        if !overlap {
             tx.execute(
                 "INSERT INTO scheduled_job_owners(run_id,generation) VALUES(?1,1)",
                 [&id],

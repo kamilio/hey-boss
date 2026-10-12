@@ -40,7 +40,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let (root, ctx, store) = super::super::context::tests::test_context();
+        let (root, ctx, mut store) = super::super::context::tests::test_context();
         let db = ctx.db().unwrap();
         db.execute(
             "INSERT INTO projects(id,name,next_number) VALUES(?1,'Scheduled',1)",
@@ -48,19 +48,19 @@ impl Fixture {
         )
         .unwrap();
         replica::install_capture(&db, "controller", &ctx.node).unwrap();
-        let spec = json!({"git":"https://example.invalid/scheduled.git","path":root});
-        // Use existing checkout configuration/status without a worker registration.
-        let key = super::super::context::hash(&json!({"id":PROJECT,"checkout":spec}));
-        ctx.atomic_json(
-            &ctx.state.join("fleet-main.json"),
-            &json!({"workers":[],"projects":{PROJECT:spec}}),
-        )
-        .unwrap();
-        ctx.atomic_json(
-            &ctx.state.join("project-checkouts.json"),
-            &json!({PROJECT:{"key":key,"path":root}}),
-        )
-        .unwrap();
+        store
+            .register_worker(
+                Some("pool"),
+                &crate::issues::worker::Settings {
+                    directory: root.to_string_lossy().into_owned(),
+                    projects: vec![PROJECT.into()],
+                    enabled: true,
+                    ..Default::default()
+                },
+                &ctx.node,
+            )
+            .unwrap();
+        advertise_worker(&ctx, "pool").unwrap();
         Self { root, ctx, store }
     }
     fn op(&mut self, operation: Operation) -> Value {
@@ -84,7 +84,7 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        self.store.assign_job(&run, &self.ctx.node).unwrap();
+        self.store.assign_job(&run, &self.ctx.node, "pool").unwrap();
         self.store
             .job_dispatches(&self.ctx.node)
             .unwrap()
@@ -130,16 +130,174 @@ fn wait(mut check: impl FnMut() -> bool) {
 }
 
 #[test]
-fn zero_workers_saturated_and_paused_pools_launch_once_without_slots() {
+fn checkout_without_a_running_worker_keeps_job_pending() {
+    let mut f = Fixture::new();
+    let d = f.run("no-worker");
+    f.store.unregister_worker("pool").unwrap();
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_job_owners SET node=NULL WHERE run_id=?1",
+            [&d.run.id],
+        )
+        .unwrap();
+    schedule(&f.ctx, &f.machines()).unwrap();
+    assert!(f.store.job_owner(&d.run.id).unwrap().is_none());
+    let result = f.op(Operation::Run {
+        id: "no-worker".into(),
+        run_id: d.run.id,
+    });
+    assert!(result["run"]["reason"].as_str().unwrap().contains("worker"));
+}
+
+#[test]
+fn paused_stopped_and_other_project_workers_cannot_receive_jobs() {
+    let mut f = Fixture::new();
+    let d = f.run("waiting");
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_job_owners SET node=NULL WHERE run_id=?1",
+            [&d.run.id],
+        )
+        .unwrap();
+    for sql in [
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('false'))",
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('true')),stop_requested=1",
+        "UPDATE issue_workers SET stop_requested=0,config=json_set(config,'$.projects',json('[\"named:Other\"]'))",
+    ] {
+        f.ctx.db().unwrap().execute_batch(sql).unwrap();
+        schedule(&f.ctx, &f.machines()).unwrap();
+        assert!(f.store.job_owner(&d.run.id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn worker_jobs_survive_fleet_shutdown_and_use_isolated_worktrees() {
     if isolated(
-        "zero_workers_saturated_and_paused_pools_launch_once_without_slots",
+        "worker_jobs_survive_fleet_shutdown_and_use_isolated_worktrees",
+        &[("HEY_BOSS_FIXTURE_JOB_HOLD", "1")],
+    ) {
+        return;
+    }
+    let mut f = Fixture::new();
+    let checkout = f.root.join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(&checkout)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "--initial-branch=legacy"]);
+    fs::write(checkout.join("file"), "committed").unwrap();
+    git(&["add", "file"]);
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "-qm",
+        "fixture",
+    ]);
+    fs::write(checkout.join("file"), "uncommitted").unwrap();
+    let config = crate::issues::worker::Settings {
+        directory: checkout.to_string_lossy().into_owned(),
+        projects: vec![PROJECT.into()],
+        enabled: true,
+        worktree_enabled: Some(true),
+        ..Default::default()
+    };
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE issue_workers SET config=?1 WHERE id='pool'",
+            [serde_json::to_string(&config).unwrap()],
+        )
+        .unwrap();
+    f.ctx.db().unwrap().execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,worktree_enabled) VALUES(?1,?2,0,1,1)", params![PROJECT,MARKDOWN]).unwrap();
+    let d = f.run("worktree");
+    receive(&f.ctx, &d, MARKDOWN).unwrap();
+    let mut worker_ctx = f.ctx.clone();
+    worker_ctx.stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut jobs = WorkerJobs {
+        ctx: worker_ctx,
+        worker: "pool".into(),
+        handles: vec![],
+    };
+    jobs.tick().unwrap();
+    wait(|| f.report(&d).state == "running");
+    let workspace = PathBuf::from(f.report(&d).cwd.unwrap());
+    assert_ne!(workspace, checkout);
+    assert_eq!(
+        fs::read_to_string(workspace.join("file")).unwrap(),
+        "committed"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("file")).unwrap(),
+        "uncommitted"
+    );
+    assert!(!jobs.idle(), "worker upgrade must wait for the job");
+    f.ctx.stop.store(true, std::sync::atomic::Ordering::Release);
+    reconcile(&f.ctx).unwrap();
+    assert_eq!(
+        f.report(&d).state,
+        "running",
+        "fleet shutdown does not own the agent"
+    );
+    f.store
+        .revoke_job(&d.run.id, &f.ctx.node, d.generation)
+        .unwrap();
+    receive(
+        &f.ctx,
+        &f.store.job_dispatches(&f.ctx.node).unwrap().remove(0),
+        MARKDOWN,
+    )
+    .unwrap();
+    wait(|| f.report(&d).state == "cancelled");
+    wait(|| jobs.idle());
+    let mut disabled = f
+        .store
+        .job_worker_projects("pool")
+        .unwrap()
+        .remove(PROJECT)
+        .unwrap();
+    disabled.worktree_enabled = false;
+    assert_eq!(job_workspace(&disabled, "existing").unwrap(), checkout);
+    f.ctx
+        .db()
+        .unwrap()
+        .execute("UPDATE project_settings SET worktree_enabled=0", [])
+        .unwrap();
+    assert!(!f.store.job_worker_projects("pool").unwrap()[PROJECT].worktree_enabled);
+}
+
+#[test]
+fn saturated_worker_launches_jobs_once_without_using_task_slots() {
+    if isolated(
+        "saturated_worker_launches_jobs_once_without_using_task_slots",
         &[],
     ) {
         return;
     }
     let mut f = Fixture::new();
-    for mode in ["absent", "saturated", "paused", "stopped"] {
+    for mode in ["saturated"] {
         let d = f.run(mode);
+        let db = f.ctx.db().unwrap();
+        db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES(?1,1,'Task','', 'open','human:test',1,1,1,'[]')",[PROJECT]).unwrap();
+        db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id) VALUES('ordinary',?1,1,'{}','human:test','running',?2,'fixture',?3,1,1,'pool')",params![PROJECT,std::process::id(),f.ctx.node]).unwrap();
         f.ctx
             .db()
             .unwrap()
@@ -171,7 +329,9 @@ fn zero_workers_saturated_and_paused_pools_launch_once_without_slots() {
         // Racing delivery and ticks cannot overwrite custody or launch twice.
         for _ in 0..5 {
             receive(&f.ctx, &d, MARKDOWN).unwrap();
-            tick(&f.ctx).unwrap();
+            for handle in tick_worker(&f.ctx, "pool").unwrap() {
+                drop(handle);
+            }
         }
         thread.join().unwrap();
         wait(|| f.report(&d).state == "succeeded");
@@ -183,7 +343,7 @@ fn zero_workers_saturated_and_paused_pools_launch_once_without_slots() {
                 .query_row("SELECT count(*) FROM worker_runs", [], |r| r
                     .get::<_, i64>(0))
                 .unwrap(),
-            0
+            1
         );
         assert!(
             f.ctx
@@ -211,12 +371,15 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
     let mut companion = Fixture::new();
     companion.ctx.node = "companion".into();
     replica::install_capture(&companion.ctx.db().unwrap(), "agent", "companion").unwrap();
-    // Companion checkout configuration has no saved workers.
-    fs::rename(
-        companion.ctx.state.join("fleet-main.json"),
-        companion.ctx.state.join("fleet-agent.json"),
-    )
-    .unwrap();
+    companion
+        .ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE issue_workers SET machine='companion' WHERE id='pool'",
+            [],
+        )
+        .unwrap();
     let mut dispatch = supervisor.run("remote");
     supervisor
         .store
@@ -228,7 +391,7 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
     supervisor.store.accept_job_report("test", &ack).unwrap();
     supervisor
         .store
-        .assign_job(&dispatch.run.id, "companion")
+        .assign_job(&dispatch.run.id, "companion", "pool")
         .unwrap();
     dispatch = supervisor
         .store
@@ -242,11 +405,7 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
         &[],
     )
     .unwrap();
-    assert!(companion.ctx.db().unwrap().query_row(
-        "SELECT job_run_id=?1 AND NOT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?2 AND number=?3) FROM issues WHERE project_id=?2 AND number=?3",
-        rusqlite::params![dispatch.run.id,PROJECT,dispatch.run.task_number],
-        |r|r.get::<_,bool>(0),
-    ).unwrap());
+    assert!(dispatch.run.task_number.is_none());
     receive(&companion.ctx, &dispatch, MARKDOWN).unwrap();
     assert!(
         receive(&companion.ctx, &dispatch, "corrupt transfer").is_ok(),
@@ -255,7 +414,7 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
     let pending = Report::pending(&dispatch);
     execute(&companion.ctx, &dispatch).unwrap();
     let terminal = companion.report(&dispatch);
-    assert_eq!(terminal.state, "succeeded");
+    assert_eq!(terminal.state, "succeeded", "{terminal:?}");
     assert!(terminal.session_id.is_some());
     acknowledge(&companion.ctx, &pending).unwrap();
     assert_eq!(
@@ -274,11 +433,22 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
         &[],
     )
     .unwrap();
-    assert!(companion.ctx.db().unwrap().query_row(
-        "SELECT state='closed' AND job_run_id=?1 FROM issues WHERE project_id=?2 AND number=?3",
-        rusqlite::params![dispatch.run.id,PROJECT,dispatch.run.task_number],
-        |r|r.get::<_,bool>(0),
-    ).unwrap());
+    assert_eq!(
+        supervisor.op(Operation::Run {
+            id: "remote".into(),
+            run_id: dispatch.run.id.clone()
+        })["run"]["state"],
+        "succeeded"
+    );
+    assert_eq!(
+        companion
+            .ctx
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     acknowledge(&companion.ctx, &terminal).unwrap();
     assert!(reports(&companion.ctx).unwrap().is_empty());
     receive(&companion.ctx, &dispatch, MARKDOWN).unwrap();
@@ -311,7 +481,9 @@ fn stop_cancels_only_its_process_and_schedule_deletion_retains_execution() {
     for d in [&first, &second] {
         receive(&f.ctx, d, MARKDOWN).unwrap();
     }
-    tick(&f.ctx).unwrap();
+    for handle in tick_worker(&f.ctx, "pool").unwrap() {
+        drop(handle);
+    }
     wait(|| f.report(&first).state == "running" && f.report(&second).state == "running");
     f.op(Operation::Delete {
         id: "second".into(),
@@ -471,7 +643,10 @@ fn unavailable_runtime_or_model_is_visible_without_false_success() {
     execute(&f.ctx, &dispatch).unwrap();
     let report = f.report(&dispatch);
     assert_eq!(report.state, "failed");
-    assert!(report.reason.unwrap().contains("model"));
+    assert!(
+        report.reason.as_deref().unwrap().contains("model"),
+        "{report:?}"
+    );
     assert!(report.started_at.is_none());
     schedule(&f.ctx, &f.machines()).unwrap();
     let view = f.op(Operation::Run {
@@ -483,12 +658,8 @@ fn unavailable_runtime_or_model_is_visible_without_false_success() {
         f.ctx
             .db()
             .unwrap()
-            .query_row(
-                "SELECT state FROM issues WHERE number=?1",
-                [dispatch.run.task_number],
-                |r| r.get::<_, String>(0)
-            )
+            .query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        "open"
+        0
     );
 }

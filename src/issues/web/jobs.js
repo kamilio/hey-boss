@@ -46,7 +46,7 @@ const HeyBossJobs = (() => {
     return choices;
   }
   function availability(machines, project, harness, now=Date.now()) {
-    return machines.some(m=>m.state==='connected'&&now/1000-(m.heartbeat||0)<15&&m.jobs?.available&&m.jobs.checkouts?.[project]&&(!harness||m.jobs.runtimes?.[harness]?.available));
+    return machines.some(m=>m.state==='connected'&&now/1000-(m.heartbeat||0)<15&&m.jobs?.available&&m.jobs.workers?.some(w=>w.projects?.includes(project))&&(!harness||m.jobs.runtimes?.[harness]?.available));
   }
   class Mutation {
     constructor(post, uuid=()=>HeyBossUI.requestId(), persist=()=>{}) {this.post=post;this.uuid=uuid;this.persist=persist;this.pending=null;}
@@ -113,7 +113,7 @@ const HeyBossJobs = (() => {
     }
     async function service(){
       try{const value=await post({},'/api/jobs/runtime');machines=value.machines||[];const available=availability(machines,context.project);
-        $('#jobs-service').textContent=available?'Ready to run':value.service_error||'No connected job service has this project checkout. Runs will wait.';$('#jobs-service').dataset.available=String(available);
+        $('#jobs-service').textContent=available?'Ready to run · Uses no task slots':value.service_error||'No running worker is available for this project. Runs will wait.';$('#jobs-service').dataset.available=String(available);
       }catch(e){$('#jobs-service').textContent='Job service status unavailable · '+e.message;}
     }
     function field(id,label,value,extra=''){return `<label class="job-field ${extra.includes('wide')?'wide':''}" for="${id}">${label}<input id="${id}" value="${esc(value)}" ${extra.replace('wide','')}></label>`;}
@@ -203,7 +203,7 @@ const HeyBossJobs = (() => {
       const saved=$('#job-model').value,harness=$('#job-harness').value,options=modelChoices(value.catalog,saved);
       $('#job-models').innerHTML=options.map(m=>`<option value="${esc(m.value)}">${esc(m.label)}</option>`).join('');
       const unlisted=saved&&!options.some(m=>m.value===saved&&m.advertised);
-      $('#job-model-status').textContent=[value.catalog?.error,unlisted?'Current model is not advertised. Its exact ID is preserved.':'Choose a discovered model or enter an exact custom ID.',`Discovered on ${value.machine}.`,availability(value.machines||[],context.project,harness)?'':'No connected service currently advertises this project and harness; runs may wait.'].filter(Boolean).join(' ');
+      $('#job-model-status').textContent=[value.catalog?.error,unlisted?'Current model is not advertised. Its exact ID is preserved.':'Choose a discovered model or enter an exact custom ID.',`Discovered on ${value.machine}.`,availability(value.machines||[],context.project,harness)?'':'No running worker is available for this project and harness; runs will wait.'].filter(Boolean).join(' ');
     }
     async function save(event){
       event.preventDefault();if(busy||mutation.pending)return;
@@ -230,7 +230,7 @@ const HeyBossJobs = (() => {
         const active=latest.job.active_run;
         if($('#job-stop')){$('#job-stop').hidden=!active;$('#job-stop').onclick=()=>act({command:'stop',id:job.id,run_id:active.id});}
         if($('#job-run-status'))$('#job-run-status').textContent=active?(active.reason||`${active.state==='running'?'Running':'Pending'} · Stop affects this execution only.`):job.deleted_at?'This job is deleted. Saved runs remain available.':'Run now also works while the schedule is disabled.';
-        $('#job-history').innerHTML=history.length?`<ol class="job-history-list">${history.map(run=>`<li class="job-run"><div class="job-run-top"><span class="job-badge ${esc(run.state)}">${esc(run.state)}</span><time>${esc(date(run.scheduled_at,run.snapshot.definition.timezone,true))}</time></div>${run.reason?`<p>${esc(run.reason)}</p>`:''}<p><small>${esc(run.trigger==='manual'?'Run now':'Scheduled')} · Revision ${run.snapshot.revision} · ${esc(run.snapshot.definition.harness)} / ${esc(run.snapshot.definition.model)}</small></p><div class="job-run-links">${run.task_number?`<a href="/${mobile?'issues':''}#${esc(new URLSearchParams({project:job.project_id,issue:run.task_number,...(context.host?{host:context.host}:{})}))}">Task #${run.task_number} ↗</a>`:''}${run.session_id?`<a href="/agents/session#${esc(new URLSearchParams({project:job.project_id,host:machines.find(m=>m.node===run.machine)?.host||run.machine||'local',run:'job:'+run.id}))}">Session ↗</a>`:''}</div></li>`).join('')}</ol>`:'<p class="job-help">No runs yet. Your first execution will appear here.</p>';
+        $('#job-history').innerHTML=history.length?`<ol class="job-history-list">${history.map(run=>`<li class="job-run"><div class="job-run-top"><span class="job-badge ${esc(run.state)}">${esc(run.state)}</span><time>${esc(date(run.scheduled_at,run.snapshot.definition.timezone,true))}</time></div>${run.reason?`<p>${esc(run.reason)}</p>`:''}<p><small>${esc(run.trigger==='manual'?'Run now':'Scheduled')} · Revision ${run.snapshot.revision} · ${esc(run.snapshot.definition.harness)} / ${esc(run.snapshot.definition.model)}${run.worker_id?` · Worker ${esc(run.worker_id.slice(0,8))}`:""}</small></p><div class="job-run-links">${run.task_number?`<a href="/${mobile?'issues':''}#${esc(new URLSearchParams({project:job.project_id,issue:run.task_number,...(context.host?{host:context.host}:{})}))}">Task #${run.task_number} ↗</a>`:''}${run.session_id?`<a href="/agents/session#${esc(new URLSearchParams({project:job.project_id,host:machines.find(m=>m.node===run.machine)?.host||run.machine||'local',run:'job:'+run.id}))}">Session ↗</a>`:''}</div></li>`).join('')}</ol>`:'<p class="job-help">No runs yet. Your first execution will appear here.</p>';
         $('#job-history-more').hidden=!historyNext;pendingUI();
       }catch(e){if(seq===detailGeneration)message(e.message);}
     }

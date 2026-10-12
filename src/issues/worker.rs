@@ -463,6 +463,11 @@ impl Worker {
         let upgrade_requested = upgrading.clone();
         let reload_ready = reload.clone();
         let stopped = stop.clone();
+        let mut scheduled = worker_id
+            .as_deref()
+            .map(|id| crate::fleet::WorkerJobs::new(&path, id, stop.clone()))
+            .transpose()
+            .map_err(|e| Error::new("worker_error", e.to_string()))?;
         let handle = thread::spawn(move || {
             let drain_marker = path.with_added_extension("drain-for-update");
             let mut update_pending = false;
@@ -528,6 +533,7 @@ impl Worker {
                 if update_pending {
                     if handles.is_empty()
                         && abandoned.is_empty()
+                        && scheduled.as_mut().is_none_or(|jobs| jobs.idle())
                         && worker_id
                             .as_deref()
                             .is_some_and(|id| store.worker_reload_allowed(id).unwrap_or(false))
@@ -553,6 +559,11 @@ impl Worker {
                         ));
                     }
                     last_recovery = Instant::now();
+                }
+                if let Some(jobs) = scheduled.as_mut()
+                    && let Err(error) = jobs.tick()
+                {
+                    crate::worker_tui::diagnostics::report(format_args!("Scheduled jobs: {error}"));
                 }
                 match store.worker_reserve(&machine, worker_id.as_deref()) {
                     Ok(Some(job)) => {

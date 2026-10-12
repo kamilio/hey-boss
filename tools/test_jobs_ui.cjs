@@ -47,9 +47,10 @@ assert.match(summary('*/7 2-8 * JAN MON'), /Minute/);
 assert.deepEqual(modelChoices({models:[{selection:{id:'exact',route:'openai'},label:'Exact',advertised:true}]},'custom'),[
  {value:'custom',label:'custom · Not advertised',advertised:false}, {value:'openai/exact',label:'Exact',advertised:true}
 ]);
-const machine={state:'connected',heartbeat:100,jobs:{available:true,checkouts:{p:'/p'},runtimes:{codex:{available:true}}},workers:[{intent:'pause',free:0}]};
+const machine={state:'connected',heartbeat:100,jobs:{available:true,workers:[{id:'pool',projects:['p']}],runtimes:{codex:{available:true}}},workers:[{intent:'pause',free:0}]};
 assert.equal(availability([machine],'p','codex',100000),true);
-assert.equal(availability([{...machine,workers:[]}],'p','codex',100000),true);
+assert.equal(availability([{...machine,jobs:{...machine.jobs,workers:[]}}],'p','codex',100000),false);
+assert.equal(availability([{...machine,jobs:{...machine.jobs,workers:[{id:'other',projects:['q']}]}}],'p','codex',100000),false);
 assert.equal(availability([machine],'p','claude',100000),false);
 assert.equal(availability([machine],'p','codex',200000),false);
 (async()=>{
