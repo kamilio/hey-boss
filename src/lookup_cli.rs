@@ -38,7 +38,7 @@ fn execute(route: &Route, options: &Options, operation: Operation) -> Result<Val
         operation,
         request_id: None,
     };
-    match options
+    let host = options
         .host
         .clone()
         .or_else(|| route.host.clone())
@@ -46,10 +46,15 @@ fn execute(route: &Route, options: &Options, operation: Operation) -> Result<Val
             std::env::var("HEY_BOSS_ISSUE_HOST")
                 .ok()
                 .filter(|v| !v.is_empty())
-        }) {
-        Some(host) => issues::remote::call(&host, &request),
-        None => Store::open(&issues::database_path()?)?.execute(&request),
+        });
+    let mut value = match &host {
+        Some(host) => issues::remote::call(host, &request)?,
+        None => Store::open(&issues::database_path()?)?.execute(&request)?,
+    };
+    if matches!(request.operation, Operation::View { .. }) {
+        crate::issue_attachments::enrich(&mut value, &request, host.as_deref());
     }
+    Ok(value)
 }
 pub fn run(options: &Options) -> Result<()> {
     let route = routes::resolve(&options.url)?;

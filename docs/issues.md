@@ -26,6 +26,14 @@ hey-boss issue close 1 --comment 'Fixed in commit abc123.'
 Bodies and comments are Markdown text stored directly in SQLite. No Markdown
 file is required. `create` allows an empty body; comments must contain text.
 
+`issue view NUMBER` and `lookup URL` include attached files with absolute paths
+on the caller's machine, including screenshots on otherwise empty issues.
+SSH and companion reads download files through the existing connection into a
+private cache beside the local issue database; repeated reads reuse verified files.
+JSON exposes `attachments[].path` and `attachments_complete`. Unavailable files
+remain listed with an error and no path; a failed attachment listing is reported
+as unavailable, never as an empty list. Compact issue views include these paths too.
+
 For an uncertain creation, `issue request ID --agent ORIGINAL_ACTOR --json`
 reads its saved receipt. See [request recovery](issue-request-recovery.md) before
 retrying; a missing receipt or search result does not prove non-creation.

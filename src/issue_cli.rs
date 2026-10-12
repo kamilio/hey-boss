@@ -1508,6 +1508,9 @@ pub fn run(options: &Options) -> Result<()> {
                 }
                 error
             })?;
+        if matches!(options.action, Action::View { .. }) {
+            crate::issue_attachments::enrich(&mut value, &request, host.as_deref());
+        }
         if interactive {
             let file = match &options.action {
                 Action::Create { body, .. } | Action::Edit { body, .. } => body.file.as_deref(),
@@ -1969,6 +1972,28 @@ pub(crate) fn print_text(value: &Value) {
         println!("\nSubtasks:");
         for child in children {
             print_issue_line(child);
+        }
+    }
+    if let Some(error) = value["attachments_error"].as_str() {
+        println!("\nAttachments unavailable: {}", line(&json!(error)));
+    }
+    if let Some(files) = value["attachments"]
+        .as_array()
+        .filter(|files| !files.is_empty())
+    {
+        println!("\nAttachments:");
+        for file in files {
+            println!(
+                "  {} · {} bytes · {}",
+                line(&file["name"]),
+                file["size"],
+                line(&file["id"])
+            );
+            if let Some(path) = file["path"].as_str() {
+                println!("    {path}");
+            } else {
+                println!("    Unavailable: {}", line(&file["error"]));
+            }
         }
     }
     if let Some(artifacts) = value["artifacts"]

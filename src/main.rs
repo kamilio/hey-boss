@@ -8,6 +8,7 @@ mod broker;
 mod cli_request;
 mod companion;
 mod health_cli;
+mod issue_attachments;
 mod issue_cli;
 mod job_cli;
 mod lookup_cli;
