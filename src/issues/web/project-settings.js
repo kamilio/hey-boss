@@ -126,6 +126,7 @@ $("#project-settings-trigger").onclick = async () => {
   $("#project-chief-actions").open = false;
   $("#project-chief-run-status").textContent = "";
   $("#project-settings-name").textContent = model.project.name;
+  $("#project-settings-name").title = model.project.name;
   $("#project-settings-error").hidden = true;
   projectPreviewFailed = false;
   $("#project-settings-state").textContent = "Loading…";
