@@ -6,6 +6,8 @@ Create requires a stable ID, project, name, cron, explicit IANA timezone, harnes
 
 ## Schedule contract
 
+The web editor keeps the saved cron expression visible and editable. Repeat controls cover minute steps, an hourly minute, daily or weekday times, selected weekdays, and monthly dates. Custom expressions stay intact. The field guide, examples, and next three occurrences use the selected timezone; changing a schedule does not run it. Cron is also shown and searchable in the Jobs list.
+
 - Five fields: minute, hour, day of month, month, day of week. Numeric lists, ascending ranges and steps are supported; month/day names are case-insensitive. Sunday is 0 or 7. Seconds, years, macros, `?`, `L`, `W`, `#` and descending ranges are rejected.
 - Day fields follow Vixie cron: if either starts with `*`, both must match; otherwise either may match. Thus `0 8 1 * MON` matches every first day and every Monday. A step applies within its field, not elapsed time.
 - Missing local times are skipped. Repeated local times use the earlier UTC instant exactly once, including non-hour DST changes.
