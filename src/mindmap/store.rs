@@ -172,6 +172,7 @@ fn insert(db: &Connection, p: &Project, node: NewNode<'_>, now: i64) -> Result<V
         alias,
         parent,
     } = node;
+    crate::issues::project_features::Feature::Mindmaps.require(db, p)?;
     let count: i64 = db.query_row(
         "SELECT count(*) FROM mindmap_nodes WHERE project_id=?1",
         [&p.id],

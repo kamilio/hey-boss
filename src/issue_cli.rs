@@ -702,6 +702,14 @@ enum SettingsAction {
         drafts_enabled: bool,
         #[arg(long)]
         no_drafts: bool,
+        #[arg(long, conflicts_with = "no_artifacts")]
+        artifacts_enabled: bool,
+        #[arg(long)]
+        no_artifacts: bool,
+        #[arg(long, conflicts_with = "no_mindmaps")]
+        mindmaps_enabled: bool,
+        #[arg(long)]
+        no_mindmaps: bool,
         #[arg(long)]
         plan_template: Option<String>,
     },
@@ -889,6 +897,10 @@ impl Options {
                     no_worktree,
                     drafts_enabled,
                     no_drafts,
+                    artifacts_enabled,
+                    no_artifacts,
+                    mindmaps_enabled,
+                    no_mindmaps,
                     plan_template,
                 } => {
                     if boss_name.is_none()
@@ -899,16 +911,34 @@ impl Options {
                         && !no_prs
                         && !drafts_enabled
                         && !no_drafts
+                        && !artifacts_enabled
+                        && !no_artifacts
+                        && !mindmaps_enabled
+                        && !no_mindmaps
                         && plan_template.is_none()
                     {
                         return Err(Error::invalid(
-                            "Specify --prompt, --worktree, --no-worktree, --prs-enabled, --no-prs, --drafts-enabled, --no-drafts, or --plan-template",
+                            "Specify a setting to change; see `hey-boss issue settings set --help`",
                         ));
                     }
                     Operation::ConfigureProject {
                         subtask_scheduling: None,
                         chief_enabled: None,
                         chief_prompt: None,
+                        artifacts_enabled: if *artifacts_enabled {
+                            Some(true)
+                        } else if *no_artifacts {
+                            Some(false)
+                        } else {
+                            None
+                        },
+                        mindmaps_enabled: if *mindmaps_enabled {
+                            Some(true)
+                        } else if *no_mindmaps {
+                            Some(false)
+                        } else {
+                            None
+                        },
                         drafts_enabled: if *drafts_enabled {
                             Some(true)
                         } else if *no_drafts {
@@ -1741,9 +1771,18 @@ pub(crate) fn print_text(value: &Value) {
             println!("{label}: true");
         }
     }
-    for (key, label) in [
-        ("prompt", "Shared prompt"),
-    ] {
+    if value.get("prompt").is_some() {
+        for (key, label) in [
+            ("drafts_enabled", "Drafts enabled"),
+            ("artifacts_enabled", "Artifacts enabled"),
+            ("mindmaps_enabled", "Mindmaps enabled"),
+        ] {
+            if let Some(enabled) = value[key].as_bool() {
+                println!("{label}: {enabled}");
+            }
+        }
+    }
+    for (key, label) in [("prompt", "Shared prompt")] {
         let prompt = markdown(&value[key]);
         if !prompt.trim().is_empty() {
             println!("{label}: {prompt}");

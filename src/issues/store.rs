@@ -220,6 +220,8 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("project_settings", "chief_prompt", "TEXT"),
     ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "plan", "TEXT"),
+    ("project_settings", "artifacts_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    ("project_settings", "mindmaps_enabled", "INTEGER NOT NULL DEFAULT 1"),
     (
         "project_settings",
         "drafts_enabled",
@@ -2000,6 +2002,7 @@ impl Store {
                     Some(settings) => serde_json::from_value(json!({
                         "action":"configure_project", "prs_enabled":settings.prs_enabled,
                         "worktree_enabled":settings.worktree_enabled, "drafts_enabled":settings.drafts_enabled,
+                        "artifacts_enabled":settings.artifacts_enabled, "mindmaps_enabled":settings.mindmaps_enabled,
                         "if_version":settings.if_version
                     }))?,
                 };
@@ -2519,6 +2522,8 @@ impl Store {
             .entry("prs_enabled")
             .or_insert_with(|| project_settings["prs_enabled"].clone());
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
+        result["artifacts_enabled"] = project_settings["artifacts_enabled"].clone();
+        result["mindmaps_enabled"] = project_settings["mindmaps_enabled"].clone();
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
             json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
