@@ -77,13 +77,15 @@ pub(super) fn status_text(v: &Value) -> String {
         if let Some(available) = m["jobs"]["available"].as_bool() {
             let _ = writeln!(
                 out,
-                "  Jobs service: {} · {} configured checkouts",
+                "  Jobs: {} · {} running workers · no task slots used",
                 if available {
                     "available"
                 } else {
                     "unavailable"
                 },
-                m["jobs"]["checkouts"].as_object().map_or(0, |p| p.len())
+                m["jobs"]["workers"]
+                    .as_array()
+                    .map_or(0, |workers| workers.len())
             );
         }
         if m["worker_count"].is_null() {

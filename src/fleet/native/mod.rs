@@ -11,6 +11,7 @@ mod github_reads;
 mod github_relay;
 mod handshake;
 mod jobs;
+pub(crate) use jobs::WorkerJobs;
 mod mobile;
 mod model_recovery;
 mod pr_monitor;

@@ -1,5 +1,5 @@
-//! Worker-independent job execution, driven by durable supervisor assignments.
-use super::{Context, Result, projects, replica};
+//! Worker-owned job execution, driven by durable supervisor assignments.
+use super::{Context, Result, replica};
 use crate::{
     agent_runtime::{AgentSession, Event, Launch, ModelSelection, Provider, TurnStatus},
     issues::Store,
@@ -13,62 +13,38 @@ fn now() -> i64 {
     crate::issues::worker::now()
 }
 
-/// Capability is a property of this service and its checkouts, not its workers.
+fn advertise_worker(ctx: &Context, worker: &str) -> Result<()> {
+    ctx.db()?.execute("INSERT OR REPLACE INTO local_job_workers(worker_id,owner_pid,owner_start) SELECT id,owner_pid,owner_start FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![worker,std::process::id()])?;
+    Ok(())
+}
+
+/// Advertise live workers; task capacity does not gate scheduled execution.
 pub(super) fn capability(ctx: &Context) -> Result<Value> {
-    let saved = ctx.read_json(
-        &ctx.state.join(
-            if ctx
-                .db()?
-                .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
-                    r.get::<_, bool>(0)
-                })?
-            {
-                "fleet-agent.json"
-            } else {
-                "fleet-main.json"
-            },
-        ),
-        json!({}),
-    )?;
-    let checkouts = projects::project_status(
-        saved.get("projects").unwrap_or(&json!({})),
-        &projects::resolved(ctx)?,
-    );
-    let mut paths = BTreeMap::<String, String>::new();
-    for (project, entry) in checkouts.as_object().into_iter().flatten() {
-        if let Some(path) = entry["resolved_path"]
-            .as_str()
-            .filter(|p| std::path::Path::new(p).is_dir())
-        {
-            paths.insert(project.clone(), path.into());
-        }
-    }
-    // Legacy configurations already carry checkout mappings. Enabled/pause/slots
-    // have no bearing on whether those configured paths can run a scheduled job.
-    for worker in saved["workers"].as_array().into_iter().flatten() {
-        for (project, path) in worker["config"]["directories"]
-            .as_object()
-            .into_iter()
-            .flatten()
-        {
-            if let Some(path) = path.as_str().filter(|p| std::path::Path::new(p).is_dir()) {
-                paths.entry(project.clone()).or_insert_with(|| path.into());
-            }
+    let db = ctx.db()?;
+    let ids = db.query_collect(
+        "SELECT w.id FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start WHERE w.machine=?1 ORDER BY w.id",
+        [&ctx.node], |r| r.get::<_,String>(0))?;
+    let store = Store::open(&ctx.path)?;
+    let mut workers = Vec::new();
+    for id in ids {
+        let projects = store.job_worker_projects(&id)?;
+        if !projects.is_empty() {
+            workers.push(json!({"id":id,"projects":projects.keys().collect::<Vec<_>>()}));
         }
     }
     let runtimes: BTreeMap<_, _> = [Provider::Codex, Provider::Claude, Provider::Pi]
         .into_iter()
-        .map(|provider| {
+        .map(|p| {
             (
-                provider.name(),
-                match provider.binary() {
+                p.name(),
+                match p.binary() {
                     Ok(_) => json!({"available":true}),
                     Err(e) => json!({"available":false,"reason":e.to_string()}),
                 },
             )
         })
         .collect();
-    Ok(json!({"available":true,"checkouts":paths,"runtimes":runtimes}))
+    Ok(json!({"available":true,"workers":workers,"runtimes":runtimes}))
 }
 
 pub(super) fn reports(ctx: &Context) -> Result<Vec<Report>> {
@@ -185,27 +161,101 @@ fn finish(ctx: &Context, report: &mut Report, state: &str, reason: Option<String
     save(ctx, report)
 }
 
-/// One lock per run guards concurrent service ticks and survives reconfiguration.
-/// An interrupted executor is recovered, never relaunched from an uncertain phase.
-pub(super) fn tick(ctx: &Context) -> Result<()> {
-    let rows=ctx.db()?.query_collect("SELECT dispatch,report FROM local_job_executions WHERE json_extract(report,'$.state') IN ('pending','running') ORDER BY rowid",[],|r|Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
-    for (dispatch, _report) in rows {
+/// Owned by the worker process; fleet restarts cannot cancel its sessions.
+pub(crate) struct WorkerJobs {
+    ctx: Context,
+    worker: String,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+impl WorkerJobs {
+    pub(crate) fn new(
+        path: &std::path::Path,
+        worker: &str,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<Self> {
+        let mut ctx = Context::with_database(Some(path))?;
+        ctx.stop = stop;
+        advertise_worker(&ctx, worker)?;
+        Ok(Self {
+            ctx,
+            worker: worker.into(),
+            handles: Vec::new(),
+        })
+    }
+    pub(crate) fn idle(&mut self) -> bool {
+        let mut running = Vec::new();
+        for handle in self.handles.drain(..) {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                running.push(handle);
+            }
+        }
+        self.handles = running;
+        self.handles.is_empty()
+    }
+    pub(crate) fn tick(&mut self) -> Result<()> {
+        self.idle();
+        self.handles.extend(tick_worker(&self.ctx, &self.worker)?);
+        Ok(())
+    }
+}
+impl Drop for WorkerJobs {
+    fn drop(&mut self) {
+        self.ctx
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+fn tick_worker(ctx: &Context, worker: &str) -> Result<Vec<std::thread::JoinHandle<()>>> {
+    let db = ctx.db()?;
+    let rows = db.query_collect("SELECT dispatch FROM local_job_executions WHERE json_extract(dispatch,'$.run.worker_id')=?1 AND json_extract(report,'$.state') IN ('pending','running') ORDER BY rowid", [worker], |r| r.get::<_,String>(0))?;
+    let mut handles = Vec::new();
+    for dispatch in rows {
         let d: Dispatch = serde_json::from_str(&dispatch)?;
         let Some(lock) = ctx.lock(&format!("job-{}.lock", d.run.id), false)? else {
             continue;
         };
+        if !d.revoke
+            && !Store::open(&ctx.path)?
+                .job_worker_projects(worker)?
+                .contains_key(&d.run.snapshot.project_id)
+        {
+            continue;
+        }
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
+        handles.push(std::thread::spawn(move || {
             let _lock = lock;
             if let Err(error) = execute(&ctx, &d) {
-                // Keep nonterminal custody on a storage/stop failure. The next
-                // tick reconciles its recorded group before publishing failure.
                 let _ = ctx.atomic_json(
                     &ctx.state.join("jobs-error.json"),
                     &json!({"run":d.run.id,"error":error.to_string(),"at":now()}),
                 );
             }
-        });
+        }));
+    }
+    Ok(handles)
+}
+
+/// Services reconcile dead owners and revoked, unsubmitted deliveries only.
+/// Agent sessions are launched exclusively by their assigned worker.
+pub(super) fn reconcile(ctx: &Context) -> Result<()> {
+    let rows = ctx.db()?.query_collect("SELECT dispatch,owner_pid,owner_start FROM local_job_executions WHERE json_extract(report,'$.state') IN ('pending','running')", [], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,Option<u32>>(1)?,r.get::<_,Option<String>>(2)?)))?;
+    for (raw, owner, start) in rows {
+        let dispatch: Dispatch = serde_json::from_str(&raw)?;
+        if owner.is_some_and(|pid| crate::agents::process_identity(pid) == start) {
+            continue;
+        }
+        if owner.is_none() && !dispatch.revoke {
+            continue;
+        }
+        let Some(_lock) = ctx.lock(&format!("job-{}.lock", dispatch.run.id), false)? else {
+            continue;
+        };
+        execute(ctx, &dispatch)?;
     }
     Ok(())
 }
@@ -326,9 +376,22 @@ fn run_session(
     d: &Dispatch,
     report: &mut Report,
 ) -> Result<(String, Option<String>)> {
-    let capability = capability(ctx)?;
-    let cwd=capability["checkouts"][&d.run.snapshot.project_id].as_str().ok_or_else(||replica::invalid("Project checkout is unavailable on the assigned machine; configure or repair its existing fleet checkout"))?;
-    report.cwd = Some(cwd.into());
+    let worker = d
+        .run
+        .worker_id
+        .as_deref()
+        .ok_or_else(|| replica::invalid("Job has no assigned worker"))?;
+    let store = Store::open(&ctx.path)?;
+    let config = store
+        .job_worker_projects(worker)?
+        .remove(&d.run.snapshot.project_id)
+        .ok_or_else(|| {
+            replica::invalid(
+                "Assigned worker is paused, stopped, or no longer has this project checkout",
+            )
+        })?;
+    let cwd = job_workspace(&config, &d.run.id)?;
+    report.cwd = Some(cwd.to_string_lossy().into_owned());
     let provider: Provider = serde_json::from_value(json!(d.run.snapshot.definition.harness))?;
     let model = &d.run.snapshot.definition.model;
     let model = if provider == Provider::Pi {
@@ -356,7 +419,7 @@ fn run_session(
         provider,
         model: Some(model),
         binary: None,
-        cwd: PathBuf::from(cwd),
+        cwd,
         resume: None,
         env,
         output_schema: None,
@@ -460,31 +523,27 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         if let Some((node, generation, revoking)) = store.job_owner(&run.id)? {
             if !revoking
                 && run.started_at.is_none()
-                && let Some(machine) = machines.iter().find(|m| {
-                    m["node"] == node
-                        && m["state"] == "connected"
-                        && super::context::now() - m["heartbeat"].as_f64().unwrap_or(0.0) < 15.0
-                        && m["jobs"]["available"] == true
-                })
-                && (!machine["jobs"]["checkouts"][&run.snapshot.project_id].is_string()
-                    || machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"]
-                        != true)
+                && let Some(machine) = machines.iter().find(|m| m["node"] == node && connected(m))
+                && !eligible_workers(machine, &run).any(|id| Some(id) == run.worker_id.as_deref())
             {
                 store.revoke_job(&run.id, &node, generation)?;
             }
             continue;
         }
-        let candidate = machines.iter().find(|m| {
-            m["state"] == "connected"
-                && super::context::now() - m["heartbeat"].as_f64().unwrap_or(0.0) < 15.0
-                && m["jobs"]["available"] == true
-                && m["jobs"]["checkouts"][&run.snapshot.project_id].is_string()
-                && m["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"] == true
-        });
-        if let Some(node) = candidate.and_then(|m| m["node"].as_str()) {
-            store.assign_job(&run.id, node)?;
+        let candidate = machines
+            .iter()
+            .filter(|m| connected(m))
+            .find_map(|m| eligible_workers(m, &run).next().map(|worker| (m, worker)));
+        if let Some((machine, worker)) = candidate {
+            store.assign_job(
+                &run.id,
+                machine["node"]
+                    .as_str()
+                    .ok_or_else(|| replica::invalid("Missing worker machine"))?,
+                worker,
+            )?;
         } else {
-            store.unavailable_job(&run.id,"No connected job service has the configured project checkout and chosen harness. Repair the fleet checkout or install/authenticate the selected harness.")?;
+            store.unavailable_job(&run.id, "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.")?;
         }
     }
     for dispatch in store.job_dispatches(&ctx.node)? {
@@ -492,6 +551,53 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         receive(ctx, &dispatch, &markdown)?;
     }
     Ok(())
+}
+
+fn connected(machine: &Value) -> bool {
+    machine["state"] == "connected"
+        && super::context::now() - machine["heartbeat"].as_f64().unwrap_or(0.0) < 15.0
+        && machine["jobs"]["available"] == true
+}
+fn eligible_workers<'a>(
+    machine: &'a Value,
+    run: &'a crate::jobs::Run,
+) -> impl Iterator<Item = &'a str> {
+    machine["jobs"]["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |w| {
+            machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"] == true
+                && w["projects"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|p| p == &run.snapshot.project_id))
+        })
+        .filter_map(|w| w["id"].as_str())
+}
+fn job_workspace(config: &crate::issues::worker::ProjectConfig, run: &str) -> Result<PathBuf> {
+    let checkout = PathBuf::from(&config.cwd);
+    if !config.worktree_enabled {
+        return Ok(checkout);
+    }
+    crate::jobs::validate_id(run)?;
+    let name = format!("job-{run}");
+    let path = checkout
+        .parent()
+        .ok_or_else(|| replica::invalid("Checkout has no parent directory"))?
+        .join(&name);
+    let output = std::process::Command::new("git")
+        .current_dir(&checkout)
+        .args(["worktree", "add", "-b", &name])
+        .arg(&path)
+        .arg("HEAD")
+        .output()?;
+    if !output.status.success() {
+        return Err(replica::invalid(&format!(
+            "Could not prepare job worktree: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(path)
 }
 
 #[cfg(test)]

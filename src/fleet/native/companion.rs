@@ -547,7 +547,7 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
     let jobs = ctx.clone();
     std::thread::spawn(move || {
         while !jobs.stopped() {
-            if let Err(error) = super::jobs::tick(&jobs) {
+            if let Err(error) = super::jobs::reconcile(&jobs) {
                 let _ = jobs.atomic_json(
                     &jobs.state.join("jobs-error.json"),
                     &json!({"error":error.to_string(),"at":now()}),
@@ -556,6 +556,7 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
             jobs.wait(Duration::from_secs(1));
         }
     });
+
     while !ctx.stopped() {
         let interrupted = {
             let _lock = ctx.lock("fleet-worker-control.lock", false)?;

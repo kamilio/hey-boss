@@ -1682,7 +1682,7 @@ impl Supervisor {
                     .collect::<Vec<_>>();
                 machines.insert(0,json!({"node":self.ctx.node,"state":"connected","heartbeat":now(),"jobs":capability}));
                 super::jobs::schedule(&self.ctx, &machines)?;
-                super::jobs::tick(&self.ctx)
+                super::jobs::reconcile(&self.ctx)
             })();
             if let Err(error) = result {
                 self.event("local", "jobs", &error.to_string());

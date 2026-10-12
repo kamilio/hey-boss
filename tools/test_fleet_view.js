@@ -78,6 +78,8 @@ const {workerPhase} = require('../src/issues/web/fleet.js');
 const machine={state:'connected',heartbeat:now/1000};
 const working={id:'a',intent:'running',pid:1,active:1,config:{enabled:true}};
 assert.equal(workerPhase(working,machine,now).group,'working');
+assert.equal(workerPhase({...working,active:0,job_active:1},machine,now).group,'working');
+assert.equal(workerPhase({...working,active:0,job_active:1,intent:'pause'},machine,now).label,'Finishing work');
 assert.equal(workerPhase({...working,intent:'pause'},machine,now).label,'Finishing work');
 assert.equal(workerPhase({...working,pid:null,active:0,intent:'stop'},machine,now).group,'stopped');
 assert.equal(workerPhase(working,{...machine,state:'disconnected'},now).label,'Offline');
@@ -85,6 +87,7 @@ assert.equal(workerPhase(working,{...machine,configuration_error:'"a": Missing c
 assert.equal(workerPhase({...working,id:'c'}, {...machine,configuration_error:'"a": Missing checkout'},now).group,'working');
 console.log('Worker status classification checks passed');
 const {slotUsage}=require('../src/issues/web/fleet.js');
+assert.deepEqual(slotUsage({...working,active:0,job_active:2,config:{enabled:true,concurrency:1}},machine,now),{capacity:1,occupied:0,available:1,paused:0,online:true,running:true});
 assert.deepEqual(slotUsage({...working,config:{enabled:true,concurrency:3}},machine,now),{capacity:3,occupied:1,available:2,paused:0,online:true,running:true});
 assert.equal(slotUsage({...working,intent:'pause',config:{enabled:false,concurrency:3}},machine,now).paused,2);
 assert.equal(slotUsage({...working,active:4,config:{enabled:true,concurrency:2}},machine,now).available,0);

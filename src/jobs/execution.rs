@@ -1,4 +1,4 @@
-//! Wire records shared by the supervisor and the worker-independent executor.
+//! Wire records shared by the supervisor and worker-owned job execution.
 use super::Run;
 use serde::{Deserialize, Serialize};
 

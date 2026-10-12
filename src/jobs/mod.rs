@@ -267,6 +267,8 @@ pub struct Run {
     pub state: String,
     pub reason: Option<String>,
     pub task_number: Option<i64>,
+    #[serde(default)]
+    pub worker_id: Option<String>,
     pub machine: Option<String>,
     pub session_id: Option<String>,
     pub created_at: i64,

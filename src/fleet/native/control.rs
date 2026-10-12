@@ -411,6 +411,7 @@ fn reconcile_locked(ctx: &Context, config: &Value) -> Result<Vec<String>> {
 
 fn drained(worker: &Value) -> bool {
     worker["active"].as_u64() == Some(0)
+        && worker["job_active"].as_u64().unwrap_or(0) == 0
         && worker["chiefs"]
             .as_array()
             .is_some_and(|chiefs| chiefs.iter().all(|chief| chief["state"] != "running"))
@@ -588,7 +589,10 @@ fn apply_signal_locked(
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
-            if worker["pid"].is_null() && worker["active"] == 0 {
+            if worker["pid"].is_null()
+                && worker["active"] == 0
+                && worker["job_active"].as_u64().unwrap_or(0) == 0
+            {
                 break;
             }
             if phase == "starting" || Instant::now() >= deadline {
@@ -605,7 +609,9 @@ fn apply_signal_locked(
     } else if action == "resume" && !worker["pid"].is_null() {
         control(ctx, &worker["id"], "start")?;
     } else if matches!(action, "resume" | "restart") && !already_started {
-        if worker["active"].as_u64().unwrap_or(0) > 0 {
+        if worker["active"].as_u64().unwrap_or(0) > 0
+            || worker["job_active"].as_u64().unwrap_or(0) > 0
+        {
             return Err("Owned sessions are still active; no duplicate was launched".into());
         }
         replica::execute(
@@ -719,6 +725,9 @@ mod tests {
         ));
         assert!(!super::drained(&serde_json::json!({"chiefs":[]})));
         assert!(!super::drained(&serde_json::json!({"active":0})));
+        assert!(!super::drained(
+            &serde_json::json!({"active":0,"job_active":1,"chiefs":[]})
+        ));
         assert!(super::drained(
             &serde_json::json!({"active":0,"chiefs":[{"state":"idle"}]})
         ));

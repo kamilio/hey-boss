@@ -1,6 +1,6 @@
 # Scheduled jobs
 
-`hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs through an independent service, including with no saved workers or a paused, stopped or saturated worker pool.
+`hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs to a running worker for the project. Jobs use no task slots, so a full worker can still run them. Without a running worker, runs wait.
 
 Create requires a stable ID, project, name, cron, explicit IANA timezone, harness, logical model and user-written `.md` instructions. Edit replaces definition fields with an `--if-revision` guard; omitted instructions retain the prior file. Pause, resume and delete also require that guard. Delete retains revisions and history, and does not stop active work.
 
@@ -24,14 +24,14 @@ Markdown bytes are never normalized or stored as database prompt text. Reference
 
 Run Now can execute a paused schedule without enabling it. Use the same request ID to retry an uncertain request; overlapping scheduled/manual occurrences are recorded as skipped. Stop takes an exact run ID and cancels only its owned process group. Pause/delete affect future scheduling and retain current executions and history.
 
-Each occurrence atomically creates its task at the top of the project list. A persisted, immutable job marker excludes it from ordinary pickup even after unassignment, failure or restart. Follow-up tasks use the ordinary pool. Success closes the execution task; failure/cancellation leaves an open task with an explicit result.
+Each occurrence creates only a Jobs history entry. It does not create an issue, allocate an issue number, or reserve a task slot. The entry records its worker, machine, session and outcome. Existing task links from older versions remain available.
 
-Fleet status reports job-service capability independently of workers, using existing project checkouts and installed harnesses. Pi selections use the configured `route/model-id`; other harnesses use an exact model ID. Instructions load from the immutable Markdown revision with no added agent prompt.
+Jobs use the assigned worker’s project checkout and worktree setting, subject to the project’s worktree permission. Dedicated job worktrees start from that checkout’s current HEAD. Paused or stopped workers receive no new jobs; pausing pickup lets running jobs finish. Pi selections use the configured `route/model-id`; other harnesses use an exact model ID. Instructions load from the immutable Markdown revision with no added agent prompt.
 
-Owners are generation-fenced. A disconnect never releases ownership. A revoked, unsubmitted owner must acknowledge that it stopped before handoff; submitted work is never replayed. Process identity is committed before a launch gate opens, and submission intent is committed before sending instructions. After a service crash, surviving processes must be conclusively stopped before the attempt can finish. Unknown custody remains visible and blocks overlap.
+Owners are generation-fenced. A disconnect never releases ownership. A revoked, unsubmitted owner must acknowledge that it stopped before handoff; submitted work is never replayed. Process identity is committed before a launch gate opens, and submission intent is committed before sending instructions. Fleet-service restarts leave worker-owned job sessions running. Worker upgrades wait for their job sessions to finish. After a worker crash, surviving processes must be conclusively stopped before the attempt can finish. Unknown custody remains visible and blocks overlap.
 
 ## Calendar
 
-The Jobs calendar has month, week and compact agenda views. Its display timezone is independent of each job's schedule timezone. Filters never change schedules. Upcoming entries open the editor; executions open their immutable revision, scheduled/actual times, recorded reason and task/session links. Deleted jobs retain their history.
+The Jobs calendar has month, week and compact agenda views. Its display timezone is independent of each job's schedule timezone. Filters never change schedules. Upcoming entries open the editor; executions open their immutable revision, scheduled/actual times, recorded reason and session links (plus historical task links where present). Deleted jobs retain their history.
 
 `calendar` reads 1–42 civil days in an explicit IANA timezone, returning counts and three sample entries per day. `calendar_entries` reads one day in pages of 100, with an exclusive `(at, key)` cursor. Both use the authoritative project and optional `job_id`; projections use the same Rust evaluator as preview, strictly after now and the definition's schedule boundary. History uses indexed half-open UTC ranges. Projects with more than 100 active schedules must select a job, keeping worst-case recurrence work bounded. Neither read creates tasks or fetches Markdown instructions.

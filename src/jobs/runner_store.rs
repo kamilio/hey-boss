@@ -26,6 +26,9 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
 }
 
 fn progress(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: i64) -> Result<()> {
+    if run.task_number.is_none() {
+        return Ok(());
+    }
     let actor = format!("job:{}", run.id);
     let metadata = json!({"id":actor,"kind":"job","machine":"scheduled-service","session_id":run.session_id,"host":"","cwd":"/","source":"scheduled-job"});
     db.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",params![actor,metadata.to_string(),now])?;
@@ -43,28 +46,25 @@ fn progress(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: 
 }
 
 impl Store {
-    pub fn enqueue_job(&mut self, occurrence: &Occurrence) -> Result<Run> {
-        let markdown = self.job_instructions(&occurrence.snapshot)?;
-        self.commit_job_occurrence(occurrence, |db,snapshot,id| {
-            let number:i64=db.query_row("SELECT next_number FROM projects WHERE id=?1",[&snapshot.project_id],|r|r.get(0))?;
-            let actor=format!("job:{id}");
-            let now=occurrence.observed_at;
-            db.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3)",params![actor,json!({"id":actor,"kind":"job","machine":"","host":"","cwd":"/","source":"scheduled-job"}).to_string(),now])?;
-            db.execute("UPDATE projects SET next_number=next_number+1,issue_order_version=issue_order_version+1 WHERE id=?1",[&snapshot.project_id])?;
-            db.execute("INSERT INTO issues(project_id,number,title,body,state,assignee,created_by,created_at,updated_at,version,labels,sort_order,job_run_id) VALUES(?1,?2,?3,?4,'open',?5,?5,?6,?6,1,'[\"job\"]',(SELECT coalesce(min(sort_order),1)-1 FROM issues WHERE project_id=?1),?7)",params![snapshot.project_id,number,snapshot.definition.name,markdown,actor,now,id])?;
-            event(db,&snapshot.project_id,number,&actor,"created",now,&json!({"job_id":snapshot.job_id,"job_run_id":id,"placement":"top"}))?;
-            Ok(number)
-        })
-    }
     pub(crate) fn active_job_runs(&self) -> Result<Vec<Run>> {
         authority(&self.db)?;
         Ok(self.db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE state IN('pending','running') ORDER BY sequence"),[],run_row)?)
     }
     /// A generation is never reassigned on timeout. Only an acknowledged revoke
     /// before submission can release its owner; submitted work completes once.
-    pub(crate) fn assign_job(&self, id: &str, node: &str) -> Result<bool> {
+    pub(crate) fn assign_job(&self, id: &str, node: &str, worker: &str) -> Result<bool> {
         authority(&self.db)?;
-        Ok(self.db.execute("UPDATE scheduled_job_owners SET node=?2 WHERE run_id=?1 AND node IS NULL AND stop_requested=0 AND EXISTS(SELECT 1 FROM scheduled_job_runs WHERE id=?1 AND state='pending')",params![id,node])? == 1)
+        let tx =
+            crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let changed = tx.execute("UPDATE scheduled_job_owners SET node=?2 WHERE run_id=?1 AND node IS NULL AND stop_requested=0 AND EXISTS(SELECT 1 FROM scheduled_job_runs WHERE id=?1 AND state='pending')",params![id,node])? == 1;
+        if changed {
+            tx.execute(
+                "UPDATE scheduled_job_runs SET worker_id=?2,reason=NULL WHERE id=?1",
+                params![id, worker],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
     pub(crate) fn job_dispatches(&self, node: &str) -> Result<Vec<Dispatch>> {
         authority(&self.db)?;
@@ -212,7 +212,9 @@ impl Store {
                 && let Some(started_at) = report.started_at
             {
                 tx.execute("UPDATE scheduled_job_runs SET state='running',machine=?2,session_id=?3,started_at=?4,reason=NULL WHERE id=?1",params![run.id,node,report.session_id,report.started_at])?;
-                tx.execute("INSERT OR IGNORE INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) VALUES(?1,?2,?3,?4)",params![run.id,run.snapshot.project_id,run.task_number,report.started_at])?;
+                if run.task_number.is_some() {
+                    tx.execute("INSERT OR IGNORE INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) VALUES(?1,?2,?3,?4)",params![run.id,run.snapshot.project_id,run.task_number,report.started_at])?;
+                }
                 if let Some(session) = &report.session_id {
                     // Use the exact harness session for task ownership; the job marker
                     // remains authoritative even if a user later clears the assignee.
@@ -247,6 +249,9 @@ fn complete(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: 
         "UPDATE scheduled_job_runs SET state=?2,reason=?3,finished_at=?4 WHERE id=?1",
         params![run.id, state, reason, now],
     )?;
+    if run.task_number.is_none() {
+        return Ok(());
+    }
     db.execute("UPDATE issues SET state=?3,closed_at=?4,closed_by=?5,assignee=NULL,version=version+1,updated_at=?6 WHERE project_id=?1 AND number=?2",params![run.snapshot.project_id,run.task_number,if state=="succeeded"{"closed"}else{"open"},(state=="succeeded").then_some(now),(state=="succeeded").then(||format!("job:{}",run.id)),now])?;
     progress(db, run, state, reason, now)?;
     let actor = format!("job:{}", run.id);
