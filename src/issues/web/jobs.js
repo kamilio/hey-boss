@@ -6,11 +6,9 @@ const HeyBossJobs = (() => {
     if(fields.frequency==='minutes')return fields.interval===1?'Every minute':`Every ${fields.interval} minutes${60%fields.interval?', restarting each hour':''}`;
     if(fields.frequency==='hourly')return fields.minute===0?'Every hour':`Every hour at :${String(fields.minute).padStart(2,'0')}`;
     if(fields.frequency==='monthly')return `Day ${fields.day} of each month at ${fields.time}`;
-    if(fields.frequency==='weekly'&&fields.days?.join(',')!=='1')return `${fields.days.map(day=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]).join(', ')} at ${fields.time}`;
+    if(fields.frequency==='weekly')return `${fields.days.join(',')==='1'?'Mondays':fields.days.map(day=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]).join(', ')} at ${fields.time}`;
+    if(fields.frequency==='daily'||fields.frequency==='weekdays')return `${fields.frequency==='daily'?'Every day':'Weekdays'} at ${fields.time}`;
     const [m,h,d,month,w] = cron.trim().split(/\s+/);
-    if (/^\d+$/.test(m)&&/^\d+$/.test(h)&&d==='*'&&month==='*'&&['*','1-5','1'].includes(w)) return `${w==='*'?'Every day':w==='1'?'Mondays':'Weekdays'} at ${h.padStart(2,'0')}:${m.padStart(2,'0')}`;
-    if(m==='*'&&h==='*'&&d==='*'&&month==='*'&&w==='*')return 'Every minute';
-    if(m==='0'&&h==='*'&&d==='*'&&month==='*'&&w==='*')return 'Every hour';
     return `Minute ${m} · Hour ${h} · Day ${d} · Month ${month} · Weekday ${w}`;
   }
   function scheduleFields(cron) {
@@ -23,7 +21,7 @@ const HeyBossJobs = (() => {
       if(number(minute,0,59))return {frequency:'hourly',time:'09:00',minute:Number(minute)};
     }
     if(!number(minute,0,59)||!number(hour,0,23)||month!=='*')return custom;
-    const time=hour.padStart(2,'0')+':'+minute.padStart(2,'0');
+    const time=String(Number(hour)).padStart(2,'0')+':'+String(Number(minute)).padStart(2,'0');
     if(week==='*'&&number(day,1,31))return {frequency:'monthly',time,day:Number(day)};
     if(day!=='*')return custom;
     if(week==='*'||week==='1-5')return {frequency:week==='*'?'daily':'weekdays',time};

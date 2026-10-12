@@ -4,6 +4,8 @@ const {webcrypto} = require('node:crypto');
 const vm = require('node:vm');
 const {summary, modelChoices, availability, Mutation, scheduleState, filterJobs, scheduleFields, scheduleCron} = require('../src/issues/web/jobs.js');
 assert.deepEqual(scheduleFields('30 17 * * 1-5'),{frequency:'weekdays',time:'17:30'});
+assert.deepEqual(scheduleFields('005 009 * * *'),{frequency:'daily',time:'09:05'},'Valid zero-padded cron remains editable');
+assert.equal(summary('005 009 * * *'),'Every day at 09:05');
 assert.deepEqual(scheduleFields('0 * * * *'),{frequency:'hourly',time:'09:00',minute:0});
 assert.deepEqual(scheduleFields('*/15 * * * *'),{frequency:'minutes',time:'09:00',interval:15});
 assert.deepEqual(scheduleFields('45 * * * *'),{frequency:'hourly',time:'09:00',minute:45});
