@@ -11,7 +11,9 @@
   gap: 20px;
   margin-bottom: 28px;
 }
-#artifact-main .page-heading h1 { font-size: 30px; }
+#artifact-main .page-heading h1 { font-size: 36px; letter-spacing: -1.2px; margin: 0; }
+.artifact-eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 11px; font-weight: 650; letter-spacing: .12em; text-transform: uppercase; }
+.artifact-library-intro { margin: 10px 0 0; font-size: 14px; color: var(--muted); }
 #artifact-main .button { min-height: 40px; gap: 7px; }
 #artifact-main .button svg { width: 15px; height: 15px; }
 #artifact-status { margin: 0; color: var(--muted); font-size: 12px; }
@@ -35,9 +37,16 @@
 .artifact-search input:focus-visible { outline: none; }
 .artifact-archive-filter { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; min-height: 44px; cursor: pointer; }
 .artifact-archive-filter input { accent-color: var(--accent); margin: 0; width: 15px; height: 15px; }
-#artifact-list { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); overflow: hidden; }
-.artifact-row { display: flex; align-items: center; gap: 16px; padding: 0 16px 0 24px; border-bottom: 1px solid var(--line); transition: background .15s; }
-.artifact-row-link { display: flex; align-items: center; gap: 16px; flex: 1; min-width: 0; padding: 21px 0; color: inherit; text-decoration: none; }
+#artifact-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+#artifact-list > .artifact-empty, #artifact-list > .artifact-loading { grid-column: 1 / -1; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; }
+.artifact-row { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--line); border-radius: 16px; background: linear-gradient(145deg, var(--surface), var(--solid)); box-shadow: 0 2px 5px #18264603; transition: border-color .15s, box-shadow .15s; }
+.artifact-card-label { display: flex; align-items: center; gap: 9px; width: 100%; color: var(--muted); font-size: 11px; font-weight: 550; }
+.artifact-card-arrow { margin-left: auto; color: var(--faint); }
+.artifact-card-arrow svg { display: block; width: 16px; height: 16px; }
+.artifact-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 24px; padding: 8px 0; border-top: 1px solid var(--line); }
+.artifact-row-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; margin-top: 10px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.artifact-row-preview.is-empty { color: var(--faint); }
+.artifact-row-link { display: flex; flex-direction: column; align-items: stretch; gap: 18px; flex: 1; width: 100%; min-width: 0; padding: 24px; color: inherit; text-decoration: none; border-radius: 16px 16px 0 0; }
 .artifact-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .artifact-row-actions .icon-button { width: 44px; height: 44px; }
 .artifact-danger { color: var(--danger); }
@@ -51,14 +60,14 @@
 .artifact-delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .artifact-delete-actions .button { min-height: 44px; }
 .artifact-menu-panel .artifact-danger, .artifact-menu-panel .artifact-danger svg { color: var(--danger); }
-.artifact-row:last-child { border-bottom: 0; }
-.artifact-row:hover { background: var(--hover); }
+.artifact-row:hover, .artifact-row:focus-within { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); box-shadow: var(--shadow); }
+.artifact-row-link:hover strong { color: var(--accent); }
 .artifact-row-link:focus-visible { outline-offset: -3px; border-radius: 10px; }
-.artifact-document-icon { display: grid; place-items: center; width: 38px; height: 44px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--input); flex-shrink: 0; }
-.artifact-document-icon svg { width: 20px; height: 20px; }
+.artifact-document-icon { display: grid; place-items: center; width: 30px; height: 34px; border: 1px solid color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 7px; color: var(--accent); background: var(--accent-soft); flex-shrink: 0; }
+.artifact-document-icon svg { width: 17px; height: 17px; }
 .artifact-row-content { flex: 1; min-width: 0; }
-.artifact-row strong { display: block; font-size: 15px; font-weight: 600; letter-spacing: -.15px; overflow-wrap: anywhere; }
-.artifact-row-meta { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.artifact-row strong { display: block; font-size: 20px; line-height: 1.35; font-weight: 600; letter-spacing: -.4px; overflow-wrap: anywhere; }
+.artifact-row-meta { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 11px; }
 .artifact-badge { display: inline-block; padding: 1px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 11px; font-weight: 500; margin-left: 3px; }
 #artifact-more { display: flex; margin: 20px auto 0; }
 .artifact-empty { text-align: center; padding: 64px 24px; }
@@ -227,6 +236,9 @@
   .artifact-document-heading .artifact-actions { width: 100%; }
   .artifact-menu { margin-left: auto; }
 }
+@media (max-width: 760px) {
+  #artifact-list { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+}
 @media (max-width: 560px) {
   #artifact-main, #resource-main { padding: 24px 18px 40px; }
   #artifact-main .page-heading { gap: 12px; margin-bottom: 24px; }
@@ -235,13 +247,12 @@
   .artifact-toolbar { flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
   .artifact-search { flex-basis: 100%; max-width: none; }
   .artifact-archive-filter { min-height: 32px; }
-  .artifact-row { gap: 8px; padding: 0 8px 0 16px; }
-  .artifact-row-link { gap: 12px; padding: 18px 0; }
+  .artifact-row-link { gap: 14px; padding: 20px; }
+  .artifact-card-footer { margin-inline: 20px; }
+  .artifact-library-intro { font-size: 13px; max-width: 210px; line-height: 1.5; }
   .artifact-row-actions { gap: 0; }
-  .artifact-row .artifact-document-icon { display: none; }
   .artifact-delete-dialog { padding: 22px; }
-  .artifact-row strong { font-size: 14px; }
-  .artifact-document-icon { width: 32px; height: 38px; }
+  .artifact-row strong { font-size: 19px; }
   #artifact-document > .back-link { margin-bottom: 14px; }
   .artifact-document-heading { margin-bottom: 20px; }
   .artifact-document-heading h1 { font-size: 25px; }

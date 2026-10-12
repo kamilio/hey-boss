@@ -7,9 +7,15 @@ project. One document can be attached to multiple issues and map nodes; its
 stable URL and references survive renames, edits and archiving. Unlinking removes
 only the reference. Removed map topics remain identified in document backlinks.
 
-The library keeps search and recent documents together. Open a document for a
+The library shows document cards with short, readable text previews in a
+responsive two-column layout (one column on phones). Previews omit Markdown
+formatting, front matter, code blocks, and headings that repeat the title.
+Only the first 4,096 characters are inspected; excerpts contain at most 240
+characters plus an ellipsis and display up to three lines. Full documents load
+when opened, keeping the library fast even with large files.
+Open a document for a
 focused reading view; **Edit** opens its draft, and the **More actions** menu
-contains Export Markdown, Archive/Restore, and Delete permanently. Library rows
+contains Export Markdown, Archive/Restore, and Delete permanently. Library cards
 also offer quick Archive/Restore and Delete actions, including on touch screens.
 Select **Archived** to browse archived documents and restore them.
 Permanent deletion asks for confirmation and removes the document, its comments,
