@@ -11,6 +11,16 @@ that project. Existing drafts remain saved. Omitting `--drafts` in scripts keeps
 the saved choice (enabled for new projects). For an initialized project,
 `hey-boss issue settings set --no-drafts` changes only this setting.
 
+Artifacts and mindmaps follow the same rule: initialization accepts
+`--artifacts false --mindmaps false`; settings accepts `--no-artifacts` and
+`--no-mindmaps`. Omitted choices preserve saved values and default to enabled for
+new projects. Disabled creation exits nonzero with a project-specific message
+pointing to regular tasks. Existing content remains available.
+
+All workflow and resource switches live in Builder → Project settings →
+Configuration, alongside the terminal plan path. Prompt editors stay in their
+own tabs.
+
 To separate two checkouts of the same repository, initialize the second with
 `hey-boss project init --project poe2-legacy` and choose its own workflow, such as
 no pull requests. A custom identity is saved in a local `.hey-boss` JSON file at

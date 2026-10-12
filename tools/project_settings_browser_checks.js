@@ -5,17 +5,28 @@ async (page) => {
   const tab = name => page.getByRole('tab', {name, exact:true});
   const open = async () => {
     await page.getByRole('button', {name:'Project settings',exact:true}).click();
-    await page.locator('#project-prompt').waitFor({state:'visible'});
+    await page.locator('#project-prs').waitFor({state:'visible'});
+    await page.waitForFunction(() => !document.querySelector('#project-prs').disabled);
   };
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  await page.goto('http://127.0.0.1:59642');
+  await page.goto(page.url().startsWith('http://127.0.0.1:') ? page.url().split('/').slice(0, 3).join('/') : 'http://127.0.0.1:59642');
   await page.evaluate(() => { window.fixtureSettings.prompt_overrides.layout = '{{delivery}}\n\n{{task}}'; });
   await open();
-  check(await page.getByRole('tab').count() === 3, 'Three editor tabs');
+  check(await page.getByRole('tab').count() === 4, 'Configuration and three editor tabs');
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
-  check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Instructions selected initially');
+  check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Configuration selected initially');
+  check(!await page.locator('.settings-preview').isVisible(), 'Configuration has no prompt preview');
+  for (const id of ['prs', 'worktree', 'drafts', 'artifacts', 'mindmaps']) {
+    check(await page.locator('#project-' + id).isVisible(), id + ' is in Configuration');
+  }
+  await page.locator('#project-prs').check();
+  await page.locator('#project-drafts').uncheck();
+  await page.locator('#project-artifacts').uncheck();
+  await page.locator('#project-mindmaps').uncheck();
+  await page.locator('#project-plan-template').fill('plans/edited-{number}.md');
+  await tab('Instructions').click();
   check(await page.locator('#project-prompt-layout').count() === 0, 'Prompt sequence editor is removed');
   await page.getByText('Task context sections', {exact:true}).click();
   await page.locator('#project-prompt-handoff').fill('Short handoff for {{number}}.');
@@ -24,31 +35,34 @@ async (page) => {
   }
   await page.locator('#project-prompt').fill('Edited implementation');
   await tab('Planning').click();
-  await page.locator('#project-plan-template').fill('plans/edited-{number}.md');
   await page.locator('#project-prompt-plan').fill('Edited plan');
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited plan');
   check(await page.locator('.settings-preview').isVisible(), 'Planning preview visible beside editor');
   await tab('Planning').press('ArrowRight');
   check(await tab('Workflow').evaluate(el => el === document.activeElement), 'Arrow selects and focuses next tab');
-  await page.locator('#project-prs').check();
+  check(!await page.locator('#project-prs').isVisible(), 'Workflow only contains prompt editors');
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited implementation');
   check(await page.locator('#project-preview-choices').innerText() === 'Existing checkout · Pull requests', 'Workflow preview uses unsaved edits');
   await tab('Workflow').press('End');
   check(await tab('Workflow').getAttribute('aria-selected') === 'true', 'End selects last tab');
   check(await tab('Chief').count() === 0, 'Retired editor is absent');
   await tab('Workflow').press('ArrowRight');
-  check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Arrow wraps around');
+  check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Arrow wraps around');
+  await tab('Instructions').click();
   check(await page.locator('#project-prompt').inputValue() === 'Edited implementation', 'Draft survives tab switches');
   await tab('Instructions').press('ArrowLeft');
-  await tab('Workflow').press('Home');
-  check(await tab('Instructions').evaluate(el => el === document.activeElement), 'Home focuses first tab');
+  await tab('Configuration').press('Home');
+  check(await tab('Configuration').evaluate(el => el === document.activeElement), 'Home focuses first tab');
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
   check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && saved[0].plan_template === 'plans/edited-{number}.md'), 'Save includes all tab edits');
+  check(await page.evaluate(() => !saved[0].drafts_enabled && !saved[0].artifacts_enabled && !saved[0].mindmaps_enabled), 'Save includes all resource switches');
   check(await page.evaluate(() => !('chief_enabled' in saved[0]) && !('chief_prompt' in saved[0])), 'Saving settings never restores retired configuration');
   check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');
   await open();
   check(await page.locator('#project-prompt-layout, [data-reset-prompt="layout"]').count() === 0, 'Reopening does not recreate the sequence editor');
+  for (const id of ['drafts', 'artifacts', 'mindmaps']) check(!await page.locator('#project-' + id).isChecked(), id + ' persists on reopen');
+  await tab('Instructions').click();
   await page.locator('#project-prompt').fill('');
   await tab('Planning').click();
   await page.getByRole('button', {name:'Save',exact:true}).click();
@@ -66,20 +80,22 @@ async (page) => {
   check(await page.locator('#project-settings-trigger').evaluate(el => el === document.activeElement), 'Closing restores trigger focus');
   await page.evaluate(() => { window.failSave = false; });
   await open();
-  check(await tab('Instructions').getAttribute('aria-selected') === 'true', 'Reopening starts at first tab');
+  check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Reopening starts at first tab');
   for (const theme of ['light','dark']) for (const width of [1280, 768, 390, 320]) {
     await page.emulateMedia({colorScheme:theme});
     await page.setViewportSize({width,height:800});
-    for (const name of ['Instructions','Planning','Workflow']) {
+    for (const name of ['Configuration','Instructions','Planning','Workflow']) {
       await tab(name).click();
-      check(await page.locator('.settings-preview').isVisible(), name + ' retains preview at ' + width);
-      if (width >= 800) check(await page.locator('.settings-preview').evaluate(el => {
+      check(await page.locator('.settings-preview').isVisible() === (name !== 'Configuration'), name + ' preview visibility at ' + width);
+      if (width >= 800 && name !== 'Configuration') check(await page.locator('.settings-preview').evaluate(el => {
         const preview = el.getBoundingClientRect(), editor = document.querySelector('[role="tabpanel"]:not([hidden])').getBoundingClientRect();
         return preview.left >= editor.right && Math.abs(preview.top-editor.top)<2;
       }), name + ' editor left and preview right');
       check(await page.locator('#project-settings-dialog').evaluate(el => el.scrollWidth <= el.clientWidth + 1), `${name} fits at ${width}px`);
       check(await page.getByRole('button', {name:'Save',exact:true}).evaluate(el => {const r=el.getBoundingClientRect();return r.bottom<=innerHeight && r.top>=0;}), `Save visible for ${name} at ${width}px`);
     }
+    await tab('Configuration').click();
+    await page.screenshot({path:`/tmp/hey-boss-settings-qa/configuration-${theme}-${width}.png`});
     await tab('Workflow').click();
     await page.waitForFunction(() => document.querySelector('#project-instructions-preview').getAttribute('aria-busy') === 'false');
     check(await page.locator('#project-instructions-preview').textContent() === await page.locator('#project-prompt').inputValue(), 'Implementation preview preserves configured text');

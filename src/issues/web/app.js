@@ -1248,7 +1248,7 @@ function renderDetail(value) {
     $("#comment-preview").onclick = () => preview("comment", true);
   }
   mountIssueSection("#issue-attachments", "Attachments", () => HeyBossAttachments.mount(document.querySelector("#issue-attachments"), {project:model.project.id,target:{kind:"issue",id:String(i.number)},host:model.route.host,csrf:model.csrf,readonly:deleted}, document.querySelector("#comment-form .markdown-editor")));
-  mountIssueSection("#issue-artifacts", "Linked documents", () => HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || []}));
+  mountIssueSection("#issue-artifacts", "Linked documents", () => HeyBossArtifacts.mount(document.querySelector("#issue-artifacts"), {project:model.project.id,issue:i.number,host:model.route.host,csrf:model.csrf,artifacts:value.artifacts || [],artifacts_enabled:value.artifacts_enabled}));
   mountIssueSection(".subtasks-card", "Subtasks", () => IssueSubtasks.rendered());
   loadIssueTimeline($("#comments"), value);
   if ($("#pr-form"))
