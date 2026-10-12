@@ -80,6 +80,7 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                             | "retiring"
                             | "intent"
                             | "active"
+                            | "job_active"
                             | "free"
                             | "eligible"
                             | "desired_concurrency"
@@ -1331,7 +1332,7 @@ mod tests {
 
     #[test]
     fn compact_overview_preserves_worker_configuration_status() {
-        let original = json!({"machines":[{"host":"local","workspace":"~/projects","projects":{"github.com/acme/atlas":{"git":"git@github.com:acme/atlas.git","path":"~/projects/atlas"}},"desired_revision":"new","applied_revision":"old","configuration_error":"Checkout unavailable","workers":[{"id":"worker","managed":true,"retiring":false,"intent":"pause","active":1,"free":1,"eligible":0,"desired_concurrency":2,"retry_at":123,"error":"Retrying","runs":[]}]}]});
+        let original = json!({"machines":[{"host":"local","workspace":"~/projects","projects":{"github.com/acme/atlas":{"git":"git@github.com:acme/atlas.git","path":"~/projects/atlas"}},"desired_revision":"new","applied_revision":"old","configuration_error":"Checkout unavailable","workers":[{"id":"worker","managed":true,"retiring":false,"intent":"pause","active":1,"job_active":2,"free":1,"eligible":0,"desired_concurrency":2,"retry_at":123,"error":"Retrying","runs":[]}]}]});
         let result = compact(original.clone(), &HashSet::new()).unwrap();
         for key in [
             "desired_revision",
@@ -1347,6 +1348,7 @@ mod tests {
             "retiring",
             "intent",
             "active",
+            "job_active",
             "free",
             "eligible",
             "retry_at",
