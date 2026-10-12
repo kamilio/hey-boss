@@ -283,6 +283,7 @@ pub(super) fn execute(
             issue,
             node,
         } => {
+            crate::issues::project_features::Feature::Artifacts.require(db, p)?;
             let mut bytes = [0u8; 16];
             std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
             let id = format!(
@@ -441,6 +442,9 @@ pub(super) fn prepare_import(
         return Ok(None);
     };
     crate::attachments::check_authority(db)?;
+    if matches!(operation.as_ref(), Operation::Create { .. }) {
+        crate::issues::project_features::Feature::Artifacts.require(db, p)?;
+    }
     // Reject an already-invalid target before touching disk. The mutation still
     // checks these conditions again after acquiring the writer.
     match operation.as_ref() {

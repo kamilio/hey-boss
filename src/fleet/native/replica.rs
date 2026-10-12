@@ -211,6 +211,8 @@ impl<'a> RowWriter<'a> {
         let defaults: &[(&str, Value)] = match table {
             "project_settings" => &[
                 ("drafts_enabled", json!(1)),
+                ("artifacts_enabled", json!(1)),
+                ("mindmaps_enabled", json!(1)),
                 ("plan_template", json!("plans/{timestamp}-{number}.md")),
                 ("worktree_enabled", json!(0)),
                 ("prompt_overrides", json!("{}")),
@@ -6562,6 +6564,8 @@ mod tests {
         for column in [
             "subtask_scheduling",
             "drafts_enabled",
+            "artifacts_enabled",
+            "mindmaps_enabled",
             "plan_template",
             "worktree_enabled",
             "prompt_overrides",
@@ -6586,6 +6590,12 @@ mod tests {
         let main = Fixture::new();
         main.capture();
         main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt) VALUES('named:Native fleet','Shared instructions',1,7,'Boss',0,'custom/{number}.md',1,'{\"main\":\"Ship {{number}}\"}',1,'Review the release')", []).unwrap();
+        main.db
+            .execute(
+                "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0",
+                [],
+            )
+            .unwrap();
         let agent = Fixture::new();
         install_capture(&agent.db, "agent", "agent").unwrap();
         apply_pull(
@@ -6598,6 +6608,29 @@ mod tests {
         assert_eq!(
             rows(&agent.db, "SELECT * FROM project_settings", &[]).unwrap(),
             rows(&main.db, "SELECT * FROM project_settings", &[]).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_settings_updates_preserve_disabled_project_resources() {
+        let f = Fixture::new();
+        let legacy = json!({"project_id":"named:Native fleet","prompt":"Instructions","prs_enabled":0,"version":1,"boss_name":"Boss"});
+        put_row(&f.db, "project_settings", &legacy).unwrap();
+        f.db.execute(
+            "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0",
+            [],
+        )
+        .unwrap();
+        put_row(&f.db, "project_settings", &legacy).unwrap();
+        let retained = rows(
+            &f.db,
+            "SELECT artifacts_enabled,mindmaps_enabled FROM project_settings",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retained[0],
+            json!({"artifacts_enabled":0,"mindmaps_enabled":0})
         );
     }
 

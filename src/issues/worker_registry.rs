@@ -109,15 +109,18 @@ struct ProjectSettingsRow {
     prs: bool,
     version: i64,
     drafts_enabled: bool,
+    artifacts_enabled: bool,
+    mindmaps_enabled: bool,
     plan_template: String,
     worktree_enabled: bool,
     overrides: String,
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
+            artifacts_enabled: r.get(7)?, mindmaps_enabled: r.get(8)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?, plan_template: r.get(4)?,
             worktree_enabled: r.get(5)?, overrides: r.get(6)?,
@@ -128,6 +131,8 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         prs,
         version,
         drafts_enabled,
+        artifacts_enabled,
+        mindmaps_enabled,
         plan_template,
         worktree_enabled,
         overrides,
@@ -136,6 +141,8 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         prs: false,
         version: 0,
         drafts_enabled: true,
+        artifacts_enabled: true,
+        mindmaps_enabled: true,
         plan_template: "plans/{timestamp}-{number}.md".into(),
         worktree_enabled: false,
         overrides: "{}".into(),
@@ -144,7 +151,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"plan_template":plan_template,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -777,6 +784,8 @@ pub(super) fn execute(
             worktree_enabled,
             prompt_overrides,
             drafts_enabled,
+            artifacts_enabled,
+            mindmaps_enabled,
             plan_template,
             if_version,
         } => {
@@ -808,6 +817,10 @@ pub(super) fn execute(
             super::identifier(&legacy_name, "Boss name", 64)?;
             let legacy_name = legacy_name.trim();
             let drafts_enabled = drafts_enabled.unwrap_or(defaults["drafts_enabled"] == true);
+            let artifacts_enabled =
+                artifacts_enabled.unwrap_or(defaults["artifacts_enabled"] != false);
+            let mindmaps_enabled =
+                mindmaps_enabled.unwrap_or(defaults["mindmaps_enabled"] != false);
             let plan_template = plan_template
                 .as_deref()
                 .unwrap_or(defaults["plan_template"].as_str().unwrap());
@@ -823,7 +836,7 @@ pub(super) fn execute(
             if let Some(name) = boss_name {
                 crate::issues::global_settings::configure(db, name, None)?;
             }
-            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template,worktree_enabled,serde_json::to_string(&prompt_overrides)?])?;
+            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,plan_template=excluded.plan_template,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,mindmaps_enabled=excluded.mindmaps_enabled",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,plan_template,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,mindmaps_enabled])?;
             db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit' WHERE project_id=?1", [&p.id])?;
             project_settings(db, p)
         }

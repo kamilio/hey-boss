@@ -35,6 +35,12 @@ enum Action {
         /// Allow draft issues; defaults to the saved choice, or true for a new project.
         #[arg(long, action = clap::ArgAction::Set)]
         drafts: Option<bool>,
+        /// Allow artifacts; defaults to the saved choice, or true for a new project.
+        #[arg(long, action = clap::ArgAction::Set)]
+        artifacts: Option<bool>,
+        /// Allow mindmaps; defaults to the saved choice, or true for a new project.
+        #[arg(long, action = clap::ArgAction::Set)]
+        mindmaps: Option<bool>,
         /// Save explicit choices without interactive review.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -48,6 +54,8 @@ pub fn run(options: &Options) -> Result<()> {
         prs,
         worktree,
         drafts,
+        artifacts,
+        mindmaps,
         yes,
     } = &options.action;
     let interactive =
@@ -102,6 +110,8 @@ pub fn run(options: &Options) -> Result<()> {
     let mut prs = prs.unwrap_or(current["prs_enabled"] == true);
     let mut worktree = worktree.unwrap_or(current["worktree_enabled"] == true);
     let mut drafts = drafts.unwrap_or(current["drafts_enabled"] == true);
+    let mut artifacts = artifacts.unwrap_or(current["artifacts_enabled"] != false);
+    let mut mindmaps = mindmaps.unwrap_or(current["mindmaps_enabled"] != false);
     if interactive {
         println!();
         line(&format!("Project setup · {}", request.project.name));
@@ -135,7 +145,7 @@ pub fn run(options: &Options) -> Result<()> {
         };
         worktree = selected;
         println!();
-        line("3 / 4 · Drafts");
+        line("3 / 4 · Project resources");
         line(
             "Keep work as drafts until it is ready for agents. Turning this off preserves existing drafts.",
         );
@@ -143,6 +153,14 @@ pub fn run(options: &Options) -> Result<()> {
             return cancelled();
         };
         drafts = selected;
+        let Some(selected) = choice("Allow artifacts?", artifacts)? else {
+            return cancelled();
+        };
+        artifacts = selected;
+        let Some(selected) = choice("Allow mindmaps?", mindmaps)? else {
+            return cancelled();
+        };
+        mindmaps = selected;
         println!();
         line("4 / 4 · Prompts and review");
         outline(&current, prs, worktree, false);
@@ -152,6 +170,11 @@ pub fn run(options: &Options) -> Result<()> {
             enabled(prs),
             enabled(worktree),
             enabled(drafts)
+        ));
+        line(&format!(
+            "Artifacts: {} · Mindmaps: {}",
+            enabled(artifacts),
+            enabled(mindmaps)
         ));
         line("Workers are configured separately; saving does not start one.");
         loop {
@@ -165,7 +188,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
     request.operation = serde_json::from_value(json!({
         "action":"project_init", "settings": { "prs_enabled":prs, "worktree_enabled":worktree,
-        "drafts_enabled":drafts, "if_version":current["version"] },
+        "drafts_enabled":drafts, "artifacts_enabled":artifacts, "mindmaps_enabled":mindmaps, "if_version":current["version"] },
     }))?;
     let result = crate::cli_request::execute(&request, host.as_deref(), false)?;
     if bind_checkout {
@@ -182,7 +205,12 @@ pub fn run(options: &Options) -> Result<()> {
             enabled(worktree),
             enabled(drafts)
         ));
-        line("Review or edit prompts in Builder → Project settings.");
+        line(&format!(
+            "Artifacts: {} · Mindmaps: {}",
+            enabled(artifacts),
+            enabled(mindmaps)
+        ));
+        line("Review configuration and prompts in Builder → Project settings.");
         line("Run hey-boss project init again to change these choices.");
     }
     Ok(())

@@ -13,6 +13,7 @@ mod global_settings;
 pub mod identity;
 pub(crate) mod model_recovery;
 pub mod planning;
+pub(crate) mod project_features;
 pub(crate) mod provenance;
 pub mod remote;
 mod reviewed_evidence;
@@ -317,6 +318,10 @@ pub enum Operation {
         prompt_overrides: Option<worker::PromptOverrides>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         drafts_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        artifacts_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mindmaps_enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plan_template: Option<String>,
         if_version: Option<i64>,
@@ -629,6 +634,10 @@ pub struct ProjectInitSettings {
     pub worktree_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drafts_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifacts_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mindmaps_enabled: Option<bool>,
     pub if_version: i64,
 }
 
