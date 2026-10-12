@@ -1274,7 +1274,7 @@ fn archive_files_and_sidecars_cannot_be_overwritten_by_auxiliary_outputs() {
         path.push(suffix);
         let path = std::path::PathBuf::from(path);
         assert!(path.exists());
-        assert!(crate::issues::planning::protect_database_paths(&hot, [&path]).is_err());
+        assert!(crate::database::protect_database_paths(&hot, [&path]).is_err());
     }
     assert!(backup_store(&f.db, &archive).is_err());
 }

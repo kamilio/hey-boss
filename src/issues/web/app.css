@@ -2854,9 +2854,6 @@ button.avatar.self:hover {
 .preview-heading .field-label { margin-top:16px; }
 .preview-heading .field-help { font-size:11px; margin:8px 0 0; }
 #project-instructions-preview { padding:18px; margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; min-height:220px; }
-.planning-settings { border-top:1px solid var(--line); padding-top:14px; font-size:12px; }
-.planning-settings summary { cursor:pointer; color:var(--text); font-size:14px; font-weight:600; padding:8px 0; margin-bottom:12px; }
-.planning-settings .draft-choice { margin:0 0 18px; }
 .project-settings-body > .form-error { grid-column:1/-1; }
 @media (max-width:600px) {
  #project-prompt-plan { font-size:16px; }
@@ -2902,9 +2899,6 @@ button.avatar.self:hover {
 .draft-notice .button { flex-shrink:0; }
 .readiness-status { font-size:12px; font-weight:600; }
 .issue-readiness .button { margin-top:5px; min-height:36px; }
-.issue-plan { margin-top:16px; padding:12px; border-radius:8px; background:var(--hover); border:1px solid var(--line); }
-.issue-plan h3 { margin:0 0 6px; font-size:11px; font-weight:600; }
-.issue-plan code { font-size:11px; overflow-wrap:anywhere; }
 .draft-choice {
   display:flex;
   align-items:flex-start;

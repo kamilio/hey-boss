@@ -34,7 +34,7 @@ explicit approvals/input, and provider-neutral goal continuation. Choose Codex,
 Claude Code or Pi in **Worker settings → Agent**, or pass `--provider claude|pi`
 to `worker run` or `auto-workers add`. Existing workers default to Codex; changes
 apply to newly picked issues. Each provider must be installed and authenticated
-on its worker's machine. Interactive planning continues using Codex.
+on its worker's machine.
 
 Run `hey-boss auto-workers run` to start or resume saved workers, then
 `hey-boss auto-workers watch` to open their dashboard.
@@ -714,7 +714,7 @@ also need the Xcode command-line tools. Builds use a persistent cache, replaceme
 are staged beside the installed executable, and failed verification restores the
 previous binary. Before replacing the CLI or restarting services, the staged
 build opens this installation's issue store and commits required schema changes
-atomically. Startup also reconciles missing draft, plan, project planning, and
+atomically. Startup also reconciles missing draft, project settings, and
 mindmap label columns without overwriting existing values. A failed migration
 keeps the installed CLI and services in place and reports the store and cause;
 resolve that cause and retry rather than deleting the store. Committed schema

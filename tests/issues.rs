@@ -3882,14 +3882,7 @@ fn upgrade_reconciles_released_and_partially_upgraded_stores_without_data_loss()
         assert_eq!(settings["prompt"], "Keep instructions");
         assert_eq!(settings["prs_enabled"], true);
         assert_eq!(settings["drafts_enabled"], true);
-        assert_eq!(
-            settings["plan_template"],
-            if version == 11 {
-                "custom/{number}.md"
-            } else {
-                "plans/{timestamp}-{number}.md"
-            }
-        );
+        assert!(settings.get("plan_template").is_none());
         f.run("session-a", &["projects"]);
         f.run("session-a", &["edit", "1", "--title", "Edited"]);
         f.run("session-a", &["settings", "set", "--no-drafts"]);
@@ -4079,12 +4072,16 @@ fn explicit_database_override_survives_running_executable_replacement() {
 }
 
 #[test]
-fn interactive_requires_a_human_terminal_before_creating_anything() {
+fn removed_interactive_option_does_not_create_state() {
     let f = Fixture::empty();
-    f.fail("a", &["create", "--title", "Plan", "--interactive"], 2);
+    let output = f
+        .cmd("a", &["create", "--title", "Plan", "--interactive"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
     assert!(
         !f.db.exists(),
-        "Interactive refusal must not open or create a project"
+        "Removed options must not open or create a project"
     );
 }
 
@@ -4260,4 +4257,84 @@ fn dependency_migration_normalizes_legacy_parents_and_preserves_manual_blocks() 
     f.run("session-a", &["close", "2"]);
     assert_eq!(f.run("reader", &["view", "1"])["issue"]["state"], "open");
     assert_eq!(f.run("reader", &["view", "3"])["issue"]["state"], "blocked");
+}
+
+#[test]
+fn terminal_planning_commands_are_removed() {
+    let f = Fixture::new();
+    for args in [
+        vec!["create", "--title", "Unused", "--interactive"],
+        vec!["edit", "1", "--interactive"],
+        vec!["settings", "set", "--plan-template", "plans/{number}.md"],
+        vec!["plan-sync"],
+    ] {
+        let output = f.cmd("human:test", &args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unexpected")
+                || String::from_utf8_lossy(&output.stderr).contains("unrecognized")
+        );
+    }
+    assert!(
+        f.run("a", &["settings", "show"])
+            .get("plan_template")
+            .is_none()
+    );
+    for action in ["bind_plan", "read_plan"] {
+        let operation = json!({"action":action,"number":1,"if_version":1,"plan":{
+            "path":"plan.md","checkout":f.cwd,"machine":"offline","host":"offline"
+        }});
+        assert!(serde_json::from_value::<hey_boss::issues::Operation>(operation).is_err());
+    }
+}
+
+#[test]
+fn legacy_plan_links_do_not_block_undrafting_or_replace_saved_content() {
+    let f = Fixture::new();
+    f.run(
+        "a",
+        &[
+            "create",
+            "--title",
+            "Saved title",
+            "--body",
+            "Saved body",
+            "--draft",
+        ],
+    );
+    let legacy = json!({"path":"missing.md","checkout":f.cwd,"machine":"offline","host":"offline"});
+    f.sql()
+        .execute(
+            "UPDATE issues SET plan=?1 WHERE number=1",
+            [legacy.to_string()],
+        )
+        .unwrap();
+    f.run("a", &["settings", "set", "--no-drafts"]);
+    let ready = f.run("a", &["undraft", "1"]);
+    assert_eq!(ready["issue"]["draft"], false);
+    assert_eq!(ready["issue"]["title"], "Saved title");
+    assert_eq!(ready["issue"]["body"], "Saved body");
+    assert!(ready["issue"].get("plan").is_none());
+    f.run("a", &["claim", "1"]);
+}
+
+#[test]
+fn markdown_file_import_remains_a_one_time_body_import() {
+    let f = Fixture::new();
+    fs::write(f.cwd.join("body.md"), "# Body heading\n\nOriginal body").unwrap();
+    let created = f.run(
+        "a",
+        &[
+            "create",
+            "--title",
+            "Explicit title",
+            "--file",
+            "body.md",
+            "--draft",
+        ],
+    );
+    assert_eq!(created["issue"]["title"], "Explicit title");
+    fs::write(f.cwd.join("body.md"), "# Changed file").unwrap();
+    let ready = f.run("a", &["undraft", "1"]);
+    assert_eq!(ready["issue"]["body"], "# Body heading\n\nOriginal body");
 }

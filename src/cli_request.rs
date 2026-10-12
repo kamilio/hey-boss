@@ -17,7 +17,7 @@ fn artifact_edit(value: &mut Value) -> &mut Value {
 
 fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
     match value["action"].as_str().unwrap_or_default() {
-        "assign" | "transfer" | "hold_attempt" | "reconcile_attempt" | "set_yolo" | "bind_plan" => {
+        "assign" | "transfer" | "hold_attempt" | "reconcile_attempt" | "set_yolo" => {
             missing(&value["if_version"])
         }
         "edit" => value["if_version"].is_null() && (supervisor || value["draft"] == true),

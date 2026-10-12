@@ -217,10 +217,7 @@ impl Context {
         }
     }
     pub fn protect_file(&self, path: &Path) -> Result<()> {
-        Ok(crate::issues::planning::protect_database_paths(
-            &self.path,
-            [path],
-        )?)
+        Ok(crate::database::protect_database_paths(&self.path, [path])?)
     }
     pub fn read_json(&self, path: &Path, default: Value) -> Result<Value> {
         self.protect_file(path)?;

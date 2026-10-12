@@ -121,11 +121,8 @@ pub(crate) fn worker_connection_path(role: &str, database: Option<&str>) -> Valu
         .and_then(|path| {
             let path = path.with_file_name("fleet-agent-status.json");
             if let Some(database) = database.filter(|path| !path.is_empty()) {
-                crate::issues::planning::protect_database_paths(
-                    std::path::Path::new(database),
-                    [&path],
-                )
-                .ok()?;
+                crate::database::protect_database_paths(std::path::Path::new(database), [&path])
+                    .ok()?;
             }
             std::fs::read(path).ok()
         })

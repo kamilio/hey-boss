@@ -2,8 +2,10 @@
 //! Transactions retain exclusive access to one writer until commit, rollback,
 //! or caller disconnect. Independent queries use a read-only WAL connection.
 pub(crate) mod owner;
+mod paths;
 mod wire;
 pub use owner::Owner;
+pub(crate) use paths::protect_database_paths;
 pub use rusqlite::{OpenFlags, StatementStatus, TransactionBehavior};
 use rusqlite::{
     Result, ToSql,

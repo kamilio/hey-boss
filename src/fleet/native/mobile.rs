@@ -491,13 +491,8 @@ fn mobile_web_operation(payload: &Value) -> Result<Operation> {
         return Err(invalid("Remote hosts are not accepted"));
     }
     let operation: Operation = serde_json::from_value(payload["operation"].clone())?;
-    if matches!(
-        operation,
-        Operation::ReadPlan { .. } | Operation::BindPlan { .. } | Operation::Status { .. }
-    ) {
-        return Err(invalid(
-            "Plan files and status updates use the terminal workflow",
-        ));
+    if matches!(operation, Operation::Status { .. }) {
+        return Err(invalid("Status updates use the terminal workflow"));
     }
     if let Operation::Mindmap { operation } = &operation
         && operation.writes()

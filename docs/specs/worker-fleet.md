@@ -117,13 +117,8 @@ The supervisor MUST derive its inventory from the existing machine configuration
 
 ## Synchronization and Offline Processing
 
-Opening a store or reading a local bound plan MUST preserve SQLite locks held
-by existing connections in the same process. Store-owned local plan reads and
-final reconciliation MUST reject plan or sync-marker inode aliases to the
-active issue database, WAL and shared-memory files before opening them through
-non-SQLite file APIs. Interactive planning and background plan sync MUST reject
-such aliases to the configured local issue database before opening sync locks
-or writing plan contents and sync markers. Fleet lifecycle locks MUST reject
+Opening a store MUST preserve SQLite locks held by existing connections in the
+same process. Auxiliary files and fleet lifecycle locks MUST reject
 inode aliases to their context's database and its WAL/shared-memory files before
 opening a non-SQLite descriptor. Rejection MUST preserve locks held by existing
 SQLite connections. Ordinary lifecycle lock contention MUST retain nonblocking

@@ -27,7 +27,7 @@ unreserved draft with no unfinished worker attempt. It never undrafts, launches
 workers, releases reservations, or approves CI, review, merge or production.
 Ordinary drafts and draft dependents remain unschedulable. Reopening the source
 withdraws its Ready handoff while preserving its draft flag; dependent pickups
-pause again. This path does not sync a linked plan or assert its completion.
+pause again. This path does not assert that the work is complete.
 Companions require the `issue_ready_keep_draft` capability; upgrade older peers.
 
 A changed version, assignee, allocation, or worker attempt rejects the handoff.

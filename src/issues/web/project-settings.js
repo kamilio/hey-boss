@@ -97,7 +97,6 @@ function projectSettingsDraft() {
     drafts_enabled: $("#project-drafts").checked,
     artifacts_enabled: $("#project-artifacts").checked,
     mindmaps_enabled: $("#project-mindmaps").checked,
-    plan_template: $("#project-plan-template").value,
   };
 }
 function projectSettingsChanged() {
@@ -153,7 +152,6 @@ $("#project-settings-trigger").onclick = async () => {
       input.placeholder = projectPromptDefaults[key];
     }
     for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
-    $("#project-plan-template").value = value.plan_template;
     projectSettingsOriginal = projectSettingsDraft();
     setProjectSettingsDisabled(false);
     projectSettingsChanged();
@@ -274,7 +272,6 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 }
 
 for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).onchange = projectSettingsChanged;
-$("#project-plan-template").oninput = projectSettingsChanged;
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;

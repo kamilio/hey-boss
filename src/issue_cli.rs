@@ -355,8 +355,6 @@ enum Action {
         #[arg(long)]
         draft: bool,
         #[arg(long)]
-        interactive: bool,
-        #[arg(long)]
         title: String,
         #[command(flatten)]
         body: Body,
@@ -376,8 +374,6 @@ enum Action {
     Edit {
         #[arg(long)]
         draft: bool,
-        #[arg(long)]
-        interactive: bool,
         number: i64,
         #[arg(long)]
         title: Option<String>,
@@ -391,10 +387,8 @@ enum Action {
         #[arg(long, hide = true)]
         if_version: Option<i64>,
     },
-    /// Make a draft runnable, syncing its bound plan first.
+    /// Make a draft runnable.
     Undraft { number: i64 },
-    #[command(hide = true)]
-    PlanSync,
 
     /// Show the calling session identity and resolved project.
     Whoami,
@@ -710,8 +704,6 @@ enum SettingsAction {
         mindmaps_enabled: bool,
         #[arg(long)]
         no_mindmaps: bool,
-        #[arg(long)]
-        plan_template: Option<String>,
     },
 }
 #[derive(Subcommand)]
@@ -901,7 +893,6 @@ impl Options {
                     no_artifacts,
                     mindmaps_enabled,
                     no_mindmaps,
-                    plan_template,
                 } => {
                     if boss_name.is_none()
                         && prompt.is_none()
@@ -915,7 +906,6 @@ impl Options {
                         && !no_artifacts
                         && !mindmaps_enabled
                         && !no_mindmaps
-                        && plan_template.is_none()
                     {
                         return Err(Error::invalid(
                             "Specify a setting to change; see `hey-boss issue settings set --help`",
@@ -954,7 +944,6 @@ impl Options {
                             None
                         },
                         prompt_overrides: None,
-                        plan_template: plan_template.clone(),
                         boss_name: boss_name.clone(),
                         prompt: prompt.clone(),
                         prs_enabled: if *prs_enabled {
@@ -1058,31 +1047,17 @@ impl Options {
                 body,
                 labels,
                 draft,
-                interactive,
                 blocked_by,
                 then_titles,
-            } => {
-                if *interactive && body.file.as_deref() == Some(std::path::Path::new("-")) {
-                    return Err(Error::invalid(
-                        "Interactive --file requires an existing file in the checkout",
-                    ));
-                }
-                let imported = body.read()?.unwrap_or_default();
-                let (title, body) = if *interactive && body.file.is_some() {
-                    issues::planning::parse(&imported)?
-                } else {
-                    (title.clone(), imported)
-                };
-                Operation::Create {
-                    draft: *draft || *interactive,
-                    title,
-                    body,
-                    labels: labels.clone(),
-                    at_top: *at_top,
-                    blockers: blocked_by.clone(),
-                    then_titles: then_titles.clone(),
-                }
-            }
+            } => Operation::Create {
+                draft: *draft,
+                title: title.clone(),
+                body: body.read()?.unwrap_or_default(),
+                labels: labels.clone(),
+                at_top: *at_top,
+                blockers: blocked_by.clone(),
+                then_titles: then_titles.clone(),
+            },
             Action::Edit {
                 number,
                 title,
@@ -1091,22 +1066,16 @@ impl Options {
                 remove_labels,
                 if_version,
                 draft,
-                interactive,
             } => Operation::Edit {
                 draft: if *draft { Some(true) } else { None },
                 number: *number,
                 title: title.clone(),
-                body: if *interactive && body.file.is_some() {
-                    None
-                } else {
-                    body.read()?
-                },
+                body: body.read()?,
                 add_labels: add_labels.clone(),
                 remove_labels: remove_labels.clone(),
                 if_version: *if_version,
             },
             Action::Undraft { number } => Operation::Undraft { number: *number },
-            Action::PlanSync => unreachable!(),
             Action::Claim { number, force } => Operation::Claim {
                 number: *number,
                 force: *force,
@@ -1290,10 +1259,7 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Pr {
                     command: PrAction::Add { .. } | PrAction::List { .. },
                 }
-                | Action::Edit {
-                    interactive: false,
-                    ..
-                }
+                | Action::Edit { .. }
         ) {
             return Err(Error::invalid(
                 "--supervisor supports view, status, status-history, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
@@ -1381,30 +1347,13 @@ pub fn run(options: &Options) -> Result<()> {
             mindmap: false,
         });
     }
-    if matches!(options.action, Action::PlanSync) {
-        return issues::planning::daemon();
-    }
     let rpc = matches!(options.action, Action::Rpc);
     let mut value = if rpc {
         let raw = read_text(std::io::stdin(), issues::WIRE_LIMIT)?;
         let request: Request = serde_json::from_str(&raw)?;
         Store::open(&issues::database_path()?)?.execute(&request)?
     } else {
-        let interactive = match &options.action {
-            Action::Create { interactive, .. } | Action::Edit { interactive, .. } => *interactive,
-            _ => false,
-        };
-        if interactive {
-            issues::planning::require_terminal()?;
-        }
-        let mut operation = match &options.action {
-            Action::Edit {
-                number,
-                interactive: true,
-                ..
-            } => Operation::View { number: *number },
-            _ => options.operation()?,
-        };
+        let mut operation = options.operation()?;
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
         let project_override = options.project.clone().or_else(worker_project);
@@ -1425,8 +1374,8 @@ pub fn run(options: &Options) -> Result<()> {
         let inspection = matches!(
             operation,
             Operation::View { .. } | Operation::ViewCompact { .. }
-        ) && !interactive;
-        let mut actor = if operation.needs_actor() || interactive || inspection {
+        );
+        let mut actor = if operation.needs_actor() || inspection {
             Some(if inspection {
                 issues::identity::resolve_inspection(options.agent.as_deref(), &machine, &cwd)?
             } else {
@@ -1510,31 +1459,6 @@ pub fn run(options: &Options) -> Result<()> {
             })?;
         if matches!(options.action, Action::View { .. }) {
             crate::issue_attachments::enrich(&mut value, &request, host.as_deref());
-        }
-        if interactive {
-            let file = match &options.action {
-                Action::Create { body, .. } | Action::Edit { body, .. } => body.file.as_deref(),
-                _ => None,
-            };
-            let pending = match &options.action {
-                Action::Edit {
-                    draft,
-                    title,
-                    body,
-                    add_labels,
-                    remove_labels,
-                    ..
-                } if *draft
-                    || title.is_some()
-                    || body.body.is_some()
-                    || !add_labels.is_empty()
-                    || !remove_labels.is_empty() =>
-                {
-                    Some(options.operation()?)
-                }
-                _ => None,
-            };
-            value = issues::planning::interactive(&request, host.as_deref(), value, file, pending)?;
         }
         if let Some(host) = &host
             && let Some(info) = value.get_mut("allocation")

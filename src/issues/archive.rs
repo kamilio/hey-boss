@@ -208,7 +208,7 @@ pub(crate) fn backup_store(db: &crate::database::Connection, destination: &Path)
     let mut cold_destination = destination.as_os_str().to_owned();
     cold_destination.push(".archive.db");
     let cold_destination = std::path::PathBuf::from(cold_destination);
-    super::planning::protect_database_paths(
+    crate::database::protect_database_paths(
         Path::new(source),
         [destination, cold_destination.as_path()],
     )?;
