@@ -194,6 +194,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     projectSettingsSaving = false;
     closeProjectSettings();
     detailCache.clear();
+    await refreshProjects(projectSettingsProject);
     await renderRoute();
     updateHeader();
     toast(promptsChanged ? "Settings saved. Instruction updates queued for running agents." : "Settings saved");

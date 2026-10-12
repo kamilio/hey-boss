@@ -2087,13 +2087,17 @@ impl Store {
                     p.activity_at,p.hidden_at,p.created_at,
                     coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.state='ready' AND i.deleted_at IS NULL),0),
-                    EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.prs_enabled=1)
+                    EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.prs_enabled=1),
+                    coalesce((SELECT s.artifacts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
+                    coalesce((SELECT s.mindmaps_enabled FROM project_settings s WHERE s.project_id=p.id),1),
+                    coalesce((SELECT s.drafts_enabled FROM project_settings s WHERE s.project_id=p.id),1)
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE EXISTS(SELECT 1 FROM project_name_keys k WHERE k.project_id=p.id) AND (?1 OR p.hidden_at IS NULL) GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
-                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?
+                    "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?,
+                    "artifacts_enabled":row.get::<_,bool>(12)?,"mindmaps_enabled":row.get::<_,bool>(13)?,"drafts_enabled":row.get::<_,bool>(14)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 // Discovery and read-only commands do not enroll a project in
                 // Builder. Explicit settings or saved work do, without deleting

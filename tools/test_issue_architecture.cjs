@@ -46,3 +46,5 @@ assert.match(readiness({state: 'open', assignee: 'codex:assigned'}), /Assigned/)
 assert.match(readiness({state: 'closed'}), /Completed/);
 assert.equal(readiness({deleted_at: 1}), '');
 console.log('Issue architecture groups preserve controls and history without default metadata clutter');
+
+assert.doesNotMatch(context.renderReadiness({issue:{state:"open"},drafts_enabled:false}), /data-draft-action="draft"/);

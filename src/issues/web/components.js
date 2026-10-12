@@ -247,6 +247,16 @@ function date(at) {
       if (project) {
         projectNavigation(project.id);
       }
+      // Some pages pass only an identity; settings live on the project list.
+      const settings = {...projects.find(p => p.id === project?.id), ...project};
+      for (const [id, enabled] of [
+        ["nav-artifacts", project && settings.artifacts_enabled !== false],
+        ["nav-mindmaps", project && settings.mindmaps_enabled !== false],
+        ["nav-merged-prs", project && settings.prs_enabled === true],
+      ]) {
+        const link = $("#" + id);
+        if (link) link.hidden = !enabled;
+      }
       if (!$("#project-menu").hidden) this.render();
     }
     render() {
