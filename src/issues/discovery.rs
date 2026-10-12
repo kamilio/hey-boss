@@ -14,7 +14,10 @@ pub(super) fn projects(snapshot: &Snapshot, machine: &str) -> Vec<(Project, i64)
             continue;
         }
         let project = if let Some(git) = &agent.git {
-            identity::project_from_git(git, machine)
+            let Ok(project) = identity::project_from_git(git, machine) else {
+                continue;
+            };
+            project
         } else if let Some(cwd) = &agent.cwd {
             let Ok(project) = identity::project(Path::new(cwd), machine) else {
                 continue;

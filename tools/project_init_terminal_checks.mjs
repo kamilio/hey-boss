@@ -1,6 +1,6 @@
 // Exercise the actual onboarding wizard in a PTY with an isolated store.
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, rm, realpath, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, rm, realpath, stat, readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
@@ -96,6 +96,7 @@ assert.equal(rows.stdout.trim(), '0');
 const parent = join(root, 'parent');
 const nested = join(parent, 'nested', 'deep');
 await mkdir(nested, {recursive: true});
+assert.equal(spawnSync('git', ['init', '-q'], {cwd: parent, env}).status, 0);
 const rejected = await pilot.newSession({command: binary, args: ['issue', 'list'], cwd: nested, env, cols: 80, rows: 24});
 await rejected.waitFor('hey-boss project init');
 assert.notEqual(await rejected.waitForExit({timeout: 10000}), 0);
@@ -123,6 +124,34 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
   assert.notEqual(await session.waitForExit({timeout: 10000}), 0);
   assert.equal(read('Terminal 80', 'settings', 'show').prompt, 'Concurrent custom prompt.');
   checks.push('Concurrent edits are preserved and reported');
+  for (const cols of [48, 80, 120]) {
+    const checkout = join(root, `naming-${cols}`);
+    await mkdir(checkout);
+    assert.equal(spawnSync('git', ['init', '-q'], {cwd: checkout, env}).status, 0);
+    assert.equal(spawnSync('git', ['remote', 'add', 'origin', 'https://github.com/example/poe2.git'], {cwd: checkout, env}).status, 0);
+    const named = await pilot.newSession({command: binary, args: ['project', 'init'], cwd: checkout, env, cols, rows: 28});
+    await named.waitFor('Project name [poe2]:');
+    await capture(named, `name-${cols}`);
+    const name = `Poe2 Legacy ${cols}`;
+    await named.send(`${name}\r`);
+    await named.waitFor('Use pull requests?'); await named.send('n\r');
+    await named.waitFor('Use worktrees?'); await named.send('y\r');
+    await named.waitFor('Save project?');
+    await capture(named, `named-review-${cols}`);
+    await named.send('y\r');
+    assert.equal(await named.waitForExit({timeout: 10000}), 0);
+    const marker = await readFile(join(checkout, '.hey-boss'), 'utf8');
+    assert.deepEqual(JSON.parse(marker), {id: `named:${name}`, name});
+    const found = spawnSync(binary, ['issue', 'settings', 'show', '--json'], {cwd: checkout, env, encoding: 'utf8'});
+    assert.equal(found.status, 0, found.stderr);
+    assert.equal(JSON.parse(found.stdout).project.name, name);
+    assert.equal(JSON.parse(found.stdout).prs_enabled, false);
+    const cancelled = await pilot.newSession({command: binary, args: ['project', 'init', '--project', `Cancelled ${cols}`], cwd: checkout, env, cols, rows: 28});
+    await cancelled.waitFor('Use pull requests?'); await cancelled.send('q\r');
+    assert.equal(await cancelled.waitForExit({timeout: 10000}), 0);
+    assert.equal(await readFile(join(checkout, '.hey-boss'), 'utf8'), marker);
+    checks.push(`Custom name retains case, binds checkout, disables PRs and survives cancellation at ${cols} columns`);
+  }
   console.log(JSON.stringify({passed: checks.length, checks}));
 } finally {
   if (pilot) await pilot.close();

@@ -17,7 +17,7 @@ pub struct Options {
 enum Action {
     /// Choose a project's workflow and review its default prompts.
     #[command(
-        after_help = "Run inside a checkout to detect its project, or select one with --project.\nExisting custom prompts are preserved. Ctrl-C or q cancels before saving.\nFor scripts: --yes --prs <true|false> --worktree <true|false>."
+        after_help = "Run inside a checkout to detect its project, or name a separate project with --project.\nCustom identities are saved in the checkout root's .hey-boss file. Ordinary projects need no file.\nExisting custom prompts are preserved. Ctrl-C or q cancels before saving.\nFor scripts: --yes --prs <true|false> --worktree <true|false>."
     )]
     Init {
         /// Project name or full ID; defaults to this checkout.
@@ -55,6 +55,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let machine = issues::identity::machine()?;
+    let binding = issues::identity::CheckoutBinding::prepare(&cwd, &machine)?;
     let mut request = Request {
         version: 1,
         project: issues::identity::project(&cwd, &machine)?,
@@ -71,6 +72,19 @@ pub fn run(options: &Options) -> Result<()> {
         operation: Operation::ProjectInit { settings: None },
         request_id: None,
     };
+    if interactive && request.project_override.is_none() {
+        println!();
+        line("Project setup · Name");
+        line("Enter keeps the detected project. A different name creates a separate project.");
+        line("Type q to cancel.");
+        let Some(name) = project_name(&request.project.name)? else {
+            return cancelled();
+        };
+        if name != request.project.name {
+            request.project_override = Some(name);
+        }
+    }
+    let bind_checkout = request.project_override.is_some();
     let host = host.clone().or_else(|| {
         std::env::var("HEY_BOSS_ISSUE_HOST")
             .ok()
@@ -87,6 +101,11 @@ pub fn run(options: &Options) -> Result<()> {
         println!();
         line(&format!("Project setup · {}", request.project.name));
         line(&request.project.id);
+        line(if binding.is_custom(&request.project) {
+            "Checkout identity: local .hey-boss file."
+        } else {
+            "Checkout identity: repository default; no local file needed."
+        });
         if let Some(host) = &host {
             line(&format!("Store: {host}"));
         }
@@ -134,6 +153,9 @@ pub fn run(options: &Options) -> Result<()> {
         "if_version":current["version"] },
     }))?;
     let result = crate::cli_request::execute(&request, host.as_deref(), false)?;
+    if bind_checkout {
+        binding.save(&request.project)?;
+    }
     if options.json {
         println!("{}", serde_json::to_string(&result)?);
     } else {
@@ -152,6 +174,27 @@ pub fn run(options: &Options) -> Result<()> {
 
 fn enabled(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+fn project_name(default: &str) -> Result<Option<String>> {
+    loop {
+        print!("Project name [{default}]: ");
+        io::stdout().flush()?;
+        let mut value = String::new();
+        if io::stdin().read_line(&mut value)? == 0 {
+            return Ok(None);
+        }
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("q") || value.eq_ignore_ascii_case("quit") {
+            return Ok(None);
+        }
+        if value.is_empty() {
+            return Ok(Some(default.into()));
+        }
+        match issues::identifier(value, "Project name", 512) {
+            Ok(()) => return Ok(Some(value.into())),
+            Err(error) => line(&error.message),
+        }
+    }
 }
 fn cancelled() -> Result<()> {
     println!("\nCancelled. Project settings were not changed.");

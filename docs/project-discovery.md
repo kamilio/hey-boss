@@ -7,6 +7,20 @@ preserves custom prompts and checks for concurrent settings changes.
 For scripts, pass `--yes --prs true --worktree true` (use `false` for either
 choice); `--project` selects a name or full ID and `--json` returns settings.
 
+To separate two checkouts of the same repository, initialize the second with
+`hey-boss project init --project poe2-legacy` and choose its own workflow, such as
+no pull requests. A custom identity is saved in a local `.hey-boss` JSON file at
+the checkout root. Ordinary repository-based projects need no file. The wizard
+also accepts a project name when no `--project` is supplied. Initialization does
+not switch Git branches or start workers.
+
+Commands in that checkout and its subdirectories use the saved identity; an
+explicit `--project` still takes precedence. Linked worktrees inherit the main
+checkout's identity unless they have their own `.hey-boss`. Invalid files fail
+instead of silently selecting another project. Keep this machine-local file out
+of Git. Reinitializing with the ordinary project removes an unnecessary override;
+cancelled setup leaves the file untouched.
+
 Only `hey-boss project init` registers new projects. Cancelling initialization,
 reading project data, sending notifications, and observing running agents never
 create registry entries. Existing registry rows remain usable.

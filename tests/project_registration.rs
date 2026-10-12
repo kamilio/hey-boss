@@ -281,6 +281,196 @@ fn git_subdirectories_and_worktrees_share_an_initialized_project() {
 }
 
 #[test]
+fn named_checkout_binding_separates_projects_sharing_a_repository() {
+    let f = Fixture::new();
+    let main = f.root.join("poe2");
+    let legacy = f.root.join("poe2-legacy");
+    for repo in [&main, &legacy] {
+        fs::create_dir(repo).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/poe2.git",
+            ],
+        ] {
+            assert!(
+                f.command("git", repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+    let original = f.init(&main)["project"].clone();
+    assert!(
+        !main.join(".hey-boss").exists(),
+        "Ordinary projects need no marker"
+    );
+    let nested = legacy.join("src/deep");
+    fs::create_dir_all(&nested).unwrap();
+    let separate = f.json(
+        &nested,
+        &[
+            "project",
+            "init",
+            "--project",
+            "poe2-legacy",
+            "--yes",
+            "--prs",
+            "false",
+            "--worktree",
+            "true",
+            "--json",
+        ],
+    )["project"]
+        .clone();
+    assert_ne!(original, separate);
+    assert_eq!(separate["name"], "poe2-legacy");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(legacy.join(".hey-boss")).unwrap()).unwrap(),
+        separate
+    );
+    assert!(!nested.join(".hey-boss").exists());
+    for path in [&legacy, &nested] {
+        assert_eq!(
+            f.json(path, &["issue", "list", "--json"])["project"],
+            separate
+        );
+        assert_eq!(
+            f.json(path, &["issue", "--project", "poe2", "list", "--json"])["project"],
+            original
+        );
+    }
+    assert_eq!(
+        f.json(&main, &["issue", "list", "--json"])["project"],
+        original
+    );
+    assert_eq!(f.init(&nested)["project"], separate);
+    assert_eq!(f.count(), 2);
+    assert_eq!(
+        f.json(&legacy, &["issue", "settings", "show", "--json"])["prs_enabled"],
+        false
+    );
+    for (project, matches) in [(&separate, true), (&original, false)] {
+        let id = project["id"].as_str().unwrap().to_owned();
+        let settings = hey_boss::issues::worker::Settings {
+            projects: vec![id.clone()],
+            directories: [(id, legacy.to_string_lossy().into_owned())].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            hey_boss::issues::worker::validate_settings(&settings).is_ok(),
+            matches
+        );
+    }
+    // Selecting the ordinary project again clears the now-unnecessary file.
+    assert_eq!(
+        f.json(
+            &nested,
+            &[
+                "project",
+                "init",
+                "--project",
+                "poe2",
+                "--yes",
+                "--prs",
+                "true",
+                "--worktree",
+                "true",
+                "--json",
+            ]
+        )["project"],
+        original
+    );
+    assert!(!legacy.join(".hey-boss").exists());
+    assert_eq!(
+        f.json(&nested, &["issue", "list", "--json"])["project"],
+        original
+    );
+}
+
+#[test]
+fn worktree_marker_overrides_the_shared_checkout_binding() {
+    let f = Fixture::new();
+    let repo = f.root.join("repo");
+    let linked = f.root.join("linked");
+    fs::create_dir(&repo).unwrap();
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=QA",
+            "-c",
+            "user.email=qa@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        vec!["worktree", "add", "-qb", "legacy", linked.to_str().unwrap()],
+    ] {
+        assert!(
+            f.command("git", &repo)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+    let main = f.json(
+        &repo,
+        &[
+            "project",
+            "init",
+            "--project",
+            "Modern",
+            "--yes",
+            "--prs",
+            "true",
+            "--worktree",
+            "true",
+            "--json",
+        ],
+    )["project"]
+        .clone();
+    assert_eq!(
+        f.json(&linked, &["issue", "list", "--json"])["project"],
+        main
+    );
+    let legacy = f.json(
+        &linked,
+        &[
+            "project",
+            "init",
+            "--project",
+            "legacy",
+            "--yes",
+            "--prs",
+            "true",
+            "--worktree",
+            "true",
+            "--json",
+        ],
+    )["project"]
+        .clone();
+    assert_eq!(
+        f.json(&linked, &["issue", "list", "--json"])["project"],
+        legacy
+    );
+    assert_eq!(f.json(&repo, &["issue", "list", "--json"])["project"], main);
+    // Broken bindings must never silently redirect a command to the other project.
+    fs::write(linked.join(".hey-boss"), "broken").unwrap();
+    let rejected = f.run(&linked, &["issue", "list"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains(".hey-boss"));
+}
+
+#[test]
 fn explicit_selection_overrides_directory_and_unknown_selectors_do_not_register() {
     let f = Fixture::new();
     let parent = f.root.join("registered");

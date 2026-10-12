@@ -175,12 +175,7 @@ fn directory(db: &Connection, p: &Project) -> Result<String> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for path in paths.into_iter().flatten() {
         if Path::new(&path).is_dir()
-            && (p.id.starts_with("named:")
-                || crate::issues::identity::project(
-                    Path::new(&path),
-                    &crate::issues::identity::machine()?,
-                )
-                .is_ok_and(|actual| actual.id == p.id))
+            && worker::checkout_matches_project(Path::new(&path), &p.id).unwrap_or(false)
         {
             return Ok(path);
         }
