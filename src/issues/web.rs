@@ -770,7 +770,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     )
                     .replace(
                         "<!--workers-current-->",
-                        if matches!(path.as_str(), "/workers" | "/agents" | "/agents/session") {
+                        if matches!(path.as_str(), "/workers" | "/agents") {
                             " aria-current=\"page\""
                         } else {
                             ""

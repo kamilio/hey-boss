@@ -182,7 +182,7 @@ if (typeof document !== 'undefined') (() => {
   const mobile = document.documentElement.dataset.agentMobile === 'true';
   const detail = location.pathname.endsWith('/session');
   const base = '/agents';
-  const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(!detail&&(location.pathname==='/workers'||query.get('view')!=='conversations'))query.set('workers','');return query;};
+  const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(!detail)query.set('workers','');return query;};
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
   let configRevision, configOriginal='', configPreview, configBusy=false;
   let workerFilter='current', workerSearch=route().get('find')||'', workerEdit, workerEditRevision, workerEditPreview, workerEditBusy=false;
@@ -201,10 +201,12 @@ if (typeof document !== 'undefined') (() => {
   }
   function saveTakeover(entry,value) {const key=takeoverKey(entry);takeovers.set(key,value);try{sessionStorage.setItem('takeover:'+key,JSON.stringify(value));}catch{}}
   HeyBossUI.icons();
+  if(detail)$('nav-workers')?.removeAttribute('aria-current');
+  else $('nav-workers')?.setAttribute('aria-current','page');
   const picker = new HeyBossUI.ProjectPicker({onSelect(project){
-    const query=detail?new URLSearchParams({view:'conversations'}):route();
+    const query=detail?new URLSearchParams():route();
     query.set('project',project);query.delete('scope');
-    location.href=(detail?base:location.pathname)+'#'+query;
+    location.href=(detail?(mobile?'/project-resource':'/'):'/workers')+'#'+query;
   }});
   function context() {
     if(!defaultProject){if(last)render(last);return;}
@@ -212,70 +214,20 @@ if (typeof document !== 'undefined') (() => {
     const matched=projects.find(p=>p.id===rawId||p.name===rawId)||defaultProject||{id:rawId,name:rawId};
     const id=matched.id;
     const query=new URLSearchParams(location.hash.slice(1));
-    if(!query.get('project')||query.get('project')!==id){query.set('project',id);history.replaceState(null,'','#'+query);}
+    if(detail&&(!query.get('project')||query.get('project')!==id)){query.set('project',id);history.replaceState(null,'','#'+query);}
     picker.update(projects, matched);
     if(last)render(last);
   }
-  const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id});
+  const link = (entry) => base+'/session#'+new URLSearchParams({project:entry.run.project_id,host:entry.machine.host,run:entry.run.id,...(entry.run.number?{issue:entry.run.number}:{})});
   const runLabel = run => HeyBossUI.actorLabel(run.actor_id || (run.session_id ? 'codex:'+run.session_id : 'agent:unknown'), run.model);
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
-  function card(entry, history=false) {
-    const {run,machine}=entry;
-    const a=element('a',(history?'agent-card history-card':'agent-card')+(run.state==='infrastructure_blocked'?' is-held':''));a.href=link(entry);a.dataset.focus=machine.host+':'+run.id;
-    const top=element('div','agent-card-top');top.append(stateBadge(entry),element('span','location-label',machine.hostname||machine.host));
-    const title=element('h3','',run.title||'Preparing your task');
-    const activity=run.last_event||'';
-    const preview=element('p','agent-preview',run.state==='infrastructure_blocked'?infrastructureGuidance(run):run.summary||(/^(Goal:|Codex session|\/goal)/.test(activity)?'Making progress on this task.':/^(\/bin\/|.* -lc )/.test(activity)?'Checking changes and running commands.':activity)||(entry.online?'Getting started…':'Reconnect to see the latest activity.'));
-    const bottom=element('div','agent-card-bottom');bottom.append(element('span','',`Issue #${run.number}`),element('span','open-conversation',history?'Read conversation →':'Open conversation →'));
-    a.append(top,element('p','agent-model',runLabel(run)),title,preview,bottom);return a;
-  }
   function renderOverview(data) {
-    const workersPage=route().has('workers');
-    document.querySelector('.fleet-tabs').hidden=false;
-    document.body.classList.toggle('workers-page',workersPage);
-    const project=route().get('project'), hash=new URLSearchParams({project});
-    $('workers-tab').href=base+'#'+hash;
-    $('conversations-tab').href=base+'#'+new URLSearchParams({project,view:'conversations'});
-    $('worker-status-view').href=base+'#'+hash;
-    $('worker-config-view').href=base+'#'+new URLSearchParams({project,view:'configuration'});
-    $('conversations-tab').setAttribute('aria-current',workersPage?'false':'page');
-    $('worker-config').hidden=!workersPage;
-    $('projects').hidden=workersPage;
-    $('workers-tab').setAttribute('aria-current',workersPage?'page':'false');
-    document.querySelector('.page-heading h1').textContent=workersPage?'Workers':'Agents';
-    document.title=(workersPage?'Workers':'Agents')+' · Hey Boss';
-    if(workersPage){
-      $('overview-note').textContent='Running agents and the work happening right now.';
-      $('show-all').hidden=true;
-      if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
-      else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
-      renderWorkerBoard(data);$('device-settings').hidden=true;return;
-    }
-    $('show-all').textContent='All projects';
-    $('show-all').href=base+'#'+new URLSearchParams({project,view:'conversations',scope:'all'});
-    const focus=document.activeElement?.dataset.focus;
-    const open=new Set([...$('projects').querySelectorAll('details[open]')].map(d=>d.dataset.section));
-    const filter=route().get('scope')==='all'?null:route().get('project');
-    const groups=projectView(data).filter(p=>!filter||p.id===filter||p.name===filter);
-    $('show-all').hidden=!filter;
-    $('overview-note').textContent=groups.some(p=>p.active.length)?'A little closer to done. See what’s moving.':'Your projects, and the work behind them.';
-    const sections=groups.map(group=>{
-      const section=element('section','project-section');
-      const holds=scheduledRetries(group);
-      const heading=element('div','project-heading');const title=element('div');
-      title.append(element('h2','',group.name),element('p','',group.active.length?group.active.some(e=>e.online)?'In progress':'Waiting for a connection':holds.length?'Scheduled retries':'Recent work'));
-      const issues=element('a','project-issues','View issues →');issues.href=(mobile?'/#issues&':'/#')+new URLSearchParams({project:group.id});
-      heading.append(title,issues);section.append(heading);
-      if(holds.length){section.append(element('h3','agents-section-label','Scheduled retries'));const held=element('div','agent-grid');for(const entry of holds)held.append(card(entry,true));section.append(held);}
-      if(group.active.length)section.append(element('h3','agents-section-label','Active agents'));
-      if(group.active.length){const grid=element('div','agent-grid');for(const entry of group.active)grid.append(card(entry));section.append(grid);}
-      if(group.history.length){const history=element('details','project-history');history.dataset.section=group.id;history.append(element('summary','','Completed & earlier conversations'));const past=element('div','agent-grid');for(const entry of group.history)past.append(card(entry,true));history.append(past);history.open=open.has(group.id)||(!group.active.length&&!holds.length);section.append(history);}
-      return section;
-    });
-    if(!sections.length){const empty=element('section','agents-empty');empty.append(element('div','empty-orbit','✧'),element('h2','','Room for your next idea'),element('p','','When an agent picks up a task, its conversation will appear here.'));sections.push(empty);}
-    $('projects').replaceChildren(...sections);
-    if(focus)[...$('projects').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
-    renderDevices(data);
+    $('worker-status-view').href='/workers';
+    $('worker-config-view').href='/workers#view=configuration';
+    $('worker-config').hidden=false;
+    if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
+    else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
+    renderWorkerBoard(data);$('device-settings').hidden=true;
   }
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
   const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
@@ -443,7 +395,7 @@ if (typeof document !== 'undefined') (() => {
     const configuring=route().get('view')==='configuration';
     document.querySelector('.page-heading h1').textContent=configuring?'Workers & settings':'Worker activity';
     document.title=(configuring?'Worker settings':'Worker activity')+' · Hey Boss';
-    $('overview-note').textContent=configuring?'Manage saved workers across your machines.':'Running agents and agent limits by project.';
+    $('overview-note').textContent=configuring?'Manage saved workers across your machines.':'Running agents and agent limits across all projects.';
     $('worker-view-help').hidden=true;
     document.body.classList.add('workers-page');
     $('worker-status-view').setAttribute('aria-current',configuring?'false':'page');
@@ -582,7 +534,19 @@ if (typeof document !== 'undefined') (() => {
     if(focus)[...$('device-list').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
     $('device-settings').hidden=!workersPage&&(mobile||!controls.length);
   }
+  function taskNavigation(run={}) {
+    const project=run.project_id||route().get('project');
+    const number=Number(run.number||route().get('issue'));
+    const issue=Number.isSafeInteger(number)&&number>0?number:null;
+    const hash=new URLSearchParams(project?{project}:{});
+    if(issue>0)hash.set('issue',issue);
+    const back=$('back');
+    back.href=(mobile?'/project-resource':'/')+'#'+hash;
+    const arrow=element('span','','←');arrow.setAttribute('aria-hidden','true');
+    back.replaceChildren(arrow,document.createTextNode(issue?'Issue #'+issue:'Issues'));
+  }
   function renderDetail(data) {
+    taskNavigation();
     const assignment = route().get('agent');
     if (assignment) {
       const entry = assignedAgentEntry(data, route());
@@ -600,10 +564,10 @@ if (typeof document !== 'undefined') (() => {
     if(!selected&&resource?.entity==='agent'&&resource.project){
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
-    $('back').href=base+'#'+new URLSearchParams({project:route().get('project'),view:'conversations'});
-    if(!selected){const issueNum=Number(route().get('issue')),proj=route().get('project');if(issueNum>0&&proj){$('session-issue').hidden=false;$('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:proj,issue:issueNum});$('session-issue').textContent='Issue #'+issueNum+' ↗';}$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to Agents to browse available conversations.':'This agent is no longer in recent activity.';$('conversation-empty').textContent='The saved session could not be loaded.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
+    if(!selected){const issueNum=Number(route().get('issue')),proj=route().get('project');if(issueNum>0&&proj){$('session-issue').hidden=false;$('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:proj,issue:issueNum});$('session-issue').textContent='Issue #'+issueNum+' ↗';}$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to the issue to see its activity.':'This agent is no longer in recent activity.';$('conversation-empty').textContent='The saved session could not be loaded.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     selected=jobConversation(selected,data);
     const {run,machine}=selected;
+    taskNavigation(run);
     document.title=(run.title||'Conversation')+' · Hey Boss';
     $('session-title').textContent=run.title||'Preparing your task';
     $('session-context').textContent=runLabel(run)+' · '+(run.project_name||'Project')+' · '+(machine.hostname||machine.host);

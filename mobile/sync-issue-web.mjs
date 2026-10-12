@@ -10,7 +10,6 @@ let shell=readFileSync(new URL('app-shell.html',source),'utf8')
  .replace('<!--project-action-->',readFileSync(new URL('issue-project-action.html',source),'utf8'))
  .replace('<a id="nav-skills"','<a hidden id="nav-skills"')
  .replace('<a id="nav-admin"','<a hidden id="nav-admin"')
- .replace('<a id="nav-workers"','<a hidden id="nav-workers"')
  .replace(/<!--[^]*?-->/g,'');
 for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)||['index.html','mindmap.html','artifacts.html','merged-prs.html','jobs.html'].includes(name))){
  let value=readFileSync(new URL(name,source));

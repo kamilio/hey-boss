@@ -1,7 +1,6 @@
 /* The regular issue layout already adapts to narrow screens. Keep primary
    phone destinations quiet and leave project documents one tap away. */
 .app-navigation .navigation-inner{justify-content:center}
-#nav-workers{display:none}
 .app-navigation a{min-height:44px}
 .project-resources{display:flex;justify-content:flex-end;gap:18px;max-width:1100px;margin:0 auto;padding:12px 20px;font-size:12px;color:var(--muted)}
 .project-resources a{display:inline-flex;align-items:center;gap:6px;min-height:44px}
