@@ -65,6 +65,13 @@ pub fn validate_template(template: &str) -> Result<()> {
     }
     Ok(())
 }
+fn drafts_disabled(project: &Project) -> Error {
+    Error::invalid(format!(
+        "Project {:?} is not using drafts. Use regular tasks.",
+        project.name
+    ))
+}
+
 pub fn drafts_allowed(db: &Connection, project: &Project) -> Result<()> {
     let enabled: bool = db.query_row(
         "SELECT coalesce((SELECT drafts_enabled FROM project_settings WHERE project_id=?1),1)",
@@ -72,7 +79,7 @@ pub fn drafts_allowed(db: &Connection, project: &Project) -> Result<()> {
         |r| r.get(0),
     )?;
     if !enabled {
-        return Err(Error::invalid("Drafts are disabled in this project"));
+        return Err(drafts_disabled(project));
     }
     Ok(())
 }
@@ -420,7 +427,7 @@ pub fn interactive(
     sync.request.operation = Operation::View { number };
     let settings = call(&sync, Operation::ProjectSettings)?;
     if settings["drafts_enabled"] != true {
-        return Err(Error::invalid("Drafts are disabled in this project"));
+        return Err(drafts_disabled(&sync.request.project));
     }
     if value["issue"]["draft"] != true
         && value["issue"]["plan"].is_null()

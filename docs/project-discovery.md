@@ -6,6 +6,10 @@ Enter keeps existing choices; `q` or Ctrl-C cancels before saving. Rerunning
 preserves custom prompts and checks for concurrent settings changes.
 For scripts, pass `--yes --prs true --worktree true` (use `false` for either
 choice); `--project` selects a name or full ID and `--json` returns settings.
+The wizard also offers drafts; use `--drafts false` to disable new drafts for
+that project. Existing drafts remain saved. Omitting `--drafts` in scripts keeps
+the saved choice (enabled for new projects). For an initialized project,
+`hey-boss issue settings set --no-drafts` changes only this setting.
 
 To separate two checkouts of the same repository, initialize the second with
 `hey-boss project init --project poe2-legacy` and choose its own workflow, such as

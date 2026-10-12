@@ -32,6 +32,9 @@ enum Action {
         /// Allow dedicated Git worktrees for tasks.
         #[arg(long, action = clap::ArgAction::Set)]
         worktree: Option<bool>,
+        /// Allow draft issues; defaults to the saved choice, or true for a new project.
+        #[arg(long, action = clap::ArgAction::Set)]
+        drafts: Option<bool>,
         /// Save explicit choices without interactive review.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -44,6 +47,7 @@ pub fn run(options: &Options) -> Result<()> {
         host,
         prs,
         worktree,
+        drafts,
         yes,
     } = &options.action;
     let interactive =
@@ -97,6 +101,7 @@ pub fn run(options: &Options) -> Result<()> {
     let existing = current["version"].as_i64().unwrap_or(0) > 0;
     let mut prs = prs.unwrap_or(current["prs_enabled"] == true);
     let mut worktree = worktree.unwrap_or(current["worktree_enabled"] == true);
+    let mut drafts = drafts.unwrap_or(current["drafts_enabled"] == true);
     if interactive {
         println!();
         line(&format!("Project setup · {}", request.project.name));
@@ -116,27 +121,37 @@ pub fn run(options: &Options) -> Result<()> {
         });
         line("Enter keeps the shown choice. Type q to cancel.");
         println!();
-        line("1 / 3 · Delivery");
+        line("1 / 4 · Delivery");
         line("Use pull requests for review, or commit and push to main.");
         let Some(selected) = choice("Use pull requests?", prs)? else {
             return cancelled();
         };
         prs = selected;
         println!();
-        line("2 / 3 · Workspace");
+        line("2 / 4 · Workspace");
         line("Allow a separate Git worktree per task, or use the existing checkout.");
         let Some(selected) = choice("Use worktrees?", worktree)? else {
             return cancelled();
         };
         worktree = selected;
         println!();
-        line("3 / 3 · Prompts and review");
+        line("3 / 4 · Drafts");
+        line(
+            "Keep work as drafts until it is ready for agents. Turning this off preserves existing drafts.",
+        );
+        let Some(selected) = choice("Allow draft issues?", drafts)? else {
+            return cancelled();
+        };
+        drafts = selected;
+        println!();
+        line("4 / 4 · Prompts and review");
         outline(&current, prs, worktree, false);
         println!();
         line(&format!(
-            "Pull requests: {} · Worktrees: {}",
+            "Pull requests: {} · Worktrees: {} · Drafts: {}",
             enabled(prs),
-            enabled(worktree)
+            enabled(worktree),
+            enabled(drafts)
         ));
         line("Workers are configured separately; saving does not start one.");
         loop {
@@ -150,7 +165,7 @@ pub fn run(options: &Options) -> Result<()> {
     }
     request.operation = serde_json::from_value(json!({
         "action":"project_init", "settings": { "prs_enabled":prs, "worktree_enabled":worktree,
-        "if_version":current["version"] },
+        "drafts_enabled":drafts, "if_version":current["version"] },
     }))?;
     let result = crate::cli_request::execute(&request, host.as_deref(), false)?;
     if bind_checkout {
@@ -162,9 +177,10 @@ pub fn run(options: &Options) -> Result<()> {
         println!();
         line(&format!("Project saved · {}", request.project.name));
         line(&format!(
-            "Pull requests: {} · Worktrees: {}",
+            "Pull requests: {} · Worktrees: {} · Drafts: {}",
             enabled(prs),
-            enabled(worktree)
+            enabled(worktree),
+            enabled(drafts)
         ));
         line("Review or edit prompts in Builder → Project settings.");
         line("Run hey-boss project init again to change these choices.");

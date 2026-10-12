@@ -110,6 +110,122 @@ fn unattended_init_requires_explicit_choices_and_confirmation() {
 }
 
 #[test]
+fn init_controls_drafts_per_project_and_preserves_them_on_rerun() {
+    let f = Fixture::new();
+    let init = [
+        "project",
+        "init",
+        "--project",
+        "Legacy",
+        "--yes",
+        "--prs",
+        "false",
+        "--worktree",
+        "false",
+        "--json",
+    ];
+    assert_eq!(f.json(&init)["drafts_enabled"], true);
+    let existing = f.json(&[
+        "issue",
+        "--project",
+        "Legacy",
+        "--agent",
+        "human:qa",
+        "--json",
+        "create",
+        "--title",
+        "Existing draft",
+        "--draft",
+    ]);
+    let mut disabled = init.to_vec();
+    disabled.extend(["--drafts", "false"]);
+    assert_eq!(f.json(&disabled)["drafts_enabled"], false);
+    assert_eq!(
+        f.json(&init)["drafts_enabled"],
+        false,
+        "Reruns preserve the saved choice"
+    );
+    let rejected = f.run(&[
+        "issue",
+        "--project",
+        "Legacy",
+        "--agent",
+        "human:qa",
+        "create",
+        "--title",
+        "New draft",
+        "--draft",
+    ]);
+    assert_eq!(rejected.status.code(), Some(2));
+    let message = "Project \"Legacy\" is not using drafts. Use regular tasks.";
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains(message));
+    let rejected_json = f.run(&[
+        "issue",
+        "--project",
+        "Legacy",
+        "--agent",
+        "human:qa",
+        "--json",
+        "create",
+        "--title",
+        "New draft",
+        "--draft",
+    ]);
+    assert_eq!(rejected_json.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&rejected_json.stdout).unwrap();
+    assert_eq!(error["error"]["message"], message);
+    let number = existing["issue"]["number"].to_string();
+    assert_eq!(
+        f.json(&["issue", "--project", "Legacy", "--json", "view", &number])["issue"]["draft"],
+        true
+    );
+    let regular = f.json(&[
+        "issue",
+        "--project",
+        "Legacy",
+        "--agent",
+        "human:qa",
+        "--json",
+        "create",
+        "--title",
+        "Ordinary issue",
+    ]);
+    assert_eq!(
+        regular["issue"]["number"],
+        existing["issue"]["number"].as_i64().unwrap() + 1
+    );
+    assert_eq!(regular["issue"]["draft"], false);
+    let other = [
+        "project",
+        "init",
+        "--project",
+        "Modern",
+        "--yes",
+        "--prs",
+        "true",
+        "--worktree",
+        "true",
+        "--json",
+    ];
+    assert_eq!(f.json(&other)["drafts_enabled"], true);
+    f.json(&[
+        "issue",
+        "--project",
+        "Modern",
+        "--agent",
+        "human:qa",
+        "--json",
+        "create",
+        "--title",
+        "Other project draft",
+        "--draft",
+    ]);
+    let mut enabled = init.to_vec();
+    enabled.extend(["--drafts", "true"]);
+    assert_eq!(f.json(&enabled)["drafts_enabled"], true);
+}
+
+#[test]
 fn builder_omits_empty_discoveries_but_keeps_saved_and_initialized_projects() {
     let f = Fixture::new();
     let mut store = Store::open(&f.db()).unwrap();
