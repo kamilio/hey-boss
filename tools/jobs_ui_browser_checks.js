@@ -1,21 +1,21 @@
 // Run through playwright-cli against serve_jobs_ui_fixture.mjs only.
-async page => {
+async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  const origin=await page.evaluate(()=>location.origin);
- if(!['http://127.0.0.1:59649','http://127.0.0.1:52049'].includes(origin))throw Error('Isolated fixture required');
+ if(!['http://127.0.0.1:59649','http://hey-boss.test:59649','http://127.0.0.1:52049'].includes(origin))throw Error('Isolated fixture required');
  const params=value=>Object.entries(value).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
- const paired=origin.endsWith('52049'),surface=paired?'paired':'desktop',project='named:Jobs UI QA',errors=[],checks=[];
+ const paired=origin.endsWith('52049'),ordinaryHTTP=origin.includes('hey-boss.test'),surface=paired?'paired':ordinaryHTTP?'desktop-http':'desktop',project='named:Jobs UI QA',errors=[],checks=[];
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
  page.on('dialog',dialog=>dialog.accept());
  const runtime=route=>{const provider=route.request().postDataJSON().provider||'codex';return route.fulfill({json:{ok:true,machine:'fixture-device',machines:[{state:'connected',heartbeat:Date.now()/1000,jobs:{available:true,checkouts:{[project]:'/fixture'},runtimes:{codex:{available:true},claude:{available:true},pi:{available:false}}},workers:[]}],catalog:{provider,error:provider==='pi'?'Pi runtime is unavailable':null,models:provider==='pi'?[]:[{selection:{id:provider+'-exact'},label:provider+' exact',advertised:true}]}}});};
  await page.route('**/api/jobs/runtime',runtime);
- await page.route('**/jobs.css',r=>r.fulfill({path:'src/issues/web/jobs.css',contentType:'text/css'}));
- await page.route('**/jobs.js',r=>r.fulfill({path:'src/issues/web/jobs.js',contentType:'text/javascript'}));
  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
  if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();check((await page.request.post(origin+'/api/pair',{data:{code}})).ok(),'Authenticated paired surface');}
  const markdown=await(await page.request.get('http://127.0.0.1:52049/fixture-instructions.md')).text();
  await page.goto(origin+'/jobs?qa='+Date.now()+'#'+params({project}));
  await page.waitForFunction(()=>!document.querySelector('#job-new').disabled);
+ check(await page.evaluate(()=>isSecureContext)===!ordinaryHTTP,'Browser context matches the tested origin');
+ if(ordinaryHTTP)check(await page.evaluate(()=>typeof crypto.randomUUID==='undefined'&&typeof crypto.getRandomValues==='function'),'Ordinary HTTP uses real browser crypto restrictions');
  check(await page.locator('#jobs-service').textContent()==='Ready to run','Absent worker pool keeps Jobs available');
  let writes=0;const watch=req=>{if(req.url().endsWith('/api/action')&&['create','edit','run_now','stop','delete','set_enabled'].includes(req.postDataJSON()?.operation?.operation?.command))writes++;};page.on('request',watch);
  await page.getByRole('button',{name:'New job',exact:true}).click();
@@ -44,6 +44,7 @@ async page => {
  await page.getByRole('button',{name:'Create job',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#job-run'));
  const id=await page.evaluate(()=>new URLSearchParams(location.hash.slice(1)).get('job'));
+ check(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id),'New job gets a UUID on this origin');
  check(await page.locator('#job-timezone').inputValue()==='America/Chicago','Timezone round trip');
  check(await page.locator('#job-markdown').inputValue()===markdown,'Markdown byte-for-byte round trip');
  const boot=await(await page.request.get(origin+'/api/bootstrap')).json();
@@ -59,9 +60,30 @@ async page => {
  check(!(await page.locator('#job-dialog').evaluate(el=>el.open)),'List toggle does not open editor');
  check((await api({command:'view',id})).job.enabled,'Keyboard switch enables the saved job');
  await page.locator('[data-filter="disabled"]').click();check(await page.locator('[data-job-toggle="'+id+'"]').count()===0,'Disabled filter excludes enabled jobs');
+ let lostDisable=false;const disableRequests=[];
+ const loseDisable=async route=>{const body=route.request().postDataJSON();if(body.operation?.operation?.command==='set_enabled'){disableRequests.push(body);if(!lostDisable){lostDisable=true;await route.fetch();return route.fulfill({json:{ok:false,error:{code:'offline',message:'Synthetic lost disable response'}}});}}return route.continue();};
+ await page.route('**/api/action',loseDisable);
  await page.locator('[data-filter="enabled"]').click();await page.locator('[data-job-toggle="'+id+'"]').click();
- await page.waitForFunction(id=>!document.querySelector('[data-job-toggle="'+id+'"]'),id);
+ await page.waitForFunction(()=>!document.querySelector('#jobs-retry').hidden);
+ const disabled=(await api({command:'view',id})).job;
+ check(!disabled.enabled,'Disable was saved before its response was lost');
+ await page.reload();await page.waitForFunction(()=>!document.querySelector('#jobs-retry').hidden&&document.querySelector('[data-job-toggle]'));
+ check(await page.locator('[data-job-toggle="'+id+'"]').isDisabled(),'Reload blocks new mutations until the pending disable is confirmed');
+ await page.screenshot({path:`${outputDir}/${surface}-disable-retry.png`,fullPage:true});
+ await page.getByRole('button',{name:'Retry request',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#jobs-retry').hidden);
+ check(JSON.stringify(disableRequests[0])===JSON.stringify(disableRequests[1]),'Disable retry after reload keeps its original request ID and payload');
+ check((await api({command:'view',id})).job.revision===disabled.revision,'Disable retry does not create another revision');
+ await page.unroute('**/api/action',loseDisable);
+ check(await page.locator('#jobs-error').isHidden(),'Successful disable retry clears the error');
  await page.locator('[data-filter="disabled"]').click();
+ for(const width of [1440,768,390])for(const theme of ['light','dark']){
+  await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme});
+  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${width} ${theme}: disabled list has no horizontal overflow`);
+  check(await page.locator('[data-job-toggle="'+id+'"]').getAttribute('aria-checked')==='false','Disabled switch stays accessible');
+  await page.screenshot({path:`${outputDir}/${surface}-list-${width}-${theme}.png`,fullPage:true});
+ }
+ await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
  await page.locator('#jobs-search').fill('nonexistent job');check(await page.locator('.job-row').count()===0,'Search filters jobs');
  await page.locator('#jobs-search').fill('repository');
  await page.locator('.job-card[href$="job='+id+'"]').click();
@@ -109,7 +131,7 @@ async page => {
   await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme});await page.waitForTimeout(220);
   await page.locator('#job-dialog').evaluate(el=>el.scrollTop=0);
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${width} ${theme}: no horizontal overflow`);
-  await page.screenshot({path:`/tmp/hb-jobs-ui-qa/${surface}-${width}-${theme}.png`,fullPage:true});
+  await page.screenshot({path:`${outputDir}/${surface}-${width}-${theme}.png`,fullPage:true});
  }
  await page.locator('#job-name').focus();await page.keyboard.press('Tab');check(await page.locator('#job-markdown').evaluate(el=>el===document.activeElement),'Keyboard reaches Markdown after name');
  await page.goto(origin+sessionHref);await page.waitForFunction(()=>document.body.textContent.includes('Synthetic saved job result.'));

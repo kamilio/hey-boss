@@ -33,7 +33,7 @@ const HeyBossJobs = (() => {
     return machines.some(m=>m.state==='connected'&&now/1000-(m.heartbeat||0)<15&&m.jobs?.available&&m.jobs.checkouts?.[project]&&(!harness||m.jobs.runtimes?.[harness]?.available));
   }
   class Mutation {
-    constructor(post, uuid=()=>crypto.randomUUID(), persist=()=>{}) {this.post=post;this.uuid=uuid;this.persist=persist;this.pending=null;}
+    constructor(post, uuid=()=>HeyBossUI.requestId(), persist=()=>{}) {this.post=post;this.uuid=uuid;this.persist=persist;this.pending=null;}
     async send(operation, project, host) {
       if(this.pending)throw Error('Retry the unconfirmed request before making another change.');
       this.pending={project,operation:{action:'job',operation},request_id:this.uuid(),...(host?{host}:{})};this.persist(this.pending);
@@ -166,7 +166,7 @@ const HeyBossJobs = (() => {
     async function save(event){
       event.preventDefault();if(busy||mutation.pending)return;
       const job=editor.job,definition={name:$('#job-name').value,cron:$('#job-cron').value,timezone:$('#job-timezone').value,harness:$('#job-harness').value,model:$('#job-model').value};
-      const operation={command:job?'edit':'create',id:job?.id||crypto.randomUUID(),definition,markdown:$('#job-markdown').value,...(job?{if_revision:job.revision}:{enabled:$('#job-enabled').checked})};
+      const operation={command:job?'edit':'create',id:job?.id||HeyBossUI.requestId(),definition,markdown:$('#job-markdown').value,...(job?{if_revision:job.revision}:{enabled:$('#job-enabled').checked})};
       await act(operation,$('#job-project').value);
     }
     async function act(operation,project=context.project,retry=false){

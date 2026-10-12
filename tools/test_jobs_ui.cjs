@@ -1,4 +1,7 @@
 const assert = require('node:assert/strict');
+const {readFileSync} = require('node:fs');
+const {webcrypto} = require('node:crypto');
+const vm = require('node:vm');
 const {summary, modelChoices, availability, Mutation, scheduleState, filterJobs, scheduleFields, scheduleCron} = require('../src/issues/web/jobs.js');
 assert.deepEqual(scheduleFields('30 17 * * 1-5'),{frequency:'weekdays',time:'17:30'});
 assert.deepEqual(scheduleFields('0 * * * *'),{frequency:'hourly',time:'09:00'});
@@ -29,6 +32,22 @@ assert.equal(availability([{...machine,workers:[]}],'p','codex',100000),true);
 assert.equal(availability([machine],'p','claude',100000),false);
 assert.equal(availability([machine],'p','codex',200000),false);
 (async()=>{
+ for(const crypto of [webcrypto,{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)}]){
+  const context=vm.createContext({crypto});
+  vm.runInContext(readFileSync('src/issues/web/components.js','utf8')+'\n'+readFileSync('src/issues/web/jobs.js','utf8')+'\nthis.Mutation=HeyBossJobs.Mutation;',context);
+  const sent=[],saved=[];
+  let loseResponse=true;
+  const mutation=new context.Mutation(async body=>{sent.push(body);if(loseResponse){loseResponse=false;throw Error('Lost response');}return {ok:true};},undefined,value=>saved.push(value&&JSON.stringify(value)));
+  await assert.rejects(mutation.send({command:'set_enabled',id:'daily',if_revision:1,enabled:false},'p','local'),/Lost response/);
+  assert.match(mutation.pending.request_id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const restored=new context.Mutation(mutation.post);
+  restored.pending=JSON.parse(saved[0]);
+  await restored.retry();
+  assert.equal(JSON.stringify(sent[0]),JSON.stringify(sent[1]),'Restored disable retries the original payload and ID on HTTP and secure origins');
+  await restored.send({command:'set_enabled',id:'daily',if_revision:2,enabled:true},'p','local');
+  assert.notEqual(sent[2].request_id,sent[0].request_id,'A new action gets a fresh request ID');
+  assert.equal(restored.pending,null);
+ }
  let calls=[],fail=true;
  const mutation=new Mutation(async body=>{calls.push(body);if(fail){fail=false;throw Error('Lost response');}return {ok:true};},()=> 'request-one');
  await assert.rejects(mutation.send({command:'run_now',id:'daily'},'p'));
