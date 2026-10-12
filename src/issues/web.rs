@@ -1020,13 +1020,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             return json_response(crate::notices::execute(&action)?);
         }
         let action: Action = serde_json::from_slice(&bytes)?;
-        if matches!(
-            action.operation,
-            Operation::ReadPlan { .. } | Operation::BindPlan { .. } | Operation::Status { .. }
-        ) {
+        if matches!(action.operation, Operation::Status { .. }) {
             return Err(Error::new(
                 "forbidden",
-                "Plan files and issue status updates use the terminal workflow",
+                "Issue status updates use the terminal workflow",
             ));
         }
         if let Operation::Mindmap { operation } = &action.operation {

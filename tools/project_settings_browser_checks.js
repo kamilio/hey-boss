@@ -25,7 +25,7 @@ async (page) => {
   await page.locator('#project-drafts').uncheck();
   await page.locator('#project-artifacts').uncheck();
   await page.locator('#project-mindmaps').uncheck();
-  await page.locator('#project-plan-template').fill('plans/edited-{number}.md');
+  check(await page.locator('#project-plan-template').count() === 0, 'Terminal planning configuration is removed');
   await tab('Instructions').click();
   check(await page.locator('#project-prompt-layout').count() === 0, 'Prompt sequence editor is removed');
   await page.getByText('Task context sections', {exact:true}).click();
@@ -55,7 +55,7 @@ async (page) => {
   check(await tab('Configuration').evaluate(el => el === document.activeElement), 'Home focuses first tab');
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
-  check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && saved[0].plan_template === 'plans/edited-{number}.md'), 'Save includes all tab edits');
+  check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && !('plan_template' in saved[0])), 'Save includes all tab edits');
   check(await page.evaluate(() => !saved[0].drafts_enabled && !saved[0].artifacts_enabled && !saved[0].mindmaps_enabled), 'Save includes all resource switches');
   check(await page.evaluate(() => !('chief_enabled' in saved[0]) && !('chief_prompt' in saved[0])), 'Saving settings never restores retired configuration');
   check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');

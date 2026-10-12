@@ -481,7 +481,9 @@ struct Issue {
     labels: Vec<String>,
     sort_order: i64,
     draft: bool,
-    plan: Option<super::planning::Plan>,
+    // Retain legacy metadata for rolling fleet upgrades; it has no runtime behavior.
+    #[serde(skip_serializing)]
+    plan: Option<Value>,
     #[serde(default)]
     agent_launch_count: i64,
     #[serde(default)]
@@ -1794,9 +1796,6 @@ impl Store {
                 "guidance":if recorded {"Saved mutation result. Retry only the identical operation with the original project, actor and request ID."} else {"No receipt in this store snapshot. This does not prove the mutation was not saved: check the original host, project and actor, then retry only the identical request with its original ID."}
             }}));
         }
-        if let Operation::ReadPlan { plan } = &r.operation {
-            return super::planning::read_plan(&self.db, plan);
-        }
         let payload = if let Operation::Attachment { operation } = &r.operation {
             serde_json::to_string(
                 &json!({"action":"attachment","operation":operation.fingerprint()?}),
@@ -2741,7 +2740,7 @@ fn create_issue(
     let (title, body) = title_content::split(title, body)?;
     let draft = matches!(operation, Operation::Create { draft: true, .. });
     if draft {
-        super::planning::drafts_allowed(db, project)?;
+        super::drafts::drafts_allowed(db, project)?;
     }
     let any_unfinished = super::blockers::validate_new_links(db, &project.id, blockers)?;
     let initial_state = if !draft && any_unfinished {
@@ -2939,7 +2938,6 @@ fn mutate(
         operation,
         Operation::Edit { .. }
             | Operation::SetYolo { .. }
-            | Operation::BindPlan { .. }
             | Operation::Undraft { .. }
             | Operation::Close { .. }
             | Operation::Block { .. }
@@ -3025,7 +3023,7 @@ fn mutate(
             }
             if let Some(draft) = draft {
                 if *draft && (!issue.draft || issue.state == "blocked") {
-                    super::planning::can_draft(
+                    super::drafts::can_draft(
                         db,
                         project,
                         number,
@@ -3050,15 +3048,6 @@ fn mutate(
                 issue.title = title.to_owned();
                 issue.body = body.into_owned();
             }
-            if *draft == Some(false) && before["draft"] == true {
-                super::planning::final_sync(
-                    db,
-                    project,
-                    &mut issue.title,
-                    &mut issue.body,
-                    issue.plan.as_ref(),
-                )?;
-            }
             let mut values: BTreeSet<_> = issue.labels.iter().cloned().collect();
             values.extend(add_labels.iter().cloned());
             for value in remove_labels {
@@ -3072,39 +3061,10 @@ fn mutate(
             }
         }
         Operation::Undraft { .. } => {
-            if issue.draft || issue.plan.is_some() {
-                super::planning::final_sync(
-                    db,
-                    project,
-                    &mut issue.title,
-                    &mut issue.body,
-                    issue.plan.as_ref(),
-                )?;
+            if issue.draft {
                 issue.draft = false;
-                if serde_json::to_value(&issue)? != before {
-                    action = "undrafted";
-                }
+                action = "undrafted";
             }
-        }
-        Operation::BindPlan {
-            plan, if_version, ..
-        } => {
-            super::planning::drafts_allowed(db, project)?;
-            if (!issue.draft && issue.plan.is_none()) || *if_version != issue.version {
-                return Err(Error::conflict("Planning requires an unchanged draft"));
-            }
-            plan.validate()?;
-            if plan.machine != actor.machine
-                || plan.checkout != actor.cwd
-                || plan.host != actor.host
-            {
-                return Err(Error::invalid(
-                    "Bind the plan from its owning machine and checkout",
-                ));
-            }
-            issue.plan = Some(plan.clone());
-            action = "plan_bound";
-            data = json!({"plan":plan});
         }
         Operation::Ready { .. } => {
             if let Some(handoff) = ready::handoff(db, project, &mut issue, actor, operation, now)? {

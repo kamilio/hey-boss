@@ -1219,7 +1219,7 @@ fn template_with(text: &str, job: &Job, values: &[(&str, &str)]) -> String {
             "body" => job.issue["body"].as_str().unwrap_or("").into(),
             "worktree_name" => worktree_name(job),
             "worktree_path" => worktree_path(job),
-            "plan_path" => job.issue["plan"]["path"].as_str().unwrap_or("").into(),
+            "plan_path" => String::new(), // Retired terminal-planning placeholder.
             "subtask_position" => value_text(&job.issue["subtask_context"]["position"]),
             "subtask_total" => value_text(&job.issue["subtask_context"]["total"]),
             "parent_number" => value_text(&job.issue["subtask_context"]["parent"]["number"]),

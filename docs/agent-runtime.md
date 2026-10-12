@@ -107,7 +107,7 @@ input/output pipes and backpressured readers even if the caller retains the obje
 All Hey Boss Codex launches use the hardcoded Auto permission policy in
 `src/codex_permissions.rs`: `approval_policy = "on-request"`,
 `approvals_reviewer = "auto_review"`, and `sandbox_mode = "workspace-write"`.
-Workers, the shared runtime, and interactive planning use process overrides;
+Workers and the shared runtime use process overrides;
 new and resumed app-server threads also explicitly override their saved policy.
 Takeover commands include `--approve-for-me`. This does not edit global Codex
 configuration or add a project setting. Managed Codex restrictions still apply;

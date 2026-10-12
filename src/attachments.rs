@@ -318,7 +318,7 @@ pub(crate) fn execute(
             let attachment = get(db, p, id)?;
             let path = root.join(id);
             if let Some(database) = db.path().filter(|path| !path.is_empty()) {
-                crate::issues::planning::protect_database_paths(Path::new(database), [&path])?;
+                crate::database::protect_database_paths(Path::new(database), [&path])?;
             }
             let file = OpenOptions::new()
                 .read(true)

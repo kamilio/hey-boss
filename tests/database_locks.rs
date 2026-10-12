@@ -325,57 +325,6 @@ fn connection_status_reads_cannot_release_database_locks() {
     }
 }
 
-#[test]
-fn reading_a_plan_alias_of_the_live_database_preserves_its_locks() {
-    let root = temporary_directory();
-    let path = root.join("issues.db");
-    let mut store = Store::open(&path).unwrap();
-    projects::seed(&path, &["named:Locktest"]);
-    let request = serde_json::from_value(serde_json::json!({
-        "version":1,"project":{"id":"named:Locktest","name":"Locktest"},
-        "operation":{"action":"read_plan","plan":{
-            "path":"plan.md","checkout":root,
-            "machine":hey_boss::issues::identity::machine().unwrap(),"host":"local"
-        }}
-    }))
-    .unwrap();
-    for database_suffix in ["", "-wal", "-shm"] {
-        let database_file = root.join(format!("issues.db{database_suffix}"));
-        for plan_extension in ["md", "hey-boss-sync-lock", "hey-boss-sync-paused"] {
-            let alias = root.join(format!("plan.{plan_extension}"));
-            for symbolic in [false, true] {
-                fs::write(root.join("plan.md"), "# Safe plan\n\nBody\n").unwrap();
-                if alias.exists() {
-                    fs::remove_file(&alias).unwrap();
-                }
-                if symbolic {
-                    symlink(&database_file, &alias).unwrap();
-                } else {
-                    fs::hard_link(&database_file, &alias).unwrap();
-                }
-                let error = store.execute(&request).unwrap_err();
-                assert!(error.to_string().contains("must not alias"), "{error}");
-                assert_database_locked(&path);
-                fs::remove_file(alias.clone()).unwrap();
-            }
-        }
-    }
-    fs::write(root.join("plan.md"), "# Safe plan\n\nBody\n").unwrap();
-    let response = store.execute(&request).unwrap();
-    assert_eq!(response["title"], "Safe plan");
-    assert_eq!(response["body"], "Body");
-    assert_database_locked(&path);
-    drop(store);
-    let db = Connection::open(&path).unwrap();
-    assert_eq!(
-        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
-            .unwrap(),
-        "ok"
-    );
-    drop(db);
-    fs::remove_dir_all(root).unwrap();
-}
-
 fn assert_database_locked(path: &std::path::Path) {
     let probe = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "journal_mode_probe", "--nocapture"])

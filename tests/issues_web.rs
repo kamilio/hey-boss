@@ -1745,11 +1745,9 @@ fn web_blocked_drafts_preserve_subtasks_and_recheck_them_on_editor_save() {
 }
 
 #[test]
-fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
+fn web_drafts_preserve_editor_content_without_reading_legacy_plan_files() {
     let w = Web::start();
-    let created =
-        w.ok(json!({"action":"create","title":"Plan","body":"Old body","labels":[],"draft":true}));
-    assert_eq!(created["issue"]["draft"], true);
+    w.ok(json!({"action":"create","title":"Saved title","body":"Saved body","labels":[],"draft":true}));
     w.ok(json!({"action":"configure_project","drafts_enabled":false}));
     assert_ne!(
         w.action(
@@ -1761,70 +1759,33 @@ fn web_drafts_respect_settings_and_sync_bound_plans_before_undrafting() {
         200
     );
     let db = rusqlite::Connection::open(w.root.join("issues.db")).unwrap();
-    let machine: String = db
-        .query_row(
-            "SELECT json_extract(metadata,'$.machine') FROM agents WHERE id='human:boss'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let plan =
-        json!({"path":"plan.md","checkout":w.root,"machine":machine,"host":"synthetic-owner"});
+    let plan = json!({"path":"plan.md","checkout":w.root,"machine":"offline","host":"offline"});
     db.execute(
         "UPDATE issues SET plan=?1 WHERE number=1",
         [plan.to_string()],
     )
     .unwrap();
-    let failed = w.action(&w.project, json!({"action":"undraft","number":1}), None);
-    assert_ne!(failed.status, 200);
-    let message = failed.json()["error"]["message"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(
-        message.contains("plan.md") && message.contains("retry undrafting"),
-        "{message}"
-    );
-    assert_eq!(
-        w.ok(json!({"action":"view","number":1}))["issue"]["draft"],
-        true
-    );
-    fs::hard_link(w.root.join("issues.db"), w.root.join("plan.md")).unwrap();
-    let aliased = w.action(&w.project, json!({"action":"undraft","number":1}), None);
-    assert_ne!(aliased.status, 200);
-    assert!(
-        aliased.json()["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("must not have hard links")
-    );
-    fs::remove_file(w.root.join("plan.md")).unwrap();
-    let preserved = w.ok(json!({"action":"view","number":1}));
-    assert_eq!(preserved["issue"]["draft"], true);
-    assert_eq!(preserved["issue"]["title"], "Plan");
-    assert_eq!(preserved["issue"]["body"], "Old body");
-    fs::write(w.root.join("plan.md"), "# Final title\n\nFinal body\n").unwrap();
-    let issue=w.ok(json!({"action":"edit","number":1,"draft":false,"title":"Stale editor","body":"Stale body","add_labels":[],"remove_labels":[]}));
+    fs::write(w.root.join("plan.md"), "# File title\n\nFile body\n").unwrap();
+    let issue = w.ok(json!({"action":"edit","number":1,"draft":false,"title":"Editor title","body":"Editor body","add_labels":[],"remove_labels":[]}));
     assert_eq!(issue["issue"]["draft"], false);
-    assert_eq!(issue["issue"]["title"], "Final title");
-    assert_eq!(issue["issue"]["body"], "Final body");
-    let fetched = w.ok(json!({"action":"view","number":1}));
-    assert_eq!(fetched["issue"]["plan"], plan);
-    assert_eq!(fetched["issue"]["body"], "Final body");
-    assert_ne!(
-        w.action(
-            &w.project,
-            json!({"action":"edit","number":1,"draft":true,"add_labels":[],"remove_labels":[]}),
-            None
-        )
-        .status,
-        200
-    );
+    assert_eq!(issue["issue"]["title"], "Editor title");
+    assert_eq!(issue["issue"]["body"], "Editor body");
+    assert!(issue["issue"].get("plan").is_none());
     assert_eq!(
-        w.action(&w.project, json!({"action":"read_plan","plan":plan}), None)
-            .status,
-        403
+        fs::read_to_string(w.root.join("plan.md")).unwrap(),
+        "# File title\n\nFile body\n"
     );
+    for action in ["read_plan", "bind_plan"] {
+        assert_ne!(
+            w.action(
+                &w.project,
+                json!({"action":action,"number":1,"if_version":1,"plan":plan}),
+                None
+            )
+            .status,
+            200
+        );
+    }
 }
 
 #[test]

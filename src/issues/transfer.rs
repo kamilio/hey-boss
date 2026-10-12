@@ -91,7 +91,7 @@ pub(super) fn execute(
         ));
     }
     if issue.draft {
-        crate::issues::planning::drafts_allowed(db, &target)?;
+        crate::issues::drafts::drafts_allowed(db, &target)?;
     }
     let next: i64 = db.query_row(
         "SELECT next_number FROM projects WHERE id=?1",

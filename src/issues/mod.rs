@@ -9,10 +9,10 @@ pub mod commits;
 mod dependency_notices;
 mod fleet;
 pub(crate) use fleet::INDEXES as FLEET_INDEXES;
+pub(crate) mod drafts;
 mod global_settings;
 pub mod identity;
 pub(crate) mod model_recovery;
-pub mod planning;
 pub(crate) mod project_features;
 pub(crate) mod provenance;
 pub mod remote;
@@ -322,8 +322,6 @@ pub enum Operation {
         artifacts_enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mindmaps_enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plan_template: Option<String>,
         if_version: Option<i64>,
     },
     PullRequests {
@@ -525,14 +523,6 @@ pub enum Operation {
         enabled: bool,
         if_version: i64,
     },
-    BindPlan {
-        number: i64,
-        plan: planning::Plan,
-        if_version: i64,
-    },
-    ReadPlan {
-        plan: planning::Plan,
-    },
     Undraft {
         number: i64,
     },
@@ -674,7 +664,6 @@ impl Operation {
                 | Self::WorkerRun { .. }
                 | Self::Whoami
                 | Self::List { .. }
-                | Self::ReadPlan { .. }
                 | Self::View { .. }
                 | Self::ViewCompact { .. }
                 | Self::InspectAttempt { .. }
@@ -723,7 +712,6 @@ impl Operation {
             | Self::WorkerControl { .. }
             | Self::Whoami
             | Self::List { .. }
-            | Self::ReadPlan { .. }
             | Self::Create { .. } => None,
             Self::PullRequests { number }
             | Self::AddPullRequest { number, .. }
@@ -752,7 +740,6 @@ impl Operation {
             | Self::Comments { number, .. }
             | Self::Edit { number, .. }
             | Self::SetYolo { number, .. }
-            | Self::BindPlan { number, .. }
             | Self::Undraft { number }
             | Self::Claim { number, .. }
             | Self::Ready { number, .. }

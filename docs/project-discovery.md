@@ -18,7 +18,7 @@ new projects. Disabled creation exits nonzero with a project-specific message
 pointing to regular tasks. Existing content remains available.
 
 All workflow and resource switches live in Builder → Project settings →
-Configuration, alongside the terminal plan path. Prompt editors stay in their
+Configuration. Prompt editors stay in their
 own tabs.
 
 To separate two checkouts of the same repository, initialize the second with

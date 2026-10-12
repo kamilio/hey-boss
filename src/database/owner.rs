@@ -169,7 +169,7 @@ impl Owner {
         prepare_parent(path)?;
         secure_directory()?;
         let lock_path = directory().join(format!("{}.lock", identity(path)));
-        crate::issues::planning::protect_database_paths(path, [&lock_path])
+        crate::database::protect_database_paths(path, [&lock_path])
             .map_err(|e| error(e.to_string()))?;
         let lock = OpenOptions::new()
             .create(true)
@@ -628,7 +628,7 @@ fn execute(
             super::execute_batch(db, &sql)?;
         }
         Command::Backup { path } => {
-            crate::issues::planning::protect_database_paths(Path::new(db.path().unwrap()), [&path])
+            crate::database::protect_database_paths(Path::new(db.path().unwrap()), [&path])
                 .map_err(|e| error(e.to_string()))?;
             db.backup("main", path, None)?;
         }
@@ -690,7 +690,7 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
     prepare_parent(path)?;
     secure_directory()?;
     let startup_path = directory().join(format!("{}.startup", identity(path)));
-    crate::issues::planning::protect_database_paths(path, [&startup_path])
+    crate::database::protect_database_paths(path, [&startup_path])
         .map_err(|e| error(e.to_string()))?;
     let startup = OpenOptions::new()
         .create(true)
@@ -718,8 +718,7 @@ pub(crate) fn ensure(path: &Path) -> Result<()> {
     }
     let binary = std::env::current_exe().map_err(|e| error(e.to_string()))?;
     let log_path = directory().join(format!("{}.log", identity(path)));
-    crate::issues::planning::protect_database_paths(path, [&log_path])
-        .map_err(|e| error(e.to_string()))?;
+    crate::database::protect_database_paths(path, [&log_path]).map_err(|e| error(e.to_string()))?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
