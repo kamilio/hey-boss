@@ -18,7 +18,7 @@ for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','CODEX_THREAD_
 const binary = resolve(process.env.HEY_BOSS_TEST_BINARY || 'target/debug/hey-boss');
 const children = [];
 const start = args => {
-  const child = spawn(binary, args, {env, stdio:['ignore','inherit','inherit']});
+  const child = spawn(binary, args, {cwd:root, env, stdio:['ignore','inherit','inherit']});
   children.push(child);
   child.once('exit',()=>{if(!closing){process.exitCode=1;close();}});
   return child;
@@ -51,7 +51,7 @@ try {
     await new Promise(resolve=>setTimeout(resolve,50));
   }
   const command = args => {
-    const result=spawnSync(binary,args,{env,encoding:'utf8'});
+    const result=spawnSync(binary,args,{cwd:root,env,encoding:'utf8'});
     if(result.status!==0)throw Error(result.stdout+result.stderr);
     return JSON.parse(result.stdout);
   };
