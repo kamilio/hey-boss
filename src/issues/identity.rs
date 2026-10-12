@@ -1,6 +1,10 @@
 use super::{Actor, Error, Project, Result, identifier};
 use std::path::Path;
 
+#[path = "project_binding.rs"]
+mod binding;
+pub use binding::CheckoutBinding;
+
 pub fn machine() -> Result<String> {
     #[cfg(target_os = "macos")]
     {
@@ -35,21 +39,33 @@ pub fn host() -> String {
 }
 
 pub fn project(cwd: &Path, machine: &str) -> Result<Project> {
+    project_with_binding(cwd, machine).map(|(project, _)| project)
+}
+
+pub(super) fn project_with_binding(cwd: &Path, machine: &str) -> Result<(Project, bool)> {
     let cwd = cwd.canonicalize()?;
     let directory = cwd
         .to_str()
         .ok_or_else(|| Error::invalid("Project path must be UTF-8"))?;
     if let Some(git) = crate::agents::git_repository_info(directory) {
-        return Ok(project_from_git(&git, machine));
+        return git_project_with_binding(&git, machine);
     }
-    Ok(Project {
-        id: format!("local:{machine}:{directory}"),
-        name: cwd
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("directory")
-            .into(),
-    })
+    for root in cwd.ancestors() {
+        if let Some(project) = binding::read(root)? {
+            return Ok((project, true));
+        }
+    }
+    Ok((
+        Project {
+            id: format!("local:{machine}:{directory}"),
+            name: cwd
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("directory")
+                .into(),
+        },
+        false,
+    ))
 }
 
 pub(crate) fn is_home_project(project: &Project) -> bool {
@@ -117,7 +133,30 @@ pub(crate) fn is_git_metadata_project(id: &str) -> bool {
         .is_some_and(|(_, path)| is_git_metadata_path(Path::new(path)))
 }
 
-pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Project {
+pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> Result<Project> {
+    git_project_with_binding(git, machine).map(|(project, _)| project)
+}
+
+fn git_project_with_binding(
+    git: &crate::agents::GitInfo,
+    machine: &str,
+) -> Result<(Project, bool)> {
+    if let Some(project) = binding::read(Path::new(&git.worktree))? {
+        return Ok((project, true));
+    }
+    inherited_git_selection(git, machine)
+}
+
+fn inherited_git_project(git: &crate::agents::GitInfo, machine: &str) -> Result<Project> {
+    inherited_git_selection(git, machine).map(|(project, _)| project)
+}
+
+fn inherited_git_selection(git: &crate::agents::GitInfo, machine: &str) -> Result<(Project, bool)> {
+    if git.worktree != git.repository_root
+        && let Some(project) = binding::read(Path::new(&git.repository_root))?
+    {
+        return Ok((project, true));
+    }
     let id = git
         .origin
         .clone()
@@ -133,7 +172,7 @@ pub(crate) fn project_from_git(git: &crate::agents::GitInfo, machine: &str) -> P
         })
         .unwrap_or("repository")
         .to_owned();
-    Project { id, name }
+    Ok((Project { id, name }, false))
 }
 
 fn env(name: &str) -> Option<String> {

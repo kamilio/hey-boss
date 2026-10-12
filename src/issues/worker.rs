@@ -179,13 +179,13 @@ pub(crate) fn validate_settings_structure(c: &Settings) -> Result<()> {
     Ok(())
 }
 
-fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
+pub(super) fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
     let machine = identity::machine()?;
-    let actual = identity::project(path, &machine)?;
+    let (actual, bound) = identity::project_with_binding(path, &machine)?;
     // Adding an origin does not invalidate the saved identity of this same
     // local checkout. Its existing issues still belong to that local project.
     let local = format!("local:{machine}:{}", path.canonicalize()?.display());
-    Ok(project.starts_with("named:") || actual.id == project || local == project)
+    Ok(actual.id == project || (!bound && (project.starts_with("named:") || local == project)))
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
