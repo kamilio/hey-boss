@@ -20,3 +20,25 @@ const worker = context.issueActivity({id:2,actor:'reservation:internal-id',actio
 assert.match(worker,/Review worker.*selected this issue/s);
 assert.doesNotMatch(worker,/reservation:internal-id/);
 console.log('Timeline presentation: 11 checks passed');
+
+const event = (id, action = 'created', data = {}) => ({id, action, actor:'codex:session', created_at:id, data});
+const events = new Map([[1,event(1)], [2,event(2,'worker_selected')], [3,event(3,'claimed',{assignee:'codex:session'})], [4,event(4,'closed')]]);
+const comments = new Map([[9,{id:9}]]);
+context.renderIssueComment = c => `<article data-comment-id="${c.id}">Comment</article>`;
+const entries = ids => ids.map(id => ({kind:id === 9 ? 'comment' : 'event',id}));
+assert.equal(typeof context.renderIssueTimeline, 'function', 'Timeline must group consecutive activity');
+const grouped = context.renderIssueTimeline(entries([1,2,3]), comments, events, false);
+assert.equal((grouped.match(/class="activity-group"/g)||[]).length, 1);
+assert.match(grouped, /3 updates/);
+assert.match(grouped, /data-activity-group="3"/);
+for (const id of [1,2,3]) assert.match(grouped, new RegExp(`data-event-id="${id}"`), 'Expanded history retains every event');
+assert.doesNotMatch(grouped, /<details[^>]*\sopen[\s>]/, 'History starts collapsed');
+const split = context.renderIssueTimeline(entries([1,2,9,3,4]), comments, events, false);
+assert.equal((split.match(/class="activity-group"/g)||[]).length, 2, 'Comments separate groups');
+assert.ok(split.indexOf('data-event-id="2"') < split.indexOf('data-comment-id="9"'));
+assert.ok(split.indexOf('data-comment-id="9"') < split.indexOf('data-event-id="3"'));
+assert.doesNotMatch(context.renderIssueTimeline(entries([1]), comments, events, false), /activity-group/, 'Single events stay one compact row');
+assert.equal(context.renderIssueTimeline([], comments, events, false), '');
+assert.match(render('created'), /<summary class="activity-summary">/);
+assert.match(render('edited',{before:{title:'Old'},after:{title:'<script>New'}}), /&lt;script>New/);
+console.log('Compact timeline: grouping, ordering, disclosure and escaping checks passed');

@@ -1496,6 +1496,11 @@ function queueActivity(event) {
   return `<p>${esc(data.worker_name || "Worker")} reserved this issue as the first eligible task in queue order.</p><p class="muted-text">Required tags: ${esc(tags)}. Drafts, claims, reservations, dependencies and retry holds are excluded.</p><details><summary>Selection details</summary><pre>${esc(JSON.stringify(data, null, 2))}</pre></details>`;
 }
 function issueActivity(event) {
+  const {headline, symbol} = issueActivitySummary(event);
+  const extra = queueActivity(event) + (event.data?.sync_conflict ? `<p>${esc(event.data.sync_conflict)}</p>` : "");
+  return `<details class="issue-activity" data-event-id="${event.id}"><summary class="activity-summary"><span class="activity-icon" aria-hidden="true">${icon(symbol)}</span><span class="activity-headline">${headline}</span><span class="activity-time">${date(event.created_at)}</span><span class="activity-chevron" aria-hidden="true">›</span></summary><div class="activity-content"><div>${headline}</div>${extra}</div></details>`;
+}
+function issueActivitySummary(event) {
   const data = event.data || {}, before = data.before || {}, after = data.after || {};
   const who = id => `<strong>${esc(actorName(id, id === event.actor ? data.actor_model : data.assignee_model))}</strong>`;
   const label = value => `<span class="activity-label">${esc(value)}</span>`;
@@ -1541,11 +1546,33 @@ function issueActivity(event) {
   if (event.action === "reopened" || event.action === "created") symbol = "issue";
   const relation = data.parent && data.child ? ` <a data-issue="${esc(data.child)}" href="${esc(routeHash({...model.route,issue:data.child}))}">#${esc(data.parent)} → #${esc(data.child)}</a>` : "";
   const author = event.action === "worker_selected" ? `<strong>${esc(data.worker_name || "Worker")}</strong>` : who(event.actor);
-  return `<div class="issue-activity" data-event-id="${event.id}"><span class="activity-icon" aria-hidden="true">${icon(symbol)}</span><div class="activity-content"><div>${author} ${changes.join("; ")}${relation}</div><div class="activity-time">${date(event.created_at)}</div>${queueActivity(event)}${data.sync_conflict ? `<p>${esc(data.sync_conflict)}</p>` : ""}</div></div>`;
+  return {headline:`${author} ${changes.join("; ")}${relation}`, symbol};
+}
+function renderIssueTimeline(entries, comments, events, deleted) {
+  const html = [], pending = [];
+  const flush = () => {
+    if (!pending.length) return;
+    if (pending.length === 1) html.push(issueActivity(pending[0]));
+    else {
+      const latest = pending[pending.length - 1], {headline} = issueActivitySummary(latest);
+      html.push(`<details class="activity-group" data-activity-group="${latest.id}"><summary class="activity-summary"><span class="activity-icon" aria-hidden="true">${icon("clock")}</span><span class="activity-headline">${headline}</span><span class="activity-count">${pending.length} updates</span><span class="activity-time">${date(latest.created_at)}</span><span class="activity-chevron" aria-hidden="true">›</span></summary><div class="activity-history">${pending.map(issueActivity).join("")}</div></details>`);
+    }
+    pending.length = 0;
+  };
+  for (const entry of entries) {
+    if (entry.kind === "comment") {
+      flush();
+      html.push(renderIssueComment(comments.get(entry.id), deleted));
+    } else pending.push(events.get(entry.id));
+  }
+  flush();
+  return html.join("");
 }
 async function loadIssueTimeline(target, detail) {
   const project = model.project.id, number = detail.issue.number, host = model.route.host;
   let before = null, loading = false;
+  let entries = [];
+  const comments = new Map(), events = new Map();
   const current = () => target.isConnected && model.detail === detail && model.route.host === host;
   async function page(older = false) {
     if (loading) return;
@@ -1555,19 +1582,24 @@ async function loadIssueTimeline(target, detail) {
     try {
       const result = await api({action:"timeline",number,limit:30,before}, project, null, host);
       if (!current()) return;
-      const anchor = older ? target.querySelector("[data-event-id], [data-comment-id]") : null;
+      const anchor = older ? target.querySelector(":scope > [data-activity-group], :scope > [data-event-id], :scope > [data-comment-id]") : null;
       const top = anchor?.getBoundingClientRect().top;
-      const comments = new Map(result.comments.map(c => [c.id,c]));
-      const events = new Map(result.events.map(e => [e.id,e]));
+      const anchorSelector = anchor && (anchor.hasAttribute("data-activity-group") ? `[data-activity-group="${anchor.dataset.activityGroup}"]` : anchor.hasAttribute("data-event-id") ? `[data-event-id="${anchor.dataset.eventId}"]` : `[data-comment-id="${anchor.dataset.commentId}"]`);
+      const expanded = [...target.querySelectorAll("details[open]")].map(node => node.dataset.activityGroup ? `[data-activity-group="${node.dataset.activityGroup}"]` : node.dataset.eventId ? `[data-event-id="${node.dataset.eventId}"]` : node.closest("[data-comment-id]") ? `[data-comment-id="${node.closest("[data-comment-id]").dataset.commentId}"] details` : null).filter(Boolean);
+      const selectionDetails = [...target.querySelectorAll("[data-event-id] details[open]")].map(node => node.closest("[data-event-id]").dataset.eventId);
+      for (const comment of result.comments) comments.set(comment.id, comment);
+      for (const event of result.events) events.set(event.id, event);
+      entries = older ? [...result.entries, ...entries] : result.entries;
       for (const comment of result.comments) {
         const index = detail.comments.findIndex(c => c.id === comment.id);
         if (index < 0) detail.comments.push(comment); else detail.comments[index] = comment;
       }
-      const html = result.entries.map(entry => entry.kind === "comment" ? renderIssueComment(comments.get(entry.id), !!detail.issue.deleted_at) : issueActivity(events.get(entry.id))).join("");
-      target.querySelector(".timeline-error")?.remove();
-      target.querySelector(".history-more")?.remove();
-      if (!older) target.innerHTML = html || '<p class="muted-text">No activity yet.</p>';
-      else target.insertAdjacentHTML("afterbegin", html);
+      target.innerHTML = renderIssueTimeline(entries, comments, events, !!detail.issue.deleted_at) || '<p class="muted-text">No activity yet.</p>';
+      for (const selector of expanded) {
+        const node = target.querySelector(selector);
+        if (node) { node.open = true; node.parentElement.closest(".activity-group")?.setAttribute("open", ""); }
+      }
+      for (const id of selectionDetails) target.querySelector(`[data-event-id="${id}"] details`)?.setAttribute("open", "");
       before = result.next_before;
       if (before) {
         target.insertAdjacentHTML("afterbegin", '<button type="button" class="button history-more">Load earlier activity</button>');
@@ -1575,7 +1607,12 @@ async function loadIssueTimeline(target, detail) {
       }
       target.querySelectorAll("[data-resolve-comment]").forEach(b => { b.onclick = e => resolveComment(e.currentTarget); });
       secureLinks();
-      if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+      if (anchorSelector) {
+        const nextAnchor = target.querySelector(anchorSelector);
+        const visibleAnchor = nextAnchor?.closest(".activity-group:not([open])") || nextAnchor;
+        if (visibleAnchor) window.scrollBy(0, visibleAnchor.getBoundingClientRect().top - top);
+        (target.querySelector(".history-more") || visibleAnchor?.querySelector("summary"))?.focus({preventScroll:true});
+      }
     } catch (error) {
       if (!current()) return;
       target.querySelector(".timeline-error")?.remove();

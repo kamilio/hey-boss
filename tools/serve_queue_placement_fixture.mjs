@@ -48,11 +48,12 @@ try {
     await new Promise(resolve=>setTimeout(resolve,50));
   }
   const cli = (args, input) => {
-    const result = spawnSync(binary, args, {env, input, encoding:'utf8'});
+    const result = spawnSync(binary, args, {env, input, cwd:root, encoding:'utf8'});
     if (result.status) throw Error(result.stderr || result.stdout);
     return JSON.parse(result.stdout);
   };
   const issue = (actor, args) => cli(['issue','--project','Queue placement QA','--json','--agent',actor,...args]);
+  cli(['project','init','--project','Queue placement QA','--yes','--prs','false','--worktree','false','--json']);
   issue('human:boss',['create','--title','Recovery second']);
   issue('human:boss',['create','--title','Recovery first']);
   issue('fixture-agent',['create','--title','Ordinary follow-up']);

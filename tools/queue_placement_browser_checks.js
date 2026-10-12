@@ -19,9 +19,12 @@ async page => {
     await page.waitForFunction(() => model.signature && model.issues.length >= 5);
     check(JSON.stringify(await page.locator('.issue-row').evaluateAll(rows => rows.slice(0,5).map(r => Number(r.dataset.issueNumber)))) === '[4,2,1,3,5]', `${scheme}/${width}: priority order and draft preserved`);
     await page.locator('[data-issue-number="3"] .issue-title').click();
+    await page.locator('#comments > .issue-activity > summary').click();
     await page.getByText('Added to the bottom of the queue.',{exact:true}).waitFor();
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),`${scheme}/${width}: placement fits`);
     await page.goto(base+'&issue=2');
+    await page.locator('#comments > .activity-group > summary').click();
+    for (const row of await page.locator('#comments .issue-activity > summary').all()) await row.click();
     await page.getByText('MCP recovery worker reserved this issue as the first eligible task in queue order.',{exact:true}).waitFor();
     await page.getByText('Added to the top of the queue.',{exact:true}).waitFor();
     const details = page.getByText('Selection details',{exact:true});
