@@ -191,9 +191,15 @@ fn existing_state_directory_is_not_a_project_binding() {
     fs::create_dir(f.root.join(".hey-boss")).unwrap();
     let nested = f.root.join("workspace/project");
     fs::create_dir_all(&nested).unwrap();
-    assert_eq!(f.json(&f.root, &["issue", "projects", "--json"])["ok"], true);
+    assert_eq!(
+        f.json(&f.root, &["issue", "projects", "--json"])["ok"],
+        true
+    );
     let initialized = f.init(&nested);
-    assert_eq!(f.json(&nested, &["issue", "list", "--json"])["project"], initialized["project"]);
+    assert_eq!(
+        f.json(&nested, &["issue", "list", "--json"])["project"],
+        initialized["project"]
+    );
     assert!(f.root.join(".hey-boss").is_dir());
 }
 
