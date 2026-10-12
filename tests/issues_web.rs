@@ -1516,7 +1516,7 @@ fn main_navigation_includes_mindmaps_on_every_page() {
             .split("</nav>")
             .next()
             .unwrap();
-        for (href, label) in [("/mm", "Mindmaps"), ("/agents", "Agents")] {
+        for (href, label) in [("/mm", "Mindmaps")] {
             assert!(
                 navigation.contains(&format!("href=\"{href}\"")) && navigation.contains(label),
                 "Missing {label} in main navigation on {path}"
@@ -1524,9 +1524,19 @@ fn main_navigation_includes_mindmaps_on_every_page() {
         }
         assert!(navigation.contains("Inbox") && navigation.contains("Issues"));
         assert_eq!(html.matches("href=\"/mm\"").count(), 1);
-        if path != "/" {
-            let current = if path == "/workers" { "/agents" } else { path };
-            assert!(navigation.contains(&format!("href=\"{current}\" aria-current=\"page\"")));
+        assert!(!navigation.contains("nav-workers"));
+        assert!(html.contains("id=\"nav-workers\" href=\"/workers\""));
+        if path == "/mm" {
+            assert!(
+                navigation
+                    .split("id=\"nav-mindmaps\"")
+                    .nth(1)
+                    .unwrap()
+                    .split('>')
+                    .next()
+                    .unwrap()
+                    .contains("aria-current=\"page\"")
+            );
         }
     }
 }
@@ -2054,10 +2064,13 @@ fn agent_conversations_reject_malformed_cursors_and_query_encoding() {
     }
     for path in ["/agents", "/agents/session"] {
         let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
-        assert!(html.contains("Agents · Hey Boss"));
+        assert!(html.contains("Workers · Hey Boss"));
         assert!(html.contains("id=\"conversation\""));
         assert!(!html.contains("coordinates workers"));
-        assert!(html.contains("href=\"/agents\" aria-current=\"page\""));
+        assert_eq!(
+            html.contains("href=\"/workers\" aria-current=\"page\""),
+            path == "/agents"
+        );
     }
 }
 

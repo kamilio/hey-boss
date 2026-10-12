@@ -29,6 +29,7 @@ async page => {
   await selected(projects[1]);
   check(true, 'Mindmaps → Inbox → Issues preserves selection');
   for (const selector of ['#nav-workers', '#nav-mindmaps', '#nav-issues']) {
+    if(selector==='#nav-workers')await page.locator('#navigation-more').click();
     await page.locator(selector).click();
     await selected(projects[1]);
     check(true, selector + ' preserves selection');
@@ -60,8 +61,7 @@ async page => {
   });
   await page.goto(origin + '/mm#project=' + encodeURIComponent(projects[1]));
   await selected(projects[1]);
-  await page.locator('#nav-workers').click();
-  await selected(projects[1]);
+  check(await page.locator('#nav-workers').getAttribute('href')==='/workers','Global worker link is independent of storage and project');
   await page.locator('#nav-issues').click();
   await selected(projects[1]);
   check(true, 'URL navigation works when browser storage is unavailable');

@@ -1,7 +1,5 @@
 /* Project overview and a quiet, readable conversation surface. */
 #main { max-width:1120px }
-.fleet-tabs { display:flex; gap:10px; margin:0 0 24px }
-.fleet-tabs [aria-current="page"] { background:var(--accent-soft); color:var(--accent); border-color:var(--accent) }
 .config-editor { border:1px solid var(--line); border-radius:16px; background:var(--surface); padding:20px; margin-bottom:24px }
 .config-editor>summary { cursor:pointer; font-weight:600; min-height:30px }
 .config-editor>summary span { color:var(--muted); font-size:12px; font-weight:400; margin-left:8px }

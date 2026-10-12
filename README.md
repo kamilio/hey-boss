@@ -169,9 +169,10 @@ before its agent starts. Explicit checks respect an active cooldown too.
 Run `hey-boss fleet setup --source /path/to/hey-boss` once on the supervisor machine
 to manage the existing SSH machine inventory automatically. The supervisor
 installs companions, mirrors issue queues, distributes saved worker configurations,
-and redeploys changed source builds. Open **Agents** (`/agents`) for a project
-view of each task and the device where it runs. Open a task for its live Codex
-conversation: the original request, saved replies, and expandable tool activity.
+and redeploys changed source builds. Open **Workers** from the top-right overflow
+menu (`/workers`) to manage activity and settings across all projects and machines.
+Open a task’s agent link for its live conversation: the original request, saved
+replies, and expandable tool activity.
 Conversations open at the latest activity; load earlier messages above it.
 Use the machine’s **+ / −** controls to add or remove workers. Removal finishes
 current work; **Kill now** stops a finishing worker immediately. **Add project**

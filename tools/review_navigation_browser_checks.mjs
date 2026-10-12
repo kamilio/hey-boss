@@ -57,6 +57,7 @@ try {
   await trigger.focus();
   await page.keyboard.press('Enter');
   await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
   assert.equal(await review.evaluate(el=>el===document.activeElement),true,'Tab reaches Review');
   await page.keyboard.press('Escape');
   assert.equal(await review.isVisible(),false,'Escape dismisses');
@@ -81,7 +82,10 @@ try {
   await trigger.click();
   if(process.env.REVIEW_SCREENSHOTS) await page.screenshot({path:resolve(process.env.REVIEW_SCREENSHOTS,'320-full-header.png')});
   await page.goto(origin+'/paired#project=named%3ANavigation');
-  assert.equal(await page.locator('#navigation-more').isVisible(),false,'Paired UI has no empty menu for unavailable Review');
+  assert.equal(await page.locator('#navigation-more').isVisible(),true,'Paired UI offers global Workers');
+  await page.locator('#navigation-more').click();
+  assert.equal(await page.locator('#nav-workers').isVisible(),true);
+  assert.equal(await review.isVisible(),false,'Unavailable Review stays hidden');
   assert.deepEqual(errors,[],'No runtime errors');
   console.log('PASS: Review overflow, touch, keyboard, dismissal, context, 8 visual layouts, paired visibility');
 } finally {

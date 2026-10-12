@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Agents · Hey Boss</title>
+    <title>Workers · Hey Boss</title>
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/fleet.css" />
@@ -18,8 +18,7 @@
     <main id="main" tabindex="-1">
       <div id="error" class="error" role="alert" hidden></div>
       <div id="overview-page">
-        <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Agents</h1><p id="overview-note" class="page-description">Your projects, and the work behind them.</p></div><a class="button" id="show-all" href="/agents" hidden>All projects</a></div>
-        <nav class="fleet-tabs" aria-label="Agent views"><a class="button" id="workers-tab" href="/agents">Workers</a><a class="button" id="conversations-tab" href="/agents#view=conversations">Conversations</a></nav>
+        <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Worker activity</h1><p id="overview-note" class="page-description">Running agents and agent limits across all projects.</p></div></div>
         <section id="worker-config" hidden aria-label="Worker configuration">
           <nav class="worker-views" aria-label="Worker views"><a id="worker-status-view" href="/workers">Activity</a><a id="worker-config-view" href="/workers#view=configuration">Workers &amp; settings</a></nav>
           <section id="fleet-attention" class="fleet-attention" aria-label="Fleet health"></section>
@@ -38,12 +37,11 @@
             <div class="config-actions"><button id="config-reload" class="button" type="button">Reload file</button><button id="config-validate" class="button" type="button" disabled>Preview changes</button><button id="config-save" class="button primary" type="button" disabled>Save configuration</button></div>
           </details>
         </section>
-        <section id="projects" aria-label="Agents by project"><p class="loading-note">Finding your conversations…</p></section>
         <details id="device-settings" class="device-settings"><summary>Manage workers</summary><p id="device-help" class="device-help"></p><p class="device-help">Pause pickup lets current agents finish. Restart worker and Stop worker stop its current agents. Enabled workers keep running in the background after you close their terminal.</p><div id="device-list"></div></details>
       </div>
       <div id="session-page" hidden>
         <header class="session-header">
-          <a id="back" class="back-link" href="/agents"><span data-icon="arrow-left"></span>Agents</a>
+          <a id="back" class="back-link" href="/"><span data-icon="arrow-left"></span>Issues</a>
           <div class="session-heading"><div><p id="session-context" class="session-context"></p><h1 id="session-title">Loading conversation…</h1></div><div id="session-state"></div></div>
           <div class="session-subheading"><p id="session-status" role="status"></p><a id="session-issue" class="project-issues"></a></div>
           <div class="session-actions"><button id="steer-open" class="button primary" type="button" hidden>Steer</button><button id="takeover-open" class="button" type="button" hidden>Take over</button><p id="steer-note" class="device-note" role="status" hidden></p><p id="takeover-note" class="device-note" role="status" hidden></p></div>

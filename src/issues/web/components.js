@@ -198,7 +198,7 @@ function date(at) {
     if ($("#nav-jobs")) $("#nav-jobs").href = `/jobs#${hash}`;
     if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
     if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
-    if ($("#nav-workers")) $("#nav-workers").href = `/agents#${hash}`;
+    if ($("#nav-workers")) $("#nav-workers").href = "/workers";
     if ($("#nav-skills")) $("#nav-skills").href = `/skills#${hash}`;
     if ($("#nav-admin")) $("#nav-admin").href = `/admin#${hash}`;
     if (location.pathname !== "/") {
