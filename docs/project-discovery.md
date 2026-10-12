@@ -29,8 +29,9 @@ also accepts a project name when no `--project` is supplied. Initialization does
 not switch Git branches or start workers.
 
 Commands in that checkout and its subdirectories use the saved identity; an
-explicit `--project` still takes precedence. Linked worktrees inherit the main
-checkout's identity unless they have their own `.hey-boss`. Invalid files fail
+explicit `--project` still takes precedence. Each Git worktree uses its own
+repository identity unless explicitly initialized with a local `.hey-boss`;
+the main checkout's marker does not affect other worktrees. Invalid files fail
 instead of silently selecting another project. Keep this machine-local file out
 of Git. Reinitializing with the ordinary project removes an unnecessary override;
 cancelled setup leaves the file untouched.

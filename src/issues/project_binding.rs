@@ -79,7 +79,7 @@ impl CheckoutBinding {
             if let Some(git) = crate::agents::git_repository_info(&cwd.to_string_lossy()) {
                 (
                     PathBuf::from(&git.worktree),
-                    super::inherited_git_project(&git, machine)?,
+                    super::ordinary_git_project(&git, machine),
                 )
             } else {
                 let root = cwd.clone();
