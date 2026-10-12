@@ -9,17 +9,19 @@ async page => {
  page.on('dialog',dialog=>dialog.accept());
  const runtime=route=>{const provider=route.request().postDataJSON().provider||'codex';return route.fulfill({json:{ok:true,machine:'fixture-device',machines:[{state:'connected',heartbeat:Date.now()/1000,jobs:{available:true,checkouts:{[project]:'/fixture'},runtimes:{codex:{available:true},claude:{available:true},pi:{available:false}}},workers:[]}],catalog:{provider,error:provider==='pi'?'Pi runtime is unavailable':null,models:provider==='pi'?[]:[{selection:{id:provider+'-exact'},label:provider+' exact',advertised:true}]}}});};
  await page.route('**/api/jobs/runtime',runtime);
+ await page.route('**/jobs.css',r=>r.fulfill({path:'src/issues/web/jobs.css',contentType:'text/css'}));
  await page.route('**/jobs.js',r=>r.fulfill({path:'src/issues/web/jobs.js',contentType:'text/javascript'}));
  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
  if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();check((await page.request.post(origin+'/api/pair',{data:{code}})).ok(),'Authenticated paired surface');}
  const markdown=await(await page.request.get('http://127.0.0.1:52049/fixture-instructions.md')).text();
  await page.goto(origin+'/jobs?qa='+Date.now()+'#'+params({project}));
  await page.waitForFunction(()=>!document.querySelector('#job-new').disabled);
- check(await page.locator('#jobs-service').textContent()==='Job service available','Absent worker pool keeps Jobs available');
+ check(await page.locator('#jobs-service').textContent()==='Ready to run','Absent worker pool keeps Jobs available');
  let writes=0;const watch=req=>{if(req.url().endsWith('/api/action')&&['create','edit','run_now','stop','delete','set_enabled'].includes(req.postDataJSON()?.operation?.operation?.command))writes++;};page.on('request',watch);
  await page.getByRole('button',{name:'New job',exact:true}).click();
  await page.locator('#job-name').fill('Weekday repository review');
  await page.locator('#job-markdown').fill(markdown);
+ await page.locator('#job-frequency').selectOption('custom');
  await page.locator('#job-cron').fill('invalid');
  await page.locator('#job-timezone').fill('America/Chicago');
  await page.locator('#job-model').fill('custom-exact');
@@ -29,7 +31,9 @@ async page => {
  await page.waitForFunction(()=>!document.querySelector('#jobs-error').hidden);
  check((await page.locator('#jobs-error').textContent()).includes('five fields'),'Backend rejects invalid cron');
  check(await page.locator('#job-markdown').inputValue()===markdown,'Validation preserves exact Markdown');
- await page.locator('#job-cron').fill('0 9 * * 1-5');
+ await page.locator('#job-frequency').selectOption('weekdays');
+ await page.locator('#job-time').fill('09:00');
+ check(await page.locator('#job-cron').inputValue()==='0 9 * * 1-5','Frequency and time generate the expected cron');
  await page.locator('#job-harness').selectOption('claude');
  await page.waitForFunction(()=>document.querySelector('#job-models').innerHTML.includes('claude-exact'));
  check(await page.locator('#job-model').inputValue()==='custom-exact','Harness change preserves exact custom model');
@@ -44,6 +48,24 @@ async page => {
  check(await page.locator('#job-markdown').inputValue()===markdown,'Markdown byte-for-byte round trip');
  const boot=await(await page.request.get(origin+'/api/bootstrap')).json();
  const api=async operation=>{const response=await page.request.post(origin+'/api/action',{headers:paired?{}:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation:{action:'job',operation},...(['create','edit','run_now','stop','delete','set_enabled'].includes(operation.command)?{request_id:'browser-'+Date.now()+'-'+Math.random().toString(16).slice(2)}:{})}});const value=await response.json();if(!value.ok)throw Error(JSON.stringify(value));return value;};
+ await page.getByRole('button',{name:'Close job details'}).click();
+ await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);
+ await page.waitForFunction(()=>document.activeElement?.classList.contains('job-card'));
+ check(true,'Closing details restores focus to its job');
+ const toggle=page.locator('[data-job-toggle="'+id+'"]');
+ check(await toggle.getAttribute('aria-checked')==='false','List exposes disabled state per job');
+ await toggle.focus();await page.keyboard.press('Space');
+ await page.waitForFunction(id=>document.querySelector('[data-job-toggle="'+id+'"]')?.getAttribute('aria-checked')==='true',id);
+ check(!(await page.locator('#job-dialog').evaluate(el=>el.open)),'List toggle does not open editor');
+ check((await api({command:'view',id})).job.enabled,'Keyboard switch enables the saved job');
+ await page.locator('[data-filter="disabled"]').click();check(await page.locator('[data-job-toggle="'+id+'"]').count()===0,'Disabled filter excludes enabled jobs');
+ await page.locator('[data-filter="enabled"]').click();await page.locator('[data-job-toggle="'+id+'"]').click();
+ await page.waitForFunction(()=>document.querySelectorAll('.job-row').length===0);
+ await page.locator('[data-filter="disabled"]').click();
+ await page.locator('#jobs-search').fill('nonexistent job');check(await page.locator('.job-row').count()===0,'Search filters jobs');
+ await page.locator('#jobs-search').fill('repository');
+ await page.locator('.job-card[href$="job='+id+'"]').click();
+ await page.waitForFunction(()=>document.querySelector('#job-name'));
  const before=await api({command:'history',id,before:null,limit:20});check(before.runs.length===0,'Navigation and discovery never run a job');
  // An independent client edits the saved revision while this draft is open.
  const {job}=await api({command:'view',id});
@@ -56,7 +78,7 @@ async page => {
  await page.waitForFunction(()=>document.querySelector('#job-name')?.value==='Saved on another device');
  await page.locator('#job-name').fill('Weekday repository review');
  await page.getByRole('button',{name:'Save changes',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Revision 3'));
+ await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Revision 5'));
  let lost=false,requests=[];
  const loseResponse=async route=>{const body=route.request().postDataJSON();if(body.operation?.operation?.command==='run_now'){requests.push(body);if(!lost){lost=true;await route.fetch();return route.fulfill({json:{ok:false,error:{code:'offline',message:'Synthetic lost response'}}});}}return route.continue();};
  await page.route('**/api/action',loseResponse);
@@ -67,10 +89,10 @@ async page => {
  check(JSON.stringify(requests[0])===JSON.stringify(requests[1]),'Run now retries identical payload and request ID');
  check((await api({command:'history',id,before:null,limit:20})).runs.length===1,'Run now retry creates exactly one execution');
  await page.unroute('**/api/action',loseResponse);
- await page.getByRole('button',{name:'Resume schedule',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.textContent==='Pause schedule');
- await page.getByRole('button',{name:'Pause schedule',exact:true}).click();
- await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.textContent==='Resume schedule');
+ await page.getByRole('switch',{name:'Enable job',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.getAttribute('aria-checked')==='true');
+ await page.getByRole('switch',{name:'Disable job',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#job-enabled-toggle')?.getAttribute('aria-checked')==='false');
  check((await api({command:'view',id})).job.active_run.state==='pending','Pause leaves the active execution alone');
  check(await page.locator('#job-stop').isVisible(),'Stop remains distinct while paused');
  await page.getByRole('button',{name:'Stop current run',exact:true}).click();
@@ -85,7 +107,7 @@ async page => {
  const taskHref=await task.getAttribute('href');
  for(const width of [1440,768,390])for(const theme of ['light','dark']){
   await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme});await page.waitForTimeout(220);
-  await page.evaluate(()=>scrollTo(0,0));
+  await page.locator('#job-dialog').evaluate(el=>el.scrollTop=0);
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${width} ${theme}: no horizontal overflow`);
   await page.screenshot({path:`/tmp/hb-jobs-ui-qa/${surface}-${width}-${theme}.png`,fullPage:true});
  }
@@ -102,7 +124,9 @@ async page => {
  check(!!(await api({command:'view',id})).job.active_run,'Deletion leaves active execution alone');
  await page.getByRole('button',{name:'Stop current run',exact:true}).click();await page.waitForFunction(()=>document.querySelector('#job-stop').hidden);
  check(!(await api({command:'view',id})).job.active_run,'Deleted schedules still allow stopping their current execution');
- await page.locator('#jobs-deleted').check();await page.waitForFunction(()=>[...document.querySelectorAll('.job-card')].some(el=>el.textContent.includes('Deleted')));
+ await page.getByRole('button',{name:'Close job details'}).click();
+ await page.locator('#jobs-deleted').check();await page.waitForFunction(()=>[...document.querySelectorAll('.job-row')].some(el=>el.textContent.includes('Deleted')));
+ await page.locator('.job-card[href$="job='+id+'"]').click();
  check(!(await page.locator('#job-run').count()),'Deleted jobs have no run controls');
  check(errors.length===0,'No browser JavaScript errors');
  page.off('request',watch);return {surface,checks:checks.length,writes,job:id};
