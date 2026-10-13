@@ -50,7 +50,7 @@ test('artifact page and data routes require existing pairing and origin authenti
  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
  t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
  const call=(path,body,headers={})=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
- assert.equal((await call('/artifacts')).status,401);assert.equal((await call('/api/artifact-bootstrap')).status,401);
+ assert.equal((await call('/artifacts')).status,200);assert.equal((await call('/api/artifact-bootstrap')).status,401);
  assert.equal((await call('/api/bridge/artifacts')).status,401);
  const paired=await call('/api/pair',{code:store.pairing()});const headers={Cookie:paired.headers.get('set-cookie').split(';')[0]};
  assert.equal((await call('/api/artifact-bootstrap',null,headers)).status,200);

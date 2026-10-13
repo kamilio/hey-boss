@@ -16,14 +16,18 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  if(vapid)push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);
  app.use((req,res,next)=>{res.set({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"});if(req.method!=='GET'&&req.headers.origin&&req.headers.origin!==origin)return res.status(403).json({error:'Request origin is not allowed'});next();});
  const change=()=>{for(const res of listeners)res.write('data: '+JSON.stringify({revision:store.revision(),connected:Date.now()-bridgeSeen<30000})+'\n\n');};
- const auth=(req,res,next)=>{const secret=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('hb_session='))?.slice(11);req.device=secret?store.device(secret):null;if(!req.device)return res.status(401).json({error:'Pair this device to continue'});next();};
+ const device=req=>{const secret=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('hb_session='))?.slice(11);return secret?store.device(secret):null;};
+ const auth=(req,res,next)=>{req.device=device(req);if(!req.device)return res.status(401).json({error:'Pair this device to continue'});next();};
+ // A saved phone link must offer pairing, not strand the browser on JSON.
+ // Serve only the public shell; data and shared assets still require a session.
+ const pageAuth=(req,res,next)=>{req.device=device(req);if(!req.device)return res.sendFile(fileURLToPath(new URL('../dist/index.html',import.meta.url)));next();};
  const bridge=(req,res,next)=>{if(!equal(req.headers.authorization,'Bearer '+hubToken))return res.status(401).json({error:'Invalid bridge credentials'});bridgeSeen=Date.now();next();};
  const closeCheckpoint=checkpointRoutes(app,{store,bridge,enabled:checkpoint,hubToken,onRestore:()=>{
   const keys=store.db.prepare("SELECT value FROM metadata WHERE key='vapid'").get();
   if(vapid&&keys){Object.assign(vapid,JSON.parse(keys.value));push.setVapidDetails(vapid.subject,vapid.publicKey,vapid.privateKey);}
  }});
- const closeAgents=agentRoutes(app,{auth,bridge,store,now});
- const closeWeb=webRoutes(app,{auth,bridge});
+ const closeAgents=agentRoutes(app,{auth,pageAuth,bridge,store,now});
+ const closeWeb=webRoutes(app,{auth,pageAuth,bridge});
  app.use('/issue-web',auth,express.static(fileURLToPath(new URL('../dist/issue-web/',import.meta.url))));
  app.get('/healthz',(req,res)=>res.json({ok:true}));
  app.post('/api/bridge/pair-code',bridge,(req,res)=>res.json({code:store.pairing(),expiresIn:300}));
@@ -41,8 +45,8 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  app.post('/api/bridge/issue-projects',bridge,(req,res)=>{store.setIssueProjects(req.body.projects);res.json({ok:true});});
  app.get('/api/bridge/issues',bridge,(req,res)=>res.json({creations:store.pendingIssues()}));
  app.post('/api/bridge/issues/:id/result',bridge,(req,res)=>{store.finishIssue(req.params.id,req.body);change();res.json({ok:true});});
- app.get('/project-resource',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/resource.html',import.meta.url))));
- app.get('/artifacts',auth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/issue-web/artifacts.html',import.meta.url))));
+ app.get('/project-resource',pageAuth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/artifact-web/resource.html',import.meta.url))));
+ app.get('/artifacts',pageAuth,(req,res)=>res.sendFile(fileURLToPath(new URL('../dist/issue-web/artifacts.html',import.meta.url))));
  app.use('/agent-web',auth,express.static(fileURLToPath(new URL('../dist/agent-web/',import.meta.url))));
  app.use('/artifact-web',auth,express.static(fileURLToPath(new URL('../dist/artifact-web/',import.meta.url))));
  app.get('/api/artifact-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects(),connected:store.issueConnected()}));
