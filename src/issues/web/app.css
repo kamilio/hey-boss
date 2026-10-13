@@ -3072,7 +3072,7 @@ button.avatar.self:hover {
   inset: auto;
   margin: 0;
   box-sizing: border-box;
-  width: min(300px, calc(100vw - 16px));
+  width: min(328px, calc(100vw - 16px));
   max-height: calc(100dvh - 16px);
   overflow-y: auto;
   padding: 14px;
@@ -3085,8 +3085,19 @@ button.avatar.self:hover {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.assignment-card > strong { display: block; font-weight: 600; }
-.assignment-card-detail { display: block; margin: 3px 0 10px; color: var(--muted); font-size: 12px; }
+.assignment-card-heading { display: flex; align-items: center; gap: 10px; margin: 2px 2px 14px; }
+.assignment-card-heading strong { display: block; font-weight: 650; }
+.assignment-card-avatar { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 11px; background: var(--hover); }
+.assignment-card-avatar svg { width: 20px; height: 20px; }
+.assignment-card-detail { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.assignment-activity { display: flex; flex-direction: column; padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--hover); }
+.assignment-activity-status { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.assignment-activity-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.assignment-activity[data-live="true"] .assignment-activity-status { color: var(--green); }
+.assignment-activity[data-live="true"] .assignment-activity-status::before { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, transparent); }
+.assignment-runtime-label { color: var(--muted); font-size: 11px; margin-top: 16px; }
+.assignment-runtime { font-size: 32px; line-height: 1.3; font-weight: 600; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+.assignment-started { color: var(--muted); font-size: 11px; margin-top: 6px; }
 .assignment-card-action {
   display: flex;
   align-items: center;
@@ -3104,6 +3115,9 @@ button.avatar.self:hover {
   cursor: pointer;
 }
 .assignment-card-action:hover { background: var(--hover); }
+.assignment-card-primary { background: var(--accent-soft); color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+.assignment-card-primary:hover { background: color-mix(in srgb, var(--accent) 18%, var(--solid)); }
+.assignment-card-primary svg { color: inherit; }
 .assignment-card-action svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
 @media (max-width: 640px), (pointer: coarse) {
   .issue-row-end { grid-template-columns: 48px 44px; }
