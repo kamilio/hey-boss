@@ -145,6 +145,36 @@ if(typeof document!=='undefined') (()=>{
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
   let activeFile='', editingMarkdown=false, editorDraft='', codeMirrorInstance=null, editorScriptPromise=null, deletePromptSkill='';
   let actionError='', actorId='';
+  let editorContext=null, editorStatus='', skipDraftRestore=false;
+  const draftMemory=new Map();
+  const draftKey=(skill,file)=>'hey-boss-skill-draft:'+JSON.stringify([actorId,skill,file]);
+  function readDraft(key){
+    if(draftMemory.has(key))return draftMemory.get(key);
+    try{const value=JSON.parse(localStorage.getItem(key));if(typeof value?.content==='string'&&typeof value?.baseDigest==='string'){draftMemory.set(key,value);return value;}}catch{}
+    return null;
+  }
+  function writeDraft(key,value){
+    draftMemory.set(key,value);
+    try{localStorage.setItem(key,JSON.stringify(value));return true;}catch{return false;}
+  }
+  function removeDraft(key){draftMemory.delete(key);try{localStorage.removeItem(key);}catch{}}
+  function showEditorStatus(message){
+    editorStatus=message;
+    const el=$('[data-editor-status]');if(el)el.textContent=message;
+  }
+  function keepDraft(){
+    if(!editingMarkdown||!editorContext)return;
+    editorDraft=currentEditorContent();
+    const stored=writeDraft(editorContext.key,{content:editorDraft,baseDigest:editorContext.baseDigest});
+    showEditorStatus(stored?'Draft saved in this browser':'Draft is only in this tab · browser storage unavailable');
+  }
+  function beginEditor(skill,copy,file){
+    const key=draftKey(skill.key,file.path),draft=readDraft(key);
+    editorContext={key,skill:skill.key,file:file.path,baseDigest:draft?.baseDigest||copy.digest};
+    editorDraft=draft?.content??file.text;
+    editorStatus=draft?'Draft restored from this browser':'Changes are saved as a browser draft';
+    editingMarkdown=true;skipDraftRestore=false;
+  }
   const labels={codex:'Codex',claude:'Claude',agents:'Shared agents',project:'Repository',library:'Saved library'};
   function renderMachineTags(skill, includeMissing=false){
     const cov = machineCoverage(skill, data.machines);
@@ -252,7 +282,7 @@ if(typeof document!=='undefined') (()=>{
   function use(value,reset=false){
     data=value;skills=library(data);
     if(reset||!dirty){selected=new Set(data.selected);choices={...data.choices};maxWords=data.max_words||400;}
-    if(!skills.some(s=>s.key===active))active=skills[0]?.key||'';
+    if(!editingMarkdown&&!skills.some(s=>s.key===active))active=skills[0]?.key||'';
     render();
     clearTimeout(timer);if(data.busy)timer=setTimeout(poll,1200);
   }
@@ -278,6 +308,8 @@ if(typeof document!=='undefined') (()=>{
     renderList();
     if(!editingMarkdown)renderDetail();
     else document.querySelectorAll('[data-save-markdown], [data-cancel-editor]').forEach(button=>{button.disabled=!!busy;});
+    const draftConflict=$('[data-draft-conflict]');
+    if(draftConflict)draftConflict.hidden=!!skills.find(s=>s.key===active)?.versions.some(v=>v.digest===editorContext?.baseDigest);
     renderFeedback();
     const conflicts=unresolved(skills,selected,choices), count=global.filter(s=>selected.has(s.name)).length;
     $('#selection-summary').textContent=`${count} skill${count===1?'':'s'} selected${dirty?' · Unsaved changes':''}`;
@@ -305,25 +337,18 @@ if(typeof document!=='undefined') (()=>{
     const compareVersion = skill.versions.find(v => v.digest === compareDigest && v.digest !== baseVersion.digest) || (preview.digest !== baseVersion.digest ? preview : altDefault);
     const baseIdx = skill.versions.findIndex(v => v.digest === baseVersion.digest) + 1;
     const compIdx = skill.versions.findIndex(v => v.digest === compareVersion.digest) + 1;
-    const baseHosts = [...new Set(skill.copies.filter(c=>c.digest===baseVersion.digest).map(c=>c.host==='local'?'This machine':c.hostname))].join(', ');
-    const compHosts = [...new Set(skill.copies.filter(c=>c.digest===compareVersion.digest).map(c=>c.host==='local'?'This machine':c.hostname))].join(', ');
     const filesDiff = diffFiles(baseVersion, compareVersion);
     const totalAdd = filesDiff.reduce((sum,f)=>sum+f.additions,0);
     const totalDel = filesDiff.reduce((sum,f)=>sum+f.deletions,0);
     const changedFiles = filesDiff.filter(f => f.status !== 'unchanged');
-    return `<section class="skill-section gh-diff-section" aria-label="GitHub-style version diff">
+    return `<section class="skill-section gh-diff-section" aria-label="Version differences">
       <div class="gh-diff-toolbar">
         <div class="gh-diff-summary">
-          <strong>GitHub Diff</strong>
-          <span class="gh-diff-range">Version ${baseIdx} (${esc(baseHosts)}) → Version ${compIdx} (${esc(compHosts)})</span>
+          <strong>Version differences</strong>
+          <span class="gh-diff-range">Red: Version ${baseIdx} · Green: Version ${compIdx}</span>
           <span class="gh-diff-stats"><span class="diff-add-stat">+${totalAdd}</span> <span class="diff-del-stat">−${totalDel}</span></span>
         </div>
-        <div class="gh-diff-actions">
-          <button type="button" class="button small ${chosen?.digest===baseVersion.digest?'primary':''}" data-unify="${esc(baseVersion.digest)}" ${pending||data.busy?'disabled':''}>Keep Version ${baseIdx} (${esc(baseHosts)})</button>
-          <button type="button" class="button small ${chosen?.digest===compareVersion.digest?'primary':''}" data-unify="${esc(compareVersion.digest)}" ${pending||data.busy?'disabled':''}>Keep Version ${compIdx} (${esc(compHosts)})</button>
-        </div>
       </div>
-      <div data-rollout-feedback></div>
       ${changedFiles.map(file => `<div class="gh-diff-file">
         <div class="gh-diff-file-header">
           <span class="gh-diff-file-path">${icon('code')}<code>${esc(file.path)}</code> <small>(${esc(file.status)})</small></span>
@@ -348,6 +373,7 @@ if(typeof document!=='undefined') (()=>{
     const mdFiles = getMarkdownFiles(preview);
     if(!activeFile || !mdFiles.some(f=>f.path===activeFile)) activeFile = mdFiles[0]?.path || 'SKILL.md';
     const currentFileObj = mdFiles.find(f=>f.path===activeFile) || mdFiles[0] || {path:'SKILL.md',text:preview.text||''};
+    if(!editingMarkdown&&!skipDraftRestore&&readDraft(draftKey(skill.key,currentFileObj.path)))beginEditor(skill,preview,currentFileObj);
     const ignored = preview.ignored_files || [];
     const canDelete = skill.scope==='global' && skill.name!=='hey-boss';
     $('#skills-detail').innerHTML=`<div class="skill-detail-heading">
@@ -392,24 +418,24 @@ if(typeof document!=='undefined') (()=>{
             : `In sync across all ${cov.known.length || 1} machines`;
       })()}</span></div>
       <div data-rollout-feedback></div>
-      ${skill.versions.length>1?'<p class="skill-conflict-note">This skill differs across machines. Review the GitHub diff below and pick the version you want to keep everywhere.</p>':''}
+      ${skill.versions.length>1?'<p class="skill-conflict-note">This skill differs across machines. Review the differences below and pick the version you want to keep everywhere.</p>':''}
       <div class="skill-versions">${skill.versions.map((v,i)=>{
         const locations=skill.copies.filter(c=>c.digest===v.digest);
-        const hostsLabel=[...new Set(locations.map(c=>c.host==='local'?'This machine':c.hostname))].join(', ');
-        const agentsLabel=[...new Set(locations.map(c=>labels[c.agent]||c.agent))].join(' · ');
+        const used=locations.some(c=>c.agent!=='library');
+        const locationRows=[...new Set(locations.map(c=>c.host))].map(host=>{const copies=locations.filter(c=>c.host===host);return `<div><strong>${esc(host==='local'?'This machine':shortHost(host))}</strong><span>${esc(copies.map(c=>labels[c.agent]||c.agent).join(' · '))}</span></div>`;}).join('');
         return `<div class="skill-version ${preview.digest===v.digest?'is-previewing':''}">
           <button class="version-preview" data-preview="${esc(v.digest)}" aria-pressed="${preview.digest===v.digest}">
             <span class="version-symbol">V${i+1}</span>
-            <span><strong>${esc(hostsLabel)}</strong><small>${esc(agentsLabel)} · ${v.word_count||0} words${locations.every(c=>c.stale)?' · Last seen':''}</small></span>
+            <span><strong>${used?'Used by agents':'Saved copy only'}</strong><small>${v.word_count||0} words · ${preview.digest===v.digest?'Viewing this version':'View this version'}${locations.every(c=>c.stale)?' · Last seen':''}</small></span>
           </button>
+          <div class="version-locations">${locationRows}<details><summary>File paths</summary>${locations.map(c=>`<p>${esc(shortHost(c.host))} · ${esc(labels[c.agent]||c.agent)}<code>${esc(c.path)}</code></p>`).join('')}</details></div>
           ${skill.scope==='global'?(() => {
             const cov = machineCoverage(skill, data.machines);
             if (cov.allGreen && skill.versions.length === 1) {
               return `<div class="version-buttons"><span class="version-choose chosen">${icon('check')}Synced everywhere</span></div>`;
             }
-            const btnLabel = skill.versions.length > 1 ? 'Keep &amp; unify' : 'Distribute to all machines';
+            const btnLabel = skill.versions.length > 1 ? 'Use this version everywhere' : 'Distribute to all machines';
             return `<div class="version-buttons">
-              ${skill.versions.length > 1 ? `<button class="version-choose ${chosen?.digest===v.digest?'chosen':''}" data-choose="${esc(v.digest)}" ${pending||data.busy?'disabled':''} aria-label="Choose version ${i+1} of ${esc(skill.name)}">${chosen?.digest===v.digest?`${icon('check')}Selected`:'Select'}</button>` : ''}
               <button class="button small primary version-unify" data-unify="${esc(v.digest)}" ${pending||data.busy?'disabled':''} title="Sync this version to all machines">${btnLabel}</button>
             </div>`;
           })():''}
@@ -423,18 +449,21 @@ if(typeof document!=='undefined') (()=>{
         <span>Open or edit with the Markdown editor</span>
       </div>
       ${mdFiles.length > 1 ? `<div class="skill-md-tabs" role="tablist" aria-label="Skill Markdown files">
-        ${mdFiles.map(f=>`<button type="button" role="tab" class="skill-md-tab ${f.path===currentFileObj.path?'is-active':''}" aria-selected="${f.path===currentFileObj.path}" data-md-file="${esc(f.path)}">${icon('docs')||icon('code')}<span>${esc(f.path)}</span></button>`).join('')}
+        ${mdFiles.map(f=>`<button type="button" role="tab" class="skill-md-tab ${f.path===currentFileObj.path?'is-active':''}" aria-selected="${f.path===currentFileObj.path}" data-md-file="${esc(f.path)}">${icon('docs')||icon('code')}<span>${esc(f.path)}${readDraft(draftKey(skill.key,f.path))?' · Draft':''}</span></button>`).join('')}
       </div>` : ''}
+      ${!editingMarkdown&&readDraft(draftKey(skill.key,currentFileObj.path))?'<p class="skill-draft-notice">You have a draft saved in this browser. <button class="button small" data-toggle-editor>Resume editing</button></p>':''}
       ${editingMarkdown ? `<div class="skill-markdown-editor-card">
         <div class="skill-markdown-editor-toolbar">
           <strong>Editing <code>${esc(currentFileObj.path)}</code></strong>
           <div class="skill-markdown-editor-actions">
-            <button type="button" class="button small" data-cancel-editor>Cancel</button>
+            <button type="button" class="button small" data-cancel-editor>Close editor</button>
             <button type="button" class="button small" data-save-markdown="local" ${pending||data.busy?'disabled':''}>Save</button>
             <button type="button" class="button small primary" data-save-markdown="distribute" ${pending||data.busy?'disabled':''}>Save &amp; unify everywhere</button>
           </div>
         </div>
         ${skill.name!=='AGENTS.md'&&currentFileObj.path==='SKILL.md'?'<p class="skill-edit-hint">Changing the frontmatter <code>name</code> also renames the skill folder when you save.</p>':''}
+        <p class="skill-editor-status" data-editor-status role="status" aria-live="polite">${esc(editorStatus)}</p>
+        <div class="skill-draft-notice" data-draft-conflict ${skill.versions.some(v=>v.digest===editorContext?.baseDigest)?'hidden':''}>The saved version changed. Review the versions above, then <button class="button small" data-rebase-draft>Use viewed version as save base</button>. Your draft text stays unchanged.</div>
         <div id="skill-codemirror-host" class="skill-codemirror-host"></div>
         <textarea id="skill-markdown-textarea" class="skill-markdown-textarea" aria-label="Markdown content for ${esc(currentFileObj.path)}" spellcheck="true">${esc(editorDraft)}</textarea>
       </div>` : `<div class="skill-source-viewer">
@@ -449,12 +478,13 @@ if(typeof document!=='undefined') (()=>{
     renderFeedback();
     if(editingMarkdown){
       const host=$('#skill-codemirror-host'), ta=$('#skill-markdown-textarea');
-      if(ta) ta.oninput=()=>{editorDraft=ta.value;};
+      if(ta) ta.oninput=keepDraft;
       loadEditorBundle().then(()=>{
         if(!host||!host.isConnected||!editingMarkdown)return;
         if(ta)ta.hidden=true;codeMirrorInstance=window.HeyBossArtifactEditor(host,editorDraft,()=>{
           editorDraft=codeMirrorInstance.content();
           if(ta)ta.value=editorDraft;
+          keepDraft();
         });
       }).catch(()=>{});
     }
@@ -466,17 +496,20 @@ if(typeof document!=='undefined') (()=>{
     if(delRow){
       e.stopPropagation();
       const s=skills.find(x=>x.name===delRow.dataset.deleteRow&&x.scope==='global');
-      if(s){active=s.key;editingMarkdown=false;renderList();renderDetail();openDeleteSkillModal(s.name,delRow);}
+      if(s){keepDraft();skipDraftRestore=false;active=s.key;editingMarkdown=false;renderList();renderDetail();openDeleteSkillModal(s.name,delRow);}
       return;
     }
     const b=e.target.closest('[data-open]');
-    if(b){active=b.dataset.open;previewDigest='';compareDigest='';activeFile='';editingMarkdown=false;deletePromptSkill='';const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);history.replaceState(null,'',`#${params}`);renderList();renderDetail();if(innerWidth<850)$('#skills-detail').scrollIntoView({behavior:'smooth',block:'start'});}
+    if(b){keepDraft();skipDraftRestore=false;active=b.dataset.open;previewDigest='';compareDigest='';activeFile='';editingMarkdown=false;deletePromptSkill='';const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);params.delete('file');history.replaceState(null,'',`#${params}`);renderList();renderDetail();if(innerWidth<850)$('#skills-detail').scrollIntoView({behavior:'smooth',block:'start'});}
   };
   $('#skills-list').onchange=e=>{const name=e.target.dataset.select;if(name){e.target.checked?selected.add(name):selected.delete(name);changes();}};
   $('#skills-detail').onclick=async e=>{
     if(e.target.closest('[data-refresh-inventory]')){await action('scan');return;}
     const skill=skills.find(s=>s.key===active);
     if(!skill)return;
+    if(e.target.closest('[data-rebase-draft]')&&editorContext){
+      editorContext.baseDigest=(skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0]).digest;keepDraft();renderDetail();return;
+    }
     const choose=e.target.closest('[data-choose]'), unify=e.target.closest('[data-unify]'), preview=e.target.closest('[data-preview]'), line=e.target.closest('[data-line]');
     const mdTab=e.target.closest('[data-md-file]'), toggleEdit=e.target.closest('[data-toggle-editor]'), editFile=e.target.closest('[data-edit-file]');
     const cancelEdit=e.target.closest('[data-cancel-editor]'), saveMd=e.target.closest('[data-save-markdown]');
@@ -499,6 +532,7 @@ if(typeof document!=='undefined') (()=>{
       return;
     }
     if(preview){
+      keepDraft();skipDraftRestore=true;
       previewDigest=preview.dataset.preview;
       compareDigest=preview.dataset.preview;
       editingMarkdown=false;
@@ -506,11 +540,13 @@ if(typeof document!=='undefined') (()=>{
       return;
     }
     if(mdTab){
-      if(editingMarkdown) editorDraft=currentEditorContent();
+      keepDraft();
       activeFile=mdTab.dataset.mdFile;
+      const params=new URLSearchParams(location.hash.slice(1));params.set('file',activeFile);history.replaceState(null,'','#'+params);
       const previewCopy=skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0];
       const f=getMarkdownFiles(previewCopy).find(x=>x.path===activeFile);
-      if(f)editorDraft=f.text;
+      if(f&&editingMarkdown)beginEditor(skill,previewCopy,f);
+      skipDraftRestore=false;
       renderDetail();
       return;
     }
@@ -519,12 +555,15 @@ if(typeof document!=='undefined') (()=>{
       activeFile=targetPath;
       const previewCopy=skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0];
       const f=getMarkdownFiles(previewCopy).find(x=>x.path===activeFile)||getMarkdownFiles(previewCopy)[0];
-      editorDraft=f?f.text:(previewCopy.text||'');
-      editingMarkdown=true;
+      if(editingMarkdown&&editorContext?.file===targetPath)return;
+      keepDraft();
+      beginEditor(skill,previewCopy,f||{path:targetPath,text:previewCopy.text||''});
       renderDetail();
+      $('.skill-markdown-editor-card')?.scrollIntoView({behavior:'smooth',block:'center'});
       return;
     }
     if(cancelEdit){
+      keepDraft();skipDraftRestore=true;
       editingMarkdown=false;
       renderDetail();
       return;
@@ -533,8 +572,8 @@ if(typeof document!=='undefined') (()=>{
       const content=currentEditorContent();
       const distribute=saveMd.dataset.saveMarkdown==='distribute';
       const previewCopy=skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0];
-      editorDraft=content;
-      await action('save_file',{skill:skill.name,file_path:activeFile||'SKILL.md',content,base_digest:previewCopy?.digest||'',distribute});
+      keepDraft();
+      await action('save_file',{skill:skill.name,file_path:activeFile||'SKILL.md',content,base_digest:editorContext?.baseDigest||previewCopy?.digest||'',distribute});
       return;
     }
     if(openDir){
@@ -558,16 +597,44 @@ if(typeof document!=='undefined') (()=>{
     }
   };
   $('#skills-detail').onchange=e=>{if(e.target.id==='skill-word-budget'){if(!e.target.reportValidity())return;maxWords=Number(e.target.value);dirty=true;$('#skills-reset').hidden=false;$('#selection-summary').textContent+=' · Unsaved policy';}};
-  $('#skills-reset').onclick=()=>{dirty=false;previewDigest='';editingMarkdown=false;deletePromptSkill='';poll();};
+  $('#skills-reset').onclick=()=>{keepDraft();skipDraftRestore=false;dirty=false;previewDigest='';editingMarkdown=false;deletePromptSkill='';poll();};
   async function action(kind, extra={}){
-    if(pending||data.busy)return;pending=true;actionError='';$('#skills-error').hidden=true;render();
+    if(pending||data.busy)return;
+    const savingContext=kind==='save_file'?editorContext:null;
+    pending=true;actionError='';$('#skills-error').hidden=true;
+    if(savingContext)showEditorStatus('Saving… Your draft is preserved.');
+    render();
     try{
       const payload={action:kind,revision:data.revision,selected:[...selected],choices,max_words:maxWords,...extra};
       const value=await request(payload);
-      if(kind==='save_file'){
-        editingMarkdown=false;
-        if(value.saved_skill){
-          active='global:'+value.saved_skill;previewDigest='';compareDigest='';
+      if(savingContext){
+        const savedName=value.saved_skill||extra.skill, savedKey='global:'+savedName;
+        const sameEditor=editingMarkdown&&editorContext===savingContext;
+        const draft=readDraft(savingContext.key);
+        const newer=draft&&draft.content!==extra.content;
+        const digest=value.choices?.[savedName]||savingContext.baseDigest;
+        if(newer){
+          const key=draftKey(savedKey,savingContext.file);
+          if(key!==savingContext.key)removeDraft(savingContext.key);
+          writeDraft(key,{...draft,baseDigest:digest});
+          if(sameEditor){editorContext={...savingContext,key,skill:savedKey,baseDigest:digest};showEditorStatus('Earlier changes saved · newer edits kept as a draft');}
+        }else removeDraft(savingContext.key);
+        const keys=new Set(draftMemory.keys());
+        try{for(const key of Object.keys(localStorage))keys.add(key);}catch{}
+        for(const key of keys){
+          if(!key.startsWith('hey-boss-skill-draft:')||key===savingContext.key)continue;
+          try{
+            const [actor,skill,file]=JSON.parse(key.slice('hey-boss-skill-draft:'.length));
+            if(actor!==actorId||skill!==savingContext.skill)continue;
+            const other=readDraft(key);if(!other)continue;
+            const next=draftKey(savedKey,file);
+            writeDraft(next,{...other,baseDigest:other.baseDigest===savingContext.baseDigest?digest:other.baseDigest});
+            if(next!==key)removeDraft(key);
+          }catch{}
+        }
+        if(sameEditor){
+          editingMarkdown=!!newer;skipDraftRestore=false;
+          active=savedKey;previewDigest='';compareDigest='';
           const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);
           history.replaceState(null,'','#'+params);
         }
@@ -575,12 +642,13 @@ if(typeof document!=='undefined') (()=>{
       if(kind==='distribute'||kind==='save_file'||kind==='delete')dirty=false;
       use(value,kind==='distribute'||kind==='save_file'||kind==='delete');
     }
-    catch(e){fail(e);if(!data.busy)timer=setTimeout(poll,1200);}
+    catch(e){fail(e);if(savingContext&&editingMarkdown)showEditorStatus('Could not save · draft preserved. '+e.message);if(!data.busy)timer=setTimeout(poll,1200);}
     finally{pending=false;render();}
   }
   $('#skills-scan').onclick=()=>action('scan');$('#skills-distribute').onclick=()=>action('distribute');
   document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.metaKey&&!e.ctrlKey&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){e.preventDefault();$('#skills-search').focus();}});
-  window.addEventListener('beforeunload',e=>{if(dirty||editingMarkdown){e.preventDefault();e.returnValue='';}});
+  window.addEventListener('pagehide',keepDraft);
+  window.addEventListener('beforeunload',e=>{keepDraft();if(dirty||editingMarkdown){e.preventDefault();e.returnValue='';}});
   async function start(){
     HeyBossUI.icons();$('#nav-skills')?.setAttribute('aria-current','page');
     const bootResponse=await fetch('/api/bootstrap',{cache:'no-store',signal:AbortSignal.timeout(10000)}),boot=await bootResponse.json();
@@ -605,6 +673,7 @@ if(typeof document!=='undefined') (()=>{
       picker.update(projects,null);
     }
     active=new URLSearchParams(location.hash.slice(1)).get('skill')||'';
+    activeFile=new URLSearchParams(location.hash.slice(1)).get('file')||'';
     use(await request(),true);if(!data.busy&&!(data.machines||[]).some(m=>m.scanned_at))await action('scan');
   }
   start().catch(fail);

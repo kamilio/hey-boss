@@ -111,3 +111,14 @@
 .skill-rollout-feedback{padding:12px 14px;margin:12px 0;border:1px solid var(--line);border-radius:8px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.skill-rollout-feedback p{margin:0 0 6px}.skill-rollout-feedback p:last-child{margin-bottom:0}.skill-rollout-feedback.has-error{border-color:var(--danger);color:var(--danger)}.skill-rollout-feedback .button{margin-top:6px}
 
 .skill-edit-hint{margin:0;padding:10px 14px;color:var(--muted);font-size:12px;line-height:1.5;border-bottom:1px solid var(--line)}
+.skill-editor-status,.skill-draft-notice{margin:0;padding:12px 14px;font-size:12px;line-height:1.5;color:var(--accent);background:var(--accent-soft);border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.skill-version{flex-wrap:wrap;align-items:flex-start;gap:14px}
+.version-preview{flex:1 1 160px;min-height:36px}
+.version-locations{flex:2 1 230px;min-width:0;font-size:11px;line-height:1.6}
+.version-locations>div{display:flex;flex-direction:column;margin-bottom:7px}
+.version-locations span,.version-locations summary{color:var(--muted)}
+.version-locations summary{cursor:pointer;font-size:10px}
+.version-locations code{display:block;overflow-wrap:anywhere;font-size:10px}
+.version-locations p{margin:8px 0}
+.version-buttons{margin-left:auto}
+@media(max-width:600px){.version-preview,.version-locations{flex:auto}.version-buttons{margin-left:0}.version-unify{white-space:normal}}
