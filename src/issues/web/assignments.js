@@ -209,7 +209,19 @@
       update(ctx);
     });
   }
-  const api = {current, owner, selectedTarget, describe, render, status, fetchOverview, initWatcher};
+  function runtime(entry, now = Date.now()) {
+    const run = entry.run || {}, heartbeat = entry.machine?.heartbeat * 1000;
+    const finished = Number.isFinite(run.finished_at);
+    const online = entry.online === true && entry.machine?.state === 'connected' && Number.isFinite(heartbeat) && now - heartbeat <= 15000;
+    const live = !finished && online;
+    const end = finished ? run.finished_at : live ? now : heartbeat;
+    const valid = Number.isFinite(run.started_at) && Number.isFinite(end) && end >= run.started_at;
+    const seconds = valid ? Math.floor((end - run.started_at) / 1000) : 0, pad = n => String(n).padStart(2, '0');
+    const duration = !valid ? 'Unavailable' : seconds < 60 ? seconds + 's' : seconds < 3600 ? Math.floor(seconds / 60) + 'm ' + pad(seconds % 60) + 's' : seconds < 86400 ? Math.floor(seconds / 3600) + 'h ' + pad(Math.floor(seconds / 60) % 60) + 'm' : Math.floor(seconds / 86400) + 'd ' + pad(Math.floor(seconds / 3600) % 24) + 'h';
+    const label = !finished && !online ? 'Last seen' : ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',approval_required:'Needs approval',needs_input:'Needs your answer',blocked:'Needs attention',failed:'Failed',interrupted:'Interrupted',stopped:'Stopped',cancelled:'Stopped',timed_out:'Interrupted',attempt_held:'Pickup paused',infrastructure_blocked:'Needs attention'})[run.state] || 'Status unknown';
+    return {duration, label, live, caption:finished ? 'Total runtime' : live ? 'Elapsed time' : 'Last known runtime'};
+  }
+  const api = {current, owner, selectedTarget, describe, render, status, fetchOverview, initWatcher, runtime};
   if (typeof module !== "undefined") module.exports = api;
   else root.IssueAssignments = api;
 })(globalThis);

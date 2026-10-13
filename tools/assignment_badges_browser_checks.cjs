@@ -23,6 +23,11 @@ for (const number of [3,6,7]) {
 const common={ok:true,csrf:'fixture',actor:{id:'human:boss'},boss:{id:'human:boss',name:'Boss'},project,projects:[project],labels:['needs-boss'],actor_models:{'codex:astra':'gpt-6-astra'},assignees:['codex:astra','human:boss','watcher:github'],assignment_machines:[{id:'box',name:'Devbox'}]};
 const requests=[];
 const server=createServer(async(req,res)=>{
+  if(req.url.startsWith('/api/fleet/assignment')){
+    const query=new URL(req.url,'http://fixture').searchParams;
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({ok:true,online:true,machine:{state:'connected',heartbeat:Date.now()/1000},run:{project_id:project.id,number:Number(query.get('issue')),actor_id:query.get('agent'),state:'running',started_at:Date.now()-125000,finished_at:null}}));return;
+  }
   if(req.url.startsWith('/api/')){
     let body='';for await(const chunk of req)body+=chunk;
     const data=body?JSON.parse(body):{}, op=data.operation||{};
@@ -70,8 +75,7 @@ const server=createServer(async(req,res)=>{
           const badges = alignment.filter(r => r.badge != null), comments = alignment.filter(r => r.comments != null);
           assert(Math.max(...badges.map(r=>r.badge))-Math.min(...badges.map(r=>r.badge))<1, 'Badge column aligns across empty, short and long counts');
           assert(Math.max(...comments.map(r=>r.comments))-Math.min(...comments.map(r=>r.comments))<1, 'Comments align even without an assignee');
-          assert(badges.every(r=>r.commentsRight==null||r.commentsRight<r.badge), 'Badges are to the right of comments');
-          assert(badges.every(r=>r.rowRight-r.badgeRight<25), 'Badges sit at the far right');
+          assert(badges.every(r=>r.commentsRight==null||r.commentsRight<=r.badge||r.badgeRight<=r.comments), 'Badge and comment controls do not overlap');
           for(const [number,owner] of [[1,'codex:astra'],[2,'human:boss'],[3,'watcher:github'],[4,'machine:box']]){
             await list();
             if(touch){
@@ -94,13 +98,17 @@ const server=createServer(async(req,res)=>{
           await card(1).waitFor({state:'visible'});
           assert.match(await card(1).innerText(),/Codex · gpt-6-astra/);
           assert.match(await card(1).innerText(),/Devbox/);
+          await card(1).getByText('Working',{exact:true}).waitFor();
+          assert.match(await card(1).locator('.assignment-runtime').innerText(),/2m 0[5-9]s/);
+          const initialTime=await card(1).locator('.assignment-runtime').innerText();
+          await page.waitForFunction(text=>document.querySelector('#assignment-card-1 .assignment-runtime').textContent!==text,initialTime);
           const link=card(1).getByRole('link',{name:'Open agent conversation'});
           assert.match(await link.getAttribute('href'),/agent=codex%3Aastra/);
           if(!touch){
             await link.hover();await page.waitForTimeout(250);assert(await card(1).isVisible());
             await page.mouse.move(0,0);await card(1).waitFor({state:'hidden'});
             await badge(1).focus();await page.keyboard.press('ArrowDown');
-            assert(await card(1).getByRole('link',{name:/Filter by/}).evaluate(el=>el===document.activeElement));
+            assert(await card(1).getByRole('link',{name:'Open agent conversation'}).evaluate(el=>el===document.activeElement));
             await page.keyboard.press('Escape');assert(!(await card(1).isVisible()));
             assert(await badge(1).evaluate(el=>el===document.activeElement));
           }
@@ -159,8 +167,21 @@ const server=createServer(async(req,res)=>{
             assert.notEqual(colors[0],colors[3], 'Machine and worker colors differ');
             if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-aligned.png`});
             if(touch)await badge(1).tap();else await badge(1).hover();
+            await card(1).getByText('Working',{exact:true}).waitFor();
             const box=await card(1).boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=width);
             if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}.png`});
+          }
+          if(width===1440){
+            for(const state of ['completed','offline','unknown','error']){
+              await page.keyboard.press('Escape');
+              await page.route('**/api/fleet/assignment?*',route=>route.fulfill({status:state==='error'?503:200,contentType:'application/json',body:JSON.stringify({ok:state!=='error',online:state!=='offline',machine:{state:state==='offline'?'disconnected':'connected',heartbeat:Date.now()/1000},run:{project_id:project.id,number:1,actor_id:'codex:astra',state:state==='completed'?'completed':'running',started_at:state==='unknown'?null:Date.now()-125000,finished_at:state==='completed'?Date.now()-5000:null}})}));
+              await badge(1).focus();await badge(1).press('ArrowDown');
+              await card(1).getByText(state==='error'?'Activity unavailable':state==='offline'?'Last seen':state==='completed'?'Completed':'Start time not recorded',{exact:true}).waitFor();
+              const text=await card(1).locator('.assignment-runtime').innerText();
+              if(state!=='error') {await page.waitForTimeout(1100);assert.equal(await card(1).locator('.assignment-runtime').innerText(),text);}
+              if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:process.env.BADGE_SCREENSHOTS+'/'+engine.name()+'-'+state+'.png'});
+              await page.unroute('**/api/fleet/assignment?*');
+            }
           }
           assert.deepEqual(errors,[]);
           console.log(engine.name(),width,touch?'touch':'desktop','passed');

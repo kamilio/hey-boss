@@ -421,9 +421,10 @@ function listAssignment(issue) {
   const badge = '<span class="assignment-avatar" data-assignment-icon="' + symbol + '">' + icon(symbol) + '</span>';
   const trigger = historical ? '<button type="button" ' + attrs + ' aria-label="Agent conversation details">' + badge + '</button>'
     : '<a ' + attrs + ' href="' + esc(href) + '" aria-label="Filter by ' + esc(description.label) + '; show assignment details">' + badge + '</a>';
-  return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(description.detail) + '</span>'
+  const activity = !historical && trace ? '<span class="assignment-activity" data-assignment-agent="' + esc(actor) + '" data-assignment-issue="' + issue.number + '"><span class="assignment-activity-status">Loading activity…</span><span class="assignment-runtime-label">Elapsed time</span><span class="assignment-runtime">—</span><span class="assignment-started">Checking this attempt</span></span>' : '';
+  return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><span class="assignment-card-heading"><span class="assignment-card-avatar">' + icon(symbol) + '</span><span><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(activity ? a.machine_name || a.machine || 'Agent session' : description.detail) + '</span></span></span>' + activity
+    + (trace ? '<a class="assignment-card-action assignment-card-primary" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
     + (historical ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
-    + (trace ? '<a class="assignment-card-action" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
     + (watching ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')
     + '</span></span>';
 }
@@ -433,6 +434,9 @@ function closeAssignmentCard(restoreFocus = false) {
   clearTimeout(assignmentCardTimer);
   if (!assignmentCardContext) return;
   const {trigger, card} = assignmentCardContext;
+  clearInterval(assignmentCardContext.clock);
+  clearTimeout(assignmentCardContext.refresh);
+  assignmentCardContext.request?.abort();
   assignmentCardContext = null;
   card.hidePopover();
   trigger.setAttribute('aria-expanded', 'false');
@@ -450,12 +454,60 @@ function openAssignmentCard(trigger) {
   assignmentCardContext = {trigger, card};
   trigger.setAttribute('aria-expanded', 'true');
   card.showPopover();
+  positionAssignmentCard();
+  if (card.querySelector('.assignment-activity')) {
+    const context = assignmentCardContext;
+    loadAssignmentActivity(context);
+    context.clock = setInterval(() => { if (!document.hidden && context.entry) renderAssignmentActivity(context); }, 1000);
+  }
+}
+function positionAssignmentCard() {
+  const {trigger, card} = assignmentCardContext;
   const anchor = trigger.getBoundingClientRect(), bounds = card.getBoundingClientRect();
   const beside = anchor.left >= bounds.width + 16;
   card.style.left = Math.max(8, Math.min(beside ? anchor.left - bounds.width - 8 : anchor.right - bounds.width, innerWidth - bounds.width - 8)) + 'px';
   const top = beside ? anchor.top : anchor.bottom + bounds.height + 4 <= innerHeight - 8 ? anchor.bottom + 4 : anchor.top - bounds.height - 4;
   card.style.top = Math.max(8, Math.min(top, innerHeight - bounds.height - 8)) + 'px';
 }
+function renderAssignmentActivity(context) {
+  if (assignmentCardContext !== context) return;
+  const activity = $('.assignment-activity', context.card), runtime = IssueAssignments.runtime(context.entry);
+  activity.dataset.live = runtime.live;
+  $('.assignment-activity-status', activity).textContent = runtime.label;
+  $('.assignment-runtime-label', activity).textContent = runtime.caption;
+  $('.assignment-runtime', activity).textContent = runtime.duration;
+  const started = context.entry.run.started_at;
+  $('.assignment-started', activity).textContent = Number.isFinite(started) ? 'Started ' + new Date(started).toLocaleString(undefined, {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'Start time not recorded';
+  positionAssignmentCard();
+}
+async function loadAssignmentActivity(context) {
+  if (assignmentCardContext !== context) return;
+  if (document.hidden) { context.refresh = setTimeout(() => loadAssignmentActivity(context), 5000); return; }
+  const activity = $('.assignment-activity', context.card);
+  context.request = new AbortController();
+  const timeout = setTimeout(() => context.request.abort(), 10000);
+  try {
+    const query = new URLSearchParams({project:model.project.id,issue:activity.dataset.assignmentIssue,agent:activity.dataset.assignmentAgent});
+    const response = await fetch('/api/fleet/assignment?' + query, {signal:context.request.signal});
+    const entry = await response.json();
+    if (!response.ok || !entry.run || entry.run.project_id !== model.project.id || entry.run.number !== Number(activity.dataset.assignmentIssue) || entry.run.actor_id !== activity.dataset.assignmentAgent) throw Error('Activity unavailable');
+    if (assignmentCardContext !== context) return;
+    context.entry = entry;
+    renderAssignmentActivity(context);
+  } catch {
+    if (assignmentCardContext !== context) return;
+    context.entry = null;
+    activity.dataset.live = 'false';
+    $('.assignment-activity-status', activity).textContent = 'Activity unavailable';
+    $('.assignment-runtime', activity).textContent = '—';
+    $('.assignment-started', activity).textContent = 'Retrying · Conversation is still available';
+    positionAssignmentCard();
+  } finally {
+    clearTimeout(timeout);
+    if (assignmentCardContext === context) context.refresh = setTimeout(() => loadAssignmentActivity(context), 5000);
+  }
+}
+window.addEventListener('pagehide', () => closeAssignmentCard());
 function assignmentContains(target) {
   return target instanceof Node && assignmentCardContext && (assignmentCardContext.trigger.contains(target) || assignmentCardContext.card.contains(target));
 }
