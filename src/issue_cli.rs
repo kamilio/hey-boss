@@ -405,7 +405,7 @@ enum Action {
     },
     /// Assign to github, boss, unassigned, or machine:MACHINE_ID.
     #[command(
-        after_help = "After handing your claimed task to Ready, run `hey-boss issue assign NUMBER github` to enable its watcher while preserving Ready and dependent usability.\nThe CLI guards the current version and uses the supervisor tunnel on companions.\nAnother owner's handoff requires Boss to assign GitHub in the web UI; do not reopen or unassign it.\nFor uncertain results, retry the identical command with the same --request-id."
+        after_help = "After handing your claimed task to Ready, run `hey-boss issue assign NUMBER github` to enable its watcher while preserving Ready and dependent usability.\nThe CLI guards the current version and uses the supervisor tunnel on companions.\nAnother owner's handoff requires Boss to assign GitHub in the web UI. Boss-owned work can return to the queue with `hey-boss issue unassign NUMBER`.\nFor uncertain results, retry the identical command with the same --request-id."
     )]
     Assign {
         number: i64,
@@ -452,7 +452,7 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
-    /// Remove your assignment, leaving the issue open.
+    /// Remove your or Boss's assignment, leaving the issue open.
     Unassign {
         number: i64,
         /// Explicitly remove another session's claim.
@@ -1251,6 +1251,7 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Request { .. }
                 | Action::Allocation { .. }
                 | Action::Assign { .. }
+                | Action::Unassign { force: false, .. }
                 | Action::Ready { .. }
                 | Action::Close { .. }
                 | Action::Reopen { .. }
