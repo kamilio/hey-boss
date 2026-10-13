@@ -310,7 +310,12 @@ fn control_socket(home: &Path, host: &str) -> PathBuf {
         .join(format!("ssh-{:016x}.sock", hash.finish()))
 }
 pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
-    if host == "local" && input["action"] == "rename" {
+    if host == "local"
+        && matches!(
+            input["action"].as_str(),
+            Some("rename" | "apply_copy" | "apply_copies")
+        )
+    {
         return super::manager_rename::apply(home, input);
     }
     let temp = crate::admin::Temporary::new()?;
@@ -343,7 +348,12 @@ pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value>
             "--",
             host,
         ]);
-        if input["action"] == "rename" {
+        if matches!(
+            input["action"].as_str(),
+            Some("apply_copy" | "apply_copies")
+        ) {
+            c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-copy'"#);
+        } else if input["action"] == "rename" {
             c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-rename'"#);
         } else {
             c.arg(format!("python3 -c {}", quote(TRANSPORT)));
@@ -952,15 +962,47 @@ pub fn act(action: Action) -> Result<Value> {
             state.choices.remove(&action.skill);
             json!({"scan":scan,"source":source})
         } else {
-            transport(
+            let relative = if action.file_path.is_empty()
+                || (action.skill == "AGENTS.md" && action.file_path == "AGENTS.md")
+            {
+                "SKILL.md"
+            } else {
+                &action.file_path
+            };
+            let path = Path::new(relative);
+            if !matches!(
+                path.extension().and_then(|p| p.to_str()),
+                Some("md" | "markdown")
+            ) {
+                return Err(Error::invalid("Only Markdown files can be edited"));
+            }
+            let mut source = base.clone();
+            let mut files = source["files"]
+                .as_array()
+                .cloned()
+                .ok_or_else(|| Error::invalid("Missing skill files"))?;
+            files.retain(|f| f["path"] != relative);
+            files.push(
+                json!({"path":relative,"data":STANDARD.encode(&action.content),"executable":false}),
+            );
+            files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+            source["files"] = json!(files);
+            source["digest"] = json!(super::manager_rename::digest(&source["files"])?);
+            if relative == "SKILL.md" {
+                source["text"] = json!(action.content);
+            }
+            let expected = state
+                .machines
+                .iter()
+                .find(|m| m["host"] == "local")
+                .map(|m| m["copies"].clone())
+                .unwrap_or(json!([]));
+            let scan = transport(
                 &home,
                 "local",
-                &json!({
-                    "action": "save", "skill": action.skill, "base_files": base["files"],
-                    "file_path": if action.file_path.is_empty() { "SKILL.md" } else { &action.file_path },
-                    "content": action.content,
-                }),
-            )?
+                &json!({"action":"apply_copy","source":source,"expected":expected}),
+            )?;
+            json!({"scan":scan,"source":source})
         };
         let source = saved["source"].clone();
         let new_digest = source["digest"].as_str().unwrap_or("").to_owned();
@@ -1087,7 +1129,6 @@ pub fn act(action: Action) -> Result<Value> {
             action.selected.clone()
         };
         let sources = chosen_sources(&state, &target_skills, &action.choices)?;
-        save_library(&home, &sources)?;
         if !action.skill.is_empty() {
             let mut merged = super::selected_skills(&home);
             merged.extend(action.selected.iter().cloned());
@@ -1209,31 +1250,9 @@ fn run_delete(home: &Path, hosts: &[String], skill: &str) {
 }
 
 fn install(home: &Path, host: &str, input: &Value) -> Result<Value> {
-    let apply = || -> Result<Value> {
-        let mut ordinary = Vec::new();
-        let mut renamed = None;
-        for source in input["sources"].as_array().into_iter().flatten() {
-            if source["previous_names"].is_array() {
-                renamed = Some(transport(
-                    home,
-                    host,
-                    &json!({"action":"rename","source":source,
-                    "previous_names":source["previous_names"],"expected":input["expected"]}),
-                )?);
-            } else {
-                ordinary.push(source.clone());
-            }
-        }
-        if ordinary.is_empty()
-            && let Some(scan) = renamed
-        {
-            return Ok(scan);
-        }
-        let mut request = input.clone();
-        request["sources"] = json!(ordinary);
-        transport(home, host, &request)
-    };
-    match apply() {
+    let mut request = input.clone();
+    request["action"] = json!("apply_copies");
+    match transport(home, host, &request) {
         Err(error) if error.to_string().contains("changed since scanning") => {
             // Refresh the conflicting copies for review, but never retry a write
             // against content the user has not seen yet.
@@ -1403,6 +1422,57 @@ mod tests {
         .unwrap();
         assert!(applied["error"].is_null());
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Original\n");
+    }
+
+    #[test]
+    fn distribution_updates_saved_library_copies_too() {
+        let temp = crate::admin::Temporary::new().unwrap();
+        for root in [".codex", ".agents", ".claude", ".hey-boss"] {
+            let path = temp.0.join(root).join("skills/example/SKILL.md");
+            atomic_write(
+                &path,
+                b"---\nname: example\ndescription: Fixture\n---\nOld version\n",
+            )
+            .unwrap();
+        }
+        let before = transport(&temp.0, "local", &json!({"action":"scan"})).unwrap();
+        let source = super::super::manager_rename::renamed_source(
+            &before["copies"][0],
+            "example",
+            "---\nname: example\ndescription: Fixture\n---\nUpdated version\n",
+        )
+        .unwrap();
+        let result = install(
+            &temp.0,
+            "local",
+            &json!({"action":"install","sources":[source.clone()],"expected":before["copies"]}),
+        )
+        .unwrap();
+        assert!(result["error"].is_null());
+        let copies = result["copies"].as_array().unwrap();
+        assert_eq!(copies.len(), 4);
+        assert!(
+            copies.iter().all(|c| c["digest"] == source["digest"]),
+            "Saved library must match installed agent copies"
+        );
+        let backups = fs::read_dir(temp.0.join(".hey-boss/skill-backups")).unwrap();
+        assert!(
+            backups.filter_map(|e| e.ok()).any(|e| {
+                fs::read_to_string(e.path().join(".hey-boss/skills/example/SKILL.md"))
+                    .is_ok_and(|text| text.contains("Old version"))
+            }),
+            "Overwritten saved-library copies remain recoverable"
+        );
+        let library = temp.0.join(".hey-boss/skills/example/SKILL.md");
+        fs::write(&library, "Edited elsewhere").unwrap();
+        let conflict = install(
+            &temp.0,
+            "local",
+            &json!({"action":"install","sources":[source],"expected":result["copies"]}),
+        )
+        .unwrap();
+        assert!(conflict["error"].as_str().unwrap().contains("Review"));
+        assert_eq!(fs::read_to_string(library).unwrap(), "Edited elsewhere");
     }
 
     #[test]

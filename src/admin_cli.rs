@@ -47,6 +47,8 @@ pub struct SkillOptions {
 pub enum SkillAction {
     #[command(hide = true)]
     ApplyRename,
+    #[command(hide = true)]
+    ApplyCopy,
     /// Print the canonical Markdown skill.
     Show,
     /// Install the bundled skill and sync selected skills for Codex, Agents and Claude Code.
@@ -102,7 +104,7 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
     let home_os = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing"))?;
     let home = Path::new(&home_os);
     match &options.action {
-        SkillAction::ApplyRename => {
+        SkillAction::ApplyRename | SkillAction::ApplyCopy => {
             let mut bytes = Vec::new();
             io::stdin()
                 .take(96 * 1024 * 1024 + 1)

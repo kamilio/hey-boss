@@ -1,4 +1,4 @@
-//! Frontmatter-driven directory renames, staged and rolled back as one machine operation.
+//! Skill saves and frontmatter renames, staged and rolled back as one machine operation.
 use super::manager::{LibraryStage, transport};
 use super::{atomic_write, is_valid_skill_name};
 use crate::issues::{Error, Result};
@@ -57,7 +57,7 @@ pub(super) fn edited_name(name: &str, file: &str, content: &str) -> Result<Strin
     Ok(next.into())
 }
 
-fn digest(files: &Value) -> Result<String> {
+pub(super) fn digest(files: &Value) -> Result<String> {
     // Match the existing fleet protocol's sorted, ASCII-escaped JSON fingerprint.
     use std::fmt::Write;
     let mut canonical = String::new();
@@ -87,6 +87,17 @@ pub(super) fn renamed_source(base: &Value, name: &str, content: &str) -> Result<
 }
 
 fn targets(home: &Path, name: &str) -> Vec<PathBuf> {
+    if name == "AGENTS.md" {
+        return [
+            ".codex/AGENTS.md",
+            ".agents/AGENTS.md",
+            ".claude/CLAUDE.md",
+            ".hey-boss/skills/AGENTS.md",
+        ]
+        .into_iter()
+        .map(|p| home.join(p))
+        .collect();
+    }
     [".codex", ".agents", ".claude", ".hey-boss"]
         .into_iter()
         .flat_map(|root| {
@@ -112,6 +123,23 @@ fn signatures(copies: &Value, names: &[String]) -> BTreeMap<String, String> {
 
 /// Internal fleet protocol. Callers supply the observed copies, never arbitrary filesystem paths.
 pub fn apply(home: &Path, input: &Value) -> Result<Value> {
+    if input["action"] == "apply_copies" {
+        let mut scan = None;
+        for source in input["sources"]
+            .as_array()
+            .ok_or_else(|| Error::invalid("Missing skill sources"))?
+        {
+            let request = if source["previous_names"].is_array() {
+                json!({"action":"rename","source":source,"previous_names":source["previous_names"],"expected":input["expected"]})
+            } else {
+                json!({"action":"apply_copy","source":source,"expected":input["expected"]})
+            };
+            scan = Some(apply(home, &request)?);
+        }
+        return scan
+            .map(Ok)
+            .unwrap_or_else(|| transport(home, "local", &json!({"action":"scan"})));
+    }
     use std::os::fd::AsRawFd;
     fs::create_dir_all(home.join(".hey-boss"))?;
     let lock = fs::OpenOptions::new()
@@ -126,18 +154,25 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
     let name = source["name"]
         .as_str()
         .ok_or_else(|| Error::invalid("Missing skill name"))?;
-    let previous: Vec<String> = serde_json::from_value(input["previous_names"].clone())?;
+    let installing = input["action"] == "apply_copy";
+    let previous: Vec<String> = if installing {
+        vec![name.into()]
+    } else {
+        serde_json::from_value(input["previous_names"].clone())?
+    };
     if previous.is_empty()
         || previous.len() > 128
         || source["scope"] != "global"
         || std::iter::once(name)
             .chain(previous.iter().map(String::as_str))
             .any(|n| {
-                !is_valid_skill_name(n) || matches!(n, "AGENTS.md" | "hey-boss") || n.len() > 128
+                !is_valid_skill_name(n)
+                    || (!installing && matches!(n, "AGENTS.md" | "hey-boss"))
+                    || n.len() > 128
             })
-        || previous.iter().any(|n| n == name)
+        || (!installing && previous.iter().any(|n| n == name))
     {
-        return Err(Error::invalid("Invalid skill rename"));
+        return Err(Error::invalid("Invalid skill operation"));
     }
     let files = source["files"]
         .as_array()
@@ -170,8 +205,11 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
         .get("SKILL.md")
         .and_then(|(b, _)| std::str::from_utf8(b).ok())
         .ok_or_else(|| Error::invalid("Missing SKILL.md"))?;
-    if edited_name(name, "SKILL.md", markdown)? != name {
+    if !installing && edited_name(name, "SKILL.md", markdown)? != name {
         return Err(Error::invalid("Skill name does not match its frontmatter"));
+    }
+    if name == "AGENTS.md" && (decoded.len() != 1 || files[0]["executable"] == true) {
+        return Err(Error::invalid("Instructions must contain only SKILL.md"));
     }
     let current = transport(home, "local", &json!({"action":"scan"}))?;
     let old_targets: Vec<_> = previous
@@ -179,18 +217,31 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
         .flat_map(|n| targets(home, n))
         .filter(|p| exists(p))
         .collect();
-    let destinations: Vec<_> = targets(home, name).into_iter().step_by(2).collect();
+    let destinations: Vec<_> = if name == "AGENTS.md" {
+        targets(home, name)
+    } else {
+        targets(home, name).into_iter().step_by(2).collect()
+    };
+    let scanned_path = |p: &Path| {
+        if name == "AGENTS.md" && p == home.join(".hey-boss/skills/AGENTS.md") {
+            p.join("SKILL.md")
+        } else {
+            p.to_path_buf()
+        }
+    };
     // A lost response may replay a completed rename. Only accept the exact installed version.
-    if old_targets.is_empty()
+    if (old_targets.is_empty()
+        || (installing && old_targets.iter().all(|p| destinations.contains(p))))
         && destinations.iter().all(|p| {
             current["copies"].as_array().unwrap().iter().any(|c| {
-                c["path"] == p.to_string_lossy().as_ref() && c["digest"] == source["digest"]
+                c["path"] == scanned_path(p).to_string_lossy().as_ref()
+                    && c["digest"] == source["digest"]
             })
         })
     {
         return Ok(current);
     }
-    if let Some(path) = targets(home, name).iter().find(|p| exists(p)) {
+    if !installing && let Some(path) = targets(home, name).iter().find(|p| exists(p)) {
         return Err(Error::conflict(format!(
             "Cannot rename to {name}: {} already exists. Choose another name.",
             path.display()
@@ -198,7 +249,7 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
     }
     if signatures(&current["copies"], &previous) != signatures(&input["expected"], &previous) {
         return Err(Error::conflict(
-            "Skill changed since scanning. Scan again and review before renaming.",
+            "Skill changed since scanning. Scan again and review before saving.",
         ));
     }
     for path in &old_targets {
@@ -207,10 +258,10 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|c| c["path"] == path.to_string_lossy().as_ref())
+                .any(|c| c["path"] == scanned_path(path).to_string_lossy().as_ref())
         {
             return Err(Error::conflict(format!(
-                "Cannot safely inspect {}. Resolve its scan warning before renaming.",
+                "Cannot safely inspect {}. Resolve its scan warning before saving.",
                 path.display()
             )));
         }
@@ -234,7 +285,7 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
         stages.push(stage);
     }
     let backup = home.join(".hey-boss/skill-backups").join(format!(
-        "rename-{}",
+        "save-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -252,10 +303,16 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
         for (destination, stage) in destinations.iter().zip(&stages) {
             if exists(destination) {
                 return Err(Error::conflict(
-                    "Rename destination appeared while saving. Retry after scanning.",
+                    "Skill destination appeared while saving. Retry after scanning.",
                 ));
             }
-            fs::rename(stage.0.join("bundle"), destination)?;
+            let staged =
+                if name == "AGENTS.md" && destination != &home.join(".hey-boss/skills/AGENTS.md") {
+                    stage.0.join("bundle/SKILL.md")
+                } else {
+                    stage.0.join("bundle")
+                };
+            fs::rename(staged, destination)?;
             installed.push(destination);
         }
         let mut selected = super::selected_skills(home);
@@ -268,7 +325,11 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
     })();
     if let Err(error) = operation {
         for path in installed.iter().rev() {
-            let _ = fs::remove_dir_all(path);
+            let _ = if path.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
         }
         for (old, archived) in moved.iter().rev() {
             let _ = fs::rename(archived, old);
@@ -303,6 +364,93 @@ mod tests {
         let request =
             json!({"source":source,"previous_names":["before"],"expected":scan["copies"]});
         (temp, scan, request)
+    }
+    #[test]
+    fn ordinary_save_backs_up_library_and_rolls_back_on_failure() {
+        let (temp, scan, _) = fixture();
+        let source = renamed_source(
+            &scan["copies"][0],
+            "before",
+            "---\nname: before\n---\nUpdated\n",
+        )
+        .unwrap();
+        let request = json!({"action":"apply_copy","source":source,"expected":scan["copies"]});
+        let installed = apply(&temp.0, &request).unwrap();
+        assert_eq!(installed["copies"].as_array().unwrap().len(), 4);
+        assert!(
+            apply(&temp.0, &request).is_ok(),
+            "A lost response can be retried"
+        );
+        // A blocked config write must roll back files and saved-library copies alike.
+        fs::remove_file(temp.0.join(".hey-boss/skill-sync.json")).unwrap();
+        fs::create_dir(temp.0.join(".hey-boss/skill-sync.json")).unwrap();
+        let newer = renamed_source(&source, "before", "---\nname: before\n---\nNewer\n").unwrap();
+        assert!(
+            apply(
+                &temp.0,
+                &json!({"action":"apply_copy","source":newer,"expected":installed["copies"]})
+            )
+            .is_err()
+        );
+        for root in [".codex", ".agents", ".claude", ".hey-boss"] {
+            assert_eq!(
+                fs::read_to_string(temp.0.join(root).join("skills/before/SKILL.md")).unwrap(),
+                source["text"]
+            );
+        }
+        let backups = fs::read_dir(temp.0.join(".hey-boss/skill-backups")).unwrap();
+        assert!(
+            backups
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().join(".codex/skills/before/SKILL.md").exists())
+        );
+    }
+    #[test]
+    fn instruction_save_rolls_back_files_and_library() {
+        let temp = crate::admin::Temporary::new().unwrap();
+        atomic_write(&temp.0.join(".codex/AGENTS.md"), b"Fixture instructions").unwrap();
+        let scan = transport(&temp.0, "local", &json!({"action":"scan"})).unwrap();
+        fs::create_dir_all(temp.0.join(".hey-boss/skill-sync.json")).unwrap();
+        let source = &scan["copies"][0];
+        assert!(
+            apply(
+                &temp.0,
+                &json!({"action":"apply_copy","source":source,"expected":scan["copies"]})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(temp.0.join(".codex/AGENTS.md")).unwrap(),
+            "Fixture instructions"
+        );
+        for path in [
+            ".agents/AGENTS.md",
+            ".claude/CLAUDE.md",
+            ".hey-boss/skills/AGENTS.md",
+        ] {
+            assert!(!temp.0.join(path).exists());
+        }
+    }
+    #[test]
+    fn ordinary_save_preserves_unscannable_saved_library() {
+        let (temp, scan, _) = fixture();
+        let library = temp.0.join(".hey-boss/skills/before");
+        fs::create_dir_all(&library).unwrap();
+        fs::write(library.join("hidden-edit"), "Keep me").unwrap();
+        let result = apply(
+            &temp.0,
+            &json!({"action":"apply_copy","source":scan["copies"][0],"expected":scan["copies"]}),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Cannot safely inspect")
+        );
+        assert_eq!(
+            fs::read_to_string(library.join("hidden-edit")).unwrap(),
+            "Keep me"
+        );
     }
     #[test]
     fn frontmatter_names_are_validated_only_for_the_skill_entrypoint() {
