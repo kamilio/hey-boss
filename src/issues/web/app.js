@@ -275,6 +275,11 @@ async function mutate(operation, project = model.project.id, host = model.route.
   }
 }
 function routeHash(route) {
+  route = { ...route };
+  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "label", "search", "blocked"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
+    if (model.route && filters.some(filter => (route[filter] || "") !== (model.route[filter] || ""))) route[key] = 1;
+    if (HeyBossPagination.number(route[key]) === 1) delete route[key];
+  }
   const p = new URLSearchParams();
   for (const [key, value] of Object.entries(route)) {
     if (
@@ -300,6 +305,8 @@ function parseRoute() {
     inbox_state: params.get("inbox_state") === "archive" ? "archive" : "unread",
     inbox_project: params.get("inbox_project") || "",
     inbox_search: params.get("inbox_search") || "",
+    inbox_page: HeyBossPagination.number(params.get("inbox_page")),
+    page: HeyBossPagination.number(params.get("page")),
     issue: resource?.entity === "issue" ? Number(resource.id) : null,
     state: ["open", "blocked", "ready", "closed", "deleted"].includes(params.get("state"))
       ? params.get("state")
@@ -319,7 +326,7 @@ function navigate(changes, replace = false) {
   } else if (location.hash !== hash) {
     history.pushState(null, "", hash);
   }
-  renderRoute();
+  return renderRoute();
 }
 function currentProject() {
   return (
@@ -723,6 +730,7 @@ function renderList(result) {
   }
   const listContext = JSON.stringify([model.project.id, model.route.host]);
   const focused = document.activeElement;
+  const focusedPage = focused?.closest("#list-view .list-pagination") ? focused.getAttribute("aria-label") : null;
   const focusedRow = focused?.closest("#issue-list .issue-row");
   const savedFocus =
     focusedRow && model.listContext === listContext
@@ -742,6 +750,22 @@ function renderList(result) {
   model.signature = JSON.stringify(result.issues);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueBlockers.matches(issue, model.route.blocked))};
+  const createdIndex = createdHere && creation.reveal ? result.issues.findIndex(issue => issue.number === creation.number) : -1;
+  const requestedPage = createdIndex < 0 ? model.route.page : Math.floor(createdIndex / HeyBossPagination.size) + 1;
+  const page = HeyBossPagination.page(result.issues, requestedPage);
+  if (model.route.page !== page.current) {
+    model.route.page = page.current;
+    history.replaceState(null, "", routeHash(model.route));
+  }
+  result.issues = page.items;
+  model.issues = page.items;
+  const pagination = HeyBossUI.pagination(page, "issues", target => routeHash({...model.route, page:target}));
+  $("#issue-pagination-top").innerHTML = pagination;
+  $("#issue-pagination-bottom").innerHTML = pagination;
+  if (focusedPage) {
+    const control = $$("#list-view .list-pagination a").find(link => link.getAttribute("aria-label") === focusedPage);
+    (control || $("#issue-pagination-top .list-pagination") || $("#issue-search"))?.focus({preventScroll:true});
+  }
   $("#issue-list").classList.toggle("large-list", result.issues.length > 300);
   $("#issue-list").innerHTML = result.issues.length
     ? result.issues
@@ -751,7 +775,7 @@ function renderList(result) {
         )
         .join("")
     : emptyState();
-  $("#list-footer").hidden = !result.issues.length;
+  $("#list-footer").hidden = !result.issues.length || page.pages > 1;
   $("#list-summary").textContent = result.issues.length
     ? `${result.issues.length} ${result.issues.length === 1 ? "issue" : "issues"}`
     : "No issues";
@@ -945,6 +969,9 @@ async function renderRoute() {
         `<button class="back-link" data-back>${icon("arrow-left")}All issues</button><div class="empty-state"><div class="empty-icon">${icon("issue")}</div><h2>Unable to open this issue</h2><p>${esc(e.message)}</p><button class="button" data-retry>Try again</button></div>`;
     }
   } else {
+    $("#issue-pagination-top").replaceChildren();
+    $("#issue-pagination-bottom").replaceChildren();
+    $("#list-footer").hidden = true;
     try {
       const result = await api(listOperation());
       if (sequence !== model.sequence) return;
@@ -2040,6 +2067,18 @@ $("#transfer-form").onsubmit = async event => {
 document.addEventListener("click", event => {
   if (!event.target.closest(".issue-overflow")) $$(".issue-overflow[open]").forEach(menu => menu.open = false);
 });
+document.addEventListener("click", async event => {
+  const link = event.target.closest("a[data-list-page]");
+  if (!link || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  const key = model.route.view === "inbox" ? "inbox_page" : "page";
+  const target = new URLSearchParams(link.hash.slice(1)).get(key);
+  await navigate({[key]: HeyBossPagination.number(target)});
+  const nav = $(model.route.view === "inbox" ? "#inbox-view .list-pagination" : "#issue-pagination-top .list-pagination");
+  nav?.focus({preventScroll:true});
+  nav?.scrollIntoView({block:"start"});
+});
+
 document.addEventListener("keydown", event => {
   if (event.key === "Escape" && !$("dialog[open]")) $$(".issue-overflow[open]").forEach(menu => { menu.open = false; $("summary", menu).focus(); });
 });
