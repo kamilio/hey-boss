@@ -84,6 +84,7 @@
           <label>Agent<select id="worker-provider"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="pi">Pi</option></select><small>Applies to the next issue. Current agents keep their session.</small></label>
           <label>Agent limit<input id="worker-slots" type="number" min="1" max="1024" required></label>
           <label class="full">Pickup mode<select id="worker-intent"><option value="running">Running — pick up tasks</option><option value="pause">Paused — finish current tasks</option><option value="drain">Drain — finish tasks, then stop</option><option value="stop">Stopped — stop current tasks</option></select></label>
+          <label class="full">Workspace<select id="worker-workspace"><option value="false">Existing checkout</option><option value="true">Dedicated worktree</option></select><small>Dedicated worktrees also require “Allow worktrees” in project settings. Applies to new tasks.</small></label>
           <details id="worker-scope" class="worker-scope full"><summary>Projects &amp; checkout paths</summary><div class="worker-scope-fields">
           <label class="full">Projects<textarea id="worker-projects" rows="3" placeholder="One project ID per line; empty means all projects"></textarea></label>
           <label class="full">Working directory<input id="worker-directory" placeholder="Empty: discover per project"><small>For a single project. Use per-project paths below for a shared worker.</small></label>
