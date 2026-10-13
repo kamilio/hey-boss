@@ -430,7 +430,7 @@ if (typeof document !== 'undefined') (() => {
       r.append(summary);
       const body=element('div','worker-record-body');body.append(element('p',phase.group==='attention'?'worker-problem':'device-note',phase.note));
       const facts=element('dl','worker-facts');
-      for(const [key,value] of [['Desired state',({running:'Pick up tasks',pause:'Paused',stop:'Stopped',drain:'Drain and stop'})[w.intent]||'Unknown'],['Worker ID',w.id],['Working directory',w.config?.directory||'Discovered per project'],...Object.entries(w.config?.directories||{}).map(([p,v])=>[projectLabel(p),v])]){facts.append(element('dt','',key),element('dd','',value));}body.append(facts);
+      for(const [key,value] of [['Desired state',({running:'Pick up tasks',pause:'Paused',stop:'Stopped',drain:'Drain and stop'})[w.intent]||'Unknown'],['Worker ID',w.id],['Workspace',workspaceLabel(w.config?.worktree_enabled)],['Working directory',w.config?.directory||'Discovered per project'],...Object.entries(w.config?.directories||{}).map(([p,v])=>[projectLabel(p),v])]){facts.append(element('dt','',key),element('dd','',value));}body.append(facts);
       const tasks=element('div','worker-tasks');
       for(const run of (w.runs||[]).filter(r=>r.kind!=='chief'&&r.finished_at==null)){const a=element('a','worker-task');a.href=link({machine:m,run});a.append(element('strong','',run.title||run.project_name||'Agent'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(a);}
       if(tasks.childNodes.length)body.append(element('h4','','Current tasks'),tasks);
@@ -809,7 +809,8 @@ if (typeof document !== 'undefined') (() => {
   $('worker-search').value=workerSearch;if(workerSearch)workerFilter='all';
   $('worker-search').oninput=event=>{workerSearch=event.target.value;if(last)renderWorkerBoard(last);};
   function workerEditButtons(){for(const input of $('worker-form').querySelectorAll('input,textarea,select'))input.disabled=workerEditBusy;$('worker-editor-preview').disabled=workerEditBusy;$('worker-editor-save').disabled=workerEditBusy||!workerEditPreview;$('worker-editor-cancel').disabled=workerEditBusy;}
-  const editFields=['name','provider','slots','intent','projects','directory','directories'];
+  const editFields=['name','provider','slots','intent','workspace','projects','directory','directories'];
+  function workspaceLabel(enabled){return enabled===true?'Dedicated worktree':'Existing checkout';}
   let workerEditOriginal='';
   const editFingerprint=()=>JSON.stringify(editFields.map(field=>$('worker-'+field).value));
   async function openWorkerEditor(host,id){
@@ -824,6 +825,7 @@ if (typeof document !== 'undefined') (() => {
       $('worker-editor-title').textContent='Edit '+workerLabel(worker);
       $('worker-editor-context').textContent=host+' · '+id;
       $('worker-name').value=worker.config?.name||'Worker';$('worker-provider').value=worker.config?.provider||'codex';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
+      $('worker-workspace').value=String(worker.config?.worktree_enabled===true);
       $('worker-projects').value=(worker.config?.projects||[]).join('\n');$('worker-directory').value=worker.config?.directory||'';$('worker-directories').value=Object.entries(worker.config?.directories||{}).map(([p,d])=>p+' = '+d).join('\n');
       workerEditOriginal=editFingerprint();$('worker-editor-status').textContent='Other settings are preserved. Structured edits may reformat the YAML file.';$('worker-editor-changes').replaceChildren();$('worker-editor').showModal();
     }catch(error){fail(error);}finally{workerEditBusy=false;workerEditButtons();}
@@ -834,12 +836,13 @@ if (typeof document !== 'undefined') (() => {
   function workerUpdate(){
     const directories={};
     for(const line of $('worker-directories').value.split('\n').map(s=>s.trim()).filter(Boolean)){const at=line.indexOf('=');if(at<1||!line.slice(at+1).trim())throw Error('Use project ID = /absolute/path for each per-project path.');const project=line.slice(0,at).trim();if(Object.hasOwn(directories,project))throw Error('Only one path is allowed per project.');directories[project]=line.slice(at+1).trim();}
-    return {host:workerEdit.host,id:workerEdit.id,intent:$('worker-intent').value,config:{provider:$('worker-provider').value,name:$('worker-name').value.trim(),concurrency:Number($('worker-slots').value),projects:$('worker-projects').value.split('\n').map(s=>s.trim()).filter(Boolean),directory:$('worker-directory').value.trim(),directories}};
+    return {host:workerEdit.host,id:workerEdit.id,intent:$('worker-intent').value,config:{provider:$('worker-provider').value,name:$('worker-name').value.trim(),concurrency:Number($('worker-slots').value),worktree_enabled:$('worker-workspace').value==='true',projects:$('worker-projects').value.split('\n').map(s=>s.trim()).filter(Boolean),directory:$('worker-directory').value.trim(),directories}};
   }
   $('worker-form').onsubmit=async event=>{
     event.preventDefault();if(workerEditBusy)return;workerEditBusy=true;workerEditButtons();
     try{const update=workerUpdate();const data=await configRequest({worker_update:update,revision:workerEditRevision,save:false});workerEditPreview=update;
       const before=workerEdit.worker;const changes=[];for(const [key,label] of [['name','Name'],['provider','Agent'],['concurrency','Agent limit'],['projects','Projects'],['directory','Working directory'],['directories','Per-project paths']]){const defaults={provider:'codex',name:'Worker',concurrency:1,projects:[],directory:'',directories:{}};const old=before.config?.[key]??defaults[key];if(JSON.stringify(old)!==JSON.stringify(update.config[key]))changes.push(label+': '+(typeof old==='object'?JSON.stringify(old):old||'Automatic')+' → '+(typeof update.config[key]==='object'?JSON.stringify(update.config[key]):update.config[key]||'Automatic'));}if(before.intent!==update.intent)changes.unshift('Pickup mode: '+before.intent+' → '+update.intent);
+      if((before.config?.worktree_enabled===true)!==update.config.worktree_enabled)changes.push('Workspace: '+workspaceLabel(before.config?.worktree_enabled)+' → '+workspaceLabel(update.config.worktree_enabled));
       $('worker-editor-changes').replaceChildren(...changes.map(text=>element('li','',text)));$('worker-editor-status').textContent=changes.length?(update.intent==='stop'&&before.intent!=='stop'?'Saving will stop this worker and its current agents.':'Ready to save to fleet.yaml. Machines will apply these settings automatically.'):'No changes to save.';if(!changes.length)workerEditPreview=undefined;$('worker-editor-changes').scrollIntoView({block:'nearest'});
     }catch(error){workerEditPreview=undefined;$('worker-editor-status').textContent=error.message;}finally{workerEditBusy=false;workerEditButtons();}
   };
