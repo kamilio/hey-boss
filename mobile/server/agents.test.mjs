@@ -7,7 +7,7 @@ test('agent history requires pairing, registered projects, bounded requests and 
  const app=createApp({store,hubToken:key,secure:false,origin:'http://localhost'});const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
  t.after(()=>{app.locals.close();server.close();store.close();});const base='http://127.0.0.1:'+server.address().port;
  const call=(path,body,headers={})=>fetch(base+path,{method:body?'POST':'GET',headers:{'Content-Type':'application/json',...headers},body:body?JSON.stringify(body):undefined});
- assert.equal((await call('/agents')).status,401);assert.equal((await call('/api/fleet/status')).status,401);
+ assert.equal((await call('/agents')).status,200);assert.equal((await call('/api/fleet/status')).status,401);
  assert.equal((await call('/api/bridge/agents')).status,401);
  const pair=await call('/api/pair',{code:store.pairing()});const headers={Cookie:pair.headers.get('set-cookie').split(';')[0]},bridge={Authorization:'Bearer '+key};
  assert.equal((await call('/api/fleet/status',null,headers)).status,503);

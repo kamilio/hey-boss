@@ -10,9 +10,9 @@ test('shared issue UI relays to the supervisor without retaining content on Fly'
  t.after(()=>{app.locals.close();server.close();store.close();});
  const base='http://127.0.0.1:'+server.address().port;
  const call=(path,body,headers={})=>fetch(base+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body)});
- assert.equal((await call('/issues')).status,401);
- assert.equal((await call('/merged-prs')).status,401);
- assert.equal((await call('/jobs')).status,401);
+ assert.equal((await call('/issues')).status,200);
+ assert.equal((await call('/merged-prs')).status,200);
+ assert.equal((await call('/jobs')).status,200);
  assert.equal((await call('/api/jobs/runtime',{})).status,401);
  assert.equal((await call('/api/bootstrap')).status,401);
  assert.equal((await call('/api/bridge/web')).status,401);

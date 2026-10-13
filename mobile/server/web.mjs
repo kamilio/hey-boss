@@ -3,7 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {HubError} from './store.mjs';
 
-export function webRoutes(app,{auth,bridge}){
+export function webRoutes(app,{auth,pageAuth,bridge}){
  const pending=new Map();let bytes=0;
  function remove(id){const request=pending.get(id);if(request){bytes-=request.bytes;pending.delete(id);}return request;}
  function relay(req,res,kind){
@@ -17,7 +17,7 @@ export function webRoutes(app,{auth,bridge}){
   pending.set(id,{id,kind,payload,device:req.device.id,res,timer,bytes:size});bytes+=size;
   res.on('close',()=>{clearTimeout(timer);remove(id);});
  }
- for(const route of ['/issues','/mm','/merged-prs','/jobs'])app.get(route,auth,(req,res)=>res.sendFile(fileURLToPath(new URL(`../dist/issue-web/${route==='/jobs'?'jobs':route==='/merged-prs'?'merged-prs':route==='/mm'?'mindmap':'index'}.html`,import.meta.url))));
+ for(const route of ['/issues','/mm','/merged-prs','/jobs'])app.get(route,pageAuth,(req,res)=>res.sendFile(fileURLToPath(new URL(`../dist/issue-web/${route==='/jobs'?'jobs':route==='/merged-prs'?'merged-prs':route==='/mm'?'mindmap':'index'}.html`,import.meta.url))));
  app.get('/api/bootstrap',auth,(req,res)=>relay(req,res,'bootstrap'));
  for(const [route,kind] of [['jobs/runtime','jobs/runtime'],['action','action'],['mm','action'],['preview','preview'],['inbox','inbox']])app.post('/api/'+route,auth,(req,res)=>relay(req,res,kind));
  app.get('/api/bridge/web',bridge,(req,res)=>res.json({requests:[...pending.values()].map(({id,kind,payload})=>({id,kind,payload}))}));

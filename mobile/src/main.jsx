@@ -6,11 +6,9 @@ import Markdown from './Markdown';
 import usePullRefresh from './usePullRefresh';
 import LiquidGlass from 'liquid-glass-react';
 import {activityGroups,activityTime,activityDateTime} from './activity';
+import {pairedDestination} from './paired-navigation';
 import '@radix-ui/themes/styles.css';
 import './style.css';
-
-// Preserve existing bookmarks and links copied from the regular issue browser.
-if(location.hash==='#issues'||new URLSearchParams(location.hash.slice(1)).has('issue')||new URLSearchParams(location.hash.slice(1)).get('view')==='issues')location.replace('/issues'+(location.hash==='#issues'?'':location.hash));
 
 async function api(path,body){
  const controller=new AbortController();const deadline=setTimeout(()=>controller.abort(),10000);
@@ -39,7 +37,10 @@ function App(){
  const refresh=useCallback(()=>refreshing.current??=(async()=>{
   try{
    await HeyBossReceipts.flush().catch(()=>{});
-   const value=await api('/tasks');setState(value);setPaired(true);setConnectionError('');
+   const value=await api('/tasks');
+   const destination=pairedDestination(location);
+   if(destination){if(location.pathname==='/')location.replace(destination);else location.reload();return;}
+   setState(value);setPaired(true);setConnectionError('');
    if('setAppBadge'in navigator)navigator.setAppBadge(value.tasks.filter(t=>t.status==='pending').length).catch(()=>{});
    if('serviceWorker'in navigator)navigator.serviceWorker.ready.then(async registration=>{
     for(const n of await registration.getNotifications())if(value.tasks.some(t=>t.taskID===n.tag&&t.status!=='pending')||n.data?.taskIDs?.length&&n.data.taskIDs.every(id=>value.tasks.some(t=>t.taskID===id&&t.status!=='pending')))n.close();

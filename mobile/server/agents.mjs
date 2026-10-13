@@ -6,14 +6,14 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {randomUUID} from 'node:crypto';
 import {HubError} from './store.mjs';
-export function agentRoutes(app,{auth,bridge,store,now}) {
+export function agentRoutes(app,{auth,pageAuth,bridge,store,now}) {
  let snapshot=null,seen=0;const pending=new Map();
  const visible=()=>new Set(store.issueProjects().map(p=>p.id));
  const filtered=()=>{
   const projects=visible();return {...snapshot,signals:snapshot?.signals||[],conflicts:[],events:[],machines:(snapshot?.machines||[]).map(m=>({host:m.host,hostname:m.hostname,state:m.state,heartbeat:m.heartbeat,desired_revision:m.desired_revision,applied_revision:m.applied_revision,configuration_error:m.configuration_error,projects:m.projects,workspace:m.workspace,workers:(m.workers||[]).map(w=>({id:w.id,pid:w.pid,intent:w.intent,managed:w.managed,retiring:w.retiring,active:w.active,job_active:w.job_active,free:w.free,eligible:w.eligible,error:w.error,retry_at:w.retry_at,config:{provider:w.config?.provider,name:w.config?.name,enabled:w.config?.enabled,concurrency:w.config?.concurrency,worktree_enabled:w.config?.worktree_enabled,projects:w.config?.projects,directory:w.config?.directory,directories:w.config?.directories},runs:(w.runs||[]).filter(r=>projects.has(r.project_id))}))}))};
  };
  const page=fileURLToPath(new URL('../dist/agent-web/fleet.html',import.meta.url));
- for(const route of ['/agents','/agents/session','/workers'])app.get(route,auth,(req,res)=>res.sendFile(page));
+ for(const route of ['/agents','/agents/session','/workers'])app.get(route,pageAuth,(req,res)=>res.sendFile(page));
  app.get('/api/agent-bootstrap',auth,(req,res)=>res.json({projects:store.issueProjects()}));
  app.get('/api/fleet/status',auth,(req,res)=>{if(!snapshot)return res.status(503).json({error:'Connect your supervisor to see agents.'});const value=filtered();if(now()-seen>15000)for(const m of value.machines)m.state='disconnected';res.json(value);});
  function requestAgent(req,res,action){
