@@ -4074,6 +4074,12 @@ final class QuickIssuePanel: NSPanel {
     }
 }
 
+struct QuickIssueRequestError: LocalizedError {
+    let message: String
+    let rejected: Bool
+    var errorDescription: String? { message }
+}
+
 /// AppKit-only Spotlight panel. All store access goes through the installed Rust
 /// CLI, so durable replicas and request-ID retries follow ordinary issue rules.
 final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
@@ -4101,14 +4107,12 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     let imageCanvas = NSView()
     var images: [QuickIssueImage] = []
     // Once creation begins, preserve an immutable snapshot through all retries.
-    // Draft publication is the last step, after every attachment is acknowledged.
+    // The CLI commits the regular task and all its images in one transaction.
     struct MediaSubmission {
         let project: QuickIssueProject
         let arguments: [String]
         let id: String
         let directory: URL
-        var number: Int?
-        var uploaded = 0
     }
     var mediaSubmission: MediaSubmission?
     var projects: [QuickIssueProject] = []
@@ -4157,7 +4161,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         confirmation.font = .systemFont(ofSize: 22, weight: .medium); confirmation.isHidden = true
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
         progress.setAccessibilityLabel("Quick Add is loading")
-        error.font = .systemFont(ofSize: 12); error.textColor = .systemRed; error.maximumNumberOfLines = 3
+        error.font = .systemFont(ofSize: 12); error.textColor = .systemOrange; error.maximumNumberOfLines = 3
         heading.font = .systemFont(ofSize: 12, weight: .semibold); heading.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: 11); hint.textColor = .tertiaryLabelColor
         let column = NSTableColumn(identifier: .init("project")); table.addTableColumn(column); table.headerView = nil
@@ -4269,7 +4273,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
     func fail(_ message: String) {
         error.stringValue = message
-        if ready { context.stringValue = "Draft preserved · retry safely" }
+        if ready { context.stringValue = images.isEmpty ? "Your text is kept" : "Your text and images are kept" }
         updateEnabled(); layout()
     }
     func changed() {
@@ -4358,6 +4362,9 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                       let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 280, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) else { throw StorageError(description: "Could not preview this image.") }
                 return QuickIssueImage(name: value.name, data: value.data, thumbnail: NSImage(cgImage: thumbnail, size: .zero))
             }
+            guard (images + added).reduce(0, { $0 + $1.data.count }) <= 10 * 1024 * 1024 else {
+                throw StorageError(description: "Images can total up to 10 MiB. Remove an image or choose smaller files.")
+            }
             images += added; rebuildImages(); changed()
         } catch { fail(error.localizedDescription) }
         return true
@@ -4392,7 +4399,6 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.name, "--title", parsed.title]
             if bottom.state != .on { args.append("--at-top") }
             if !images.isEmpty {
-                args.append("--draft")
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-quick-images-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
                 do {
@@ -4400,6 +4406,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                         let folder = directory.appendingPathComponent(image.id)
                         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
                         try image.data.write(to: folder.appendingPathComponent(image.name), options: .atomic)
+                        args += ["--attachment", folder.appendingPathComponent(image.name).path]
                     }
                 } catch { try? FileManager.default.removeItem(at: directory); throw error }
                 mediaSubmission = MediaSubmission(project: parsed.project, arguments: args, id: UUID().uuidString, directory: directory)
@@ -4413,7 +4420,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                 self.saving = false
                 do {
                     let data = try result.get()
-                    guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the issue. Retry safely with the same draft.") }
+                    guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the task. Retry to check the same submission.") }
                     self.complete(number: number, project: parsed.project)
                 } catch { self.fail(error.localizedDescription) }
             }
@@ -4422,42 +4429,30 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     func saveMedia() {
         guard let saved = mediaSubmission else { return }
         saving = true; error.stringValue = ""; matches = []; mention = nil
-        var args: [String]
-        if let number = saved.number {
-            let common = ["--json", "--agent", "human:boss", "--project", saved.project.name]
-            if saved.uploaded < images.count {
-                let image = images[saved.uploaded]
-                let file = saved.directory.appendingPathComponent(image.id).appendingPathComponent(image.name)
-                args = ["attachment", "upload", file.path, "--issue", String(number)] + common + ["--request-id", image.id]
-                context.stringValue = "Attaching image \(saved.uploaded + 1) of \(images.count)…"
-            } else {
-                args = ["undraft", String(number)] + common + ["--request-id", saved.id + "-publish"]
-                context.stringValue = "Finishing #\(number)…"
-            }
-        } else { args = saved.arguments + ["--request-id", saved.id]; context.stringValue = "Creating in \(saved.project.name)…" }
+        context.stringValue = "Saving task and images…"
         updateEnabled(); layout()
-        request(args) { [weak self] result in
+        request(saved.arguments + ["--request-id", saved.id]) { [weak self] result in
             guard let self else { return }
+            self.saving = false
             do {
                 let data = try result.get()
-                guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw StorageError(description: "Could not confirm the response.") }
-                if saved.number == nil {
-                    guard let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else { throw StorageError(description: "Could not confirm the draft.") }
-                    self.mediaSubmission?.number = number
-                } else if saved.uploaded < self.images.count {
-                    guard let attachment = value["attachment"] as? [String: Any], attachment["id"] is String else { throw StorageError(description: "Could not confirm the image upload.") }
-                    self.mediaSubmission?.uploaded += 1
-                } else {
-                    guard let issue = value["issue"] as? [String: Any], issue["number"] as? Int == saved.number else { throw StorageError(description: "Could not confirm publication.") }
-                    try? FileManager.default.removeItem(at: saved.directory)
-                    self.mediaSubmission = nil; self.images = []; self.rebuildImages()
-                    self.saving = false; self.complete(number: saved.number!, project: saved.project); return
+                guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let issue = value["issue"] as? [String: Any], let number = issue["number"] as? Int else {
+                    throw StorageError(description: "Could not confirm the task. Retry to check the same submission.")
                 }
-                self.saveMedia()
+                try? FileManager.default.removeItem(at: saved.directory)
+                self.mediaSubmission = nil; self.images = []; self.rebuildImages()
+                self.complete(number: number, project: saved.project)
             } catch {
-                self.saving = false
-                let location = self.mediaSubmission?.number.map { "Issue #\($0) · " } ?? ""
-                self.fail(location + error.localizedDescription + " Retry to finish attaching images.")
+                if (error as? QuickIssueRequestError)?.rejected == true {
+                    try? FileManager.default.removeItem(at: saved.directory)
+                    self.mediaSubmission = nil
+                    self.fail(error.localizedDescription + " Nothing was created. You can edit and try again.")
+                    if self.present { self.window.makeFirstResponder(self.input) }
+                } else {
+                    self.fail("Couldn’t confirm the save. Retry safely; your task won’t be duplicated.")
+                    self.error.toolTip = error.localizedDescription
+                }
             }
         }
     }
@@ -4494,7 +4489,8 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
                 guard process.terminationStatus == 0 else {
                     let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                     let detail = (json?["error"] as? [String: Any])?["message"] as? String
-                    throw StorageError(description: detail ?? "Could not create the issue. Your draft is preserved; retry safely.")
+                    let code = (json?["error"] as? [String: Any])?["code"] as? String
+                    throw QuickIssueRequestError(message: detail ?? "Could not save the task. Please try again.", rejected: ["invalid_input", "not_found"].contains(code ?? ""))
                 }
                 onMain { completion(.success(data)) }
             } catch { if process.isRunning { process.terminate() }; onMain { completion(.failure(error)) } }

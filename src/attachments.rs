@@ -15,6 +15,38 @@ use std::{
 
 pub const FILE_LIMIT: usize = 10 * 1024 * 1024;
 const ENCODED_LIMIT: usize = FILE_LIMIT.div_ceil(3) * 4;
+
+/// Files supplied with a new issue are committed with it, before worker pickup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewAttachment {
+    pub name: String,
+    pub data: String,
+}
+
+pub(crate) fn validate_new(files: &[NewAttachment]) -> Result<()> {
+    if files.len() > 8 {
+        return Err(Error::invalid("Attach up to eight images at a time"));
+    }
+    let mut total = 0;
+    for file in files {
+        validate_name(&file.name)?;
+        if file.data.len() > ENCODED_LIMIT {
+            return Err(Error::invalid("Attached images must total at most 10 MiB"));
+        }
+        total += decode(&file.data)?.len();
+        if total > FILE_LIMIT {
+            return Err(Error::invalid("Attached images must total at most 10 MiB"));
+        }
+    }
+    Ok(())
+}
+
+impl NewAttachment {
+    pub(crate) fn fingerprint(&self) -> Result<Value> {
+        Ok(json!({"name":self.name,"sha256":digest(&decode(&self.data)?)}))
+    }
+}
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS file_attachments(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),kind TEXT NOT NULL,target TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,author TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS file_attachment_target ON file_attachments(project_id,kind,target,created_at,id);";

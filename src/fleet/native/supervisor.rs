@@ -1779,7 +1779,8 @@ impl Supervisor {
                         | crate::issues::Operation::Job { .. }
                         | crate::issues::Operation::Artifact { .. }
                         | crate::issues::Operation::Attachment { .. }
-                ) {
+                ) && !matches!(&request.operation, crate::issues::Operation::Create { attachments, .. } if !attachments.is_empty())
+                {
                     return Err(crate::issues::Error::invalid(
                         "Only jobs, maps, artifacts and attachments use the authority relay",
                     ));
@@ -3674,6 +3675,36 @@ mod tests {
         let loaded = app.state.lock().unwrap().build.clone();
         assert!(loaded.contains(env!("HEY_BOSS_BUILD_ID")), "{loaded}");
         assert!(!loaded.contains("replacement-on-disk"));
+    }
+
+    #[test]
+    fn resource_relay_creates_regular_tasks_with_images_atomically() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Images','Images',1); INSERT INTO project_settings(project_id,prompt,version,drafts_enabled) VALUES('named:Images','',1,0)").unwrap();
+        let request = json!({"kind":"resource","request":{"version":1,
+            "project":{"id":"named:Images","name":"Images"},
+            "actor":{"id":"human:boss","kind":"human","machine":"peer","host":"peer","cwd":"/tmp","source":"test"},
+            "request_id":"image-task","operation":{"action":"create","title":"Screenshot","body":"","labels":[],
+                "attachments":[{"name":"image.png","data":"eA=="}]}}});
+        let created = app.authoritative(&request).unwrap();
+        assert_eq!(created["issue"]["draft"], false);
+        assert_eq!(app.authoritative(&request).unwrap(), created);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM issues", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM file_attachments WHERE kind='issue' AND target='1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

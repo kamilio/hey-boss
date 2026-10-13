@@ -15,6 +15,73 @@ fn call(store: &mut Store, op: Value) -> Value {
 fn files(store: &mut Store, op: Value) -> Value {
     call(store, json!({"action":"attachment","operation":op}))
 }
+
+#[test]
+fn regular_issue_and_images_commit_together_without_drafts_and_retry_once() {
+    let f = Fixture::new("atomic-create");
+    let mut store = f.store();
+    call(
+        &mut store,
+        json!({"action":"configure_project","drafts_enabled":false}),
+    );
+    let mut req = request(
+        json!({"action":"create","title":"Screenshot task","body":"","labels":[],
+        "attachments":[{"name":"one.png","data":STANDARD.encode(b"first")},{"name":"two.png","data":STANDARD.encode(b"second")}]}),
+    );
+    req.request_id = Some("create-with-images".into());
+    let created = store.execute(&req).unwrap();
+    assert_eq!(created["issue"]["draft"], false);
+    assert_eq!(created["issue"]["state"], "open");
+    assert_eq!(store.execute(&req).unwrap(), created);
+    let listed = files(
+        &mut store,
+        json!({"command":"list","target":{"kind":"issue","id":"1"}}),
+    );
+    assert_eq!(listed["attachments"].as_array().unwrap().len(), 2);
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    let payload: String = db
+        .query_row(
+            "SELECT payload FROM requests WHERE request_id='create-with-images'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !payload.contains("\"data\""),
+        "Receipts store digests, not image contents"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+
+    let mut broken = request(
+        json!({"action":"create","title":"Bad image","body":"","labels":[],
+        "attachments":[{"name":"ok.png","data":"eA=="},{"name":"bad.png","data":"invalid base64"}]}),
+    );
+    assert!(store.execute(&broken).is_err());
+    // A transaction failure after staging both images must remove those files too.
+    broken.operation = serde_json::from_value(
+        json!({"action":"create","draft":true,"title":"Disallowed draft","body":"","labels":[],
+        "attachments":[{"name":"one.png","data":"eA=="},{"name":"two.png","data":"eQ=="}]}),
+    )
+    .unwrap();
+    assert!(store.execute(&broken).is_err());
+    assert_eq!(
+        std::fs::read_dir(f.0.join("issues.attachments"))
+            .unwrap()
+            .count(),
+        2
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM issues", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
 struct Fixture(std::path::PathBuf);
 impl Fixture {
     fn new(name: &str) -> Self {

@@ -346,6 +346,9 @@ enum Action {
     },
     /// Create an open, unassigned issue. The body defaults to empty.
     Create {
+        /// Save files with the issue atomically (up to eight, 10 MiB total).
+        #[arg(long = "attachment", value_name = "PATH")]
+        attachments: Vec<PathBuf>,
         /// Explicitly place the new issue first (default only for human: identities).
         #[arg(long, conflicts_with = "at_bottom")]
         at_top: bool,
@@ -1041,6 +1044,7 @@ impl Options {
                 offset: *offset,
             },
             Action::Create {
+                attachments,
                 at_top,
                 at_bottom: _,
                 title,
@@ -1050,6 +1054,21 @@ impl Options {
                 blocked_by,
                 then_titles,
             } => Operation::Create {
+                attachments: attachments
+                    .iter()
+                    .map(|path| {
+                        use base64::Engine;
+                        Ok(hey_boss::attachments::NewAttachment {
+                            name: path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .ok_or_else(|| Error::invalid("Attachment needs a UTF-8 filename"))?
+                                .into(),
+                            data: base64::engine::general_purpose::STANDARD
+                                .encode(hey_boss::attachments::read_file(path)?),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
                 draft: *draft,
                 title: title.clone(),
                 body: body.read()?.unwrap_or_default(),
