@@ -4278,6 +4278,7 @@ mod tests {
                         model: None,
                     }),
                     operation: Operation::Create {
+                        attachments: vec![],
                         title: "Original".into(),
                         body: "Requirements".into(),
                         labels: vec![],

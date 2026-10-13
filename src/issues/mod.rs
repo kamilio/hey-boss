@@ -496,6 +496,8 @@ pub enum Operation {
         sort: CommentSort,
     },
     Create {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::attachments::NewAttachment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         draft: bool,
         title: String,

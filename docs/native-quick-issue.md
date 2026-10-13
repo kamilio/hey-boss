@@ -29,20 +29,23 @@ switching to another application also dismiss it. Unsent text and placement stay
 available until the desktop app exits. Submission temporarily disables editing
 and dismissal, with a native spinner and a disabled **Creating…** button. The
 panel uses the same clipped Liquid Glass surface as notifications, with transparent
-corners and native rounded buttons. Errors preserve the draft and reuse the same request ID on retry,
+corners and native rounded buttons. Errors preserve the entered text and reuse the same request ID on retry,
 so an uncertain response cannot create duplicates. Changing title, project, or
-placement starts a new request. Successful creation clears the draft and resets
+placement starts a new request. Successful creation clears the form and resets
 placement to the top.
 
 Paste a screenshot with **⌘V** or **Paste image**. Copied image files also work.
-Up to eight images, each at most 10 MiB, appear in a horizontally scrolling preview
+Up to eight images, totaling at most 10 MiB, appear in a horizontally scrolling preview
 strip; each has a remove button. Ordinary text pastes still edit the title. Images
-stay with a dismissed draft and become ordinary issue attachments on creation.
-Image submissions first save a non-runnable draft, upload every image, then publish
-the issue. On failure, **Retry** resumes the same submission with editing locked,
-so workers never receive an issue missing its images. If the app exits mid-upload,
-the saved issue remains a draft in the issue list. Unsubmitted in-memory images do
-not survive app exit. Temporary upload files are removed after success or exit.
+stay with the dismissed form and become ordinary issue attachments on creation.
+The regular task and all images save in one transaction, including in projects
+with drafts disabled. Workers only see the complete task. Rejected saves preserve
+the text and images and restore editing. If the response is uncertain, **Retry**
+checks the same submission with editing locked to prevent duplicates. Unsubmitted
+in-memory images do not survive app exit. Temporary upload files are removed after
+success, rejection, or exit. CLI callers can use repeated `--attachment PATH` on
+`issue create` for the same atomic behavior. Image submissions on companions require
+the supervisor connection; text-only tasks keep their existing offline behavior.
 
 The panel calls the installed Rust CLI against this machine's normal issue store.
 Fleet companions keep their usual durable local replicas and synchronization, so

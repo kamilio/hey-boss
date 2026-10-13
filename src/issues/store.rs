@@ -607,6 +607,9 @@ fn page(limit: u32) -> Result<()> {
     Ok(())
 }
 fn validate(r: &Request) -> Result<()> {
+    if let Operation::Create { attachments, .. } = &r.operation {
+        crate::attachments::validate_new(attachments)?;
+    }
     if r.version != 1 {
         return Err(Error::invalid(
             "Unsupported issue protocol version; upgrade hey-boss on both machines",
@@ -1647,7 +1650,8 @@ impl Store {
         if matches!(
             r.operation,
             Operation::Create { .. } | Operation::CreateSubtask { .. }
-        ) {
+        ) && !matches!(&r.operation, Operation::Create { attachments, .. } if !attachments.is_empty())
+        {
             validate(r)?;
             self.refresh_issue_numbers(r)?;
         }
@@ -1657,7 +1661,8 @@ impl Store {
                 | Operation::Artifact { .. }
                 | Operation::Attachment { .. }
                 | Operation::Job { .. }
-        ) {
+        ) || matches!(&r.operation, Operation::Create { attachments, .. } if !attachments.is_empty())
+        {
             validate(r)?;
             let companion: bool = self.db.query_row(
                 "SELECT role='agent' FROM fleet_meta WHERE id=1",
@@ -1809,6 +1814,21 @@ impl Store {
             serde_json::to_string(
                 &json!({"action":"artifact","operation":{"command":"import","operation":operation,"files":files}}),
             )?
+        } else if let Operation::Create { attachments, .. } = &r.operation
+            && !attachments.is_empty()
+        {
+            let mut operation = r.operation.clone();
+            if let Operation::Create { attachments, .. } = &mut operation {
+                attachments.clear();
+            }
+            let mut value = serde_json::to_value(operation)?;
+            value["attachments"] = json!(
+                attachments
+                    .iter()
+                    .map(crate::attachments::NewAttachment::fingerprint)
+                    .collect::<Result<Vec<_>>>()?
+            );
+            serde_json::to_string(&value)?
         } else {
             serde_json::to_string(&r.operation)?
         };
@@ -1894,8 +1914,21 @@ impl Store {
         // Declare cleanup before the transaction: on failure, release the writer
         // before removing any staged files. Preparation errors yield to receipts.
         let mut attachment_files = crate::attachments::DiskChange::default();
+        let mut issue_uploads = Vec::new();
         let prepared_import = (|| -> Result<Option<artifacts::PreparedImport>> {
             match &r.operation {
+                Operation::Create { attachments, .. } if !attachments.is_empty() => {
+                    crate::attachments::check_authority(&self.db)?;
+                    for file in attachments {
+                        issue_uploads.push(crate::attachments::prepare_upload(
+                            &self.attachment_root,
+                            &file.name,
+                            &crate::attachments::decode(&file.data)?,
+                            &mut attachment_files,
+                        )?);
+                    }
+                    Ok(None)
+                }
                 Operation::Attachment {
                     operation: crate::attachments::Operation::Upload { target, name, data },
                 } => {
@@ -2440,10 +2473,24 @@ impl Store {
                 ..
             } => {
                 let issue = create_issue(&tx, &project, actor.unwrap(), &r.operation, now)?;
+                for upload in &issue_uploads {
+                    crate::attachments::insert_upload(
+                        &tx,
+                        &project,
+                        &crate::attachments::Target {
+                            kind: crate::attachments::Kind::Issue,
+                            id: issue.number.to_string(),
+                        },
+                        upload,
+                        &actor.unwrap().id,
+                        now,
+                    )?;
+                }
                 let mut created_chain = vec![serde_json::to_value(&issue)?];
                 let mut prev_number = issue.number;
                 for next_title in then_titles {
                     let next_op = Operation::Create {
+                        attachments: Vec::new(),
                         draft: *draft,
                         title: next_title.clone(),
                         body: String::new(),

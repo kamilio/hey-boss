@@ -962,6 +962,7 @@ mod tests {
                 child,
             };
             f.apply(Operation::Create {
+                attachments: vec![],
                 draft: false,
                 title: "Task".into(),
                 body: "Requirements".into(),

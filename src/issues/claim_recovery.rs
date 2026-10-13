@@ -155,6 +155,7 @@ mod tests {
             let number = index as i64 + 1;
             store
                 .execute(&request(Operation::Create {
+                    attachments: vec![],
                     draft: false,
                     title: id.into(),
                     body: String::new(),

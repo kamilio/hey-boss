@@ -394,7 +394,7 @@ func auditNativeQuickIssue() {
     ui.dismiss(); precondition(ui.saving, "Cannot close an in-flight mutation")
     reply?(.failure(StorageError(description: "Disconnected")))
     precondition(!ui.saving && ui.input.stringValue == "Fix @poe-code reconnect" && ui.error.stringValue == "Disconnected")
-    precondition(ui.submit.title == "Create" && ui.context.stringValue.contains("retry"), "Failure restores a clear retry state")
+    precondition(ui.submit.title == "Create" && ui.context.stringValue == "Your text is kept", "Failure restores editing and reassures that text is retained")
     let keypadReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\u{3}", charactersIgnoringModifiers: "\u{3}", isARepeat: false, keyCode: 76)!
     precondition(ui.window.performKeyEquivalent(with: keypadReturn), "Command+keypad Enter submits too")
     precondition(requests.last == firstRequest, "Retry reuses the mutation ID")
@@ -454,7 +454,7 @@ func auditNativeQuickIssue() {
                     ui.images = (1...5).map { QuickIssueImage(name: "Screenshot \($0).png", data: Data(), thumbnail: image) }; ui.rebuildImages()
                     ui.input.stringValue = "Fix the screenshot preview @poe-code"
                 }
-                if state == "image-error" { ui.error.stringValue = "Cannot read this image. Choose an image up to 10 MiB." }
+                if state == "image-error" { ui.fail("Project is unavailable. Nothing was created. You can edit and try again.") }
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
                 for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
                 ui.window.displayIfNeeded()
@@ -526,25 +526,30 @@ func auditQuickIssueMedia() {
     ui.dismiss(); precondition(ui.images.count == 1, "Dismissal retains pasted images")
     var calls: [[String]] = []; var reply: ((Result<Data, Error>) -> Void)?
     ui.runner = { args, completion in calls.append(args); reply = completion }
-    ui.create(); precondition(calls.last!.contains("--draft"), "Workers cannot pick up an incomplete image issue")
+    ui.create(); precondition(!calls.last!.contains("--draft"), "Image tasks must never be silently converted to drafts")
+    precondition(calls.last!.filter { $0 == "--attachment" }.count == 1)
+    let rejected = calls.last!
+    let rejectedFile = rejected[rejected.firstIndex(of: "--attachment")! + 1]
+    reply?(.failure(QuickIssueRequestError(message: "Project is unavailable.", rejected: true)))
+    precondition(ui.input.isEnabled && ui.bottom.isEnabled && ui.pasteButton.isEnabled, "Rejected saves restore editing")
+    precondition(ui.mediaSubmission == nil && ui.images.count == 1 && ui.input.stringValue == "Fix screenshot")
+    precondition(ui.error.stringValue.contains("Nothing was created") && !ui.context.stringValue.contains("Draft"))
+    precondition(!FileManager.default.fileExists(atPath: rejectedFile))
+    ui.input.stringValue = "Fixed screenshot"; ui.changed(); ui.create()
+    let save = calls.last!
+    let file = save[save.firstIndex(of: "--attachment")! + 1]
     ui.window.sendEvent(paste)
     precondition(ui.images.count == 1, "Cannot add images during submission")
-    reply?(.success(Data("{\"issue\":{\"number\":42}}".utf8)))
-    precondition(calls.last!.first == "attachment" && calls.last!.contains("42"))
-    let upload = calls.last!
-    reply?(.failure(StorageError(description: "Upload interrupted")))
-    precondition(!ui.saving && !ui.input.isEnabled && ui.images.count == 1 && ui.error.stringValue.contains("42"))
-    precondition(!ui.pasteImages(board), "A partial submission stays immutable")
-    ui.create(); precondition(calls.last! == upload, "Retry resumes the same attachment without another issue")
-    reply?(.success(Data("{\"attachment\":{\"id\":\"f-test\"}}".utf8)))
-    precondition(calls.last!.first == "undraft")
-    let publish = calls.last!
     reply?(.failure(StorageError(description: "Response lost")))
-    ui.create(); precondition(calls.last! == publish, "Publication retry reuses its receipt")
+    precondition(!ui.saving && !ui.input.isEnabled && ui.images.count == 1 && ui.submit.title == "Retry")
+    precondition(!ui.pasteImages(board), "An uncertain submission stays immutable")
+    ui.dismiss(); precondition(ui.images.count == 1 && ui.mediaSubmission != nil, "Closing preserves retry state")
+    ui.create(); precondition(calls.last! == save, "Retry saves the exact same task and images without duplication")
     reply?(.success(Data("{\"issue\":{\"number\":42}}".utf8)))
     precondition(ui.succeeded && ui.images.isEmpty && ui.mediaSubmission == nil)
-    precondition(!FileManager.default.fileExists(atPath: upload[2]), "Upload staging files are removed")
-    ui.succeeded = false; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    precondition(!FileManager.default.fileExists(atPath: file), "Upload staging files are removed")
+    precondition(calls.allSatisfy { $0.first != "undraft" && $0.first != "attachment" }, "No draft or partial upload steps")
+    ui.succeeded = false; ui.input.stringValue = "Fix another screenshot"; ui.changed()
     board.clearContents(); board.setString("ordinary text", forType: .string)
     precondition(!ui.pasteImages(board), "Plain text keeps normal paste behavior")
     board.clearContents(); board.setData(Data("broken".utf8), forType: .png)
@@ -575,7 +580,7 @@ func auditQuickIssueMedia() {
     precondition(ui.imageStrip.isHidden && ui.window.frame.height == 182, "Removing all images collapses the preview strip")
     ui.window.pasteImage = nil
     ui.window.close()
-    print("Passed: native pasted images, staged publication, safe retries, cleanup")
+    print("Passed: native pasted images, atomic creation, editable rejection, safe retries, cleanup")
 }
 
 func auditQuickIssueMediaIntegration() {
@@ -588,12 +593,16 @@ func auditQuickIssueMediaIntegration() {
     let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
     let sample = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in NSColor.systemTeal.setFill(); rect.fill(); return true }
     board.writeObjects([sample]); precondition(ui.pasteImages(board)); precondition(ui.pasteImages(board))
-    ui.create()
     func wait(_ condition: () -> Bool) {
         let deadline = Date(timeIntervalSinceNow: 45)
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
         precondition(condition(), "Native CLI operation timed out")
     }
+    var configured: Result<Data, Error>?
+    ui.request(["settings", "set", "--project", "Native media test", "--no-drafts", "--json"]) { configured = $0 }
+    wait { configured != nil }
+    _ = try! configured!.get()
+    ui.create()
     wait { !ui.saving }
     precondition(ui.succeeded, ui.error.stringValue)
     var result: Result<Data, Error>?
@@ -607,7 +616,7 @@ func auditQuickIssueMediaIntegration() {
     let attachments = listed["attachments"] as! [[String: Any]]
     precondition(attachments.count == 2 && attachments.allSatisfy { ($0["name"] as? String)?.hasSuffix(".png") == true })
     ui.window.close()
-    print("Passed: real CLI creates a draft, stores two pasted images and publishes the complete issue")
+    print("Passed: real CLI atomically saves a regular task and two images with drafts disabled")
 }
 
 func auditInbox(root: URL, sample: Record) {
