@@ -8,6 +8,54 @@ use std::{
 };
 
 #[test]
+fn lists_sorted_utilities_with_optional_prefix_without_running_commands() {
+    for (index, (args, expected)) in [
+        (vec!["utils", "list", "ans-"], "ans-cat\nans-ck\n"),
+        (
+            vec!["utils", "list"],
+            "ans-cat\nans-ck\ncopy\ngcn\ngpn\npaste\npbcopy\npbpaste\nsearch\n",
+        ),
+        (vec!["utils", "list", "missing-"], ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root =
+            std::env::temp_dir().join(format!("hb-utils-list-{}-{index}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = UnixListener::bind(root.join("fleet.sock")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            let response = json!({"ok":true,"document":{"utils":{
+                "search":{"command":"exit 99"},
+                "ans-ck":{"command":"exit 99","destination":"offline"},
+                "pbcopy":{"command":"exit 99"},
+                "ans-cat":{"command":"exit 99","global":true}
+            }},"error":null});
+            stream.write_all(response.to_string().as_bytes()).unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        });
+        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .args(args)
+            .env("HEY_BOSS_FLEET_STATE", &root)
+            .output()
+            .unwrap();
+        let request = server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected.as_bytes());
+        assert!(output.stderr.is_empty());
+        assert_eq!(request, json!({"kind":"configuration"}));
+    }
+}
+
+#[test]
 fn configured_destination_forwards_binary_stdin_arguments_output_and_exit_code() {
     let root = std::env::temp_dir().join(format!("hb-utils-config-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
