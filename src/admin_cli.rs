@@ -45,6 +45,8 @@ pub struct SkillOptions {
 }
 #[derive(Subcommand)]
 pub enum SkillAction {
+    #[command(hide = true)]
+    ApplyRename,
     /// Print the canonical Markdown skill.
     Show,
     /// Install the bundled skill and sync selected skills for Codex, Agents and Claude Code.
@@ -100,6 +102,19 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
     let home_os = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing"))?;
     let home = Path::new(&home_os);
     match &options.action {
+        SkillAction::ApplyRename => {
+            let mut bytes = Vec::new();
+            io::stdin()
+                .take(96 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 96 * 1024 * 1024 {
+                return Err(io::Error::other("Skill request too large"));
+            }
+            let input: Value = serde_json::from_slice(&bytes)?;
+            let scan = hey_boss::skill::manager_rename::apply(home, &input)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            println!("{scan}");
+        }
         SkillAction::Show if options.json => println!(
             "{}",
             json!({"markdown":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","references":hey_boss::skill::references()})

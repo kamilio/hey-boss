@@ -83,8 +83,8 @@
 .skill-source-viewer pre>span:before{content:attr(data-number);display:inline-block;text-align:right;width:36px;margin-right:14px;color:var(--faint);opacity:.65;font-size:10px}
 .skill-source-viewer pre>span.highlight{background:var(--accent-soft)}
 .skill-markdown-editor-card{border:1px solid var(--accent);border-radius:10px;background:var(--solid);overflow:hidden}
-.skill-markdown-editor-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px;background:var(--hover);border-bottom:1px solid var(--line);font-size:12px}
-.skill-markdown-editor-actions{display:flex;gap:6px}
+.skill-markdown-editor-toolbar{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px;background:var(--hover);border-bottom:1px solid var(--line);font-size:12px}
+.skill-markdown-editor-actions{display:flex;flex-wrap:wrap;gap:6px}
 .skill-codemirror-host{padding:14px 18px}
 .skill-markdown-textarea{width:100%;min-height:340px;padding:14px 18px;border:0;outline:none;background:var(--solid);color:var(--text);font:13px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;box-sizing:border-box}
 .skill-compat-details>summary{cursor:pointer;list-style:none}
@@ -109,3 +109,5 @@
 .skill-source-path-inline { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
 .skill-source-path-inline code { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
 .skill-rollout-feedback{padding:12px 14px;margin:12px 0;border:1px solid var(--line);border-radius:8px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}.skill-rollout-feedback p{margin:0 0 6px}.skill-rollout-feedback p:last-child{margin-bottom:0}.skill-rollout-feedback.has-error{border-color:var(--danger);color:var(--danger)}.skill-rollout-feedback .button{margin-top:6px}
+
+.skill-edit-hint{margin:0;padding:10px 14px;color:var(--muted);font-size:12px;line-height:1.5;border-bottom:1px solid var(--line)}
