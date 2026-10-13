@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_IMAGES"] == "1" { auditImageNotifications(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_VISUAL"] { previewSubscriptionQuota(state); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REPLAY"] == "1" { auditNotificationReplay(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_VISUAL"] {
@@ -210,6 +211,7 @@ func audit() {
     auditNativeMarkdownReader(sample: updates[0])
     auditDocumentComments(root: root, sample: updates[0])
     auditReviewImage(sample: updates[0])
+    auditImageNotifications()
     auditCommentComposer(root: root)
     auditMultilineSourceComment(root: root)
     auditOptimisticNotifications()
@@ -2217,6 +2219,59 @@ func auditDocumentComments(root: URL, sample: Record) {
     precondition(reader.reviewSidebar!.entries.subviews.count == 1)
     reader.close()
     print("Passed: durable document comments, synchronous status wakes on first comment while reader stays open, async response payload, synchronous review wait, completion payload, disabled comments omitted, native sidebar geometry")
+}
+
+func auditImageNotifications() {
+    for (name, size) in [("landscape", NSSize(width: 1000, height: 560)), ("portrait", NSSize(width: 320, height: 960)), ("transparent", NSSize(width: 180, height: 180))] {
+        let image = NSImage(size: size, flipped: false) { rect in
+            if name != "transparent" { NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.28, alpha: 1).setFill(); rect.fill() }
+            NSColor.systemTeal.setFill(); NSBezierPath(roundedRect: rect.insetBy(dx: rect.width * 0.12, dy: rect.height * 0.16), xRadius: 24, yRadius: 24).fill()
+            NSColor.systemIndigo.setFill(); NSBezierPath(ovalIn: rect.insetBy(dx: rect.width * 0.28, dy: rect.height * 0.3)).fill()
+            return true
+        }
+        let png = NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!
+        var row = Record(taskID: "image-" + name, kind: "update", question: "Updated navigation", project: "Design", title: "Layout preview", description: "Updated navigation", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 0, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+        row.attachment = DocumentAttachment(name: name + ".png", mime: "image/png", data: png.base64EncodedString())
+        row.documentName = name + ".png"
+        var opened = 0, completed = 0
+        let card = Card(row, open: { opened += 1 }, openURL: { _ in }, complete: { _, _ in completed += 1 })
+        card.configure(grouped: true)
+        precondition(card.link?.title == "View image")
+        let deadline = Date().addingTimeInterval(5)
+        while card.imagePreview?.image == nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(card.imagePreview?.image != nil)
+        precondition(card.imagePreview!.frame.maxY < card.header.frame.minY)
+        precondition(card.imagePreview!.frame.minY > card.body.frame.maxY)
+        precondition(card.imagePreview!.image!.size.width <= 624 && card.imagePreview!.image!.size.height <= 624)
+        card.link!.performClick(nil)
+        precondition(opened == 1 && completed == 1)
+        let reader = Preview(row, openURL: { _ in })
+        while !reader.readerLoaded && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(reader.readerLoaded)
+        let picture = reader.text.textStorage!.attribute(.attachment, at: 0, effectiveRange: nil) as! NSTextAttachment
+        precondition(picture.image != nil && reader.reviewSidebar == nil)
+        if let output = ProcessInfo.processInfo.environment["HEY_BOSS_IMAGE_CAPTURES"] {
+            let directory = URL(fileURLWithPath: output)
+            try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try! png.write(to: directory.appendingPathComponent(name + ".png"))
+            let window = NSWindow(contentRect: card.view.bounds.insetBy(dx: -18, dy: -18), styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = AuditCanvas(frame: window.contentView!.bounds)
+            window.contentView!.addSubview(card.view); card.view.setFrameOrigin(NSPoint(x: 18, y: 18))
+            for dark in [false, true] {
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                reader.appearance = window.appearance
+                for (suffix, view) in [("card", window.contentView!), ("reader", reader.contentView!)] {
+                    view.layoutSubtreeIfNeeded()
+                    let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    try! bitmap.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent("\(name)-\(dark ? "dark" : "light")-\(suffix).png"))
+                }
+            }
+            window.orderOut(nil)
+        }
+        reader.close()
+    }
+    print("Passed: image thumbnails, bounded decode, landscape/portrait/transparency, reader and dismiss actions")
 }
 
 func auditReviewImage(sample: Record) {

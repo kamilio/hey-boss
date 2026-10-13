@@ -2696,6 +2696,7 @@ final class Card {
     let headerRight: CGFloat
     let body: NSTextField
     var link: ActionButton?
+    var imagePreview: NSImageView?
     var timer: Timer?
     var projectLabel: DragHeader!
     var info: InfoButton!
@@ -2717,16 +2718,38 @@ final class Card {
         }
         body.toolTip = row.kind == "update" ? row.description : row.question
         let hasAction = row.kind == "update" || row.linkURL != nil
-        let actionTitle = row.kind == "update" ? "Read update" : (row.linkLabel ?? "")
+        let actionTitle = row.kind == "update" ? (row.attachment == nil ? "Read update" : "View image") : (row.linkLabel ?? "")
         let actionWidth: CGFloat = min(260, max(126, ceil((actionTitle as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)]).width) + 32))
         let actionSpace: CGFloat = hasAction ? 34 : 0
         headerRight = 280
-        let height = body.frame.height + 72 + actionSpace
+        let imageSpace: CGFloat = row.attachment == nil ? 0 : 168
+        let height = body.frame.height + 72 + actionSpace + imageSpace
         view = effect(NSRect(x: 0, y: 0, width: 344, height: height))
         view.severity = row.visualSeverity
         contentHeight = height
         body.setFrameOrigin(NSPoint(x: 16, y: 32 + actionSpace))
         view.content.addSubview(body)
+        if let attachment = row.attachment {
+            let preview = NSImageView(frame: NSRect(x: 16, y: body.frame.maxY + 10, width: 312, height: 152))
+            preview.imageScaling = .scaleProportionallyUpOrDown
+            preview.wantsLayer = true
+            preview.layer?.cornerRadius = 8
+            preview.layer?.masksToBounds = true
+            preview.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+            preview.setAccessibilityLabel(attachment.name)
+            preview.toolTip = attachment.name
+            view.content.addSubview(preview); imagePreview = preview
+            // Decode a bounded thumbnail off the UI thread; retain the original only in history.
+            NativeMarkdownRenderer.queue.addOperation { [weak preview] in
+                let data = try? attachment.validatedImage()
+                let source = data.flatMap { CGImageSourceCreateWithData($0 as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) }
+                let thumbnail = source.flatMap { CGImageSourceCreateThumbnailAtIndex($0, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 624, kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) }
+                onMain { [weak preview] in
+                    if let thumbnail { preview?.image = NSImage(cgImage: thumbnail, size: NSSize(width: thumbnail.width, height: thumbnail.height)) }
+                    else { preview?.image = NSImage(systemSymbolName: "photo.badge.exclamationmark", accessibilityDescription: "Unable to display image") }
+                }
+            }
+        }
         let source = NSTextField(labelWithString: row.origin?.agent.map { "\($0.model ?? $0.kind) · \($0.id.suffix(8)) · \(row.sourceLabel)" } ?? row.sourceLabel)
         source.font = .systemFont(ofSize: 10, weight: .medium)
         source.textColor = .tertiaryLabelColor
@@ -2778,8 +2801,8 @@ final class Card {
             button.frame = NSRect(x: 328 - actionWidth, y: 10, width: actionWidth, height: button.intrinsicContentSize.height)
             button.alignment = .center
             button.cell!.lineBreakMode = .byTruncatingTail
-            button.toolTip = row.kind == "update" ? "Read update" : (row.linkLabel ?? "Open")
-            button.setAccessibilityLabel("\(row.kind == "update" ? "Read update" : (row.linkLabel ?? "Open")) for \((row.project ?? "Notifications")): \((row.title ?? "Untitled"))")
+            button.toolTip = actionTitle
+            button.setAccessibilityLabel("\(actionTitle) for \((row.project ?? "Notifications")): \((row.title ?? "Untitled"))")
             view.content.addSubview(button)
             link = button
         }

@@ -6,6 +6,20 @@ use hey_boss::Request;
 #[derive(Subcommand)]
 pub(super) enum Action {
     #[command(
+        about = "Show an image notification",
+        after_help = "Snapshots a local PNG, JPEG, GIF, or WebP up to 4 MiB. Click View image to open it; history keeps the image after the source file is removed. Returns a Task ID immediately.\n\nExample:\n  hey-boss notif image --title 'Layout preview' screenshot.png 'Updated navigation'"
+    )]
+    Image {
+        #[command(flatten)]
+        metadata: Metadata,
+        #[arg(value_name = "PATH", help = "Local image to snapshot")]
+        file: std::path::PathBuf,
+        #[arg(help = "Short caption (defaults to the filename)")]
+        caption: Option<String>,
+        #[command(flatten)]
+        output: Output,
+    },
+    #[command(
         about = "Post a short update with a Markdown preview",
         after_help = r#"Keep SUMMARY to one short sentence. MARKDOWN is inline text; use --file PATH to load a Markdown document instead.
 Headings, emphasis, lists, code, and http/https/file links are supported.
@@ -202,6 +216,7 @@ impl Action {
         let mut issue = None;
         let (project, title, severity, icon, icon_path) = match &self {
             Action::Update { metadata, .. }
+            | Action::Image { metadata, .. }
             | Action::Alert { metadata, .. }
             | Action::Ask { metadata, .. }
             | Action::Prompt { metadata, .. }
@@ -273,6 +288,29 @@ impl Action {
         };
         let output = match self {
             Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
+            Action::Image {
+                file,
+                caption,
+                output,
+                ..
+            } => {
+                let (_, attachment) = hey_boss::document::read_file(&file)?;
+                let attachment = attachment.ok_or_else(|| {
+                    invalid("Image must be a PNG, JPEG, GIF, or WebP file (up to 4 MiB)")
+                })?;
+                let caption = caption
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| attachment.name.clone());
+                request.command = "update".into();
+                request.description = Some(caption.clone());
+                request.question = Some(caption);
+                request.document_name = Some(attachment.name.clone());
+                request.attachment = Some(attachment);
+                if request.icon.is_none() && request.icon_path.is_none() {
+                    request.icon = Some("photo".into());
+                }
+                output
+            }
             Action::Update {
                 summary,
                 content,

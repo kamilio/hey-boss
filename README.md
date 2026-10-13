@@ -460,7 +460,13 @@ history and unanswered questions. Unmuting does not replay suppressed notices.
 Older notices without a recorded agent show their available process trace.
 Sender shows the exact agent ID and recorded model; missing models are labeled explicitly.
 
-Creation commands (`alert`, `update`, `ask`, `prompt`, and `approval`) accept optional appearance flags:
+`hey-boss notif image --title 'Layout preview' screenshot.png 'Updated navigation'`
+shows an image preview with a **View image** action. The optional caption defaults
+to the filename. PNG, JPEG, GIF, and WebP files up to 4 MiB are snapshotted before
+sending, so history and connected devices retain the image after the source is
+removed. The phone reader supports fit and full-size views.
+
+Creation commands (`alert`, `update`, `image`, `ask`, `prompt`, and `approval`) accept optional appearance flags:
 
 - `--severity neutral|info|success|warning|error` adds a subtle status badge color. The default is neutral. Info marks useful context, success marks a completed outcome, warning means something needs attention, and error means an actual failure.
 - `--icon NAME` chooses a cohesive native SF Symbol. Aliases: `info`, `success`, `warning`, `error`, `build`, `code`, `test`, `review`, `deploy`, `docs`, `folder`, `bell`, `question`. Any SF Symbol name is also accepted; unknown or unavailable symbols fall back to the default.

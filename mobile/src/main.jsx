@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {Theme,Button,TextArea,TextField,Spinner,Dialog,DropdownMenu} from '@radix-ui/themes';
 import {Inbox,History,Settings,Bell,MessageCircle,Check,CheckCheck,TriangleAlert,CircleAlert,Info,ArrowUpRight,ChevronRight,X,Monitor,Server,RefreshCw,ListTodo,Ellipsis} from 'lucide-react';
 import Markdown from './Markdown';
+import NotificationImage from './NotificationImage';
 import usePullRefresh from './usePullRefresh';
 import LiquidGlass from 'liquid-glass-react';
 import {activityGroups,activityTime,activityDateTime} from './activity';
@@ -147,7 +148,8 @@ function App(){
    {detailLoading?<div className="reader-loading"><Spinner size="3"/></div>:detailError?<p role="alert">{detailError} <Button variant="soft" onClick={()=>loadDetail(selectedID)}>Retry</Button></p>:selected&&<>
     <div className="reader-meta"><TaskIcon task={selected} size={16}/><span>{selected.sourceHost||'Mac'}</span>{!decision(selected)&&<span className="read-state"><Check size={13}/>{selected.status==='pending'?'Syncing read receipt':'Read'}</span>}</div>
     {selected.origin?.agent&&<p className="reader-sender"><strong>{selected.origin.agent.model||'Model not recorded'}</strong><br/><code>{selected.origin.agent.id}</code></p>}
-    {selected.kind==='update'?<>{selected.description&&<Markdown>{selected.description}</Markdown>}{selected.question&&selected.question!==selected.description&&<Markdown>{selected.question}</Markdown>}</>:<>{selected.question&&<Markdown>{selected.question}</Markdown>}{selected.description&&selected.description!==selected.question&&<Markdown>{selected.description}</Markdown>}</>}
+    {selected.attachment&&<NotificationImage key={selected.taskID} attachment={selected.attachment}/>}
+    {selected.kind==='update'?<>{selected.description&&<Markdown>{selected.description}</Markdown>}{!selected.attachment&&selected.question&&selected.question!==selected.description&&<Markdown>{selected.question}</Markdown>}</>:<>{selected.question&&<Markdown>{selected.question}</Markdown>}{selected.description&&selected.description!==selected.question&&<Markdown>{selected.description}</Markdown>}</>}
     {decision(selected)?<>{decisionLink(selected)}{responses(selected)}</>:<div className="reader-actions">{link(selected)}</div>}
    </>}
    {error&&<p className="reader-error" role="alert">{error}</p>}
