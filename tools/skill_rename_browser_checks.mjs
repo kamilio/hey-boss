@@ -21,7 +21,7 @@ try{
   }
   await put(join(local,'.hey-boss/config.json'),JSON.stringify({ssh_hosts:['fixture-remote']}));
   const shim=join(root,'bin/ssh');
-  await put(shim,`#!/usr/bin/env node\nconst {spawnSync}=require('node:child_process');\nconst args=process.argv.slice(2);\nconst command=args.at(-1);\nconst result=command.includes('skill apply-rename')?spawnSync(${JSON.stringify(binary)},['skill','apply-rename'],{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(remote)}}}):spawnSync('python3',[${JSON.stringify(resolve('src/skill/transport.py'))}],{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(remote)}}});\nif(result.status!==0)console.error({status:result.status,signal:result.signal,error:result.error});\nprocess.exit(result.status??1);\n`);
+  await put(shim,`#!/usr/bin/env node\nconst {spawnSync}=require('node:child_process');\nconst args=process.argv.slice(2);\nconst command=args.at(-1);\nconst result=(/skill apply-(rename|copy)/).test(command)?spawnSync(${JSON.stringify(binary)},['skill',command.includes('apply-copy')?'apply-copy':'apply-rename'],{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(remote)}}}):spawnSync('python3',[${JSON.stringify(resolve('src/skill/transport.py'))}],{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(remote)}}});\nif(result.status!==0)console.error({status:result.status,signal:result.signal,error:result.error});\nprocess.exit(result.status??1);\n`);
   await chmod(shim,0o755);
   const env={...process.env,HOME:local,PATH:`${join(root,'bin')}:${resolve(binary,'..')}:${process.env.PATH}`,HEY_BOSS_STATE_DIR:join(root,'state')};
   for(const key of ['HEY_BOSS_FLEET_CONFIG','HEY_BOSS_FLEET_STATE','HEY_BOSS_FLEET_DESIRED','HEY_BOSS_ISSUE_HOST'])delete env[key];
@@ -88,6 +88,37 @@ try{
     const cm=page.locator('.cm-content');
     await cm.waitFor({state:'visible'});await cm.fill(content);
   };
+  // Drafts survive reload, file/skill switches, failures, and late save responses.
+  const draft=text('rename-after')+'Unsaved browser draft\n';
+  await edit(draft);await page.reload();
+  await page.locator('.cm-content').waitFor({state:'visible'});
+  assert.match(await page.locator('.cm-content').innerText(),/Unsaved browser draft/);
+  await page.locator('[data-md-file="references/notes.md"]').click();
+  await edit('Unsaved reference draft');
+  await page.locator('[data-md-file="SKILL.md"]').click();
+  assert.match(await page.locator('.cm-content').innerText(),/Unsaved browser draft/);
+  await page.locator('[data-open="global:rename-taken"]').click();
+  await page.locator('[data-open="global:rename-after"]').click();
+  assert.match(await page.locator('.cm-content').innerText(),/Unsaved browser draft/);
+  await page.route('**/api/skills',async route=>{
+    if(route.request().method()==='POST')await route.abort('failed');else await route.continue();
+  });
+  await page.locator('[data-save-markdown="local"]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
+  await page.unroute('**/api/skills');await page.reload();
+  assert.match(await page.locator('.cm-content').innerText(),/Unsaved browser draft/);
+  let release;const gate=new Promise(r=>release=r);let received;const sent=new Promise(r=>received=r);
+  await page.route('**/api/skills',async route=>{
+    if(route.request().postDataJSON()?.action==='save_file'){
+      const response=await route.fetch();received();await gate;await route.fulfill({response});
+    }else await route.continue();
+  });
+  await page.locator('[data-save-markdown="local"]').click();await sent;
+  await edit(draft+'Typed while saving\n');release();
+  await page.waitForFunction(()=>!document.querySelector('[data-save-markdown="local"]')?.disabled);
+  assert.match(await page.locator('.cm-content').innerText(),/Typed while saving/);
+  await page.unroute('**/api/skills');await page.reload();
+  assert.match(await page.locator('.cm-content').innerText(),/Typed while saving/);
   await edit(text('rename-final'));
   if(process.env.SKILLS_SCREENSHOTS){await mkdir(process.env.SKILLS_SCREENSHOTS,{recursive:true});await page.screenshot({path:join(process.env.SKILLS_SCREENSHOTS,'editing.png'),fullPage:true});}
   await page.locator('[data-save-markdown="distribute"]').click();
@@ -97,12 +128,62 @@ try{
   assert.ok(report.machines.every(m=>!m.error),JSON.stringify(report.machines.map(m=>m.error)));
   assert.equal(await exists(join(remote,'.codex/skills/rename-after')),false);
   assert.equal(await readFile(join(remote,'.codex/skills/rename-final/SKILL.md'),'utf8'),text('rename-final'));
+  // Repeated edits after a rename must update every saved library as well as agent copies.
+  await page.reload();await page.locator('[data-toggle-editor]').click();
+  const updated=text('rename-final')+'Updated fixture content\n';
+  await edit(updated);await page.locator('[data-save-markdown="distribute"]').click();
+  await page.waitForFunction(()=>!document.querySelector('[data-save-markdown]'));
+  report=await idle();
+  for(const home of [local,remote])for(const agent of ['.codex','.agents','.claude','.hey-boss']){
+    assert.equal(await readFile(join(home,agent,'skills/rename-final/SKILL.md'),'utf8'),updated,'Every copy must update after editing a renamed skill');
+  }
+  // Reproduce an old saved-only version and exercise both version buttons in the real UI.
+  await put(join(remote,'.hey-boss/skills/rename-final/SKILL.md'),text('rename-final'));
+  await post({action:'scan'});report=await idle();await page.reload();
+  await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===2);
+  const stale=report.machines.find(m=>m.host==='fixture-remote').copies.find(c=>c.name==='rename-final'&&c.agent==='library');
+  assert.match(await page.locator('.skill-versions').textContent(),/Saved copy only/);
+  if(process.env.SKILLS_SCREENSHOTS)await page.screenshot({path:join(process.env.SKILLS_SCREENSHOTS,'saved-copy-conflict.png'),fullPage:true});
+  await page.locator('[data-unify="'+stale.digest+'"]').click();
+  report=await idle();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===1);
+  for(const home of [local,remote])for(const agent of ['.codex','.agents','.claude','.hey-boss']){
+    assert.equal(await readFile(join(home,agent,'skills/rename-final/SKILL.md'),'utf8'),text('rename-final'),'Choosing the older version applies it everywhere');
+  }
+  const base=report.machines.find(m=>m.host==='local').copies.find(c=>c.name==='rename-final');
+  report=await post({action:'save_file',skill:'rename-final',file_path:'SKILL.md',content:updated,base_digest:base.digest});
+  await page.reload();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===2);
+  await page.locator('[data-unify="'+report.choices['rename-final']+'"]').click();
+  report=await idle();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===1);
+  for(const home of [local,remote])for(const agent of ['.codex','.agents','.claude','.hey-boss']){
+    assert.equal(await readFile(join(home,agent,'skills/rename-final/SKILL.md'),'utf8'),updated,'Choosing the newer version applies it everywhere');
+  }
   // A rejected save must preserve the editable draft.
   await page.reload();await page.locator('[data-toggle-editor]').click();await edit(text('rename-taken'));
   await page.locator('[data-save-markdown="local"]').click();
   await page.waitForFunction(()=>!document.querySelector('#skills-error').hidden);
   assert.equal(await page.locator('[data-save-markdown="local"]').count(),1);
   assert.match(await page.locator('.cm-content, #skill-markdown-textarea:visible').first().textContent().catch(()=>''),/rename-taken/);
+  await page.reload();
+  assert.match(await page.locator('.cm-content').innerText(),/rename-taken/,'Rejected saves survive reload');
+  // A draft for another file follows a frontmatter rename without overwriting that file.
+  await page.locator('[data-md-file="references/notes.md"]').click();
+  assert.match(await page.locator('.cm-content').innerText(),/Unsaved reference draft/);
+  await page.locator('[data-md-file="SKILL.md"]').click();
+  // An external save replaces the original base; recovery offers an explicit reviewed retry.
+  await edit(updated+'Browser draft before external save\n');
+  report=await get('/api/skills');
+  await post({action:'save_file',skill:'rename-final',file_path:'SKILL.md',content:updated+'External save\n',base_digest:report.choices['rename-final'],distribute:true});
+  await idle();await page.reload();
+  assert.match(await page.locator('.cm-content').innerText(),/Browser draft before external save/);
+  await page.locator('[data-save-markdown="local"]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
+  await page.locator('[data-rebase-draft]').click();
+  await page.locator('[data-save-markdown="local"]').click();
+  await page.waitForFunction(()=>!document.querySelector('[data-save-markdown]'));
+  assert.match(await readFile(join(local,'.codex/skills/rename-final/SKILL.md'),'utf8'),/Browser draft before external save/);
+  await page.locator('[data-toggle-editor]').click();await edit(text('rename-taken'));
+  await page.locator('[data-save-markdown="local"]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
   await page.setViewportSize({width:390,height:844});
   const card=await page.locator('.skill-markdown-editor-card').boundingBox();
   for(const button of await page.locator('.skill-markdown-editor-actions button').all()){
@@ -110,7 +191,7 @@ try{
   }
   if(process.env.SKILLS_SCREENSHOTS)await page.screenshot({path:join(process.env.SKILLS_SCREENSHOTS,'rejected-mobile.png'),fullPage:true});
   assert.deepEqual(errors,[]);
-  console.log('Skill rename: collisions, path safety, local save, later sync, real browser rename, URL, and retained drafts passed');
+  console.log('Skills: rename, saved-library sync, version actions, reload/file recovery, failed saves, late responses, stale-base recovery, and mobile layout passed');
 }finally{
   await browser?.close();
   if(server&&server.exitCode===null){server.kill();await new Promise(r=>server.once('exit',r));}
