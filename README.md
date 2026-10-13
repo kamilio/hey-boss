@@ -30,7 +30,11 @@ through the existing fleet tunnel, without caller-to-destination SSH setup.
 Destination runs are noninteractive: piped stdin and both output streams preserve
 binary bytes, output is returned on completion, and the exit code is forwarded.
 Each stream and the arguments are limited to 1 MiB; runs stop after five minutes.
-Disconnected destinations fail without queuing or retrying execution.
+Utilities wait up to ten seconds for a disconnected destination to reconnect.
+If it stays offline, the error names the host, shows the last connection error,
+and gives recovery commands. Nothing is queued for later execution. Once a run
+is sent, it is never automatically replayed; a lost connection reports an unknown
+outcome so you can check the command's effects before rerunning it.
 
 Set `global: true` to also run a utility directly: `code-search --sem 'authentication'`.
 The fleet installs launchers in `~/.local/bin` on every connected machine, and

@@ -846,6 +846,7 @@ impl Supervisor {
         if message["watch_deltas"] != true {
             replica::legacy_watch_rows(&read, node, &mut payload)?;
         }
+        let mut repairs = Vec::new();
         for (change, receipt) in message["changes"].as_array().unwrap().iter().zip(&receipts) {
             if receipt["state"] == "conflict"
                 && !matches!(change["table_name"].as_str(), Some("comments" | "events"))
@@ -859,16 +860,11 @@ impl Supervisor {
                 )?;
                 let canonical = replica::current_row(&read, table, &row)?;
                 if !canonical.is_null() {
-                    if !payload["tables"][table].is_array() {
-                        payload["tables"][table] = json!([]);
-                    }
-                    payload["tables"][table]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(canonical);
+                    repairs.push((table.to_owned(), canonical));
                 }
             }
         }
+        replica::repair_rows(&read, &mut payload, repairs)?;
         let signals = replica::rows(
             &read,
             "SELECT * FROM fleet_signals WHERE host=? AND state='pending' ORDER BY created_at",
@@ -2092,6 +2088,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conflict_repairs_include_dependencies_beyond_the_incremental_batch() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('project','Project',2);
+            INSERT INTO agents VALUES('human:old','{}',1);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+            VALUES('project',1,'Original','','open','human:old',1,1,1,'[]');").unwrap();
+        replica::install_capture(&db, "controller", &app.ctx.node).unwrap();
+        let peer_path = app.ctx.state.join("peer.db");
+        drop(crate::issues::Store::open(&peer_path).unwrap());
+        let peer = crate::issues::Store::open_connection(&peer_path).unwrap();
+        replica::install_capture(&peer, "agent", "peer").unwrap();
+        let initial = replica::snapshot(&db, "peer").unwrap();
+        replica::apply_pull(&peer, "peer", &initial, &[]).unwrap();
+        let before = replica::rows(&peer, "SELECT * FROM issues", &[])
+            .unwrap()
+            .remove(0);
+        let mut after = before.clone();
+        after["title"] = json!("Offline edit");
+        for n in 0..310 {
+            db.execute(
+                "UPDATE agents SET last_seen=? WHERE id='human:old'",
+                [n + 2],
+            )
+            .unwrap();
+        }
+        db.execute_batch("INSERT INTO agents VALUES('human:new','{}',1);
+            UPDATE issues SET assignee='human:new',version=2 WHERE project_id='project' AND number=1;").unwrap();
+        let (payload, receipts, _) = app.heartbeat_pull(&db, "peer", "peer", &json!([]),
+            &json!({"cursor":initial["cursor"],"watch_deltas":true,"changes":[{"seq":1,"table_name":"issues","before_json":before.to_string(),"after_json":after.to_string()}]})).unwrap();
+        assert_eq!(receipts[0]["state"], "conflict");
+        assert!(
+            payload["cursor"].as_i64().unwrap()
+                < replica::snapshot(&db, "peer").unwrap()["cursor"]
+                    .as_i64()
+                    .unwrap()
+        );
+        replica::apply_pull(&peer, "peer", &payload, &receipts).unwrap();
+        assert_eq!(
+            replica::rows(&peer, "SELECT assignee FROM issues", &[]).unwrap()[0]["assignee"],
+            "human:new"
+        );
+        assert!(
+            replica::rows(&peer, "PRAGMA foreign_key_check", &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn utilities_route_by_config_and_poll_without_blocking_sync() {
         use base64::{Engine, engine::general_purpose::STANDARD};
         let (_directory, mut app) = test_supervisor();
@@ -2125,12 +2171,27 @@ mod tests {
         assert!(app.authoritative(&poll).is_err());
         let mut remote = request.clone();
         remote["name"] = json!("remote");
-        assert!(
-            app.authoritative(&remote)
-                .unwrap_err()
-                .to_string()
-                .contains("disconnected")
-        );
+        app.state
+            .lock()
+            .unwrap()
+            .machines
+            .insert("peer".into(), json!({"error":"Synchronization failed"}));
+        let error = app.authoritative(&remote).unwrap_err().to_string();
+        for detail in [
+            "remote",
+            "peer",
+            "disconnected",
+            "Synchronization failed",
+            "hey-boss fleet setup",
+            "safe to retry",
+        ] {
+            assert!(error.contains(detail), "{error}");
+        }
+        let mut waiting = remote.clone();
+        waiting["wait_for_connection"] = json!(true);
+        let response = app.authoritative(&waiting).unwrap();
+        assert_eq!(response["waiting"], true);
+        assert!(app.utilities.lock().unwrap().is_empty());
         let (tx, rx) = mpsc::sync_channel(2);
         app.state
             .lock()
@@ -2166,6 +2227,46 @@ mod tests {
         assert!(error.message.contains("Utility output exceeds 1 MiB"));
         remote["name"] = json!("missing");
         assert!(app.authoritative(&remote).is_err());
+    }
+
+    #[test]
+    fn utilities_never_replay_a_run_after_transport_loss() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(
+            &app.ctx.desired,
+            "machines: {peer: {}}\nutils: {remote: {command: cat, destination: peer}}\n",
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::sync_channel(2);
+        app.state
+            .lock()
+            .unwrap()
+            .connections
+            .insert("peer".into(), (1, tx));
+        app.state
+            .lock()
+            .unwrap()
+            .machines
+            .insert("peer".into(), json!({"utils_v1":true}));
+        let request = json!({"kind":"utils_start","name":"remote","args":[],"stdin":"","wait_for_connection":true});
+        let started = app.authoritative(&request).unwrap();
+        rx.recv().unwrap();
+        app.state.lock().unwrap().connections.remove("peer");
+        let error = app
+            .authoritative(&json!({"kind":"utils_poll","id":started["id"]}))
+            .unwrap_err();
+        assert!(error.message.contains("outcome is unknown"), "{error}");
+        assert!(error.message.contains("before rerunning"), "{error}");
+        assert!(rx.try_recv().is_err());
+        let (closed, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        app.state
+            .lock()
+            .unwrap()
+            .connections
+            .insert("peer".into(), (2, closed));
+        assert_eq!(app.authoritative(&request).unwrap()["waiting"], true);
     }
 
     #[test]

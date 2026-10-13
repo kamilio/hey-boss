@@ -4,6 +4,8 @@ use super::*;
 pub(super) struct Run {
     started: Instant,
     host: String,
+    name: String,
+    transport: Option<u32>,
     result: Option<Value>,
 }
 impl Supervisor {
@@ -28,6 +30,23 @@ impl Supervisor {
                     ));
                 }
                 return Ok(result);
+            }
+            if let Some(transport) = run.transport
+                && self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .connections
+                    .get(&run.host)
+                    .map(|(pid, _)| *pid)
+                    != Some(transport)
+            {
+                let error = invalid(&format!(
+                    "Lost the fleet connection to '{}' after sending utility '{}'; its outcome is unknown. Check the command's effects on '{}' before rerunning it. Execution was not retried.",
+                    run.host, run.name, run.host
+                ));
+                runs.remove(id);
+                return Err(error);
             }
             return Ok(json!({"ok":true,"done":false}));
         }
@@ -65,11 +84,28 @@ impl Supervisor {
                 "Utilities are busy; wait for an active run to finish",
             ));
         }
+        let mut transport = None;
         if host != "local" {
             let state = self.state.lock().unwrap();
-            let (_, outgoing) = state.connections.get(host).ok_or_else(|| {
-                invalid("Utility destination is disconnected; nothing was queued")
-            })?;
+            let disconnected = || {
+                let cause = state
+                    .machines
+                    .get(host)
+                    .and_then(|m| m["error"].as_str())
+                    .map(|error| format!("\nLast connection error: {error}"))
+                    .unwrap_or_default();
+                let error = format!(
+                    "Cannot run utility '{name}': '{host}' is disconnected from the internal fleet channel.{cause}\nNothing was sent; it is safe to retry. Reconnection is automatic.\nRecovery: inspect `hey-boss fleet status`, or run `hey-boss fleet setup` on the supervisor to restart the connection, then rerun the utility."
+                );
+                if request["wait_for_connection"] == true {
+                    Ok(json!({"ok":true,"waiting":true,"host":host,"error":error}))
+                } else {
+                    Err(invalid(&error))
+                }
+            };
+            let Some((pid, outgoing)) = state.connections.get(host) else {
+                return disconnected();
+            };
             if state
                 .machines
                 .get(host)
@@ -79,15 +115,23 @@ impl Supervisor {
                     "Upgrade the utility destination with hey-boss upgrade",
                 ));
             }
-            outgoing
-                .try_send(message.clone())
-                .map_err(|_| invalid("Utility destination is busy; nothing was queued"))?;
+            match outgoing.try_send(message.clone()) {
+                Ok(()) => transport = Some(*pid),
+                Err(mpsc::TrySendError::Disconnected(_)) => return disconnected(),
+                Err(mpsc::TrySendError::Full(_)) => {
+                    return Err(invalid(&format!(
+                        "Utility '{name}' could not reach '{host}': its fleet channel is busy. Nothing was sent; wait a moment and rerun the utility."
+                    )));
+                }
+            }
         }
         runs.insert(
             id.clone(),
             Run {
                 started: Instant::now(),
                 host: host.into(),
+                name: name.into(),
+                transport,
                 result: None,
             },
         );
