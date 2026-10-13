@@ -323,5 +323,13 @@ function date(at) {
     tip.style.bottom = below ? "auto" : window.innerHeight - rect.top + 6 + "px";
     tip.style.maxHeight = Math.max(80, (below ? window.innerHeight - rect.bottom : rect.top) - 22) + "px";
   }, true);
-  return {actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  function pagination(page, label, href) {
+    if (page.pages <= 1) return "";
+    const link = (target, text, symbol) => target < 1 || target > page.pages
+      ? `<span class="page-button" aria-disabled="true">${icon(symbol)}${text}</span>`
+      : `<a class="page-button" data-list-page href="${esc(href(target))}" aria-label="${text} page of ${esc(label)}">${icon(symbol)}${text}</a>`;
+    const format = value => value.toLocaleString();
+    return `<nav class="list-pagination" aria-label="${esc(label)} pagination" tabindex="-1"><span class="pagination-range">${format(page.start)}–${format(page.end)} <span>of ${format(page.total)} ${esc(label)}</span></span><div class="pagination-controls">${link(page.current - 1, "Previous", "arrow-left")}<span class="pagination-position" aria-live="polite">Page ${format(page.current)} of ${format(page.pages)}</span>${link(page.current + 1, "Next", "arrow-right")}</div></nav>`;
+  }
+  return {pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

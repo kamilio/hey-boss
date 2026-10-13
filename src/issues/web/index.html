@@ -18,9 +18,10 @@
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/pagination.css" />
     <link rel="stylesheet" href="/project-settings.css" />
     <link rel="stylesheet" href="/status.css" />
-    <script src="/routes.js" defer></script><script src="/components.js" defer></script><script src="/quick-issue.js" defer></script>
+    <script src="/routes.js" defer></script><script src="/pagination.js" defer></script><script src="/components.js" defer></script><script src="/quick-issue.js" defer></script>
     <script src="/tags.js" defer></script>
     <script src="/inbox.js" defer></script>
     <script src="/global-settings.js" defer></script>
@@ -175,6 +176,7 @@
               ><span data-icon="copy"></span></button>
             </div>
           </div>
+          <div id="issue-pagination-top"></div>
           <div id="issue-list" role="tabpanel" aria-label="Issues">
             <div class="loading-state">
               <span class="spinner"></span>Loading your issues…
@@ -183,6 +185,7 @@
           <div class="list-footer" id="list-footer" hidden>
             <span id="list-summary"></span>
           </div>
+          <div id="issue-pagination-bottom"></div>
         </div>
         <div class="list-bottom">
           <span><span data-icon="sync"></span>In sync with your agents</span

@@ -662,6 +662,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/css; charset=utf-8",
                 include_bytes!("web/components.css"),
             )),
+            "/pagination.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/pagination.css"),
+            )),
+            "/pagination.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/pagination.js"),
+            )),
             "/components.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/components.js"),

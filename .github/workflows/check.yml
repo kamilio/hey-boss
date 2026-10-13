@@ -21,6 +21,7 @@ jobs:
       - run: node tools/boss_unassign_checks.mjs
       - run: node tools/test_issue_transfer_controls.cjs
       - run: node tools/test_issue_navigation_exit.cjs
+      - run: node tools/test_list_pagination.cjs
       - run: node tools/test_local_http_crypto.cjs
       - run: node tools/test_native_artifact_launch.cjs
       - run: node tools/test_metadata_mutation.cjs
