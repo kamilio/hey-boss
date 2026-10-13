@@ -1,5 +1,6 @@
 //! Canonical agent skill, cross-agent/fleet skill sync, and skill policy audit.
 pub mod manager;
+pub mod manager_rename;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{

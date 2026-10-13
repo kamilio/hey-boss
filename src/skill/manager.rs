@@ -27,6 +27,8 @@ struct State {
     choices: BTreeMap<String, String>,
     #[serde(default = "default_words")]
     max_words: usize,
+    #[serde(default)]
+    pending_renames: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(skip)]
     busy: bool,
     #[serde(default)]
@@ -307,7 +309,10 @@ fn control_socket(home: &Path, host: &str) -> PathBuf {
     home.join(".local/share/hey-boss")
         .join(format!("ssh-{:016x}.sock", hash.finish()))
 }
-fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
+pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
+    if host == "local" && input["action"] == "rename" {
+        return super::manager_rename::apply(home, input);
+    }
     let temp = crate::admin::Temporary::new()?;
     fs::write(temp.0.join("input"), serde_json::to_vec(input)?)?;
     let mut command = if host == "local" {
@@ -338,7 +343,11 @@ fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
             "--",
             host,
         ]);
-        c.arg(format!("python3 -c {}", quote(TRANSPORT)));
+        if input["action"] == "rename" {
+            c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-rename'"#);
+        } else {
+            c.arg(format!("python3 -c {}", quote(TRANSPORT)));
+        }
         c
     };
     let mut child = command
@@ -642,9 +651,9 @@ fn chosen_sources(
     }
     Ok(sources)
 }
-struct LibraryStage(PathBuf);
+pub(super) struct LibraryStage(pub(super) PathBuf);
 impl LibraryStage {
-    fn new(parent: &Path) -> Result<Self> {
+    pub(super) fn new(parent: &Path) -> Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
         let path = parent.join(format!(
             ".pending-{}-{}",
@@ -897,26 +906,71 @@ pub fn act(action: Action) -> Result<Value> {
         if !is_valid_skill_name(&action.skill) {
             return Err(Error::invalid("Invalid skill name"));
         }
-        let base_files = find_source_copy(&state, &action.skill, &action.base_digest)
-            .and_then(|c| c["files"].as_array().cloned())
-            .unwrap_or_default();
-        let saved = transport(
-            &home,
-            "local",
-            &json!({
-                "action": "save",
-                "skill": action.skill,
-                "base_files": base_files,
-                "file_path": if action.file_path.is_empty() { "SKILL.md" } else { &action.file_path },
-                "content": action.content,
-            }),
-        )?;
+        let name =
+            super::manager_rename::edited_name(&action.skill, &action.file_path, &action.content)?;
+        let base =
+            find_source_copy(&state, &action.skill, &action.base_digest).ok_or_else(|| {
+                Error::conflict("Skill version is unavailable. Scan again before saving.")
+            })?;
+        if !action.base_digest.is_empty() && base["digest"] != action.base_digest {
+            return Err(Error::conflict(
+                "Skill version changed. Scan again before saving.",
+            ));
+        }
+        let renaming = name != action.skill;
+        let saved = if renaming {
+            if state
+                .machines
+                .iter()
+                .flat_map(|m| m["copies"].as_array().into_iter().flatten())
+                .any(|c| c["scope"] == "global" && c["name"] == name)
+            {
+                return Err(Error::conflict(format!(
+                    "Cannot rename to {name}: a skill with that name already exists. Choose another name."
+                )));
+            }
+            let source = super::manager_rename::renamed_source(&base, &name, &action.content)?;
+            let expected = state
+                .machines
+                .iter()
+                .find(|m| m["host"] == "local")
+                .map(|m| m["copies"].clone())
+                .unwrap_or(json!([]));
+            let rename_hosts = hosts(&home)?;
+            let scan = transport(
+                &home,
+                "local",
+                &json!({"action":"rename","source":source,"previous_names":[action.skill],"expected":expected}),
+            )?;
+            // Remember each remote's old name, including across local-only saves and restarts.
+            for host in rename_hosts.into_iter().filter(|h| h != "local") {
+                let pending = state.pending_renames.entry(host).or_default();
+                let mut previous = pending.remove(&action.skill).unwrap_or_default();
+                previous.push(action.skill.clone());
+                pending.insert(name.clone(), previous);
+            }
+            state.choices.remove(&action.skill);
+            json!({"scan":scan,"source":source})
+        } else {
+            transport(
+                &home,
+                "local",
+                &json!({
+                    "action": "save", "skill": action.skill, "base_files": base["files"],
+                    "file_path": if action.file_path.is_empty() { "SKILL.md" } else { &action.file_path },
+                    "content": action.content,
+                }),
+            )?
+        };
         let source = saved["source"].clone();
         let new_digest = source["digest"].as_str().unwrap_or("").to_owned();
         update_local_machine(&mut state, saved["scan"].clone());
-        state.choices.insert(action.skill.clone(), new_digest);
+        state.choices.insert(name.clone(), new_digest);
         let mut selected_set = super::selected_skills(&home);
-        selected_set.insert(action.skill.clone());
+        if renaming {
+            selected_set.remove(&action.skill);
+        }
+        selected_set.insert(name.clone());
         let selected_vec: Vec<String> = selected_set.iter().cloned().collect();
         super::set_selected_skills(&home, &selected_vec)?;
         state.revision += 1;
@@ -926,16 +980,26 @@ pub fn act(action: Action) -> Result<Value> {
             &action.file_path
         };
         if !action.distribute {
-            state.message = format!("Saved {display_file} in {}.", action.skill);
+            state.message = if renaming {
+                format!(
+                    "Renamed {} to {name} and saved {display_file}. Original copies are backed up.",
+                    action.skill
+                )
+            } else {
+                format!("Saved {display_file} in {name}.")
+            };
             persist(&home, &state)?;
-            return Ok(public_report(&state, selected_set));
+            let mut report = public_report(&state, selected_set);
+            report["saved_skill"] = json!(name);
+            return Ok(report);
         }
         let hosts = hosts(&home)?;
         state.busy = true;
-        state.message = format!("Saved {display_file} and distributing {}…", action.skill);
+        state.message = format!("Saved {display_file} and distributing {name}…");
         let snapshot = state.clone();
         persist(&home, &state)?;
-        let initial = public_report(&state, selected_set);
+        let mut initial = public_report(&state, selected_set);
+        initial["saved_skill"] = json!(name);
         std::thread::spawn(move || {
             let _lock = lock;
             let outcome = std::panic::catch_unwind(|| {
@@ -1145,7 +1209,31 @@ fn run_delete(home: &Path, hosts: &[String], skill: &str) {
 }
 
 fn install(home: &Path, host: &str, input: &Value) -> Result<Value> {
-    match transport(home, host, input) {
+    let apply = || -> Result<Value> {
+        let mut ordinary = Vec::new();
+        let mut renamed = None;
+        for source in input["sources"].as_array().into_iter().flatten() {
+            if source["previous_names"].is_array() {
+                renamed = Some(transport(
+                    home,
+                    host,
+                    &json!({"action":"rename","source":source,
+                    "previous_names":source["previous_names"],"expected":input["expected"]}),
+                )?);
+            } else {
+                ordinary.push(source.clone());
+            }
+        }
+        if ordinary.is_empty()
+            && let Some(scan) = renamed
+        {
+            return Ok(scan);
+        }
+        let mut request = input.clone();
+        request["sources"] = json!(ordinary);
+        transport(home, host, &request)
+    };
+    match apply() {
         Err(error) if error.to_string().contains("changed since scanning") => {
             // Refresh the conflicting copies for review, but never retry a write
             // against content the user has not seen yet.
@@ -1169,6 +1257,14 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                 // Never overwrite an unseen machine. First scan its copies for review.
                 let input = if distribute {
                     if previous.is_none() { return (host.clone(), Err(Error::conflict("New machine: scan before distributing"))); }
+                    let mut sources = sources.to_vec();
+                    if let Some(pending) = snapshot.pending_renames.get(host) {
+                        for source in &mut sources {
+                            if let Some(previous) = source["name"].as_str().and_then(|name| pending.get(name)) {
+                                source["previous_names"] = json!(previous);
+                            }
+                        }
+                    }
                     json!({"action":"install","sources":sources,"expected":expected})
                 } else { json!({"action":"scan", "project": if host == "local" { std::env::current_dir().ok() } else { None }}) };
                 (host.clone(), if distribute { install(home, host, &input) } else { transport(home, host, &input) })
@@ -1179,6 +1275,16 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                 let previous = current.machines.iter().position(|m| m["host"] == host);
                 let mut machine = match result {
                     Ok(mut value) => {
+                        if distribute
+                            && !value["error"].is_string()
+                            && let Some(pending) = current.pending_renames.get_mut(&host)
+                        {
+                            for source in sources {
+                                if let Some(name) = source["name"].as_str() {
+                                    pending.remove(name);
+                                }
+                            }
+                        }
                         if distribute && let Some(index) = previous {
                             let project_copies: Vec<Value> = current.machines[index]["copies"]
                                 .as_array()

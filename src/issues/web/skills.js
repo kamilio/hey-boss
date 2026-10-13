@@ -277,6 +277,7 @@ if(typeof document!=='undefined') (()=>{
     $('#skills-machines').innerHTML=machines.map(m=>`<article class="machine-card"><div>${icon('monitor')}<strong>${esc(m.hostname||m.host)}</strong><span class="skill-pill ${m.error?'amber':'green'}">${m.error?'Needs attention':m.state==='synced'?'Synced':'Online'}</span></div><p>${esc(m.host==='local'?'This machine':m.host)} · ${(m.copies||[]).filter(c=>c.scope==='global').length} copies${m.scanned_at?` · ${esc(new Date(m.scanned_at*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}`:''}</p>${m.error?`<p class="machine-error">${esc(m.error)}</p>`:''}</article>`).join('')||'<p>No machine inventory yet. Scan to discover your skills.</p>';
     renderList();
     if(!editingMarkdown)renderDetail();
+    else document.querySelectorAll('[data-save-markdown], [data-cancel-editor]').forEach(button=>{button.disabled=!!busy;});
     renderFeedback();
     const conflicts=unresolved(skills,selected,choices), count=global.filter(s=>selected.has(s.name)).length;
     $('#selection-summary').textContent=`${count} skill${count===1?'':'s'} selected${dirty?' · Unsaved changes':''}`;
@@ -433,6 +434,7 @@ if(typeof document!=='undefined') (()=>{
             <button type="button" class="button small primary" data-save-markdown="distribute" ${pending||data.busy?'disabled':''}>Save &amp; unify everywhere</button>
           </div>
         </div>
+        ${skill.name!=='AGENTS.md'&&currentFileObj.path==='SKILL.md'?'<p class="skill-edit-hint">Changing the frontmatter <code>name</code> also renames the skill folder when you save.</p>':''}
         <div id="skill-codemirror-host" class="skill-codemirror-host"></div>
         <textarea id="skill-markdown-textarea" class="skill-markdown-textarea" aria-label="Markdown content for ${esc(currentFileObj.path)}" spellcheck="true">${esc(editorDraft)}</textarea>
       </div>` : `<div class="skill-source-viewer">
@@ -531,7 +533,7 @@ if(typeof document!=='undefined') (()=>{
       const content=currentEditorContent();
       const distribute=saveMd.dataset.saveMarkdown==='distribute';
       const previewCopy=skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0];
-      editingMarkdown=false;
+      editorDraft=content;
       await action('save_file',{skill:skill.name,file_path:activeFile||'SKILL.md',content,base_digest:previewCopy?.digest||'',distribute});
       return;
     }
@@ -562,6 +564,14 @@ if(typeof document!=='undefined') (()=>{
     try{
       const payload={action:kind,revision:data.revision,selected:[...selected],choices,max_words:maxWords,...extra};
       const value=await request(payload);
+      if(kind==='save_file'){
+        editingMarkdown=false;
+        if(value.saved_skill){
+          active='global:'+value.saved_skill;previewDigest='';compareDigest='';
+          const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);
+          history.replaceState(null,'','#'+params);
+        }
+      }
       if(kind==='distribute'||kind==='save_file'||kind==='delete')dirty=false;
       use(value,kind==='distribute'||kind==='save_file'||kind==='delete');
     }
