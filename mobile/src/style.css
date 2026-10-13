@@ -86,3 +86,12 @@ nav{width:260px;bottom:max(22px,env(safe-area-inset-bottom))}.nav-glass{padding:
 .inbox-segments{margin:0 0 12px}.inbox-help{margin:0 4px 22px;font-size:12px}
 @media(max-width:360px){.tabs button{flex-direction:column;gap:4px;font-size:10px}.tabs .agent-tab{min-width:0;font-size:10px}}
 .reader-controls{display:flex;align-items:center;gap:6px}.reader-sender{font-size:12px;line-height:1.5;overflow-wrap:anywhere;margin:0 0 18px}.reader-sender code{font-size:11px}.reader-meta:has(+.reader-sender){margin-bottom:6px}
+.notification-image{margin:20px 0;min-width:0}
+.notification-image-canvas{display:flex;justify-content:center;align-items:center;overflow:auto;max-height:60vh;min-height:80px;border:1px solid var(--gray-a5);border-radius:14px;background:var(--gray-a2)}
+.notification-image-canvas img{display:block;max-width:100%;max-height:60vh;object-fit:contain}
+.notification-image-canvas.expanded{display:block}
+.notification-image-canvas.expanded img{max-width:none;max-height:none}
+.notification-image figcaption{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;font-size:12px;color:var(--gray-11)}
+.notification-image figcaption span{overflow-wrap:anywhere;min-width:0}
+.notification-image button{flex-shrink:0;border:1px solid var(--gray-a5);border-radius:8px;background:var(--gray-a2);color:var(--gray-12);padding:8px 12px;font:inherit;cursor:pointer;min-height:36px}
+.notification-image button:focus-visible{outline:2px solid var(--accent-9);outline-offset:2px}

@@ -1010,7 +1010,7 @@ mod tests {
         let notif = root.find_subcommand("notif").unwrap();
         for name in [
             "alert", "update", "ask", "prompt", "approval", "status", "wait", "hide", "inbox",
-            "secret",
+            "secret", "image",
         ] {
             assert!(
                 notif.find_subcommand(name).is_some(),
@@ -1391,6 +1391,70 @@ mod tests {
             assert_eq!(content.as_deref(), Some("# Report\n\n**Done**"));
         }
     }
+    #[test]
+    fn image_notifications_snapshot_files_and_reject_non_images() {
+        use base64::Engine;
+        let directory =
+            std::env::temp_dir().join(format!("hb-image-notification-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("Preview 🌄.png");
+        let bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=").unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let args = [
+            "hey-boss",
+            "notif",
+            "image",
+            "--title",
+            "Preview",
+            path.to_str().unwrap(),
+        ];
+        let (request, _) = Cli::try_parse_from(args)
+            .unwrap()
+            .into_test_request()
+            .unwrap();
+        assert_eq!(request.command, "update");
+        assert!(!request.comments_enabled && !request.sync);
+        assert_eq!(request.description.as_deref(), Some("Preview 🌄.png"));
+        assert_eq!(request.icon.as_deref(), Some("photo"));
+        let attachment = request.attachment.unwrap();
+        assert_eq!(attachment.mime, "image/png");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(attachment.data)
+                .unwrap(),
+            bytes
+        );
+        let (captioned, _) = Cli::try_parse_from(args.into_iter().chain(["The new layout"]))
+            .unwrap()
+            .into_test_request()
+            .unwrap();
+        assert_eq!(captioned.description.as_deref(), Some("The new layout"));
+        assert_eq!(captioned.question.as_deref(), Some("The new layout"));
+        std::fs::write(&path, "Not an image").unwrap();
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
+        std::fs::write(&path, vec![0; 4 * 1024 * 1024 + 1]).unwrap();
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            Cli::try_parse_from(args)
+                .unwrap()
+                .into_test_request()
+                .is_err()
+        );
+        assert_eq!(attachment.name, "Preview 🌄.png");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn markdown_file_input_snapshots_unicode_and_rejects_invalid_inputs() {
         let directory =
