@@ -11,11 +11,15 @@ test('agent history requires pairing, registered projects, bounded requests and 
  assert.equal((await call('/api/bridge/agents')).status,401);
  const pair=await call('/api/pair',{code:store.pairing()});const headers={Cookie:pair.headers.get('set-cookie').split(';')[0]},bridge={Authorization:'Bearer '+key};
  assert.equal((await call('/api/fleet/status',null,headers)).status,503);
- const snapshot={ok:true,machines:[{host:'local',state:'connected',heartbeat:Date.now()/1000,workers:[{pid:1,active:0,job_active:2,free:1,config:{provider:'pi'},chiefs:[{id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas',state:'idle',next_at:123},{id:'chief:private',project_id:'named:Hidden'}],runs:[{id:'run',project_id:'named:Atlas',title:'Fix reconnect'},{id:'private',project_id:'named:Hidden'}]}]}]};
+ const snapshot={ok:true,machines:[{host:'local',state:'connected',heartbeat:Date.now()/1000,workers:[{pid:1,active:0,job_active:2,free:1,config:{provider:'pi',worktree_enabled:true},chiefs:[{id:'chief:local:named:Atlas',kind:'chief',project_id:'named:Atlas',state:'idle',next_at:123},{id:'chief:private',project_id:'named:Hidden'}],runs:[{id:'run',project_id:'named:Atlas',title:'Fix reconnect'},{id:'private',project_id:'named:Hidden'}]}]}]};
  assert.equal((await call('/api/bridge/agents/status',snapshot,bridge)).status,200);
  const status=await(await call('/api/fleet/status',null,headers)).json();assert.equal(status.machines[0].workers[0].runs.length,1);
  assert.equal(status.machines[0].workers[0].chiefs,undefined);
  assert.equal(status.machines[0].workers[0].config.provider,'pi');
+ assert.equal(status.machines[0].workers[0].config.worktree_enabled,true);
+ snapshot.machines[0].workers[0].config.worktree_enabled=false;
+ await call('/api/bridge/agents/status',snapshot,bridge);
+ assert.equal((await(await call('/api/fleet/status',null,headers)).json()).machines[0].workers[0].config.worktree_enabled,false);
  assert.equal(status.machines[0].workers[0].job_active,2);
  assert.equal(status.machines[0].workers[0].active,0);
  assert.equal(status.machines[0].workers[0].free,1);
@@ -84,7 +88,7 @@ test('fleet YAML editing is paired, guarded and relayed to the supervisor',async
  assert.equal(queue.requests[0].action,'configuration');assert.equal(queue.requests[0].text,'machines: {}');assert.equal(queue.requests[0].revision,'one');assert.equal(queue.requests[0].save,true);
  await call('/api/bridge/agents/'+queue.requests[0].id+'/result',{ok:true,text:'machines: {}',revision:'two'},bridge);
  assert.equal((await(await pending).json()).revision,'two');
- const update={host:'local',id:'tools',intent:'pause',config:{concurrency:3}};
+ const update={host:'local',id:'tools',intent:'pause',config:{concurrency:3,worktree_enabled:true}};
  const edit=call('/api/fleet/configuration',{worker_update:update,revision:'two',save:false},headers);
  for(let n=0;n<30;n++){queue=await(await call('/api/bridge/agents',null,bridge)).json();if(queue.requests.length)break;await new Promise(r=>setTimeout(r,10));}
  assert.deepEqual(queue.requests[0].worker_update,update);
