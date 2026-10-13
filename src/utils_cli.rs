@@ -15,7 +15,7 @@ pub fn configured() -> Option<std::io::Result<()>> {
         return None;
     }
     let name = args.get(2)?.to_str()?;
-    if name.starts_with('-') || name == "help" {
+    if name.starts_with('-') || matches!(name, "help" | "list") {
         return None;
     }
     let builtin = matches!(
@@ -183,6 +183,8 @@ mod recovery_tests {
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// List available utilities, optionally matching a name prefix (e.g. ans-).
+    List { prefix: Option<String> },
     /// Run git commit --no-verify, forwarding all further arguments unchanged.
     Gcn,
     /// Run git push --no-verify, forwarding all further arguments unchanged.
@@ -209,6 +211,7 @@ pub fn cli_args() -> (Vec<OsString>, Vec<OsString>) {
 
 pub fn run(action: &Action, args: &[OsString]) -> std::io::Result<()> {
     let command = match action {
+        Action::List { prefix } => return list(prefix.as_deref().unwrap_or("")),
         Action::Gcn => "commit",
         Action::Gpn => "push",
         Action::Copy => return clipboard(true),
@@ -219,6 +222,59 @@ pub fn run(action: &Action, args: &[OsString]) -> std::io::Result<()> {
         .arg("--no-verify")
         .args(args)
         .exec())
+}
+
+fn list(prefix: &str) -> std::io::Result<()> {
+    hey_boss::database::use_service();
+    let config =
+        hey_boss::fleet::call(&json!({"kind":"configuration"})).map_err(std::io::Error::other)?;
+    let names = utility_names(&config, prefix)?;
+    let mut stdout = std::io::stdout().lock();
+    for name in names {
+        writeln!(stdout, "{name}")?;
+    }
+    Ok(())
+}
+
+fn utility_names<'a>(
+    config: &'a serde_json::Value,
+    prefix: &str,
+) -> std::io::Result<std::collections::BTreeSet<&'a str>> {
+    if let Some(error) = config["error"].as_str() {
+        return Err(std::io::Error::other(error.to_owned()));
+    }
+    if !config["document"].is_object() {
+        return Err(std::io::Error::other("Fleet configuration is unavailable"));
+    }
+    let configured = config["document"]["utils"]
+        .as_object()
+        .into_iter()
+        .flat_map(|utilities| utilities.keys().map(String::as_str));
+    Ok(["gcn", "gpn", "copy", "paste", "pbcopy", "pbpaste"]
+        .into_iter()
+        .chain(configured)
+        .filter(|name| name.starts_with(prefix))
+        .collect())
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_configuration_never_looks_like_an_empty_group() {
+        let config = json!({"document":{"utils":{}},"error":"Invalid fleet YAML"});
+        assert_eq!(
+            utility_names(&config, "ans-").unwrap_err().to_string(),
+            "Invalid fleet YAML"
+        );
+        assert!(utility_names(&json!({"document":null}), "ans-").is_err());
+        assert!(
+            utility_names(&json!({"document":{}}), "ans-")
+                .unwrap()
+                .is_empty()
+        );
+    }
 }
 
 const CLIPBOARD_LIMIT: usize = 128 * 1024;

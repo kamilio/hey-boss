@@ -5,6 +5,9 @@ Licensed under [MIT](LICENSE).
 `hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged without a daemon.
 Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
 
+`hey-boss utils list` lists built-ins and configured utilities, sorted one per line.
+Use a name prefix to list a group: `hey-boss utils list ans-`.
+
 `command | hey-boss utils copy` sends UTF-8 text (up to 128 KiB) to your connected main Mac's clipboard; `hey-boss utils paste > file` retrieves it without adding a newline. `pbcopy`/`pbpaste` are aliases. Clipboard transfers use the existing companion bridge, are never queued or cached, and fail when disconnected.
 
 Add custom utilities to the supervisor's `~/.hey-boss/fleet.yaml` (also editable in the fleet configuration editor):

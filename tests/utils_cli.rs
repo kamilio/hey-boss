@@ -270,10 +270,25 @@ fn utils_help_lists_shortcuts_and_clipboard_without_running_git() {
     let output = fixture.command("--help").output().unwrap();
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    for name in ["gcn", "gpn", "copy", "paste", "pbcopy", "pbpaste"] {
+    for name in ["list", "gcn", "gpn", "copy", "paste", "pbcopy", "pbpaste"] {
         assert!(help.contains(name), "missing {name}");
     }
     assert!(!fixture.root.join("args").exists());
+}
+
+#[test]
+fn list_help_and_extra_arguments_need_no_connection() {
+    let fixture = Fixture::new();
+    let output = fixture.command("list").arg("--help").output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PREFIX"));
+    let output = fixture
+        .command("list")
+        .args(["ans-", "extra"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_dir(fixture.root.join("home")).unwrap().count(), 0);
 }
 
 #[test]
