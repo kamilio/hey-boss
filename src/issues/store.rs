@@ -2488,7 +2488,8 @@ impl Store {
                 | Operation::Transfer { .. }
                 | Operation::Edit { draft: Some(_), .. }
                 | Operation::Undraft { .. }
-        ) {
+        ) || matches!(&r.operation, Operation::Assign { target, .. } if target == "unassigned")
+        {
             let reconcile = if matches!(
                 r.operation,
                 Operation::CreateSubtask { .. }
@@ -3114,6 +3115,26 @@ fn mutate(
             if matches!(operation, Operation::Claim { .. }) {
                 assignments::acknowledge_claim(db, &project.id, number, actor)?;
             }
+        }
+        Operation::Unassign { force: false, .. }
+            if issue.assignee.as_deref() == Some("human:boss") =>
+        {
+            // Older RPC callers get the same explicit Boss release as the CLI,
+            // including protection for surviving attempts and running workers.
+            attempts::guard(db, &project.id, number)?;
+            let version = issue.version;
+            data = assignments::assign(
+                db,
+                project,
+                actor,
+                &mut issue,
+                "unassigned",
+                version,
+                None,
+                now,
+            )?;
+            data["forced"] = json!(false);
+            action = "unassigned";
         }
         Operation::Unassign { force, .. } => {
             ownership(&issue, actor, *force)?;

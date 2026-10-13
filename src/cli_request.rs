@@ -122,6 +122,18 @@ fn prepare(
         return call(request, supervisor);
     }
     let mut request = request.clone();
+    if let Operation::Unassign {
+        number,
+        force: false,
+    } = request.operation
+    {
+        request.operation = Operation::Assign {
+            number,
+            target: "unassigned".into(),
+            if_version: 0,
+            reviewed_evidence: None,
+        };
+    }
     let mut operation = serde_json::to_value(&request.operation)?;
     // Keep the absent wire field for compatibility, but normalize the CLI
     // template so receipt comparison ignores only automatically captured guards.
@@ -234,6 +246,38 @@ mod tests {
 
     fn request(operation: Value) -> Request {
         serde_json::from_value(json!({"version":1,"project":{"id":"named:Test","name":"Test"},"actor":{"id":"codex:owner","kind":"codex","session_id":"owner","machine":"local","host":"local","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},"operation":operation})).unwrap()
+    }
+
+    #[test]
+    fn ordinary_unassign_uses_authoritative_assignment_guards() {
+        for supervisor in [false, true] {
+            let request = request(json!({"action":"unassign","number":1,"force":false}));
+            let mut calls = 0;
+            prepare(&request, supervisor, |r, authority| {
+                calls += 1;
+                match &r.operation {
+                    Operation::View { number: 1 } => {
+                        assert!(authority);
+                        Ok(json!({"issue":{"version":7,"assignee":"human:boss"}}))
+                    }
+                    Operation::Assign {
+                        number: 1,
+                        target,
+                        if_version: 7,
+                        reviewed_evidence: None,
+                    } => {
+                        assert_eq!(target, "unassigned");
+                        if supervisor {
+                            assert!(r.request_id.is_some());
+                        }
+                        Ok(json!({"ok":true}))
+                    }
+                    other => panic!("Unexpected unassign operation {other:?}"),
+                }
+            })
+            .unwrap();
+            assert_eq!(calls, 2);
+        }
     }
 
     #[test]

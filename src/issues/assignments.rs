@@ -95,9 +95,14 @@ pub(super) fn assign(
             "SELECT coalesce((SELECT action='ready' AND actor=?3 AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','assigned','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1),0)",
             params![project.id, issue.number, actor.id], |r| r.get::<_, bool>(0),
         )?;
-    if !own_ready_handoff && ownership(issue, actor, actor.id == "human:boss").is_err() {
+    // Boss is a handoff destination, not a running agent's exclusive claim.
+    let releasing_boss = target == "unassigned" && issue.assignee.as_deref() == Some("human:boss");
+    if !own_ready_handoff
+        && !releasing_boss
+        && ownership(issue, actor, actor.id == "human:boss").is_err()
+    {
         return Err(Error::conflict(format!(
-            "Issue #{} is claimed by {}; only its owner or Boss can change assignment. The agent that handed off its own claim may run `hey-boss issue assign {} github` after Ready. For another owner's Ready handoff, ask Boss to assign GitHub in the web UI; do not reopen or unassign it",
+            "Issue #{} is claimed by {}; only its owner or Boss can change assignment. The agent that handed off its own claim may run `hey-boss issue assign {} github` after Ready. For another owner's Ready handoff, ask Boss to assign GitHub in the web UI. Boss-owned work can be returned to the queue with `hey-boss issue unassign NUMBER`",
             issue.number,
             issue.assignee.as_deref().unwrap(),
             issue.number
@@ -1502,6 +1507,95 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn boss_unassignment_needs_neither_force_nor_boss_identity() {
+        for authority in [false, true] {
+            for legacy in [false, true] {
+                if authority && legacy {
+                    continue;
+                }
+                let mut f = Fixture::new();
+                f.assign("boss").unwrap();
+                let before = get_issue(&f.store.db, "named:test", 1, false).unwrap();
+                f.request.actor.as_mut().unwrap().id = "codex:delegate".into();
+                f.request.actor.as_mut().unwrap().kind = "codex".into();
+                f.request.request_id = Some("release-boss".into());
+                f.request.operation = if legacy {
+                    Operation::Unassign {
+                        number: 1,
+                        force: false,
+                    }
+                } else {
+                    Operation::Assign {
+                        number: 1,
+                        target: "unassigned".into(),
+                        if_version: before.version,
+                        reviewed_evidence: None,
+                    }
+                };
+                let result = if authority {
+                    f.store.execute_supervisor(&f.request)
+                } else {
+                    f.store.execute(&f.request)
+                }
+                .unwrap();
+                assert!(result["issue"]["assignee"].is_null());
+                assert_eq!(result["issue"]["state"], "open");
+                assert_eq!(
+                    registry::pull_requests(&f.store.db, "named:test", 1)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert_eq!(
+                    get_issue(&f.store.db, "named:test", 1, false).unwrap().body,
+                    before.body
+                );
+                let replay = if authority {
+                    f.store.execute_supervisor(&f.request)
+                } else {
+                    f.store.execute(&f.request)
+                }
+                .unwrap();
+                assert_eq!(replay["issue"]["version"], result["issue"]["version"]);
+            }
+        }
+    }
+
+    #[test]
+    fn boss_unassignment_preserves_concurrent_edits_and_active_work() {
+        let mut f = Fixture::new();
+        f.assign("boss").unwrap();
+        f.request.actor.as_mut().unwrap().id = "codex:delegate".into();
+        let before = get_issue(&f.store.db, "named:test", 1, false).unwrap();
+        assert!(f.call(json!({"action":"assign","number":1,"target":"unassigned","if_version":before.version-1})).is_err());
+        f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('active','named:test',1,'{}','codex:worker','running',1,'start','unit',0,0)",[]).unwrap();
+        for operation in [
+            json!({"action":"assign","number":1,"target":"unassigned","if_version":before.version}),
+            json!({"action":"unassign","number":1,"force":false}),
+        ] {
+            let error = f.call(operation).unwrap_err();
+            assert!(error.message.contains("still running"), "{error}");
+            let after = get_issue(&f.store.db, "named:test", 1, false).unwrap();
+            assert_eq!(after.assignee, before.assignee);
+            assert_eq!(after.version, before.version);
+        }
+        f.store
+            .db
+            .execute("UPDATE worker_runs SET finished_at=1", [])
+            .unwrap();
+        f.store
+            .db
+            .execute("UPDATE issues SET attempt_hold='{}' WHERE number=1", [])
+            .unwrap();
+        assert_eq!(
+            f.call(json!({"action":"unassign","number":1,"force":false}))
+                .unwrap_err()
+                .code,
+            "attempt_held"
+        );
+    }
+
     #[test]
     fn manual_takeover_unsubscribes_and_stale_assignment_is_rejected() {
         let mut f = Fixture::new();
