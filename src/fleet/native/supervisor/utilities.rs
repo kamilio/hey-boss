@@ -39,7 +39,12 @@ impl Supervisor {
         if let Some(error) = config["error"].as_str() {
             return Err(invalid(error));
         }
-        let utility = &config["document"]["utils"][name];
+        let mut utility = config["document"]["utils"][name].clone();
+        // Installation policy stays on the supervisor; older CLIs and peers
+        // deserialize the execution definition with deny_unknown_fields.
+        if let Some(utility) = utility.as_object_mut() {
+            utility.remove("global");
+        }
         if request["kind"] == "utils_resolve" {
             return Ok(json!({"ok":true,"utility":utility}));
         }

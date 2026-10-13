@@ -69,7 +69,12 @@ pub(super) fn status_text(v: &Value) -> String {
             text(&m["applied_revision"]),
             text(&m["desired_revision"])
         );
-        for key in ["error", "deployment_error", "configuration_error"] {
+        for key in [
+            "error",
+            "deployment_error",
+            "configuration_error",
+            "utility_error",
+        ] {
             if !m[key].is_null() {
                 let _ = writeln!(out, "  {key}: {}", text(&m[key]));
             }

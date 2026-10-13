@@ -9,6 +9,7 @@ mod control;
 mod conversation;
 mod github_reads;
 mod github_relay;
+mod global_utilities;
 mod handshake;
 mod jobs;
 pub(crate) use jobs::WorkerJobs;

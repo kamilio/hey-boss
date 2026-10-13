@@ -68,19 +68,15 @@ fn parse(text: &str) -> Result<Value> {
     let yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
     let doc: Document = serde_yaml_ng::from_value(yaml)?;
     for (name, utility) in &doc.utils {
-        if name.is_empty()
-            || name.len() > 128
-            || name == "help"
-            || !name.as_bytes()[0].is_ascii_alphanumeric()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-        {
+        if !crate::utilities::valid_name(name) {
             return Err(invalid(
                 "Utility names must start with a letter or digit and use letters, digits, hyphens or underscores; help is reserved",
             ));
         }
         utility.validate()?;
+        if utility.global && name == "hey-boss" {
+            return Err(invalid("Global utility name hey-boss is reserved"));
+        }
         if let Some(host) = &utility.destination
             && !doc.machines.contains_key(host)
         {
@@ -660,6 +656,18 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn global_utilities_round_trip_and_are_opt_in() {
+        let text = "machines: {local: {}}\nutils:\n  ans-ck: {command: ck, destination: local, global: true}\n  private: {command: cat}\n";
+        let doc = parse(text).unwrap();
+        assert_eq!(doc["utils"]["ans-ck"]["global"], true);
+        assert_ne!(doc["utils"]["private"]["global"], true);
+        assert_eq!(
+            parse(&serde_yaml_ng::to_string(&compact(&doc)).unwrap()).unwrap(),
+            doc
+        );
+        assert!(parse(&text.replace("ans-ck:", "hey-boss:")).is_err());
+    }
     #[test]
     fn utilities_round_trip_and_validate_destination() {
         let text = "machines: {local: {}, macbook: {}}\nutils:\n  pbcopy: {command: pbcopy, destination: macbook}\n  check: {command: 'git status --short'}\n";

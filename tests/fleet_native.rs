@@ -139,6 +139,79 @@ impl Drop for Service {
 }
 
 #[test]
+fn global_utilities_follow_companion_heartbeats_and_report_collisions() {
+    use serde_json::json;
+    use std::sync::mpsc;
+    let fixture = Fixture::new();
+    let mut child = Service(
+        fixture
+            .command(&["fleet", "companion", "--stdio"])
+            .env("HOME", &fixture.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let mut input = child.0.stdin.take().unwrap();
+    let output = child.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    loop {
+        let frame = received.recv_timeout(Duration::from_secs(20)).unwrap();
+        if frame["kind"] == "hello" {
+            break;
+        }
+        assert_eq!(frame["kind"], "starting");
+    }
+    let bin = fixture.root.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("ans-cat"), "user-owned").unwrap();
+    for names in [json!(["ans-ck", "ans-cat"]), json!([])] {
+        writeln!(
+            input,
+            "{}",
+            json!({"version":1,"kind":"ping","global_utilities":names})
+        )
+        .unwrap();
+        let heartbeat = loop {
+            let frame = received.recv_timeout(Duration::from_secs(20)).unwrap();
+            if frame["kind"] == "heartbeat" {
+                break frame;
+            }
+        };
+        if names.as_array().unwrap().is_empty() {
+            assert!(heartbeat["utility_error"].is_null(), "{heartbeat}");
+            assert!(bin.join("ans-ck").symlink_metadata().is_err());
+        } else {
+            assert!(
+                heartbeat["utility_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ans-cat")
+            );
+            assert!(bin.join("ans-ck").is_file());
+        }
+        assert_eq!(
+            fs::read_to_string(bin.join("ans-cat")).unwrap(),
+            "user-owned"
+        );
+    }
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+#[test]
 fn startup_reports_database_contention_before_hello_and_recovers() {
     use std::sync::mpsc;
     let fixture = Fixture::new();

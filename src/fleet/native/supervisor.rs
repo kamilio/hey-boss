@@ -1094,7 +1094,10 @@ impl Supervisor {
                     }
                     sent_jobs.retain(|key| active_jobs.contains(key));
                 }
-                send(&mut *input.lock().unwrap(), json!({"kind":"ping"}))?;
+                send(
+                    &mut *input.lock().unwrap(),
+                    json!({"kind":"ping","global_utilities":super::global_utilities::desired(&self.ctx)?}),
+                )?;
                 last_ping = Instant::now();
             }
             while let Ok(request) = requests.try_recv() {
@@ -1154,6 +1157,7 @@ impl Supervisor {
                     )?;
                 }
                 Some("heartbeat") => {
+                    self.update(host, json!({"utility_error":message["utility_error"]}))?;
                     history.receive(&mut message, incremental_history)?;
                     if hello["capabilities"]["job_execution"] == true {
                         self.update(host, json!({"jobs":message["jobs"]}))?;
@@ -1431,6 +1435,10 @@ impl Supervisor {
         // Configuration failures are recoverable; an incompatible store is not.
         drop(crate::issues::Store::open(&self.ctx.path)?);
         let hosts = self.ctx.inventory()?;
+        let utility_error = super::global_utilities::desired(&self.ctx)
+            .map(|names| super::global_utilities::apply(&self.ctx, &names))
+            .unwrap_or_else(|error| json!(error.to_string()));
+        self.update("local", json!({"utility_error":utility_error}))?;
         let Some(worker_configuration) = self.ctx.lock("fleet-worker-control.lock", false)? else {
             return Ok(());
         };
@@ -2087,12 +2095,17 @@ mod tests {
         use base64::{Engine, engine::general_purpose::STANDARD};
         let (_directory, mut app) = test_supervisor();
         app.ctx.desired = app.ctx.state.join("fleet.yaml");
-        std::fs::write(&app.ctx.desired, "machines: {local: {}, peer: {}}\nutils:\n  echo: {command: cat, destination: local}\n  remote: {command: cat, destination: peer}\n").unwrap();
+        std::fs::write(&app.ctx.desired, "machines: {local: {}, peer: {}}\nutils:\n  echo: {command: cat, destination: local, global: true}\n  remote: {command: cat, destination: peer, global: true}\n").unwrap();
+        assert_eq!(
+            super::super::global_utilities::desired(&app.ctx).unwrap(),
+            json!(["echo", "remote"])
+        );
         let request = json!({"kind":"utils_start","name":"echo","args":[],"stdin":STANDARD.encode(b"binary\0\xff")});
         let resolved = app
             .authoritative(&json!({"kind":"utils_resolve","name":"echo"}))
             .unwrap();
         assert_eq!(resolved["utility"]["command"], "cat");
+        assert!(resolved["utility"].get("global").is_none());
         let started = app.authoritative(&request).unwrap();
         let poll = json!({"kind":"utils_poll","id":started["id"]});
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2137,6 +2150,7 @@ mod tests {
         let started = app.authoritative(&remote).unwrap();
         let message = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(message["utility"]["command"], "cat");
+        assert!(message["utility"].get("global").is_none());
         let response = json!({"id":started["id"],"result":{"ok":true,"done":true,"code":0,"stdout":"","stderr":""}});
         let poll = json!({"kind":"utils_poll","id":started["id"]});
         app.utility_reply("wrong-host", &response);
