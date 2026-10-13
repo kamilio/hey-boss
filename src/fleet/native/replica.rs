@@ -1550,6 +1550,64 @@ fn pending_key(table: &str, row: &Value) -> Result<String> {
         )
     ))
 }
+
+// Conflict corrections can be newer than the bounded journal batch. Include
+// their referenced rows from the same read transaction, even when those rows'
+// creation records will not reach this companion until a later batch.
+pub(super) fn repair_rows(
+    db: &Connection,
+    payload: &mut Value,
+    repairs: Vec<(String, Value)>,
+) -> Result<()> {
+    if repairs.is_empty() {
+        return Ok(());
+    }
+    let mut seen = BTreeSet::new();
+    for (table, _) in TABLES {
+        for row in payload["tables"][*table].as_array().into_iter().flatten() {
+            if !append(table) {
+                seen.insert(pending_key(table, row)?);
+            }
+        }
+    }
+    let mut foreign_keys = BTreeMap::<String, Vec<Vec<Value>>>::new();
+    let mut pending = repairs;
+    while let Some((table, mut row)) = pending.pop() {
+        if row.is_null() || !seen.insert(pending_key(&table, &row)?) {
+            continue;
+        }
+        if !foreign_keys.contains_key(&table) {
+            let mut grouped = BTreeMap::<i64, Vec<Value>>::new();
+            for key in rows(db, &format!("PRAGMA foreign_key_list({table})"), &[])? {
+                grouped
+                    .entry(key["id"].as_i64().unwrap())
+                    .or_default()
+                    .push(key);
+            }
+            foreign_keys.insert(table.clone(), grouped.into_values().collect());
+        }
+        for references in &foreign_keys[&table] {
+            let parent = references[0]["table"].as_str().unwrap();
+            let mut key = json!({});
+            for reference in references {
+                key[reference["to"].as_str().unwrap()] =
+                    row[reference["from"].as_str().unwrap()].clone();
+            }
+            if key.as_object().unwrap().values().any(Value::is_null) {
+                continue;
+            }
+            if !seen.contains(&pending_key(parent, &key)?) {
+                pending.push((parent.to_owned(), current_row(db, parent, &key)?));
+            }
+        }
+        super::archive::strip_local(&table, &mut row);
+        if !payload["tables"][&table].is_array() {
+            payload["tables"][&table] = json!([]);
+        }
+        payload["tables"][&table].as_array_mut().unwrap().push(row);
+    }
+    Ok(())
+}
 // None protects a whole pending creation/deletion. Updates protect only fields
 // present in their saved deltas, retaining the original journal for arbitration.
 type Pending = BTreeMap<String, Option<BTreeSet<String>>>;

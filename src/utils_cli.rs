@@ -74,8 +74,8 @@ fn run_configured(
         .map(|arg| STANDARD.encode(arg.as_bytes()))
         .collect();
     let call = |request| hey_boss::fleet::call(&request).map_err(std::io::Error::other);
-    let started =
-        call(json!({"kind":"utils_start","name":name,"args":args,"stdin":STANDARD.encode(input)}))?;
+    let request = json!({"kind":"utils_start","name":name,"args":args,"stdin":STANDARD.encode(input),"wait_for_connection":true});
+    let started = start_utility(&request, call, std::time::Duration::from_secs(10))?;
     let id = started["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("Invalid utility run response"))?;
@@ -101,6 +101,83 @@ fn run_configured(
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+fn start_utility(
+    request: &serde_json::Value,
+    mut call: impl FnMut(serde_json::Value) -> std::io::Result<serde_json::Value>,
+    grace: std::time::Duration,
+) -> std::io::Result<serde_json::Value> {
+    let deadline = std::time::Instant::now() + grace;
+    let mut announced = false;
+    loop {
+        let result = call(request.clone())?;
+        if result["waiting"] != true {
+            return Ok(result);
+        }
+        // Only this explicit pre-dispatch response is safe to retry. Transport
+        // errors and accepted runs may already have executed the command.
+        if std::time::Instant::now() >= deadline {
+            return Err(std::io::Error::other(result["error"].as_str().unwrap_or(
+                "Fleet connection is unavailable; run hey-boss fleet status for recovery details",
+            ).to_owned()));
+        }
+        if !announced {
+            eprintln!(
+                "hey-boss: Waiting for '{}' to reconnect to the fleet…",
+                result["host"].as_str().unwrap_or("destination")
+            );
+            announced = true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn utility_start_retries_only_explicit_unsent_responses() {
+        let request = json!({"kind":"utils_start","args":["binary"],"stdin":"unchanged"});
+        let mut calls = 0;
+        let result = start_utility(
+            &request,
+            |value| {
+                assert_eq!(value, request);
+                calls += 1;
+                Ok(if calls == 1 {
+                    json!({"waiting":true,"host":"peer"})
+                } else {
+                    json!({"id":"accepted"})
+                })
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(result["id"], "accepted");
+        let mut calls = 0;
+        assert!(
+            start_utility(
+                &request,
+                |_| {
+                    calls += 1;
+                    Err(std::io::Error::other("reply lost"))
+                },
+                std::time::Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert_eq!(calls, 1);
+        let error = start_utility(
+            &request,
+            |_| Ok(json!({"waiting":true,"error":"Recovery instructions"})),
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Recovery instructions");
     }
 }
 
