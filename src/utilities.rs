@@ -22,6 +22,18 @@ pub struct Definition {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub global: bool,
+}
+
+pub fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name != "help"
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 impl Definition {
     pub fn validate(&self) -> io::Result<()> {
@@ -158,6 +170,19 @@ fn execute_inner(request: &Value, timeout: Duration) -> io::Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn shell_function_keeps_fixed_suffix_after_caller_arguments() {
+        let result = execute(&json!({
+            "utility":{"command":"ans_ck() { printf '%s\\0' \"$@\" /home/kjopek/ans; }; ans_ck"},
+            "args":[STANDARD.encode(b"--sem"),STANDARD.encode(b"agent API authentication"),STANDARD.encode(b""),STANDARD.encode(b"$(echo injected)")],
+            "stdin":""
+        }));
+        assert_eq!(result["code"], 0);
+        assert_eq!(
+            decode(&result["stdout"]).unwrap(),
+            b"--sem\0agent API authentication\0\0$(echo injected)\0/home/kjopek/ans\0"
+        );
+    }
+    #[test]
     fn execution_bounds_output_and_stops_slow_process_groups() {
         let result = execute(&json!({"utility":{"command":"yes"},"args":[],"stdin":""}));
         assert_eq!(result["ok"], false);
@@ -193,7 +218,8 @@ mod tests {
         assert!(
             Definition {
                 command: " ".into(),
-                destination: None
+                destination: None,
+                global: false,
             }
             .validate()
             .is_err()

@@ -42,6 +42,7 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
             "error",
             "deployment_error",
             "configuration_error",
+            "utility_error",
             "desired_revision",
             "applied_revision",
             "retry_deploy_at",

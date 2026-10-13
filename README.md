@@ -13,6 +13,10 @@ Add custom utilities to the supervisor's `~/.hey-boss/fleet.yaml` (also editable
 utils:
   pbcopy: {command: pbcopy, destination: macbook}
   check: {command: '~/scripts/check-project'}
+  code-search:
+    command: 'search() { exec /usr/local/bin/ck "$@" /srv/code; }; search'
+    destination: devbox
+    global: true
 ```
 
 Run `hey-boss utils check --verbose 'project name'` from any connected machine.
@@ -27,6 +31,13 @@ Destination runs are noninteractive: piped stdin and both output streams preserv
 binary bytes, output is returned on completion, and the exit code is forwarded.
 Each stream and the arguments are limited to 1 MiB; runs stop after five minutes.
 Disconnected destinations fail without queuing or retrying execution.
+
+Set `global: true` to also run a utility directly: `code-search --sem 'authentication'`.
+The fleet installs launchers in `~/.local/bin` on every connected machine, and
+updates or removes them when the configuration changes. That directory must be
+on PATH. Existing commands are preserved; collisions appear in `fleet status`.
+Offline machines apply changes after reconnecting. A shell function, as above,
+places fixed arguments after the caller's arguments.
 
 The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
 and Pi sessions through one API, including resume, activity, steering, interruption,

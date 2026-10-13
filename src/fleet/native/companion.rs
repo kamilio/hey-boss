@@ -515,6 +515,10 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 )?;
             }
             Some("ping") => {
+                let utility_error = message
+                    .get("global_utilities")
+                    .map(|names| super::global_utilities::apply(&ctx, names))
+                    .unwrap_or(Value::Null);
                 let mut workers = if incremental_history {
                     ctx.workers_incremental(&mut history_versions)?
                 } else {
@@ -526,6 +530,8 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 // Acknowledgment precedes observation of the stopped Chief.
                 let chief_ownership = crate::chief_ownership::read(&db)?;
                 let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
+                let mut heartbeat = heartbeat;
+                heartbeat["utility_error"] = utility_error;
                 // The peer can send its next ping as soon as it receives this reply.
                 input.finish_ping();
                 reply(&output, heartbeat)?;
