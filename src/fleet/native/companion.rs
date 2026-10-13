@@ -173,12 +173,30 @@ impl<R: Read + AsRawFd> Read for Interruptible<R> {
     }
 }
 impl Incoming {
+    #[cfg(test)]
     fn start<R: Read + AsRawFd + Send + 'static>(
         input: R,
         replies: mpsc::SyncSender<Value>,
         github: Option<super::github_relay::Replies>,
         stop: Arc<AtomicBool>,
+        observe: impl FnMut(bool) -> Result<()> + Send + 'static,
+    ) -> Self {
+        Self::with_output(
+            input,
+            replies,
+            github,
+            stop,
+            observe,
+            Arc::new(Mutex::new(std::io::sink())),
+        )
+    }
+    fn with_output<R: Read + AsRawFd + Send + 'static, W: Write + Send + 'static>(
+        input: R,
+        replies: mpsc::SyncSender<Value>,
+        github: Option<super::github_relay::Replies>,
+        stop: Arc<AtomicBool>,
         mut observe: impl FnMut(bool) -> Result<()> + Send + 'static,
+        output: Arc<Mutex<W>>,
     ) -> Self {
         let (messages, received) = mpsc::sync_channel(4);
         let ping = Arc::new(AtomicBool::new(false));
@@ -204,6 +222,18 @@ impl Incoming {
                     }
                 });
                 if let Ok(Some(message)) = &frame {
+                    if message["kind"] == "utility" {
+                        let output = output.clone();
+                        let message = frame.unwrap().unwrap();
+                        std::thread::spawn(move || {
+                            let result = crate::utilities::execute(&message);
+                            let _ = send(
+                                &mut *output.lock().unwrap(),
+                                json!({"kind":"utility","id":message["id"],"result":result}),
+                            );
+                        });
+                        continue;
+                    }
                     if let Some(github) = &github {
                         if message["kind"] == "configure" {
                             github.configure(message);
@@ -376,12 +406,13 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     }
     let input = unsafe { std::fs::File::from_raw_fd(fd) };
     let observed = status.clone();
-    let mut input = Incoming::start(
+    let mut input = Incoming::with_output(
         input,
         relay.replies(),
         github.as_ref().map(|relay| relay.replies()),
         ctx.stop.clone(),
         move |connected| observed.lock().unwrap().observe(connected),
+        output.clone(),
     );
     let mut pulls = pull::PullReader::default();
     while !ctx.stopped() {
@@ -491,16 +522,6 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                     json!({"kind":message["kind"],"id":message["id"],"result":result}),
                 )?;
             }
-            Some("utility") => {
-                let output = output.clone();
-                std::thread::spawn(move || {
-                    let result = crate::utilities::execute(&message);
-                    let _ = reply(
-                        &output,
-                        json!({"kind":"utility","id":message["id"],"result":result}),
-                    );
-                });
-            }
             Some("job_dispatch") => {
                 let dispatch = serde_json::from_value(message["dispatch"].clone())?;
                 let markdown = message["markdown"]
@@ -601,6 +622,41 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utilities_execute_while_replication_is_blocked() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (replies, _) = mpsc::sync_channel(2);
+        let (frames, received) = mpsc::channel();
+        let mut input = Incoming::with_output(
+            reader,
+            replies,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            |_| Ok(()),
+            Arc::new(Mutex::new(Recording {
+                bytes: vec![],
+                frames,
+            })),
+        );
+        // Leave the replication consumer idle, with work and coalesced pings pending.
+        send(&mut writer, json!({"kind":"pull"})).unwrap();
+        for _ in 0..100 {
+            send(&mut writer, json!({"kind":"ping"})).unwrap();
+        }
+        send(&mut writer, json!({"kind":"utility","id":"fast","utility":{"command":"printf responsive"},"args":[],"stdin":""})).unwrap();
+        let result = received.recv_timeout(Duration::from_secs(2));
+        drop(writer);
+        assert_eq!(input.next().unwrap().unwrap()["kind"], "pull");
+        drop(input);
+        let reply = result.expect("Utility waited for the blocked replication consumer");
+        assert_eq!(reply["id"], "fast");
+        assert_eq!(reply["result"]["code"], 0);
+        assert_eq!(
+            crate::utilities::decode(&reply["result"]["stdout"]).unwrap(),
+            b"responsive"
+        );
+    }
 
     #[test]
     fn silent_transport_expires_and_releases_its_relay_without_peer_eof() {

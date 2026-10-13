@@ -898,10 +898,15 @@ impl Supervisor {
         let authority_wake = reader_wake.clone();
         let peer = Arc::new(std::sync::OnceLock::<String>::new());
         let authenticated_peer = peer.clone();
+        let last_received = Arc::new(Mutex::new(Instant::now()));
+        let received_at = last_received.clone();
+        let control_replies = self.clone();
+        let reply_host = host.to_owned();
         let app = self.clone();
         let replies = input.clone();
         let (authority_requests, authority_work) = mpsc::sync_channel::<(String, Value)>(1);
         let authority_errors = incoming.clone();
+        let forward_errors = incoming.clone();
         std::thread::spawn(move || {
             while let Ok((node, message)) = authority_work.recv() {
                 let result = app
@@ -919,6 +924,29 @@ impl Supervisor {
             loop {
                 let mut handled = false;
                 let result = read_frame(&mut reader).and_then(|frame| {
+                    if let Some(message) = &frame
+                        && message["version"] == 1
+                    {
+                        *received_at.lock().unwrap() = Instant::now();
+                        if authenticated_peer.get().is_some() {
+                            control_replies.update(&reply_host, json!({"heartbeat":now()}))?;
+                            if message["kind"] == "utility" {
+                                control_replies.utility_reply(&reply_host, message);
+                                handled = true;
+                                return Ok(None);
+                            }
+                            // Progress is liveness, not a committed sync cursor.
+                            if message["kind"] == "ack"
+                                && message["progress"].is_string()
+                                && message.as_object().unwrap().keys().all(|key| {
+                                    matches!(key.as_str(), "version" | "kind" | "progress")
+                                })
+                            {
+                                handled = true;
+                                return Ok(None);
+                            }
+                        }
+                    }
                     // Neither database waits nor writing a large pull may
                     // stop draining the peer's pipe. One bounded authority
                     // worker serves requests independently of replication;
@@ -948,6 +976,12 @@ impl Supervisor {
             }
         });
         let (outgoing, requests) = mpsc::sync_channel(32);
+        utilities::forward_controls(
+            input.clone(),
+            requests,
+            forward_errors,
+            std::thread::current(),
+        );
         self.state
             .lock()
             .unwrap()
@@ -1064,7 +1098,6 @@ impl Supervisor {
             json!({"kind":"configure","worker_history_v1":incremental_history,"project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         peer.set(node.to_owned()).unwrap();
-        let mut last_message = Instant::now();
         let mut last_ping = Instant::now() - Duration::from_secs(5);
         let mut sent_jobs = std::collections::BTreeSet::new();
         while !self.ctx.stopped() {
@@ -1096,9 +1129,6 @@ impl Supervisor {
                 )?;
                 last_ping = Instant::now();
             }
-            while let Ok(request) = requests.try_recv() {
-                send(&mut *input.lock().unwrap(), request)?;
-            }
             if let Some(github) = &github {
                 for done in github.drain() {
                     send(
@@ -1107,7 +1137,7 @@ impl Supervisor {
                     )?;
                 }
             }
-            if last_message.elapsed() > Duration::from_secs(15) {
+            if last_received.lock().unwrap().elapsed() > Duration::from_secs(15) {
                 return Err("Companion heartbeat timed out".into());
             }
             let mut message = match rx.try_recv() {
@@ -1135,8 +1165,6 @@ impl Supervisor {
             if message["version"] != 1 {
                 return Err(invalid("Protocol version mismatch"));
             }
-            last_message = Instant::now();
-            self.update(host, json!({"heartbeat":now()}))?;
             match message["kind"].as_str() {
                 Some("github_read" | "github_cancel") => {
                     let github = github
@@ -1207,8 +1235,6 @@ impl Supervisor {
                         receipts,
                         hello["capabilities"]["pull_gzip_chunks"] == true,
                     )?;
-                    // Our own encoding/writing time is not companion silence.
-                    last_message = Instant::now();
                     self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
                     self.reconcile_chief_ownership()?;
                     let active = message["workers"]
@@ -2086,6 +2112,85 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utility_roundtrips_and_liveness_survive_a_blocked_sync_handler() {
+        let (_directory, mut app) = test_supervisor();
+        app.ctx.desired = app.ctx.state.join("fleet.yaml");
+        std::fs::write(&app.ctx.desired, "machines: {peer: {workers: []}}\nutils: {fast: {command: 'printf fast', destination: peer}}\n").unwrap();
+        let app = Arc::new(app);
+        let hello = json!({"version":1,"kind":"hello","node":"peer","hostname":"peer","build":"test","projects":[],"workers":[],"local_config":[],"capabilities":{"utils_v1":true}});
+        let heartbeat = json!({"version":1,"kind":"heartbeat","workers":[],"changes":[],"local_config":[{"local_revision":0}],"pending":0,"conflicts":0});
+        let script = format!(
+            r#"printf '%s\n' '{hello}'
+while IFS= read -r line; do
+    case "$line" in
+        *'"kind":"utility"'*)
+            printf '%s\n' '{heartbeat}'
+            run_id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+            printf '{{"version":1,"kind":"utility","id":"%s","result":{{"ok":true,"done":true,"code":0,"stdout":"ZmFzdA==","stderr":""}}}}\n' "$run_id"
+            ;;
+        *'"kind":"ping"'*) printf '%s\n' '{{"version":1,"kind":"ack","progress":"pull"}}' ;;
+    esac
+done"#
+        );
+        let mut child = TestTransport(
+            Command::new("sh")
+                .args(["-c", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let running = app.clone();
+        let channel = std::thread::spawn(move || {
+            running
+                .channel_inner("peer", &mut child.0)
+                .map_err(|error| error.to_string())
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.machine("peer")["state"] != "connected" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let gate = app.configuration.lock().unwrap();
+        let roundtrip = || -> std::result::Result<(), String> {
+            let started = app
+                .utility_request(&json!({"kind":"utils_start","name":"fast","args":[],"stdin":""}))
+                .map_err(|e| e.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                let result = app
+                    .utility_request(&json!({"kind":"utils_poll","id":started["id"]}))
+                    .map_err(|e| e.to_string())?;
+                if result["done"] == true {
+                    assert_eq!(
+                        crate::utilities::decode(&result["stdout"]).unwrap(),
+                        b"fast"
+                    );
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err("Utility waited for synchronization".into())
+        };
+        let first = roundtrip();
+        let second = roundtrip();
+        // Exceed the normal peer timeout with a real handler held at its mutex.
+        std::thread::sleep(Duration::from_secs(16));
+        drop(gate);
+        std::thread::sleep(Duration::from_millis(200));
+        let after_sync = roundtrip();
+        app.ctx
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        let completed = channel.join().unwrap();
+        app.state.lock().unwrap().connections.remove("peer");
+        assert!(first.is_ok(), "{first:?}");
+        assert!(second.is_ok(), "{second:?}");
+        assert!(after_sync.is_ok(), "{after_sync:?}");
+        assert!(completed.is_ok(), "{completed:?}");
+    }
 
     #[test]
     fn conflict_repairs_include_dependencies_beyond_the_incremental_batch() {
