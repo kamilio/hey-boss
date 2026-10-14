@@ -268,6 +268,9 @@ fn serve(
     ownership: Ownership,
     stop: Arc<AtomicBool>,
 ) {
+    let _ = writer.execute_batch(
+        "DELETE FROM requests WHERE rowid <= (SELECT max(rowid) - 500 FROM requests); PRAGMA wal_checkpoint(PASSIVE);",
+    );
     let generation = Arc::new(AtomicI64::new(
         writer
             .pragma_query_value(None, "schema_version", |r| r.get(0))

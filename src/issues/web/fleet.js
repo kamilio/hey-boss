@@ -642,9 +642,13 @@ if (typeof document !== 'undefined') (() => {
       if(token===generation&&!disposed){$('error').hidden=true;await refresh();}
     }catch(e){saveTakeover(entry,{...savedTakeover(entry),pending:true,error:e.message});if(token===generation&&!disposed)fail(e);}finally{takeoverBusy=false;if(selected&&token===generation&&!disposed)renderTakeover();}
   }
+  let refreshQueued=false,lastRefreshAt=0;
   async function refresh() {
-    if(refreshing)return;refreshing=true;
-    try{render(await read('/api/fleet/status'));$('error').hidden=true;}catch(e){fail(e);if(last)render(last);}finally{refreshing=false;}
+    if(refreshing){refreshQueued=true;return;}
+    const wait=Math.max(0,400-(Date.now()-lastRefreshAt));
+    if(wait>0){if(refreshQueued)return;refreshQueued=true;setTimeout(()=>{refreshQueued=false;refresh();},wait);return;}
+    refreshing=true;
+    try{render(await read('/api/fleet/status'));$('error').hidden=true;}catch(e){fail(e);if(last)render(last);}finally{lastRefreshAt=Date.now();refreshing=false;if(refreshQueued){refreshQueued=false;setTimeout(()=>refresh(),400);}}
   }
   function message(item) {
     const row=element(item.role==='tool'||item.role==='activity'?'details':'article','chat-message '+item.role);row.dataset.message=item.id;
