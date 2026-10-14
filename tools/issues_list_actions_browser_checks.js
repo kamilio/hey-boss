@@ -1,0 +1,190 @@
+// Run with playwright-cli run-code --filename against an isolated issue server.
+async page => {
+  const checks = [], errors = [];
+  const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
+  page.setDefaultTimeout(20000);
+  page.on('pageerror', error => errors.push(error.message));
+  const base = await page.evaluate(() => location.origin);
+  const path = await page.evaluate(() => location.pathname === '/issues' ? '/issues' : '/');
+  const surface = path === '/issues' ? 'paired' : 'native';
+  await page.context().grantPermissions(['clipboard-read','clipboard-write']);
+  await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
+  // Exercise the working assets even when the fixture binary predates the edit.
+  if (surface === 'native') for (const name of ['app.js', 'app.css']) await page.route(`${base}/${name}`, route => route.fulfill({path:`src/issues/web/${name}`}));
+  await page.goto(base + path);
+  await page.waitForFunction(() => model.csrf && model.project && model.signature);
+  const project = await page.evaluate(async () => {
+    const project = 'Quick actions ' + Date.now();
+    for (const title of ['Improve keyboard navigation in the issue list', 'Review the deployment checklist', 'Draft a release announcement', 'Waiting for access', 'Completed work', 'Archived mistake', 'Depends on another issue'])
+      await api({action:'create',title,body:'Isolated quick-action regression fixture.',labels:[]}, project);
+    await api({action:'assign_boss',number:2,force:false}, project);
+    await api({action:'edit',number:3,draft:true,title:null,body:null,add_labels:[],remove_labels:[],if_version:null}, project);
+    await api({action:'block',number:4,force:false,comment:'Waiting for access'}, project);
+    await api({action:'close',number:5,force:false,comment:null}, project);
+    await api({action:'delete',number:6,force:false}, project);
+    return 'named:' + project;
+  });
+  const list = async state => {
+    await page.goto(base + path + '#project=' + encodeURIComponent(project) + '&state=' + state);
+    await page.waitForFunction(({state,project}) => model.route.state === state && model.project.id === project && model.signature, {state,project});
+  };
+  const trigger = number => page.locator(`[data-list-actions="${number}"]`);
+  const menu = page.getByRole('menu', {name:/Actions for issue/});
+  const item = name => menu.getByRole('menuitem', {name,exact:true});
+  const idle = () => page.waitForFunction(() => !listActionBusy && !model.polling);
+  await list('open');
+  await trigger(1).click();
+  check(await menu.isVisible(), 'Overflow opens without navigating');
+  check(await item('View issue').evaluate(el => el === document.activeElement), 'Menu starts with keyboard focus');
+  await page.keyboard.press('End');
+  check(await item('Block issue').evaluate(el => el === document.activeElement), 'End selects last action');
+  await page.keyboard.press('ArrowDown');
+  check(await item('View issue').evaluate(el => el === document.activeElement), 'Arrow navigation wraps');
+  await page.keyboard.press('c');
+  check(await item('Copy issue link').evaluate(el => el === document.activeElement), 'Typing a letter selects matching action');
+  await page.keyboard.press('Escape');
+  check(await trigger(1).evaluate(el => el === document.activeElement), 'Escape restores trigger focus');
+  await page.locator('[data-issue-number="1"] .issue-title').focus();
+  await page.keyboard.press('Shift+F10');
+  check(await menu.isVisible(), 'Shift+F10 opens focused row actions');
+  await page.keyboard.press('Tab');
+  check(!await menu.isVisible(), 'Tab dismisses the menu');
+  await page.locator('[data-issue-number="1"] .issue-title').click({button:'right'});
+  check(await menu.isVisible(), 'Right click opens row actions');
+  await page.keyboard.press('Escape');
+  await trigger(1).click();
+  await page.locator('#issue-search').click();
+  check(!await menu.isVisible(), 'Outside click dismisses the menu');
+
+  for (const scheme of ['light','dark']) {
+    await page.emulateMedia({colorScheme:scheme,reducedMotion:'reduce'});
+    for (const width of [1440,768,390,320]) {
+      await page.setViewportSize({width,height:900});
+      await trigger(1).click();
+      check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `List fits ${scheme}/${width}`);
+      check(await menu.evaluate(el => { const r=el.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight; }), `Menu fits ${scheme}/${width}`);
+      if (width <= 390) check(await trigger(1).evaluate(el => el.getBoundingClientRect().width >= 44 && el.getBoundingClientRect().height >= 44), `Touch target ${scheme}/${width}`);
+      await page.screenshot({path:`output/playwright/issue139/${surface}-${scheme}-${width}.png`});
+      await page.keyboard.press('Escape');
+    }
+  }
+  await page.setViewportSize({width:1440,height:900});
+  await trigger(1).click();
+  await page.evaluate(async () => { await api({action:'comment',number:1,body:'Background change'});await refresh(); });
+  check(await menu.isVisible(), 'Polling does not dismiss an active menu');
+  await item('Assign to Boss').click();
+  await idle();
+  check(await page.evaluate(() => model.issues.find(i=>i.number===1).assignee === model.boss.id), 'Assign to Boss persists from list');
+  await trigger(1).click();
+  await item('Unassign').click();
+  await idle();
+  check(await page.evaluate(() => !model.issues.find(i=>i.number===1).assignee), 'Unassign persists from list');
+
+  let closeCalls=0;
+  const failure = route => {
+    if (route.request().postDataJSON()?.operation.action !== 'close') return route.continue();
+    closeCalls++;
+    return route.fulfill({status:500,json:{ok:false,error:{message:'Synthetic close failure'}}});
+  };
+  await page.route('**/api/action', failure);
+  await trigger(1).click();
+  await item('Close issue').click();
+  await idle();
+  check(closeCalls === 1 && await trigger(1).isVisible(), 'Failed close retains the issue');
+  check(await page.getByText('Synthetic close failure',{exact:true}).isVisible(), 'Mutation failure is visible');
+  await page.unroute('**/api/action', failure);
+  await trigger(1).click();
+  await item('Close issue').click();
+  await idle();
+  check(await trigger(1).count() === 0, 'Retry closes issue without opening detail');
+  check(await page.locator('#issue-search').evaluate(el=>el===document.activeElement), 'Removing a focused row restores search focus');
+
+  await trigger(3).click();
+  check(await item('Assign to Boss').count() === 0, 'Draft hides assignment');
+  await item('Mark ready').click();
+  await idle();
+  check(await page.evaluate(() => !model.issues.find(i=>i.number===3).draft), 'Mark ready persists');
+  await trigger(3).click();
+  await item('Move to draft').click();
+  await idle();
+  check(await page.evaluate(() => model.issues.find(i=>i.number===3).draft), 'Move to draft persists');
+  await trigger(3).click();
+  await item('Block issue').click();
+  await page.locator('#confirm-dialog[open]').waitFor();
+  await page.keyboard.press('Escape');
+  await idle();
+  check(await page.evaluate(() => model.issues.find(i=>i.number===3).state === 'open'), 'Cancel block leaves state intact');
+  await trigger(3).click();
+  await item('Block issue').click();
+  await page.locator('#confirm-submit').click();
+  await idle();
+  check(await trigger(3).count() === 0, 'Confirmed block removes issue from open list');
+
+  await list('blocked');
+  await trigger(4).click();
+  await item('Unblock issue').click();
+  await idle();
+  check(await trigger(4).count() === 0, 'Unblock persists and updates filtered list');
+  await list('closed');
+  await trigger(5).click();
+  await item('Reopen issue').click();
+  await idle();
+  check(await trigger(5).count() === 0, 'Reopen persists');
+  await list('deleted');
+  await trigger(6).click();
+  check(await menu.getByRole('menuitem').count() === 3, 'Deleted issue offers only view, copy, restore');
+  await item('Restore issue').click();
+  await idle();
+  check(await trigger(6).count() === 0, 'Restore persists');
+  await list('open');
+  await trigger(5).click();
+  await item('Copy issue link').click();
+  await idle();
+  check(await page.evaluate(async () => (await navigator.clipboard.readText()).includes('issue=5')), 'Copy link identifies the selected row');
+  await trigger(5).click();
+  await page.evaluate(async () => { await api({action:'edit',number:5,title:'Updated in another session',body:null,add_labels:[],remove_labels:[],if_version:null}); });
+  await item('Move to draft').click();
+  await idle();
+  check(await page.evaluate(() => !model.issues.find(i=>i.number===5).draft), 'Stale revision cannot move issue to draft');
+  check(await page.locator('#toast').isVisible(), 'Stale revision displays feedback');
+  await page.evaluate(async () => { const i=model.issues.find(i=>i.number===7);await api({action:'set_blockers',number:7,blockers:[2],if_version:i.version,force:false}); });
+  await list('blocked');
+  await trigger(7).click();
+  check(await menu.getByRole('menuitem',{name:/Unblock issue/}).isDisabled(), 'Unfinished dependencies disable Unblock');
+  check(await menu.getByText('Resolve or unlink blocking issues first').isVisible(), 'Unavailable action explains why');
+  await page.keyboard.press('Escape');
+  await page.setViewportSize({width:320,height:568});
+  await trigger(7).scrollIntoViewIfNeeded();
+  await trigger(7).click();
+  check(await menu.evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight&&r.top>=0}), 'Menu stays on screen near bottom of short phone viewport');
+  await page.screenshot({path:`output/playwright/issue139/${surface}-dark-320-short-blocked.png`});
+  await page.keyboard.press('Escape');
+  await page.setViewportSize({width:1440,height:900});
+  await list('open');
+  // Present another worker's claim through the same response shape used by replicas.
+  const otherClaim = async route => {
+    const response = await route.fetch();
+    const value = await response.json();
+    if (value.issues) value.issues.forEach(issue=>{if(issue.number===5)issue.assignee='codex:another-worker';});
+    await route.fulfill({response,json:value});
+  };
+  await page.route('**/api/action',otherClaim);
+  await page.evaluate(()=>refresh(false));
+  await trigger(5).click();
+  await item('Unassign').click();
+  await page.locator('#confirm-dialog[open]').waitFor();
+  check((await page.locator('#confirm-message').innerText()).includes('currently owns this issue'), 'Another worker claim opens ownership confirmation');
+  await page.screenshot({path:`output/playwright/issue139/${surface}-claim-confirmation.png`});
+  await page.keyboard.press('Escape');
+  await idle();
+  check(await trigger(5).isEnabled(), 'Cancelled ownership change leaves row usable');
+  await page.unroute('**/api/action',otherClaim);
+  await page.evaluate(()=>refresh(false));
+  await trigger(2).click();
+  await item('View issue').click();
+  await page.waitForFunction(() => model.route.issue === 2);
+  check(!await menu.isVisible(), 'Navigation dismisses the menu');
+  check(errors.length === 0, `No browser errors: ${errors.join(', ')}`);
+  if (checks.length !== 56) throw Error(`Incomplete browser suite: ${checks.length}/56`);
+  return {status:'COMPLETE', surface, completed:checks.length, expected:56, checks};
+}
