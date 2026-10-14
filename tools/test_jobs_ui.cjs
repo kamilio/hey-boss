@@ -3,6 +3,18 @@ const {readFileSync} = require('node:fs');
 const {webcrypto} = require('node:crypto');
 const vm = require('node:vm');
 const {summary, modelChoices, availability, Mutation, scheduleState, filterJobs, scheduleFields, scheduleCron} = require('../src/issues/web/jobs.js');
+assert.deepEqual(scheduleFields('25 */3 * * *'),{frequency:'hours',time:'09:00',interval:3,minute:25});
+assert.deepEqual(scheduleFields('00 */12 * * *'),{frequency:'hours',time:'09:00',interval:12,minute:0});
+assert.equal(scheduleCron('hours','09:00',{interval:3,minute:25}),'25 */3 * * *');
+assert.equal(summary('25 */3 * * *'),'Every 3 hours at :25');
+assert.equal(summary('0 */5 * * *'),'Every 5 hours at :00, restarting each day');
+for(const interval of [2,3,4,5,6,12,23])for(const minute of [0,25,59]){
+ const cron=scheduleCron('hours','09:00',{interval,minute});
+ assert.equal(scheduleCron('hours','09:00',scheduleFields(cron)),cron,'Hourly steps round trip');
+}
+for(const interval of [0,1,24,2.5,NaN])assert.equal(scheduleCron('hours','09:00',{interval,minute:25}),'');
+for(const minute of [-1,60,1.5,NaN])assert.equal(scheduleCron('hours','09:00',{interval:3,minute}),'');
+for(const cron of ['25 */0 * * *','25 */24 * * *','60 */3 * * *','25 1-23/3 * * *','25 */3 * * MON'])assert.equal(scheduleFields(cron).frequency,'custom');
 assert.deepEqual(scheduleFields('30 17 * * 1-5'),{frequency:'weekdays',time:'17:30'});
 assert.deepEqual(scheduleFields('005 009 * * *'),{frequency:'daily',time:'09:05'},'Valid zero-padded cron remains editable');
 assert.equal(summary('005 009 * * *'),'Every day at 09:05');

@@ -5,6 +5,7 @@ const HeyBossJobs = (() => {
     const fields=scheduleFields(cron);
     if(fields.frequency==='minutes')return fields.interval===1?'Every minute':`Every ${fields.interval} minutes${60%fields.interval?', restarting each hour':''}`;
     if(fields.frequency==='hourly')return fields.minute===0?'Every hour':`Every hour at :${String(fields.minute).padStart(2,'0')}`;
+    if(fields.frequency==='hours')return `Every ${fields.interval} hours at :${String(fields.minute).padStart(2,'0')}${24%fields.interval?', restarting each day':''}`;
     if(fields.frequency==='monthly')return `Day ${fields.day} of each month at ${fields.time}`;
     if(fields.frequency==='weekly')return `${fields.days.join(',')==='1'?'Mondays':fields.days.map(day=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][day]).join(', ')} at ${fields.time}`;
     if(fields.frequency==='daily'||fields.frequency==='weekdays')return `${fields.frequency==='daily'?'Every day':'Weekdays'} at ${fields.time}`;
@@ -20,6 +21,7 @@ const HeyBossJobs = (() => {
       if(minute==='*'||(/^\*\/\d+$/.test(minute)&&number(minute.slice(2),1,59)))return {frequency:'minutes',time:'09:00',interval:minute==='*'?1:Number(minute.slice(2))};
       if(number(minute,0,59))return {frequency:'hourly',time:'09:00',minute:Number(minute)};
     }
+    if(number(minute,0,59)&&/^\*\/\d+$/.test(hour)&&number(hour.slice(2),2,23)&&day==='*'&&month==='*'&&week==='*')return {frequency:'hours',time:'09:00',interval:Number(hour.slice(2)),minute:Number(minute)};
     if(!number(minute,0,59)||!number(hour,0,23)||month!=='*')return custom;
     const time=String(Number(hour)).padStart(2,'0')+':'+String(Number(minute)).padStart(2,'0');
     if(week==='*'&&number(day,1,31))return {frequency:'monthly',time,day:Number(day)};
@@ -30,6 +32,7 @@ const HeyBossJobs = (() => {
   }
   function scheduleCron(frequency,time,{interval=15,minute=0,days=[1],day=1}={}) {
     if(frequency==='minutes')return interval===1?'* * * * *':`*/${interval} * * * *`;
+    if(frequency==='hours')return Number.isInteger(interval)&&interval>=2&&interval<=23&&Number.isInteger(minute)&&minute>=0&&minute<=59?`${minute} */${interval} * * *`:'';
     if(frequency==='hourly')return `${minute} * * * *`;
     if(!/^\d{2}:\d{2}$/.test(time)||frequency==='weekly'&&!days.length)return '';
     const [hour,atMinute]=time.split(':').map(Number);
@@ -118,7 +121,7 @@ const HeyBossJobs = (() => {
     }
     function field(id,label,value,extra=''){return `<label class="job-field ${extra.includes('wide')?'wide':''}" for="${id}">${label}<input id="${id}" value="${esc(value)}" ${extra.replace('wide','')}></label>`;}
     async function open(id){
-      const seq=++detailGeneration;modelGeneration++;previewGeneration++;editor=null;dirty=false;message('');
+      const seq=++detailGeneration;modelGeneration++;previewGeneration++;editor=null;dirty=false;message('');$('#job-dialog-actions').hidden=true;
       if(id==='new'){selected=null;renderEditor(null,'');renderList();return;}
       if(!id){selected=null;$('#job-panel').innerHTML='';renderList();return;}
       $('#job-panel').innerHTML='<p class="job-help" role="status">Loading job…</p>';
@@ -132,8 +135,8 @@ const HeyBossJobs = (() => {
       $('#job-panel').innerHTML=`<div class="job-panel-heading"><div><h2 id="job-panel-title">${job?esc(d.name):'New job'}</h2><p class="job-panel-subtitle">${deleted?'Deleted · Instructions and history are preserved':job?'Revision '+job.revision+' · '+(job.enabled?'Runs '+esc(summary(d.cron).toLowerCase()):'No upcoming runs'):'Choose what runs and when.'}</p></div>${job?`<span class="job-badge ${deleted?'deleted':job.enabled?'enabled':'disabled'}">${deleted?'Deleted':job.enabled?'Enabled':'Disabled'}</span>`:''}</div>
        ${job?`<div class="job-section job-controls"><h3 class="job-section-title">RUN CONTROLS</h3><div class="job-actions">${!deleted?'<button class="job-switch" id="job-enabled-toggle" type="button" role="switch" aria-checked="'+job.enabled+'" aria-label="'+(job.enabled?'Disable job':'Enable job')+'" data-mutation><span class="job-switch-track" aria-hidden="true"></span>'+(job.enabled?'Enabled':'Disabled')+'</button><button class="button" id="job-run" type="button" data-mutation>Run now</button>':''}<button class="button danger" id="job-stop" type="button" data-mutation hidden>Stop current run</button></div><p class="job-help" id="job-run-status">Run now also works while the schedule is disabled.</p></div>`:''}
        <form id="job-form"><fieldset ${deleted?'disabled':''} style="border:0;padding:0;margin:0;min-width:0"><div class="job-fields">${field('job-name','Name',d.name,'required maxlength="256" wide')}<label class="job-field wide" for="job-project" ${job?'hidden':''}>Project<select id="job-project" ${job?'disabled':''}>${boot.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===context.project?'selected':''}>${esc(p.name)}</option>`).join('')}</select>${job?'<small>A job stays with the project where it was created.</small>':''}</label><label class="job-field wide" for="job-markdown">Instructions <small>Used exactly as written</small><textarea id="job-markdown" required spellcheck="false" aria-label="Task instructions">${esc(markdown)}</textarea></label></div>
-       <section class="job-section job-schedule-editor" aria-label="Schedule"><div class="job-schedule-heading"><h3 class="job-section-title">Schedule</h3><span class="job-schedule-label">5-field cron</span></div><div class="job-fields"><label class="job-field" for="job-frequency">Repeat<select id="job-frequency"><option value="minutes">Every few minutes</option><option value="hourly">Every hour</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select></label>${field('job-timezone','Timezone',d.timezone,'required list="job-timezones"')}
-        <label class="job-field" for="job-interval" id="job-interval-field">Every <span class="job-input-unit"><input id="job-interval" type="number" min="1" max="59" value="15"><span>minutes</span></span></label>
+       <section class="job-section job-schedule-editor" aria-label="Schedule"><div class="job-schedule-heading"><h3 class="job-section-title">Schedule</h3><span class="job-schedule-label">5-field cron</span></div><div class="job-fields"><label class="job-field" for="job-frequency">Repeat<select id="job-frequency"><option value="minutes">Every few minutes</option><option value="hourly">Every hour</option><option value="hours">Every few hours</option><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="custom">Custom cron</option></select></label>${field('job-timezone','Timezone',d.timezone,'required list="job-timezones"')}
+        <label class="job-field" for="job-interval" id="job-interval-field">Every <span class="job-input-unit"><input id="job-interval" type="number" min="1" max="59" value="15" aria-describedby="job-interval-help"><span id="job-interval-unit">minutes</span></span></label>
         <label class="job-field" for="job-minute" id="job-minute-field">Minute past the hour<input id="job-minute" type="number" min="0" max="59" value="0"></label>
         <label class="job-field" for="job-time" id="job-time-field">At time<input id="job-time" type="time"></label>
         <label class="job-field" for="job-monthday" id="job-monthday-field">Day of the month<input id="job-monthday" type="number" min="1" max="31" value="1"><small id="job-monthday-help">Months without this date are skipped.</small></label>
@@ -144,26 +147,33 @@ const HeyBossJobs = (() => {
         <details class="job-cron-reference"><summary>Syntax & examples</summary><p>Use <code>*</code> for any value, <code>,</code> for lists, <code>-</code> for ranges, and <code>/</code> for steps.</p><dl><dt>Minutes / hours</dt><dd>0–59 / 0–23</dd><dt>Days / months</dt><dd>1–31 / 1–12 or JAN–DEC</dd><dt>Weekdays</dt><dd>0–7 or SUN–SAT · Sunday is 0 or 7</dd></dl><div class="job-cron-examples"><button type="button" data-cron-example="*/15 * * * *"><code>*/15 * * * *</code>Every 15 minutes</button><button type="button" data-cron-example="0 9,17 * * MON-FRI"><code>0 9,17 * * MON-FRI</code>Weekdays at 09:00 & 17:00</button><button type="button" data-cron-example="0 9 1 JAN,APR,JUL,OCT *"><code>0 9 1 JAN,APR,JUL,OCT *</code>First day of each quarter</button></div><p>When both day fields are restricted, either may match. Missing daylight-saving times are skipped; repeated times run once.</p></details>
        </div><div id="job-preview" class="job-preview" aria-live="polite">Checking schedule…</div></section>
        <div class="job-section"><h3 class="job-section-title">Agent</h3><div class="job-fields"><label class="job-field" for="job-harness">Harness<select id="job-harness">${['codex','claude','pi'].map(h=>`<option ${h===d.harness?'selected':''}>${h}</option>`).join('')}</select></label><label class="job-field" for="job-model">Model<input id="job-model" list="job-models" value="${esc(d.model)}" required maxlength="256" autocomplete="off" aria-describedby="job-model-status"><datalist id="job-models"></datalist></label></div><p id="job-model-status" class="job-model-status" role="status">Discovering models…</p><button class="button" id="job-model-refresh" type="button">Refresh models</button>${!job?'<label class="job-toggle"><input id="job-enabled" type="checkbox" checked> Enable this schedule</label>':''}<p class="job-help">Overlapping occurrences are skipped. Disabling a job leaves its current run alone.</p></div>
-       ${deleted?'':`<div class="job-actions"><button class="button primary" id="job-save" type="submit" data-mutation>${job?'Save changes':'Create job'}</button>${job?'<button class="button" id="job-reload" type="button">Reload saved</button>':''}<span class="job-spacer"></span>${job?'<button class="button danger" id="job-delete" type="button" data-mutation>Delete job</button>':''}</div>`}</fieldset></form>
+       </fieldset></form>
 
        ${job?'<section class="job-section" aria-label="Run history"><div class="job-history-heading"><h3>Run history</h3><button class="icon-button" id="job-history-refresh" type="button" aria-label="Refresh run history"><span data-icon="refresh"></span></button></div><div id="job-history" aria-live="polite"></div><button class="button" id="job-history-more" type="button" hidden>Older runs</button></section>':''}`;
+      $('#job-dialog-actions').innerHTML=`${deleted?'':`<button class="button primary" id="job-save" type="submit" form="job-form" data-mutation>${job?'Save changes':'Create job'}</button>${job?'<button class="button" id="job-reload" type="button">Reload saved</button>':''}<span class="job-spacer"></span>${job?'<button class="button danger" id="job-delete" type="button" data-mutation>Delete job</button>':''}`}`;
+      $('#job-dialog-actions').hidden=deleted;
+      $('#job-dialog-label').textContent=job?'Job details':'New job';
       HeyBossUI.icons($('#job-panel'));pendingUI();
       $('#job-form').oninput=()=>{dirty=true;};
       $('#job-form').onsubmit=save;
       const frequency=$('#job-frequency'),time=$('#job-time'),cron=$('#job-cron');
       const cronLegend=()=>{const parts=cron.value.trim().split(/\s+/);document.querySelectorAll('[data-cron-part]').forEach((el,i)=>{el.textContent=parts[i]||'—';});};
       const scheduleVisibility=()=>{
-        for(const [id,modes] of Object.entries({'time':['daily','weekdays','weekly','monthly'],'interval':['minutes'],'minute':['hourly'],'monthday':['monthly'],'days':['weekly']})){
+        for(const [id,modes] of Object.entries({'time':['daily','weekdays','weekly','monthly'],'interval':['minutes','hours'],'minute':['hourly','hours'],'monthday':['monthly'],'days':['weekly']})){
           const field=$('#job-'+id+'-field');field.hidden=!modes.includes(frequency.value);
           for(const input of field.querySelectorAll('input')){input.required=!field.hidden;input.disabled=field.hidden||deleted;}
         }
-        $('#job-interval-help').hidden=frequency.value!=='minutes';
+        const hours=frequency.value==='hours';
+        $('#job-interval').min=hours?'2':'1';$('#job-interval').max=hours?'23':'59';
+        $('#job-interval-unit').textContent=hours?'hours':'minutes';
+        $('#job-interval-help').hidden=!['minutes','hours'].includes(frequency.value);
+        $('#job-interval-help').textContent=hours?'Starts at 00:'+String($('#job-minute').value||0).padStart(2,'0')+' in this timezone, restarting each day. Use a divisor of 24 for evenly spaced runs.':'Steps restart each hour. Use a divisor of 60 for evenly spaced runs.';
       };
       const loadSchedule=()=>{const fields=scheduleFields(cron.value);frequency.value=fields.frequency;time.value=fields.time;$('#job-interval').value=fields.interval||15;$('#job-minute').value=fields.minute??0;$('#job-monthday').value=fields.day||1;
         document.querySelectorAll('[data-weekday]').forEach(button=>button.setAttribute('aria-pressed',String((fields.days||[1]).includes(Number(button.dataset.weekday)))));scheduleVisibility();cronLegend();};
       const queuePreview=()=>{dirty=true;previewGeneration++;clearTimeout(previewTimer);cron.removeAttribute('aria-invalid');$('#job-timezone').removeAttribute('aria-invalid');$('#job-preview').classList.remove('error');$('#job-preview').textContent='Checking schedule…';cronLegend();previewTimer=setTimeout(preview,300);};
       const updateSchedule=()=>{scheduleVisibility();if(frequency.value!=='custom')cron.value=[...document.querySelectorAll('.job-schedule-editor input:required:not(#job-cron):not(#job-timezone)')].some(input=>!input.validity.valid)?'':scheduleCron(frequency.value,time.value,{interval:Number($('#job-interval').value),minute:Number($('#job-minute').value),day:Number($('#job-monthday').value),days:[...document.querySelectorAll('[data-weekday][aria-pressed="true"]')].map(el=>Number(el.dataset.weekday))});queuePreview();};
-      frequency.onchange=updateSchedule;
+      frequency.onchange=()=>{if(frequency.value==='hours')$('#job-interval').value=3;else if(frequency.value==='minutes')$('#job-interval').value=15;updateSchedule();};
       for(const id of ['job-time','job-interval','job-minute','job-monthday'])$('#'+id).oninput=updateSchedule;
       document.querySelectorAll('[data-weekday]').forEach(button=>button.onclick=()=>{button.setAttribute('aria-pressed',String(button.getAttribute('aria-pressed')!=='true'));updateSchedule();});
       cron.oninput=()=>{frequency.value='custom';scheduleVisibility();queuePreview();};
@@ -244,7 +254,7 @@ const HeyBossJobs = (() => {
       picker.update(boot.projects,boot.projects.find(p=>p.id===context.project)||{id:context.project,name:context.project});$('#nav-jobs').setAttribute('aria-current','page');const nav=$('#nav-jobs').closest('.app-navigation');nav.scrollLeft=$('#nav-jobs').offsetLeft-nav.clientWidth/2;
       const dialog=$('#job-dialog'),hasJob=!!params.get('job'),wasOpen=dialog.open,previousJob=selected?.id;
       $('#jobs-feedback').append($('#jobs-error'),$('#jobs-retry'));
-      if(hasJob){$('#job-panel').innerHTML='<h2 id="job-panel-title">Loading job…</h2>';$('#job-dialog-feedback').append($('#jobs-error'),$('#jobs-retry'));if(!dialog.open)dialog.showModal();}
+      if(hasJob){$('#job-panel').scrollTop=0;$('#job-panel').innerHTML='<h2 id="job-panel-title">Loading job…</h2>';$('#job-dialog-feedback').append($('#jobs-error'),$('#jobs-retry'));if(!dialog.open)dialog.showModal();}
       else if(dialog.open)dialog.close();
       pendingUI();rows=[];next=null;renderList();if(!context.project){$('#jobs-status').textContent='Choose a project to manage jobs.';return;}
       await Promise.all([load(),service(),open(params.get('job'))]);

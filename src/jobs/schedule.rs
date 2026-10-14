@@ -349,6 +349,33 @@ mod tests {
         assert!(leap.preview(i64::MIN, i64::MAX, 1).is_err());
     }
     #[test]
+    fn hour_steps_keep_the_minute_offset_and_restart_at_local_midnight() {
+        let schedule = Schedule::parse("25 */3 * * *", "America/Chicago").unwrap();
+        assert_eq!(
+            schedule
+                .preview(at("2026-10-14T23:26:00Z"), at("2026-10-15T08:25:00Z"), 10)
+                .unwrap(),
+            [
+                "2026-10-15T02:25:00Z",
+                "2026-10-15T05:25:00Z",
+                "2026-10-15T08:25:00Z"
+            ]
+            .map(at)
+        );
+        let uneven = Schedule::parse("25 */5 * * *", "UTC").unwrap();
+        assert_eq!(
+            uneven
+                .preview(at("2026-10-14T19:00:00Z"), at("2026-10-15T05:25:00Z"), 10)
+                .unwrap(),
+            [
+                "2026-10-14T20:25:00Z",
+                "2026-10-15T00:25:00Z",
+                "2026-10-15T05:25:00Z"
+            ]
+            .map(at)
+        );
+    }
+    #[test]
     fn latest_coalesces_decades_without_enumerating_occurrences() {
         let s = Schedule::parse("* * * * *", "UTC").unwrap();
         assert_eq!(
