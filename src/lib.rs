@@ -5,7 +5,7 @@ pub mod agent_guidance;
 pub(crate) mod agent_process;
 pub mod agent_runtime;
 mod agent_transcript;
-pub use hey_harvester::agents;
+pub mod agents;
 pub mod artifacts;
 pub mod attachments;
 mod chief_ownership;
@@ -16,7 +16,7 @@ pub mod document;
 pub mod environment;
 pub mod fleet;
 pub mod utilities;
-pub use hey_harvester::health;
+pub mod health;
 /// SQLite-backed project issues and durable agent ownership.
 pub mod issues;
 pub mod jobs;

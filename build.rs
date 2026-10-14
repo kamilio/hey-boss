@@ -21,7 +21,6 @@ fn main() {
         "src",
         "skills/hey-boss",
         "packages/hey-gh",
-        "packages/hey-harvester",
         "packages/hey-boss-http",
         "packages/hey-proxy",
         "tools/upgrade_hey_boss.py",

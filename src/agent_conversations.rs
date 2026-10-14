@@ -284,7 +284,7 @@ pub(crate) fn valid_session(session: &str) -> bool {
             }
         })
 }
-use hey_harvester::agents::rollout;
+use crate::agents::rollout;
 
 /// Best-effort bounded metadata capture on the caller's device, before SSH.
 /// Tool text and arguments are deliberately excluded from persisted origins.

@@ -21,7 +21,6 @@ const INPUTS: &[&str] = &[
     "src",
     "skills/hey-boss",
     "packages/hey-gh",
-    "packages/hey-harvester",
     "packages/hey-boss-http",
     "packages/hey-proxy",
     "tools/upgrade_hey_boss.py",
@@ -38,7 +37,6 @@ const PAYLOAD: &[&str] = &[
     "src",
     "skills/hey-boss",
     "packages/hey-gh",
-    "packages/hey-harvester",
     "packages/hey-boss-http",
     "packages/hey-proxy",
     "tools/upgrade_hey_boss.py",
@@ -55,7 +53,7 @@ const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
 // Archives can have older mtimes than artifacts from another snapshot in the
 // shared Cargo target. Refresh every packaged source, including companion crates.
-const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; if test -f \"$upgrade_stage/packages/hey-harvester/build.rs\"; then touch \"$upgrade_stage/packages/hey-harvester/build.rs\"; fi; for source in src packages/hey-harvester/src packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; for source in src packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
 
 #[derive(Args)]
 pub struct Options {
@@ -324,7 +322,6 @@ fn snapshot_at(
                 "src",
                 "skills/hey-boss",
                 "packages/hey-gh",
-                "packages/hey-harvester",
                 "packages/hey-boss-http",
                 "packages/hey-proxy",
                 "tools/upgrade_hey_boss.py",
@@ -957,16 +954,16 @@ mod tests {
             fs::write(
                 root.join("Cargo.toml"),
                 "[package]\nname='hey-boss'\nversion='0.1.0'\nedition='2024'\nbuild='build.rs'\n\
-                 [workspace]\nmembers=['packages/hey-harvester','packages/hey-gh','packages/hey-proxy']\n\
-                 default-members=['.','packages/hey-harvester','packages/hey-gh','packages/hey-proxy']\n\
-                 [dependencies]\nhey-harvester={path='packages/hey-harvester'}\nhey-gh={path='packages/hey-gh'}\n",
+                 [workspace]\nmembers=['packages/hey-boss-http','packages/hey-gh','packages/hey-proxy']\n\
+                 default-members=['.','packages/hey-boss-http','packages/hey-gh','packages/hey-proxy']\n\
+                 [dependencies]\nhey-boss-http={path='packages/hey-boss-http'}\nhey-gh={path='packages/hey-gh'}\n",
             )
             .unwrap();
             fs::write(
                 root.join("Cargo.lock"),
                 "version = 4\n[[package]]\nname = 'hey-boss'\nversion = '0.1.0'\n\
-                 dependencies=['hey-harvester','hey-gh']\n\
-                 [[package]]\nname='hey-harvester'\nversion='0.1.0'\n\
+                 dependencies=['hey-boss-http','hey-gh']\n\
+                 [[package]]\nname='hey-boss-http'\nversion='0.1.0'\n\
                  [[package]]\nname='hey-gh'\nversion='0.1.0'\n\
                  [[package]]\nname='hey-proxy'\nversion='0.1.0'\n",
             )
@@ -974,7 +971,7 @@ mod tests {
             fs::write(root.join("build.rs"), "fn main(){println!(\"cargo:rerun-if-changed=src\");let stamp=std::fs::read_to_string(\"src/stamp\").unwrap();println!(\"cargo:rustc-env=STAMP={stamp}\");let priority=std::process::Command::new(\"ps\").args([\"-o\",\"ni=\",\"-p\",&std::process::id().to_string()]).output().unwrap();assert!(priority.status.success());std::fs::write(\"build-priority\",priority.stdout).unwrap();}").unwrap();
             fs::write(
                 root.join("src/main.rs"),
-                "fn main(){assert_eq!(hey_harvester::stamp(),env!(\"STAMP\"));assert_eq!(hey_gh::stamp(),env!(\"STAMP\"));println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
+                "fn main(){assert_eq!(hey_boss_http::stamp(),env!(\"STAMP\"));assert_eq!(hey_gh::stamp(),env!(\"STAMP\"));println!(\"hey-boss 0.1.0 (build {})\",env!(\"STAMP\"));}",
             )
             .unwrap();
             let build_priority = || {
@@ -985,7 +982,7 @@ mod tests {
                     .unwrap()
             };
             fs::write(root.join("src/stamp"), stamp).unwrap();
-            for package in ["hey-harvester", "hey-gh", "hey-proxy"] {
+            for package in ["hey-boss-http", "hey-gh", "hey-proxy"] {
                 let dir = root.join("packages").join(package);
                 fs::create_dir_all(dir.join("src")).unwrap();
                 fs::write(
@@ -1038,7 +1035,7 @@ mod tests {
                 !bootstrap.join("release").exists(),
                 "Bootstrap must leave release compilation to the installer"
             );
-            for package in ["hey-harvester", "hey-gh", "hey-proxy"] {
+            for package in ["hey-boss-http", "hey-gh", "hey-proxy"] {
                 assert!(
                     !bootstrap.join("debug").join(package).exists(),
                     "Bootstrap must not build companion executables"
@@ -1050,7 +1047,7 @@ mod tests {
                 "Release priority {} should be at least {expected_priority} (parent {parent_priority})",
                 build_priority()
             );
-            for package in ["hey-harvester", "hey-gh", "hey-proxy"] {
+            for package in ["hey-boss-http", "hey-gh", "hey-proxy"] {
                 let bytes =
                     output(&mut Command::new(target.join("release").join(package))).unwrap();
                 assert_eq!(
@@ -1188,7 +1185,6 @@ mod tests {
                 "src",
                 "skills/hey-boss",
                 "packages/hey-gh",
-                "packages/hey-harvester",
                 "packages/hey-boss-http",
                 "packages/hey-proxy",
                 "assets",

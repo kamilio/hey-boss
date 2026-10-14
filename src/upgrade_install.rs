@@ -158,7 +158,7 @@ fn shortcut(binary: &Path) -> io::Result<()> {
 
 fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for name in ["hey-gh", "hey-harvester", "hey-proxy"] {
+    for name in ["hey-gh", "hey-proxy"] {
         paths.push(binary.with_file_name(name));
         for directory in [".cargo/bin", ".local/bin"] {
             let existing = home.join(directory).join(name);
@@ -194,18 +194,9 @@ pub(super) fn publish(
             companion,
             skills,
             companion_bins: companion_bins(binary, &home()?),
-            harvester: if cfg!(target_os = "macos") {
-                let standalone = home()?.join(".local/bin/hey-harvester");
-                Some(if standalone.exists() {
-                    standalone
-                } else {
-                    binary.with_file_name("hey-harvester")
-                })
-            } else {
-                None
-            },
+            harvester: None,
         },
-        hey_harvester::cli::refresh_schedule,
+        |_| Ok(()),
     )
 }
 
@@ -575,15 +566,16 @@ esac
     fn existing_standalone_companions_follow_package_upgrades_without_duplicates() {
         let temp = Temp::new().unwrap();
         let home = temp.0.join("home");
-        let standalone = home.join(".local/bin/hey-harvester");
+        let standalone = home.join(".local/bin/hey-proxy");
         script(&standalone, "echo standalone");
         let homebrew = temp.0.join("homebrew/bin/hey-boss");
         let destinations = companion_bins(&homebrew, &home);
-        assert!(destinations.contains(&homebrew.with_file_name("hey-harvester")));
+        assert!(!destinations.contains(&homebrew.with_file_name("hey-harvester")));
+        assert!(!destinations.contains(&home.join(".local/bin/hey-harvester")));
         assert!(destinations.contains(&homebrew.with_file_name("hey-proxy")));
         assert!(
             destinations.contains(&standalone),
-            "scheduled standalone binary must be upgraded"
+            "existing public companion must be upgraded"
         );
         assert!(
             !destinations.contains(&home.join(".local/bin/hey-gh")),

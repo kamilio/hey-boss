@@ -184,7 +184,6 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "tests",
                     "skills/hey-boss",
                     "packages/hey-gh",
-                    "packages/hey-harvester",
                     "packages/hey-boss-http",
                     "packages/hey-proxy",
                     "README.md",
@@ -213,7 +212,7 @@ cargo test --locked --manifest-path "$stage/Cargo.toml" --bin hey-boss --test se
 cargo build --locked --release --manifest-path "$stage/Cargo.toml"
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/hey-boss" "$HOME/.codex/skills/hey-boss"
 chmod 700 "$HOME/.local/share/hey-boss"
-for name in hey-gh hey-harvester hey-proxy; do
+for name in hey-gh hey-proxy; do
 cp "$stage/target/release/$name" "$HOME/.local/bin/$name.new"
 chmod 755 "$HOME/.local/bin/$name.new"
 mv "$HOME/.local/bin/$name.new" "$HOME/.local/bin/$name"
