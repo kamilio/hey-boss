@@ -71,7 +71,7 @@ async (page) => {
   check(await page.getByRole('button',{name:'Clearing…',exact:true}).isDisabled(),'clearing disables duplicate submissions');
   if(!desktop){await page.keyboard.press('Escape');check(await dialog().isVisible(),'busy confirmation remains open on Escape');}
   release();
-  await page.waitForFunction(desktop=>desktop?document.querySelector('[data-inbox-clear-all]')?.disabled&&document.querySelector('[data-inbox-clear-all]')?.textContent.includes('Clear all'):document.querySelector('.clear-inbox-button')?.disabled&&document.querySelector('.page-title .count')?.textContent==='0',desktop);
+  await page.waitForFunction(desktop=>desktop?document.querySelector('[data-inbox-clear-all]')?.disabled&&document.querySelector('[data-inbox-clear-all]')?.textContent.includes('Clear all'):document.querySelector('.clear-inbox-button')?.disabled&&document.querySelector('#page-heading small')?.textContent==='0 unread',desktop);
   await page.unrouteAll({behavior:'wait'});
   check(await pending()===0,'confirmed Clear all empties the unread Inbox');
   check(submissions===1,'clear sends exactly one browser batch request');

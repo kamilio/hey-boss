@@ -1,24 +1,76 @@
-/* The regular issue layout already adapts to narrow screens. Keep primary
-   phone destinations quiet and leave project documents one tap away. */
-.app-navigation .navigation-inner{justify-content:center}
-.app-navigation a{min-height:44px}
-.project-resources{display:flex;justify-content:flex-end;gap:18px;max-width:1100px;margin:0 auto;padding:12px 20px;font-size:12px;color:var(--muted)}
-.project-resources:not(:has(a:not([hidden]))){display:none}
-.project-resources a{display:inline-flex;align-items:center;gap:6px;min-height:44px}
-.project-resources svg{width:15px;height:15px}
+/* The phone hub reuses the regular issue pages. Dress them in the shared
+   glass system so they read as one app with the inbox. */
+html[data-issue-mobile] body{background:var(--shell-tint);background-attachment:fixed;padding-bottom:var(--bar-clearance)}
+html[data-issue-mobile]{--surface:var(--glass-surface);--input:var(--glass-surface);--solid:var(--glass-solid);--accent:var(--glass-accent);--text:var(--glass-ink)}
 input,textarea,select{font-size:16px}
-body{padding-bottom:env(safe-area-inset-bottom)}
+
+/* Status row: project chip on the left, overflow menu on the right. */
+.app-navigation,.brand,.header-divider,.connection,#quick-issue-open,.profile-control,.page-heading .eyebrow,.page-description,#new-issue{display:none!important}
+html[data-issue-mobile] .app-header{height:auto;background:none;border:0;box-shadow:none;backdrop-filter:none;-webkit-backdrop-filter:none}
+.header-right>#project-settings-trigger{display:none}
+.header-inner{max-width:1100px;min-height:64px;padding:max(10px,env(safe-area-inset-top)) 16px 0;gap:10px}
+.project-control{min-width:0;flex:0 1 auto}
+.project-trigger{min-height:40px;max-width:100%;padding:0 14px;border-radius:var(--radius-pill);background:var(--glass-surface);border:1px solid var(--glass-edge);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter);color:var(--glass-ink);font-size:13px;font-weight:600}
+#project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.header-right{margin-left:auto;gap:8px;flex-shrink:0}
+.header-right .icon-button,#navigation-more{width:40px;height:40px;border-radius:50%;background:var(--glass-surface);border:1px solid var(--glass-edge);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter);color:var(--glass-ink)}
+.navigation-overflow{display:block!important}
+.navigation-more-links{padding:6px;border-radius:18px;background:var(--glass-solid);border:1px solid var(--glass-edge);box-shadow:0 18px 50px #1a254033,inset 0 1px 0 var(--glass-edge)}
+.navigation-more-links>a,.navigation-more-links>button{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:10px 12px;border:0;border-radius:12px;background:none;color:var(--glass-ink);font:inherit;font-size:14px;text-align:left;text-decoration:none;cursor:pointer}
+.navigation-more-links>a[hidden],.navigation-more-links>button[hidden]{display:none}
+.navigation-more-links>:is(a,button):hover{background:var(--hover)}
+.navigation-more-links svg{width:17px;height:17px;color:var(--glass-muted)}
+.popover,.profile-menu{background:var(--glass-solid)}
+
+/* Large title, like the inbox. */
+main{max-width:1100px;padding-left:16px!important;padding-right:16px!important}
+.page-heading{margin:0 2px 16px;padding:0;align-items:flex-end}
+main{padding-top:10px!important}
+.page-heading h1{font-size:36px;line-height:1.1;font-weight:750;letter-spacing:-1.4px}
+.heading-count{background:none;border:0;padding:0;margin-left:4px;font-size:14px;font-weight:600;letter-spacing:0;color:var(--glass-muted)}
+.page-heading .button{border-radius:var(--radius-pill)}
+
+/* Controls become glass pills. */
+.toolbar{flex-wrap:wrap;gap:8px}
+.search-field,.select-control,.jobs-search{border-radius:var(--radius-pill);border:1px solid var(--glass-edge);background:var(--glass-surface);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter)}
+.search-field{min-height:44px;padding:0 16px;flex-basis:100%}
+.filter-controls{flex:1;min-width:0}
+.select-control{flex:1;min-width:0;height:40px;padding-left:14px}
+.select-control select{max-width:none;width:100%}
+.jobs-search{flex:1;min-height:44px;padding:0 16px}
+.jobs-toolbar{border:0;padding-bottom:0;margin-bottom:12px}
+.refresh{width:40px;height:40px;border-radius:50%;background:var(--glass-surface);border:1px solid var(--glass-edge);box-shadow:var(--glass-shadow)}
+
+/* The list panel dissolves into a segmented control and glass cards. */
+.issue-panel.glass{background:none;border:0;box-shadow:none;border-radius:0;overflow:visible;min-height:0}
+.list-heading{height:auto;padding:0;margin-bottom:12px;background:none;border:0}
+.state-tabs,.jobs-topbar .jobs-views,.jobs-filters,.calendar-modes{display:flex;flex-wrap:nowrap;gap:2px;padding:4px;border-radius:var(--radius-pill);background:var(--glass-surface);border:1px solid var(--glass-edge);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter);overflow-x:auto;scrollbar-width:none}
+.state-tabs::-webkit-scrollbar{display:none}
+.state-tabs{flex:1}
+.state-tabs button,.jobs-views .button,.jobs-filters button,.calendar-modes .button{flex:1;justify-content:center;min-height:36px;height:auto;padding:0 12px;border:0;border-radius:var(--radius-pill);background:none;font-size:13px;font-weight:600}
+.state-tabs button.selected,.jobs-views [aria-pressed=true],.jobs-filters [aria-pressed=true],.calendar-modes [aria-pressed=true]{color:var(--glass-ink);background:var(--glass-selected);box-shadow:0 2px 8px #0000000f,inset 0 1px 0 var(--glass-edge)}
+.state-tabs button.selected:after{display:none}
+.state-tabs button svg{display:none}
+#issue-list{display:grid;gap:10px}
+.issue-row{--card-accent:var(--accent-success);border:1px solid var(--glass-edge);border-radius:var(--radius-card);background:var(--glass-surface);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter);padding:16px 14px 16px 16px;gap:10px;min-height:0}
+.issue-row:last-child{border-bottom:1px solid var(--glass-edge)}
+.issue-row:before{content:"";position:absolute;left:0;top:18px;height:34px;width:3px;border-radius:0 3px 3px 0;background:var(--card-accent)}
+.issue-row:has(.issue-state.blocked){--card-accent:var(--accent-warning)}
+.issue-row:has(.issue-state.closed){--card-accent:var(--accent-info)}
+.issue-row:has(.issue-state.deleted){--card-accent:var(--accent-idle)}
+.issue-row:hover{background:var(--glass-surface)}
+.issue-title{font-size:16px;font-weight:650;letter-spacing:-.2px}
+.list-footer,.page-footer{background:none;border:0}
+
 @media(max-width:600px){
- .header-inner{gap:8px}
- .header-divider{display:none}
- .project-control{min-width:0}
- .project-trigger{max-width:max(64px,calc(100vw - 272px));min-width:0}
- #project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .header-right{flex-shrink:0}
- .instructions-trigger span:not([data-icon]){display:none}
- .connection{display:none}
- .navigation-inner{gap:0}
- .app-navigation a{flex:1;justify-content:center;padding-left:8px;padding-right:8px;font-size:12px}
+ .issue-row:not(.subtask-row)>.issue-row-end{display:flex;flex-direction:row;align-items:center;justify-content:flex-end;gap:8px;margin:-6px -6px -8px 0}
  .detail-top h1{overflow-wrap:anywhere}
  .editor-dialog{max-height:calc(100dvh - 16px)}
+}
+@media(min-width:700px){
+ .header-inner,main{padding-left:40px!important;padding-right:40px!important}
+ .search-field{flex-basis:auto}
+ .filter-controls{flex:0 0 auto}
+ .select-control{min-width:150px}
+ #issue-list{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
 }
