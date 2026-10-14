@@ -9,6 +9,8 @@ import Darwin
 import QuartzCore
 import IOKit
 import Carbon
+import AVFoundation
+import Speech
 import CryptoKit
 
 /// Only aggregate input idle time is sampled. No keys, cursor positions or app
@@ -4051,6 +4053,71 @@ enum QuickIssueText {
     }
 }
 
+/// Owns microphone resources only for one explicit dictation session. Generation
+/// fencing prevents delayed permission/recognition callbacks reopening a session.
+final class QuickIssueVoice {
+    enum Event { case listening, transcript(String), finished(String?) }
+    private let engine = AVAudioEngine()
+    private var task: SFSpeechRecognitionTask?
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var tapped = false
+    private var generation = 0
+    private var callback: ((Event) -> Void)?
+    func start(_ callback: @escaping (Event) -> Void) {
+        cancel(); self.callback = callback; let token = generation
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            onMain {
+                guard let self, token == self.generation else { return }
+                guard status == .authorized else { self.finish("Allow Speech Recognition for Hey Boss in System Settings → Privacy & Security."); return }
+                AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
+                    onMain {
+                        guard let self, token == self.generation else { return }
+                        guard allowed else { self.finish("Allow Microphone for Hey Boss in System Settings → Privacy & Security."); return }
+                        self.listen(token)
+                    }
+                }
+            }
+        }
+    }
+    private func listen(_ token: Int) {
+        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else { finish("Speech recognition is unavailable. Try again or type your issue."); return }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
+        self.request = request
+        let input = engine.inputNode, format = engine.inputNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else { finish("No microphone is available. Connect one and retry."); return }
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in request.append(buffer) }; tapped = true
+        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            onMain {
+                guard let self, token == self.generation else { return }
+                if let result { self.callback?(.transcript(result.bestTranscription.formattedString)) }
+                if result?.isFinal == true { self.finish(nil) }
+                else if let error { self.finish("Dictation stopped: \(error.localizedDescription)") }
+            }
+        }
+        do { engine.prepare(); try engine.start(); callback?(.listening) }
+        catch { finish("Could not start the microphone. \(error.localizedDescription)") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in
+            guard let self, token == self.generation else { return }; self.stop()
+        }
+    }
+    func stop() {
+        guard request != nil else { finish(nil); return }
+        stopAudio(); request?.endAudio(); let token = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, token == self.generation else { return }; self.finish(nil)
+        }
+    }
+    private func stopAudio() {
+        engine.stop()
+        if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
+    }
+    private func finish(_ error: String?) { let handler = callback; cancel(); handler?(.finished(error)) }
+    func cancel() { generation += 1; stopAudio(); request?.endAudio(); task?.cancel(); task = nil; request = nil; callback = nil }
+    deinit { cancel() }
+}
+
 struct QuickIssueImage {
     let id = UUID().uuidString
     let name: String
@@ -4124,10 +4191,15 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     let confirmation = NSTextField(labelWithString: "Issue created")
     let progress = NSProgressIndicator()
     let submitHint = NSTextField(labelWithString: "⌘↵")
+    let voiceButton = NSButton(title: "Dictate", target: nil, action: nil)
     let pasteButton = NSButton(title: "Paste image", target: nil, action: nil)
     let mediaHint = NSTextField(labelWithString: "⌘V to attach a screenshot")
     let imageStrip = NSScrollView()
     let imageCanvas = NSView()
+    let voice = QuickIssueVoice()
+    var voiceBase: (text: String, range: NSRange)?
+    var voiceFinishing = false
+    var voiceListening = false
     var images: [QuickIssueImage] = []
     // Once creation begins, preserve an immutable snapshot through all retries.
     // The CLI commits the regular task and all its images in one transaction.
@@ -4192,13 +4264,15 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         table.dataSource = self; table.delegate = self; table.target = self; table.action = #selector(chooseProject)
         table.setAccessibilityLabel("Matching projects"); table.selectionHighlightStyle = .regular
         picker.documentView = table; picker.hasVerticalScroller = true; picker.drawsBackground = false
+        voiceButton.bezelStyle = .rounded; voiceButton.image = NSImage(systemSymbolName: "mic", accessibilityDescription: nil)
+        voiceButton.imagePosition = .imageLeading; voiceButton.target = self; voiceButton.action = #selector(toggleVoice)
         pasteButton.bezelStyle = .rounded; pasteButton.image = NSImage(systemSymbolName: "photo.badge.plus", accessibilityDescription: nil)
         pasteButton.imagePosition = .imageLeading; pasteButton.target = self; pasteButton.action = #selector(pasteImage)
         pasteButton.toolTip = "Paste an image from the clipboard (⌘V)"
         mediaHint.font = .systemFont(ofSize: 11); mediaHint.textColor = .secondaryLabelColor
         imageStrip.documentView = imageCanvas; imageStrip.hasHorizontalScroller = true; imageStrip.drawsBackground = false
         imageStrip.setAccessibilityLabel("Attached images")
-        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, pasteButton, mediaHint, imageStrip] { canvas.addSubview(view) }
+        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, voiceButton, pasteButton, mediaHint, imageStrip] { canvas.addSubview(view) }
         for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
         window.submitIssue = { [weak self] in self?.create() }
         window.pasteImage = { [weak self] in self?.pasteImages(.general) ?? false }
@@ -4236,8 +4310,9 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         table.tableColumns[0].width = width - 40
         hint.frame = NSRect(x: 24, y: 68 + errorHeight + overflowHeight + mediaHeight, width: width - 48, height: 18)
         let mediaY = 68 + errorHeight + overflowHeight
-        pasteButton.frame = NSRect(x: 20, y: mediaY, width: 120, height: 32)
-        mediaHint.frame = NSRect(x: 154, y: mediaY + 8, width: width - 178, height: 18)
+        voiceButton.frame = NSRect(x: 20, y: mediaY, width: 116, height: 32)
+        pasteButton.frame = NSRect(x: 142, y: mediaY, width: 120, height: 32)
+        mediaHint.frame = NSRect(x: 276, y: mediaY + 8, width: width - 300, height: 18)
         imageStrip.frame = NSRect(x: 24, y: mediaY + 38, width: width - 48, height: 96)
         imageCanvas.frame = NSRect(x: 0, y: 0, width: max(width - 48, CGFloat(images.count) * 152), height: 80)
         imageStrip.isHidden = images.isEmpty || succeeded
@@ -4281,10 +4356,16 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
     }
     func updateEnabled() {
-        let editable = !saving && !succeeded && mediaSubmission == nil
+        let editable = !saving && !succeeded && mediaSubmission == nil && voiceBase == nil
         input.isEnabled = editable; bottom.isEnabled = editable; closeButton.isEnabled = !saving
+        voiceButton.isEnabled = !saving && !succeeded && mediaSubmission == nil && !voiceFinishing
         pasteButton.isEnabled = editable
-        pasteButton.isHidden = succeeded; mediaHint.isHidden = succeeded
+        voiceButton.isHidden = succeeded; pasteButton.isHidden = succeeded; mediaHint.isHidden = succeeded
+        voiceButton.title = voiceBase == nil ? "Dictate" : voiceFinishing ? "Finishing…" : "Stop"
+        voiceButton.image = NSImage(systemSymbolName: voiceBase == nil ? "mic" : "stop.circle.fill", accessibilityDescription: nil)
+        voiceButton.contentTintColor = voiceBase == nil ? .labelColor : .systemRed
+        voiceButton.setAccessibilityLabel(voiceBase == nil ? "Start voice dictation" : "Stop voice dictation")
+        mediaHint.stringValue = voiceBase == nil ? "⌘V to attach a screenshot" : voiceFinishing ? "Finishing dictation…" : "Listening · speak your issue"
         for button in imageCanvas.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = editable }
         input.isHidden = succeeded; confirmation.isHidden = !succeeded
         bottom.isHidden = succeeded; submit.isHidden = succeeded; submitHint.isHidden = succeeded
@@ -4292,7 +4373,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         icon.image = NSImage(systemSymbolName: succeeded ? "checkmark.circle.fill" : "circle.dashed", accessibilityDescription: succeeded ? "Issue created" : "Issue")
         icon.contentTintColor = succeeded ? .systemGreen : .controlAccentColor
         if saving || (!ready && error.stringValue.isEmpty) { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
-        submit.isEnabled = ready && !saving && !succeeded && !input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        submit.isEnabled = ready && !saving && !succeeded && voiceBase == nil && !input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     func fail(_ message: String) {
         error.stringValue = message
@@ -4374,7 +4455,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         if !pasteImages(.general) && mediaSubmission == nil { fail("Copy an image or screenshot, then paste it here.") }
     }
     @discardableResult func pasteImages(_ board: NSPasteboard) -> Bool {
-        guard !saving, !succeeded, mediaSubmission == nil else { return false }
+        guard !saving, !succeeded, mediaSubmission == nil, voiceBase == nil else { return false }
         guard ArtifactImageInput.containsImages(board) else { return false }
         do {
             let inputs = ArtifactImageInput.read(board)
@@ -4409,13 +4490,54 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
     }
     @objc func removeImage(_ sender: NSButton) {
-        guard !saving, mediaSubmission == nil, images.indices.contains(sender.tag) else { return }
+        guard !saving, mediaSubmission == nil, voiceBase == nil, images.indices.contains(sender.tag) else { return }
         images.remove(at: sender.tag); rebuildImages(); changed()
     }
-    @objc func dismiss() { guard !saving else { return }; generation += 1; window.orderOut(nil) }
-    func windowDidResignKey(_ notification: Notification) { if !saving { dismiss() } }
+    func beginVoice(range: NSRange) {
+        let text = input.stringValue as NSString
+        let start = min(range.location, text.length), length = min(range.length, text.length - start)
+        voiceBase = (input.stringValue, NSRange(location: start, length: length)); voiceFinishing = false; voiceListening = false
+        error.stringValue = ""; matches = []; mention = nil; updateEnabled(); layout()
+    }
+    @objc func toggleVoice() {
+        guard !saving, !succeeded, mediaSubmission == nil else { return }
+        if voiceBase != nil { voiceFinishing = true; updateEnabled(); voice.stop(); return }
+        guard (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        let range = (input.currentEditor() as? NSTextView)?.selectedRange() ?? NSRange(location: input.stringValue.utf16.count, length: 0)
+        beginVoice(range: range); mediaHint.stringValue = "Waiting for microphone access…"
+        voice.start { [weak self] event in self?.receiveVoice(event) }
+    }
+    func receiveVoice(_ event: QuickIssueVoice.Event) {
+        guard let base = voiceBase else { return }
+        switch event {
+        case .listening:
+            if present && !NSApp.isActive { dismiss(); return }
+            voiceListening = true; updateEnabled()
+        case .transcript(let text):
+            let original = base.text as NSString
+            let prefix = original.substring(to: base.range.location), suffix = original.substring(from: NSMaxRange(base.range))
+            let leading = !prefix.isEmpty && prefix.last?.isWhitespace == false && !text.isEmpty ? " " : ""
+            let trailing = !suffix.isEmpty && suffix.first?.isWhitespace == false && !text.isEmpty ? " " : ""
+            input.stringValue = prefix + leading + text + trailing + suffix
+        case .finished(let message):
+            voiceBase = nil; voiceFinishing = false; voiceListening = false; changed()
+            if let message { fail(message) }
+            if present && window.isKeyWindow { window.makeFirstResponder(input) }
+        }
+    }
+    @objc func dismiss() {
+        guard !saving else { return }
+        voice.cancel(); voiceBase = nil; voiceFinishing = false; voiceListening = false; updateEnabled()
+        generation += 1; window.orderOut(nil)
+    }
+    func windowDidResignKey(_ notification: Notification) {
+        // A system permission sheet can take focus before dictation starts.
+        // An actual app switch must still release the microphone immediately.
+        if voiceBase != nil { if voiceListening { dismiss() }; return }
+        if !saving { dismiss() }
+    }
     @objc func create() {
-        guard ready, !saving, !succeeded, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        guard ready, !saving, !succeeded, voiceBase == nil, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
         if mediaSubmission != nil { saveMedia(); return }
         do {
             let parsed = try QuickIssueText.parse(input.stringValue, projects: projects, current: current)
