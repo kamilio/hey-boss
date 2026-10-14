@@ -17,9 +17,11 @@ for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)|
  if(name.endsWith('.html')){
   value=Buffer.from(addAgentGuidance(value.toString().replace('<!--app-shell-->',shell)
    .replace('<html lang="en">','<html lang="en" data-issue-mobile="true">')
+   // Chrome skipped the tab transition when the opt-in loaded after the page styles.
+   .replace(/<head>\s*/,'<head><link rel="stylesheet" href="/issue-web/glass.css">')
    .replace(/(src|href)="\/([^"/]+\.(?:js|css|png))"/g,'$1="/issue-web/$2"')
    .replace('</head>','<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"><link rel="stylesheet" href="/issue-web/mobile.css"><script src="/issue-web/mobile.js" defer></script></head>')));
  }
  writeFileSync(new URL(name,destination),value);
 }
-for(const name of ['mobile.css','mobile.js'])cpSync(new URL('./web/'+name,import.meta.url),new URL(name,destination));
+for(const name of ['glass.css','mobile.css','mobile.js'])cpSync(new URL('./web/'+name,import.meta.url),new URL(name,destination));

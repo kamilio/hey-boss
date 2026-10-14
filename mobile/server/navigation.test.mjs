@@ -38,12 +38,16 @@ test('pairing returns to the original mobile page or legacy issue link',async()=
  assert.equal(pairedDestination(new URL('https://other.example/issues')),'/issues');
 });
 
-test('phone navigation has Inbox and Issues, with history inside Inbox',()=>{
+test('inbox and issue pages share one tab bar, with history and settings off the bar',()=>{
  const source=readFileSync(new URL('../src/main.jsx',import.meta.url),'utf8');
- const navigation=source.match(/<nav aria-label="Main navigation">([\s\S]*?)<\/nav>/)?.[1];
+ const issuePages=readFileSync(new URL('../web/mobile.js',import.meta.url),'utf8');
+ const navigation=source.match(/<nav className="hb-bar" aria-label="Main navigation">([\s\S]*?)<\/nav>/)?.[1];
  assert.ok(navigation,'Main navigation is present');
- for(const label of ['Inbox','Issues'])assert.ok(navigation.includes(label),label+' remains available');
- assert.doesNotMatch(navigation,/Activity|Agents|artifacts/i);
- assert.match(source,/Notification history/);
- assert.match(source,/href="\/issues"/);
+ const tabs=html=>[...html.matchAll(/href="(\/[a-z]*)"/g)].map(match=>match[1]).filter(href=>!href.includes('?'));
+ assert.deepEqual(tabs(navigation),['/','/issues','/jobs']);
+ assert.deepEqual([...issuePages.matchAll(/\['(\/[a-z]*)','(\w+)'/g)].map(match=>match[1]),['/','/issues','/jobs']);
+ for(const label of ['Inbox','Issues','Jobs','New issue'])assert.ok(navigation.includes(label)&&issuePages.includes(label),label+' is on both bars');
+ assert.doesNotMatch(navigation,/Settings|Activity|Agents|artifacts/i);
+ assert.match(source,/aria-label="Inbox view"[\s\S]*History/);
+ assert.match(source,/Phone settings/);assert.match(issuePages,/Phone settings/);
 });

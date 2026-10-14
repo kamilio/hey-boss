@@ -98,7 +98,7 @@ try{
   await page.goto(`${origin}/mobile#project=${encodeURIComponent(project)}&host=ignored-mobile-host`);
   await page.waitForFunction(()=>document.querySelectorAll('.merge-row').length===100);
   assert.doesNotMatch(await page.locator('.merge-meta a').first().getAttribute('href'),/host=/,'Mobile links stay on the supervisor');
-  assert.equal(await page.locator('.project-resources #nav-merged-prs').count(),1);
+  assert.equal(await page.locator('#navigation-more-links #nav-merged-prs').count(),1);
   for(const width of [390,320])for(const colorScheme of ['light','dark']){
     await page.setViewportSize({width,height:844});await page.emulateMedia({colorScheme});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Paired mobile ${width} ${colorScheme}: no overflow`);
