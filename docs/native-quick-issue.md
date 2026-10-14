@@ -34,6 +34,14 @@ so an uncertain response cannot create duplicates. Changing title, project, or
 placement starts a new request. Successful creation clears the form and resets
 placement to the top.
 
+**Dictate** transcribes speech at the cursor (or replaces selected text). **Stop**
+finishes recognition and leaves editable text; nothing submits while listening.
+The first use requests macOS Microphone and Speech Recognition permission.
+Recognition uses the Mac's language and stays on-device when supported; otherwise
+Apple's speech service is used. Permission or microphone errors appear inline and
+preserve existing text. Escape or leaving the panel stops the microphone; sessions
+also stop after one minute.
+
 Paste a screenshot with **⌘V** or **Paste image**. Copied image files also work.
 Up to eight images, totaling at most 10 MiB, appear in a horizontally scrolling preview
 strip; each has a remove button. Ordinary text pastes still edit the title. Images
