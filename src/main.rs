@@ -230,8 +230,8 @@ enum Command {
         /// Run on a configured SSH client (macOS or Linux).
         #[arg(long, global = true)]
         host: Option<String>,
-        #[command(subcommand)]
-        action: health_cli::Action,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Allow hey-boss globally in Codex and Claude Code, preserving existing settings.
     #[command(hide = true)]
@@ -586,11 +586,8 @@ fn run() -> std::io::Result<()> {
             }
             return Ok(());
         }
-        Command::Health { action, host } => {
-            return match host {
-                Some(host) => health_cli::run_remote(host, action),
-                None => health_cli::run(action),
-            };
+        Command::Health { args, host } => {
+            return health_cli::run(host.as_deref(), args);
         }
         Command::Agent(AgentAction::Models {
             provider,

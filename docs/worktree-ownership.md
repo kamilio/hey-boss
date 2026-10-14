@@ -2,7 +2,7 @@
 
 Current cleanup policy: candidates reach automatic evaluation without owner release
 metadata. Every supported remover repeats ownership and safety checks. See
-[cleanup safety](cleanup-protection.md). Tracked edits, non-ignored untracked files
+cleanup safety. Tracked edits, non-ignored untracked files
 and unpublished commits block removal; ignored build output does not reset idle time.
 Live remote verification, ownership locks, activity and database protections still
 apply. The dated investigations below describe the policies at those times.
@@ -167,7 +167,7 @@ build cache and an active harvester's maintenance lock; neither owner was stoppe
 and no lock was released by this task.
 
 During verification, main advanced through `b6019be` and extracted maintenance
-into `packages/hey-harvester`. Its `health/worktrees.rs` is byte-for-byte identical
+into the separate maintenance project. Its `health/worktrees.rs` is byte-for-byte identical
 to the validated implementation. The installation probe now also supports the
 standalone `hey-harvester` command shape; its previous `health` prefix was
 rejected before exercising any checks. After adaptation, the installed local and

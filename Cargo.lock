@@ -1312,7 +1312,6 @@ dependencies = [
  "flate2",
  "hey-boss-http",
  "hey-gh",
- "hey-harvester",
  "html-escape",
  "httpdate",
  "jiff",
@@ -1393,20 +1392,6 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
-]
-
-[[package]]
-name = "hey-harvester"
-version = "0.1.0"
-dependencies = [
- "clap",
- "crossterm",
- "libc",
- "ratatui",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]
