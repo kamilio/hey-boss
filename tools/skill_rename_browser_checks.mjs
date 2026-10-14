@@ -144,6 +144,7 @@ try{
   const stale=report.machines.find(m=>m.host==='fixture-remote').copies.find(c=>c.name==='rename-final'&&c.agent==='library');
   assert.match(await page.locator('.skill-versions').textContent(),/Saved copy only/);
   if(process.env.SKILLS_SCREENSHOTS)await page.screenshot({path:join(process.env.SKILLS_SCREENSHOTS,'saved-copy-conflict.png'),fullPage:true});
+  await page.locator('[data-choose="'+stale.digest+'"]').click();
   await page.locator('[data-unify="'+stale.digest+'"]').click();
   report=await idle();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===1);
   for(const home of [local,remote])for(const agent of ['.codex','.agents','.claude','.hey-boss']){
@@ -152,6 +153,7 @@ try{
   const base=report.machines.find(m=>m.host==='local').copies.find(c=>c.name==='rename-final');
   report=await post({action:'save_file',skill:'rename-final',file_path:'SKILL.md',content:updated,base_digest:base.digest});
   await page.reload();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===2);
+  await page.locator('[data-choose="'+report.choices['rename-final']+'"]').click();
   await page.locator('[data-unify="'+report.choices['rename-final']+'"]').click();
   report=await idle();await page.waitForFunction(()=>document.querySelectorAll('.skill-version').length===1);
   for(const home of [local,remote])for(const agent of ['.codex','.agents','.claude','.hey-boss']){
