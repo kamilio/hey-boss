@@ -1,5 +1,7 @@
 //! On-demand management API. No startup hooks, inference accounting, or model-path locks.
 use super::*;
+#[cfg(test)]
+mod tests;
 mod workers;
 use hey_proxy::usage::{Account, AccountUsage, Accounts, Reading, Recommendation, SCHEMA_VERSION};
 use serde::{Serialize, de::DeserializeOwned};
@@ -42,7 +44,57 @@ pub(crate) fn configured_accounts(config: &Config, source: Option<&Path>) -> Vec
                 id: name.clone(),
             }),
     );
+    deduplicate_accounts(&mut list, config, source);
     list
+}
+
+/// Discovery shows each credential store once. Keep explicit alias lookup intact;
+/// equal quota values are not evidence that two accounts are the same.
+pub(crate) fn deduplicate_accounts(
+    list: &mut Vec<Account>,
+    config: &Config,
+    source: Option<&Path>,
+) {
+    let mut aliases = std::collections::HashSet::new();
+    let mut stores = std::collections::HashSet::new();
+    list.retain(|account| {
+        if !aliases.insert((account.provider.clone(), account.id.clone())) {
+            return false;
+        }
+        use crate::config::accounts::AccountConfig;
+        let path = match (account.provider.as_str(), account.id.as_str()) {
+            ("codex", "default") => config
+                .codex
+                .clone()
+                .unwrap_or_default()
+                .credentials_path(source),
+            ("claude", "default") => config
+                .claude
+                .clone()
+                .unwrap_or_default()
+                .credentials_path(source),
+            (provider, id) => match config.accounts.get(id) {
+                Some(AccountConfig::Codex {
+                    credentials_file, ..
+                }) if provider == "codex" => codex::ProviderConfig {
+                    credentials_file: Some(credentials_file.clone()),
+                    ..Default::default()
+                }
+                .credentials_path(source),
+                Some(AccountConfig::Claude {
+                    credentials_file, ..
+                }) if provider == "claude" => claude::ProviderConfig {
+                    credentials_file: Some(credentials_file.clone()),
+                    ..Default::default()
+                }
+                .credentials_path(source),
+                _ => return true,
+            },
+        };
+        let Ok(path) = path else { return true };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        stores.insert((account.provider.clone(), path))
+    });
 }
 
 pub(super) async fn accounts(State(service): State<Arc<Service>>) -> Response {

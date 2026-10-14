@@ -162,6 +162,11 @@ async fn discover_accounts(target: &Target) -> Result<Accounts> {
                 accounts.accounts.push(local_account);
             }
         }
+        crate::proxy::subscription::deduplicate_accounts(
+            &mut accounts.accounts,
+            config,
+            Some(path.as_path()),
+        );
     }
     Ok(accounts)
 }
