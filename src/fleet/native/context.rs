@@ -131,11 +131,10 @@ impl Context {
         self.enrich_workers(workers)
     }
     fn enrich_workers(&self, mut workers: Vec<Value>) -> Result<Vec<Value>> {
-        let role: String =
-            self.db()?
-                .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
-                    row.get(0)
-                })?;
+        let db = self.db()?;
+        let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
+            row.get(0)
+        })?;
         let saved = self.read_json(
             &self.state.join(if role == "agent" {
                 "fleet-agent.json"
@@ -144,7 +143,7 @@ impl Context {
             }),
             json!({}),
         )?;
-        enrich_worker_retries(&self.db()?, &mut workers)?;
+        enrich_worker_retries(&db, &mut workers)?;
         for w in &mut workers {
             if let Some(definition) = saved["workers"]
                 .as_array()

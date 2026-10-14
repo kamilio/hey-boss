@@ -234,12 +234,26 @@ pub(crate) fn socket_path() -> Result<PathBuf> {
     })?;
     Ok(PathBuf::from(home).join("Library/Application Support/hey-boss/daemon.sock"))
 }
+static LIST_CACHE: std::sync::LazyLock<std::sync::Mutex<Option<(std::time::Instant, Value)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
 pub fn execute(action: &Action) -> Result<Value> {
     execute_cancellable(action, || false)
 }
 
 /// Cancellation is checked before transmission; sent actions are never replayed.
 pub fn execute_cancellable(action: &Action, cancelled: impl Fn() -> bool) -> Result<Value> {
+    let is_list = matches!(action, Action::List);
+    if is_list {
+        if let Ok(guard) = LIST_CACHE.lock()
+            && let Some((at, cached)) = &*guard
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return Ok(cached.clone());
+        }
+    } else if let Ok(mut guard) = LIST_CACHE.lock() {
+        *guard = None;
+    }
     let payload = action.payload()?;
     let reply = exchange(&socket_path()?, &payload, &cancelled)?;
     if reply["status"] != "ok" {
@@ -289,6 +303,7 @@ fn exchange(
 }
 
 fn project_response(action: &Action, mut result: Value) -> Result<Value> {
+    let is_list = matches!(action, Action::List);
     if let Action::Related { issue } = action {
         // Also bound responses from older daemons that ignore the relationship.
         let unread = result["unread"]
@@ -350,7 +365,22 @@ fn project_response(action: &Action, mut result: Value) -> Result<Value> {
             }
         }
     }
+    if is_list {
+        if let Some(archived) = result.get_mut("archived").and_then(Value::as_array_mut) {
+            if archived.len() > 200 {
+                archived.truncate(200);
+            }
+            for item in archived {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("iconData");
+                }
+            }
+        }
+    }
     result["ok"] = json!(true);
+    if is_list && let Ok(mut guard) = LIST_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), result.clone()));
+    }
     Ok(result)
 }
 

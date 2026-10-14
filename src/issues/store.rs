@@ -2693,6 +2693,12 @@ impl Store {
             } else {
                 tx.execute("INSERT INTO requests(project_id,actor,request_id,payload,response,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![project.id,actor.id,key,payload,serde_json::to_string(&result)?,now])?;
+                if tx.last_insert_rowid() % 50 == 0 {
+                    let _ = tx.execute(
+                        "DELETE FROM requests WHERE rowid <= (SELECT max(rowid) - 500 FROM requests)",
+                        [],
+                    );
+                }
             }
         }
         tx.commit()?;
