@@ -668,6 +668,133 @@ function emptyState() {
         : "Create an issue, add some context, and let the work begin.";
   return `<div class="empty-state"><div class="empty-icon">${icon(filtered ? "search" : state === "blocked" ? "blocked" : state === "closed" ? "closed" : state === "deleted" ? "trash" : "issue")}</div><h2>${title}</h2><p>${description}</p>${filtered ? '<button class="button" data-empty="clear">Clear filters</button>' : state === "open" ? `<button class="button primary" data-empty="create">${icon("plus")}Create your first issue</button>` : ""}</div>`;
 }
+function issueListActions(issue) {
+  const actions = [
+    {action:"view", label:"View issue", icon:"issue"},
+    {action:"copy", label:"Copy issue link", icon:"copy"},
+  ];
+  if (issue.deleted_at) return [...actions, {action:"restore", label:"Restore issue", icon:"refresh"}];
+  if (issue.state === "closed") return [...actions, {action:"reopen", label:"Reopen issue", icon:"issue"}];
+  if (issue.state === "blocked") actions.push({action:"reopen", label:"Unblock issue", icon:"issue", disabled:!!issue.blocked_by?.length, hint:issue.blocked_by?.length ? "Resolve or unlink blocking issues first" : ""});
+  if (issue.state === "open" && !issue.draft) {
+    if (!own(issue.assignee)) actions.push({action:"assign_boss", label:`Assign to ${model.boss.name}`, icon:"user"});
+    if (issue.assignee) actions.push({action:"unassign", label:"Unassign", icon:"user"});
+  }
+  if (issue.draft && issue.state === "open") actions.push({action:"undraft", label:"Mark ready", icon:"check"});
+  else if (!issue.draft && !issue.assignee) actions.push({action:"draft", label:"Move to draft", icon:"edit"});
+  actions.push({action:"close", label:"Close issue", icon:"closed"});
+  if (issue.state === "open") actions.push({action:"block", label:"Block issue", icon:"blocked"});
+  return actions;
+}
+function listActionTrigger(issue) {
+  return `<button type="button" class="issue-list-actions" data-list-actions="${issue.number}" aria-label="Actions for issue #${issue.number}" aria-haspopup="menu" aria-expanded="false" aria-controls="issue-list-menu" aria-keyshortcuts="Shift+F10" title="Issue actions · Shift+F10"><span aria-hidden="true">···</span></button>`;
+}
+let listActionContext = null, listActionBusy = false;
+const listActionMenu = document.createElement("div");
+listActionMenu.id = "issue-list-menu";
+listActionMenu.className = "issue-list-menu";
+listActionMenu.setAttribute("role", "menu");
+listActionMenu.setAttribute("popover", "manual");
+document.body.append(listActionMenu);
+function closeListActions(restoreFocus = false) {
+  if (!listActionContext) return;
+  const {trigger} = listActionContext;
+  listActionContext = null;
+  listActionMenu.hidePopover();
+  trigger.setAttribute("aria-expanded", "false");
+  if (restoreFocus && trigger.isConnected) trigger.focus({preventScroll:true});
+}
+function openListActions(trigger, point) {
+  if (!model.signature || listActionBusy || model.orderDragging || model.orderSaving || $("dialog[open]")) return;
+  const issue = model.issues.find(i => i.number === Number(trigger.dataset.listActions));
+  if (!issue) return;
+  closeListActions();
+  listActionContext = {issue, trigger, project:model.project.id, host:model.route.host || null, sequence:model.sequence};
+  trigger.setAttribute("aria-expanded", "true");
+  listActionMenu.setAttribute("aria-label", `Actions for issue #${issue.number}`);
+  listActionMenu.innerHTML = `<div class="issue-list-menu-heading" aria-hidden="true">Issue #${issue.number}</div>` + issueListActions(issue).map((item, index) => `${index === 2 ? '<div class="issue-list-menu-divider" role="separator"></div>' : ""}<button type="button" role="menuitem" tabindex="-1" data-list-action="${item.action}" ${item.disabled ? 'disabled' : ''}>${icon(item.icon)}<span>${esc(item.label)}${item.hint ? `<small>${esc(item.hint)}</small>` : ""}</span></button>`).join("");
+  listActionMenu.showPopover();
+  const bounds = trigger.getBoundingClientRect(), menu = listActionMenu.getBoundingClientRect();
+  const left = point ? point.x : bounds.right - menu.width;
+  const top = point ? point.y : bounds.bottom + 6;
+  listActionMenu.style.left = `${Math.max(8, Math.min(left, innerWidth - menu.width - 8))}px`;
+  listActionMenu.style.top = `${Math.max(8, Math.min(top, innerHeight - menu.height - 8))}px`;
+  $("button:not(:disabled)", listActionMenu).focus({preventScroll:true});
+}
+async function runListAction(action, context) {
+  if (listActionBusy) return;
+  listActionBusy = true;
+  const {issue, project, host, sequence, trigger} = context;
+  const current = () => model.sequence === sequence && model.project.id === project && (model.route.host || null) === host;
+  closeListActions(true);
+  try {
+    if (action === "view") { navigate({issue:issue.number}); return; }
+    if (action === "copy") {
+      await navigator.clipboard.writeText(new URL(routeHash({...model.route, issue:issue.number}), location.href).href);
+      toast("Issue link copied");
+      return;
+    }
+    if (["draft", "undraft"].includes(action)) {
+      const result = await mutate(action === "undraft" ? {action, number:issue.number} : {action:"edit", number:issue.number, draft:true, title:null, body:null, add_labels:[], remove_labels:[], if_version:issue.version}, project, host);
+      if (current()) toast(action === "draft" ? "Issue moved to draft" : result.issue.state === "blocked" ? "Draft marked ready; unfinished blockers still pause pickup" : "Issue marked ready for agents");
+    } else {
+      // Share the detail view's ownership confirmations and protected mutations.
+      await performAction(action, trigger, context);
+    }
+    if (current()) {
+      const result = await api(listOperation(), project, null, host);
+      if (current()) {
+        const restoreFocus = document.activeElement === document.body || document.activeElement === trigger;
+        trigger.disabled = false;
+        if (restoreFocus && trigger.isConnected) trigger.focus({preventScroll:true});
+        renderList(result);
+      }
+      await refreshProjects(project);
+    }
+  } catch (error) {
+    if (current()) toast(error.message, true);
+  } finally {
+    listActionBusy = false;
+    trigger.disabled = false;
+  }
+}
+listActionMenu.addEventListener("click", event => {
+  const button = event.target.closest("[data-list-action]");
+  if (button && !button.disabled && listActionContext) runListAction(button.dataset.listAction, listActionContext);
+});
+listActionMenu.addEventListener("keydown", event => {
+  const items = $$("button:not(:disabled)", listActionMenu);
+  const index = items.indexOf(document.activeElement);
+  if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Escape") event.preventDefault();
+    closeListActions(true);
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    event.preventDefault();
+    items[event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus({preventScroll:true});
+  } else if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    const next = [...items.slice(index + 1), ...items.slice(0, index + 1)].find(item => item.textContent.trim().toLowerCase().startsWith(event.key.toLowerCase()));
+    if (next) { event.preventDefault(); next.focus({preventScroll:true}); }
+  }
+  event.stopPropagation();
+});
+$("#issue-list").addEventListener("contextmenu", event => {
+  const row = event.target.closest(".issue-row");
+  if (!row || event.shiftKey || event.target.closest("a:not(.issue-title)")) return;
+  event.preventDefault();
+  openListActions($("[data-list-actions]", row), {x:event.clientX, y:event.clientY});
+});
+$("#issue-list").addEventListener("keydown", event => {
+  if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+  const row = event.target.closest(".issue-row");
+  if (!row) return;
+  event.preventDefault();
+  openListActions($("[data-list-actions]", row));
+});
+document.addEventListener("pointerdown", event => {
+  if (!listActionMenu.contains(event.target) && !event.target.closest("[data-list-actions]")) closeListActions();
+});
+window.addEventListener("resize", () => closeListActions(true));
+window.addEventListener("scroll", event => { if (!listActionMenu.contains(event.target)) closeListActions(true); }, true);
 function prStatus(pr, label = false) {
   const status = ["open", "closed", "merged"].includes(pr.status) ? pr.status : "unknown";
   // Allow the normal refresh interval plus two minutes for the bounded queue.
@@ -713,6 +840,7 @@ function listCommits(issue, prsEnabled) {
 function renderList(result) {
   if (model.orderDragging) return;
   closeAssignmentCard();
+  closeListActions();
   const creation = model.creation;
   const createdHere =
     creation &&
@@ -739,6 +867,7 @@ function renderList(result) {
           tag: focused.tagName,
           href: focused.getAttribute("href"),
           move: focused.dataset.moveIssue,
+          actions: focused.dataset.listActions,
           progress: focused.classList.contains("issue-progress"),
           top: focused.getBoundingClientRect().top,
         }
@@ -771,7 +900,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i, result.prs_enabled)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listAssignment(i)}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i, result.prs_enabled)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listActionTrigger(i)}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -789,6 +918,8 @@ function renderList(result) {
       $$("a, button, .issue-progress", row).find((el) =>
         savedFocus.progress
           ? el.classList.contains("issue-progress")
+          : savedFocus.actions
+          ? el.dataset.listActions === savedFocus.actions
           : savedFocus.move
           ? el.dataset.moveIssue === savedFocus.move
           : el.tagName === savedFocus.tag &&
@@ -824,6 +955,12 @@ function renderList(result) {
   }
 }
 $("#issue-list").onclick = (e) => {
+  const trigger = e.target.closest("[data-list-actions]");
+  if (trigger) {
+    if (listActionContext?.trigger === trigger) closeListActions(true);
+    else openListActions(trigger);
+    return;
+  }
   const empty = e.target.closest("[data-empty]");
   if (empty?.dataset.empty === "create") openEditor();
   if (empty?.dataset.empty === "clear")
@@ -882,6 +1019,7 @@ async function refreshProjects(project = model.project.id) {
 }
 async function renderRoute() {
   closeAssignmentCard();
+  closeListActions();
   closeIssueTagPicker();
   const sequence = ++model.sequence;
   const previous = model.project?.id;
@@ -993,6 +1131,8 @@ async function refresh(quiet = true) {
     model.orderDragging ||
     model.orderSaving ||
     assignmentCardContext ||
+    listActionContext ||
+    listActionBusy ||
     model.polling ||
     !model.csrf ||
     document.hidden ||
@@ -1017,7 +1157,7 @@ async function refresh(quiet = true) {
         project,
       ),
     ]);
-    if (sequence !== model.sequence || model.orderDragging || model.orderSaving || assignmentCardContext)
+    if (sequence !== model.sequence || model.orderDragging || model.orderSaving || assignmentCardContext || listActionContext || listActionBusy)
       return;
     $$("time[datetime]:not([data-absolute])").forEach((time) => {
       const text = relative(Date.parse(time.dateTime));
@@ -1454,10 +1594,10 @@ async function changeAssignment(select) {
   }
 }
 
-async function performAction(action, button) {
-  const i = model.detail.issue,
-    project = model.project.id;
-  const host = model.route.host || null;
+async function performAction(action, button, context = null) {
+  const i = context?.issue || model.detail.issue,
+    project = context?.project || model.project.id;
+  const allocation = context ? null : model.detail.allocation, host = context ? context.host : model.route.host || null;
   const readyGuard = action === "ready" ? model.detail?.ready_guard : null;
   let force = false;
   if (action === "block") {
@@ -1494,7 +1634,7 @@ async function performAction(action, button) {
   if (["claim", "assign_boss", "ready", "unassign", "close", "block", "delete"].includes(action))
     operation.force = force;
   if (action === "close") operation.comment = null;
-  if (action === "block") operation.comment = $("#comment-body")?.value.trim() || null;
+  if (action === "block") operation.comment = context ? null : $("#comment-body")?.value.trim() || null;
   if (action === "reopen") operation.if_version = i.version;
   if (action === "ready") {
     const guard = readyGuard;
@@ -1525,8 +1665,9 @@ async function performAction(action, button) {
         restore: "Issue restored",
       }[action],
     );
-    await Promise.all([renderRoute(), refreshProjects(project)]);
+    if (!context) await Promise.all([renderRoute(), refreshProjects(project)]);
   } catch (e) {
+    if (context) throw e;
     toast(e.message, true);
     button.disabled = false;
   }

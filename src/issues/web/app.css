@@ -307,6 +307,68 @@
   width: 14px;
   height: 14px;
 }
+.issue-list-actions {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 22px/1 system-ui;
+  letter-spacing: 1px;
+}
+.issue-list-actions:hover, .issue-list-actions[aria-expanded="true"] { background: var(--hover); border-color: var(--line); color: var(--text); }
+.issue-list-actions:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.issue-list-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  box-sizing: border-box;
+  width: min(256px, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--solid);
+  color: var(--text);
+  box-shadow: 0 12px 36px #0003, 0 2px 8px #0001;
+}
+.issue-list-menu-heading { padding: 7px 10px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.issue-list-menu-divider { height: 1px; margin: 5px 4px; background: var(--line); }
+.issue-list-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.issue-list-menu button svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
+.issue-list-menu button span { min-width: 0; overflow-wrap: anywhere; }
+.issue-list-menu button small { display: block; margin-top: 4px; font-size: 11px; line-height: 1.5; }
+.issue-list-menu button:hover:not(:disabled), .issue-list-menu button:focus-visible { background: var(--accent-soft); outline: none; }
+.issue-list-menu button:disabled { color: var(--muted); cursor: default; }
+@media (max-width: 640px), (pointer: coarse) {
+  .issue-list-actions { width: 44px; height: 44px; }
+  .issue-list-menu button { min-height: 44px; }
+}
 .label {
   display: inline-flex;
   align-items: center;
