@@ -21,6 +21,35 @@ async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
  };
  await page.locator('#job-frequency').selectOption('minutes');await page.locator('#job-interval').fill('15');await save('*/15 * * * *');
  const id=new URLSearchParams(new URL(page.url()).hash.slice(1)).get('job');
+ await page.locator('#job-frequency').selectOption('hours');await page.locator('#job-interval').fill('3');await page.locator('#job-minute').fill('25');await save('25 */3 * * *');
+ check(await page.locator('#job-frequency').inputValue()==='hours','Hour interval restores as a preset');
+ check(await page.locator('#job-interval').inputValue()==='3'&&await page.locator('#job-minute').inputValue()==='25','Interval and starting minute restore');
+ check((await page.locator('#job-preview strong').textContent())==='Every 3 hours at :25','Readable hourly cadence');
+ const occurrences=await page.locator('#job-preview li').allTextContents();
+ check(occurrences.every(value=>value.includes(':25')),'Real backend preview uses the minute offset');
+ for(const invalid of ['', '0', '24', '2.5']){await page.locator('#job-interval').fill(invalid);check(await page.locator('#job-form').evaluate(form=>!form.checkValidity()),'Invalid interval cannot save: '+invalid);check(await page.locator('#job-cron').inputValue()==='','Invalid interval clears stale cron');}
+ await page.locator('#job-interval').fill('5');await save('25 */5 * * *');
+ check((await page.locator('#job-preview strong').textContent()).includes('restarting each day'),'Uneven daily step is explicit');
+ await page.locator('#job-interval').fill('3');await save('25 */3 * * *');
+ for(const width of [1440,768,390,320])for(const theme of ['light','dark']){
+  await page.setViewportSize({width,height:800});await page.emulateMedia({colorScheme:theme});
+  await page.locator('.job-schedule-editor').evaluate(el=>el.scrollIntoView({block:'start'}));
+  check(await page.locator('#job-panel').evaluate(el=>el.scrollWidth<=el.clientWidth),`${width} ${theme}: schedule fits modal`);
+  for(const selector of ['#job-close','#job-save','#job-minute','#job-interval']){const box=await page.locator(selector).boundingBox();check(box.x>=0&&box.x+box.width<=width&&box.y>=0&&box.y+box.height<=800,`${width} ${theme}: ${selector} is visible`);}
+  const box=await page.locator('#job-dialog').boundingBox();check(Math.abs(box.x-(width-box.width)/2)<2,'Job dialog is centered');
+  await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-hours-${width}-${theme}.png`});
+ }
+ await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
+ await page.locator('#job-save').focus();await page.keyboard.press('Tab');check(await page.locator('#job-reload').evaluate(el=>el===document.activeElement),'Footer actions follow keyboard order');
+ await page.locator('#job-new').evaluate(el=>el.focus());check(await page.locator('#job-dialog').evaluate(el=>el.contains(document.activeElement)),'Modal prevents focus moving to the background');
+ await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);
+ await page.locator('.job-card[href$="job='+id+'"]').click();await preview();check(await page.locator('#job-cron').inputValue()==='25 */3 * * *','Reopen restores hourly cadence');
+ await page.locator('#job-minute').fill('26');
+ page.removeAllListeners('dialog');page.once('dialog',dialog=>dialog.dismiss());await page.keyboard.press('Escape');
+ check(await page.locator('#job-dialog').evaluate(el=>el.open),'Cancelled discard keeps the modal open');
+ check(await page.locator('#job-minute').inputValue()==='26','Cancelled discard keeps the draft');
+ page.on('dialog',dialog=>dialog.accept());await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);
+ await page.locator('.job-card[href$="job='+id+'"]').click();await preview();check(await page.locator('#job-minute').inputValue()==='25','Discard does not save draft');
  await page.locator('#job-frequency').selectOption('hourly');await page.locator('#job-minute').fill('45');await save('45 * * * *');
  check(await page.locator('#job-minute').inputValue()==='45','Hourly offset restores');
  await page.locator('#job-minute').fill('');check(await page.locator('#job-cron').inputValue()==='','Empty hourly minute does not silently select zero');
