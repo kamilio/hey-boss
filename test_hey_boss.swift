@@ -3679,7 +3679,7 @@ func auditSubscriptionQuota() {
     precondition(!stale.isFresh(now: 2005))
     let expired = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: "2099-10-15T16:42:07Z", with: "1970-01-01T00:33:24Z").utf8))
     precondition(!expired.isFresh(now: 2005), "Crossing reset invalidates the previous reading")
-    let ui = SubscriptionQuotaController(present: false)
+    let ui = SubscriptionQuotaController()
     var calls: [[String]] = []
     var replies: [(Result<Data, Error>) -> Void] = []
     ui.runner = { args, reply in calls.append(args); replies.append(reply) }
@@ -3708,7 +3708,7 @@ func auditSubscriptionQuota() {
     defer { try? FileManager.default.removeItem(at: fixture) }
     try! Data(("#!/bin/sh\nprintf '%s' '" + json + "'\nexit 1\n").utf8).write(to: fixture)
     try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fixture.path)
-    let processUI = SubscriptionQuotaController(present: false)
+    let processUI = SubscriptionQuotaController()
     processUI.cli = fixture.path
     var completed = false
     processUI.request(["--provider", "codex", "--account", "work"]) { result in
@@ -3717,12 +3717,46 @@ func auditSubscriptionQuota() {
         completed = true
     }
     let deadline = Date().addingTimeInterval(5)
-    while !completed && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
-    precondition(completed, "Background CLI reads must complete without blocking the UI")
+    while !completed && Date() < deadline { _ = RunLoop.main.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01)) }
+    precondition(completed, "Background CLI reads must complete while the native menu tracks events")
     let overview = AgentsOverview(present: false)
-    let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showSubscriptionQuota) }
-    precondition(item?.title == "Subscription quota…" && item?.target === overview)
-    print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, menu action")
+    let item = overview.statusMenu.items.first { $0.view === overview.subscriptionQuota.content }
+    precondition(item != nil && item?.submenu == nil, "Quota is visible directly inside the status dropdown")
+    var menuCalls = 0
+    overview.subscriptionQuota.runner = { _, _ in menuCalls += 1 }
+    let opened = ProcessInfo.processInfo.systemUptime
+    overview.menuWillOpen(overview.statusMenu)
+    precondition(ProcessInfo.processInfo.systemUptime - opened < 0.1 && menuCalls == 1)
+    precondition(overview.subscriptionQuota.loading && overview.subscriptionQuota.timer != nil)
+    overview.menuDidClose(overview.statusMenu)
+    precondition(overview.subscriptionQuota.timer == nil, "Closed menus stop polling")
+    overview.menuWillOpen(overview.statusMenu)
+    precondition(menuCalls == 1, "Reopening during a pending read must coalesce")
+    overview.menuDidClose(overview.statusMenu)
+    let tracking = AgentsOverview(present: false)
+    tracking.subscriptionQuota.runner = { args, reply in
+        let payload = args.contains("--accounts") ? #"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"}]}"# : json
+        let delivery = Timer(timeInterval: 0.05, repeats: false) { _ in reply(.success(Data(payload.utf8))) }
+        RunLoop.main.add(delivery, forMode: .common)
+    }
+    var tracked = false
+    let inspect = Timer(timeInterval: 0.5, repeats: false) { _ in
+        let quota = tracking.subscriptionQuota
+        precondition(!quota.loading && quota.rows.count == 1, "Quota arrives while the dropdown remains open")
+        let menuView = quota.content.window!.contentView!
+        let cardRect = quota.content.convert(quota.content.bounds, to: menuView)
+        precondition(menuView.bounds.contains(cardRect), "The open menu resizes to fit asynchronous quota content")
+        if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_SNAPSHOT_DIR"] {
+            let bitmap = menuView.bitmapImageRepForCachingDisplay(in: menuView.bounds)!
+            menuView.cacheDisplay(in: menuView.bounds, to: bitmap)
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent("tracking-menu.png"))
+        }
+        tracked = true; tracking.statusMenu.cancelTracking()
+    }
+    RunLoop.main.add(inspect, forMode: .common)
+    tracking.statusMenu.popUp(positioning: nil, at: NSPoint(x: 100, y: 600), in: nil)
+    precondition(tracked && tracking.subscriptionQuota.timer == nil, "Tracking ends cleanly and stops polling")
+    print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, async inline menu")
 }
 
 func auditNativeBackdrops() {
@@ -3757,10 +3791,24 @@ func auditNativeBackdrops() {
 func previewSubscriptionQuota(_ state: String) {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
-    let ui = SubscriptionQuotaController()
-    if state == "live" { ui.open(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]) }
+    let overview = AgentsOverview(present: false)
+    let ui = overview.subscriptionQuota
+    let window = NSPanel(contentRect: ui.content.bounds, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    if state.contains("menu") {
+        window.title = "Quota menu preview"
+        let button = NSPopUpButton(frame: NSRect(x: 24, y: 40, width: 280, height: 32), pullsDown: true)
+        overview.statusMenu.insertItem(withTitle: "Open status menu", action: nil, keyEquivalent: "", at: 0)
+        button.menu = overview.statusMenu; window.contentView!.addSubview(button)
+        app.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
+    } else { window.contentView = ui.content }
+    if state.contains("live") {
+        overview.cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]
+        if !state.contains("menu") { ui.open(cli: overview.cli) }
+        window.center(); window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
+    }
     else {
-        ui.window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
+        window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
         let now = Date().timeIntervalSince1970
         let reset = ISO8601DateFormatter().string(from: Date().addingTimeInterval(7620))
         func reading(_ provider: String, _ id: String, _ status: String, _ windows: [[String: Any]]) -> SubscriptionQuotaRow {
@@ -3775,9 +3823,8 @@ func previewSubscriptionQuota(_ state: String) {
         if state.contains("empty") { ui.rows = []; ui.message = "No subscriptions connected" }
         if state.contains("error") { ui.rows = []; ui.message = "Could not load subscriptions" }
         if state.contains("loading") { ui.rows = []; ui.loading = true }
-        ui.runner = { _, _ in }
-        if state.contains("compact") { ui.window.setContentSize(NSSize(width: 420, height: 340)) }
-        ui.render(); ui.window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
+        ui.runner = { _, _ in }; ui.lastLoaded = Date()
+        ui.render(); window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
     }
     if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_SNAPSHOT_DIR"] {
         if state == "live" {
@@ -3786,11 +3833,17 @@ func previewSubscriptionQuota(_ state: String) {
             precondition(!ui.loading && !ui.rows.isEmpty && ui.rows.contains { $0.reading?.isFresh() == true }, "Live quota integration requires a fresh provider reading")
             print("PASS live quota: \(ui.rows.count) accounts, background CLI → native panel")
         }
-        ui.content.layoutSubtreeIfNeeded()
+        window.setContentSize(ui.content.frame.size); window.makeKeyAndOrderFront(nil); ui.content.layoutSubtreeIfNeeded()
         let bitmap = ui.content.bitmapImageRepForCachingDisplay(in: ui.content.bounds)!
         ui.content.cacheDisplay(in: ui.content.bounds, to: bitmap)
-        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent(state + ".png"))
-        ui.window.close(); return
+        let canvas = NSImage(size: ui.content.bounds.size)
+        canvas.lockFocus()
+        window.effectiveAppearance.performAsCurrentDrawingAppearance { NSColor.windowBackgroundColor.setFill(); ui.content.bounds.fill() }
+        NSImage(cgImage: bitmap.cgImage!, size: ui.content.bounds.size).draw(in: ui.content.bounds)
+        canvas.unlockFocus()
+        let composite = NSBitmapImageRep(data: canvas.tiffRepresentation!)!
+        try! composite.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent(state + ".png"))
+        window.close(); return
     }
-    withExtendedLifetime(ui) { app.run() }
+    withExtendedLifetime((overview, window)) { app.run() }
 }
