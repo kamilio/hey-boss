@@ -4759,7 +4759,6 @@ struct SubscriptionQuotaRow {
 }
 final class QuotaCanvas: NSView {
     override var isFlipped: Bool { true }
-    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); dirtyRect.fill() }
 }
 final class QuotaMeter: NSView {
     let remaining: Double?
@@ -4787,14 +4786,12 @@ final class QuotaCard: NSView {
         shape.fill(); NSColor.separatorColor.withAlphaComponent(0.4).setStroke(); shape.stroke()
     }
 }
-final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
-    let window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 570), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-    let content = QuotaCanvas()
+final class SubscriptionQuotaController: NSObject {
+    let content = QuotaCanvas(frame: NSRect(x: 0, y: 0, width: 340, height: 128))
     let scroll = NSScrollView()
     let body = QuotaCanvas()
-    let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
-    let subtitle = NSTextField(labelWithString: "")
-    let present: Bool
+    let refreshButton = NSButton(title: "", target: nil, action: nil)
+    let subtitle = NSTextField(labelWithString: "Subscription quota")
     var cli: String?
     var rows: [SubscriptionQuotaRow] = []
     var message = "Checking subscriptions…"
@@ -4805,31 +4802,22 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
     let queue: OperationQueue = {
         let queue = OperationQueue(); queue.name = "hey-boss.subscription-quota"; queue.qualityOfService = .userInitiated; queue.maxConcurrentOperationCount = 2; return queue
     }()
-    init(present: Bool = true) {
-        self.present = present
+    override init() {
         super.init()
-        window.title = "Subscription quota"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 420, height: 340)
-        window.maxSize = NSSize(width: 620, height: 900)
-        window.delegate = self
-        window.contentView = content
-        content.autoresizingMask = [.width, .height]
-        let title = label("Subscription quota", size: 23, weight: .semibold)
-        title.frame = NSRect(x: 24, y: 22, width: 310, height: 30)
-        content.addSubview(title)
-        subtitle.font = .systemFont(ofSize: 11); subtitle.textColor = .secondaryLabelColor
+        subtitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        subtitle.textColor = .secondaryLabelColor
+        subtitle.frame = NSRect(x: 18, y: 9, width: 250, height: 18)
         content.addSubview(subtitle)
         refreshButton.target = self; refreshButton.action = #selector(refresh)
         refreshButton.bezelStyle = .rounded; refreshButton.isBordered = false
-        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
-        refreshButton.imagePosition = .imageLeading
-        refreshButton.toolTip = "Refresh subscription limits from hey-proxy"
+        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh subscription quota")
+        refreshButton.toolTip = "Refresh subscription quota"
+        refreshButton.frame = NSRect(x: 298, y: 4, width: 28, height: 28)
         content.addSubview(refreshButton)
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.drawsBackground = false; scroll.documentView = body
         content.addSubview(scroll)
-        window.center(); render()
+        render()
     }
     func label(_ text: String, size: CGFloat = 12, weight: NSFont.Weight = .regular, color: NSColor = .labelColor) -> NSTextField {
         let view = NSTextField(labelWithString: text)
@@ -4839,17 +4827,17 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
     }
     func open(cli: String?) {
         self.cli = cli
-        render() // Re-evaluate freshness and reset times even when reusing cached data.
-        if present { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        render() // Re-evaluate freshness and reset times when reopening cached data.
         if lastLoaded.map({ Date().timeIntervalSince($0) < 30 }) != true { refresh() }
-        if present, timer == nil {
-            timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                guard let self, self.window.isVisible else { return }; self.refresh()
-            }
+        if timer == nil {
+            let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.refresh() }
+            // Native menus use event-tracking mode; updates must arrive while open.
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
         }
     }
-    func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil }
-    func windowDidResize(_ notification: Notification) { render() }
+    func close() { timer?.invalidate(); timer = nil }
+    deinit { timer?.invalidate() }
     @objc func refresh() {
         guard !loading else { return }
         loading = true; message = "Checking subscriptions…"; render()
@@ -4911,71 +4899,70 @@ final class SubscriptionQuotaController: NSObject, NSWindowDelegate {
         }
     }
     func render() {
-        let width = content.bounds.width, height = content.bounds.height
-        refreshButton.frame = NSRect(x: width - 112, y: 57, width: 90, height: 28)
         refreshButton.isEnabled = !loading
-        subtitle.stringValue = loading ? "hey-proxy · Checking subscriptions…" : "hey-proxy · Updates every minute while open"
-        subtitle.frame = NSRect(x: 24, y: 61, width: width - 150, height: 18)
-        scroll.frame = NSRect(x: 0, y: 100, width: width, height: max(0, height - 100))
+        subtitle.stringValue = loading ? "Subscription quota · Updating…" : "Subscription quota"
         let origin = scroll.contentView.bounds.origin
         body.subviews.forEach { $0.removeFromSuperview() }
+        let width: CGFloat = 340, cardWidth: CGFloat = 316
         var y: CGFloat = 0
-        let cardWidth = width - 48
         if rows.isEmpty {
-            let title = label(message, size: 15, weight: .semibold, color: .secondaryLabelColor)
-            title.alignment = .center; title.frame = NSRect(x: 24, y: 72, width: cardWidth, height: 24); body.addSubview(title)
-            let hint = NSTextField(wrappingLabelWithString: loading ? "Reading your connected accounts securely." : message == "No subscriptions connected" ? "Sign in with hey-proxy to see your subscription limits here." : "Check that hey-proxy is installed and connected, then refresh.")
-            hint.font = .systemFont(ofSize: 12); hint.textColor = .secondaryLabelColor; hint.alignment = .center
-            hint.frame = NSRect(x: 48, y: 108, width: cardWidth - 48, height: 54); body.addSubview(hint)
-            y = 190
+            let title = label(message, size: 12, weight: .medium, color: .secondaryLabelColor)
+            title.frame = NSRect(x: 18, y: 12, width: 304, height: 18); body.addSubview(title)
+            let hint = label(loading ? "Your limits will appear here automatically." : message == "No subscriptions connected" ? "Connect a subscription with hey-proxy." : "Refresh to try again.", size: 11, color: .secondaryLabelColor)
+            hint.frame = NSRect(x: 18, y: 36, width: 304, height: 18); body.addSubview(hint)
+            y = 72
         }
         for row in rows {
             let reading = row.reading
             let fresh = reading?.isFresh() == true
             let windows = reading?.data?.windows ?? []
-            let card = QuotaCard(frame: NSRect(x: 24, y: y, width: cardWidth, height: 104 + CGFloat(windows.count) * 76))
+            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60))
             body.addSubview(card)
-            let name = label(row.account.title, size: 17, weight: .semibold)
-            name.frame = NSRect(x: 18, y: 16, width: cardWidth - 156, height: 23); card.addSubview(name)
-            let alias = label(row.account.id, size: 11, color: .secondaryLabelColor)
-            alias.frame = NSRect(x: 18, y: 41, width: cardWidth - 36, height: 18); card.addSubview(alias)
+            let accountTitle = row.account.title + (row.account.id == "default" ? "" : " · " + row.account.id)
+            let name = label(accountTitle, size: 13, weight: .semibold)
+            name.frame = NSRect(x: 12, y: 10, width: cardWidth - 108, height: 19); card.addSubview(name)
             let statusText = reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
-            let status = label(statusText, size: 11, weight: .medium, color: fresh ? .systemTeal : .secondaryLabelColor)
-            status.alignment = .right; status.frame = NSRect(x: cardWidth - 138, y: 20, width: 120, height: 18); card.addSubview(status)
-            var rowY: CGFloat = 76
+            let status = label(statusText, size: 10, weight: .medium, color: fresh ? .systemTeal : .secondaryLabelColor)
+            status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
+            var rowY: CGFloat = 38
             for limit in windows {
-                let name = label(limit.label, size: 12, weight: .medium)
-                name.frame = NSRect(x: 18, y: rowY, width: cardWidth - 140, height: 18); card.addSubview(name)
+                let name = label(limit.label, size: 11, weight: .medium)
+                name.frame = NSRect(x: 12, y: rowY, width: cardWidth - 106, height: 16); card.addSubview(name)
                 let value = limit.remaining.map { String(format: $0 > 0 && $0 < 1 ? "%.1f%% left" : "%.0f%% left", $0) } ?? "Unknown"
-                let amount = label(value, size: 12, weight: .semibold, color: fresh ? .labelColor : .secondaryLabelColor)
+                let amount = label(value, size: 11, weight: .semibold, color: fresh ? .labelColor : .secondaryLabelColor)
                 if fresh, let remaining = limit.remaining, remaining <= 25 { amount.textColor = remaining <= 10 ? .systemRed : .systemOrange }
-                amount.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-                amount.alignment = .right; amount.frame = NSRect(x: cardWidth - 116, y: rowY, width: 98, height: 18); card.addSubview(amount)
-                let meter = QuotaMeter(frame: NSRect(x: 18, y: rowY + 27, width: cardWidth - 36, height: 6), remaining: limit.remaining, fresh: fresh)
+                amount.font = .monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+                amount.alignment = .right; amount.frame = NSRect(x: cardWidth - 92, y: rowY, width: 80, height: 16); card.addSubview(amount)
+                let meter = QuotaMeter(frame: NSRect(x: 12, y: rowY + 21, width: cardWidth - 24, height: 4), remaining: limit.remaining, fresh: fresh)
                 meter.setAccessibilityElement(true); meter.setAccessibilityRole(.progressIndicator)
                 meter.setAccessibilityLabel(limit.label); meter.setAccessibilityValue(value + (fresh ? "" : ", last known")); card.addSubview(meter)
-                let reset = label(limit.resetLabel(), size: 11, color: .secondaryLabelColor)
+                let reset = label(limit.resetLabel(), size: 10, color: .secondaryLabelColor)
                 reset.toolTip = limit.reset?.formatted(date: .complete, time: .shortened) ?? "Provider did not report a reset time"
-                reset.frame = NSRect(x: 18, y: rowY + 40, width: cardWidth - 36, height: 18); card.addSubview(reset)
-                rowY += 76
+                reset.frame = NSRect(x: 12, y: rowY + 30, width: cardWidth - 24, height: 16); card.addSubview(reset)
+                rowY += 60
             }
             let footnote: String
             if let reading {
-                if windows.isEmpty { footnote = reading.state == "disabled" ? "Sign in to this account with hey-proxy." : "The provider has not reported quota limits." }
-                else if reading.data?.availability_unknown == true { footnote = "Provider availability is uncertain · last known limits" }
+                if windows.isEmpty { footnote = reading.state == "disabled" ? "Connect this account with hey-proxy." : "Provider has not reported limits." }
+                else if reading.data?.availability_unknown == true { footnote = "Availability uncertain · last known limits" }
                 else { footnote = (fresh ? "Updated " : "Last reading · ") + (agentRelativeTime(reading.updated_at) ?? "time unavailable") }
             } else { footnote = row.message }
-            let foot = label(footnote, size: 11, color: .secondaryLabelColor)
-            foot.frame = NSRect(x: 18, y: rowY, width: cardWidth - 36, height: 18); card.addSubview(foot)
-            y += card.frame.height + 12
+            let foot = label(footnote, size: 10, color: .secondaryLabelColor)
+            foot.frame = NSRect(x: 12, y: rowY, width: cardWidth - 24, height: 16); card.addSubview(foot)
+            y += card.frame.height + 8
         }
-        body.frame = NSRect(x: 0, y: 0, width: width, height: max(y + 12, scroll.contentSize.height))
-        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(origin.y, max(0, body.frame.height - scroll.contentSize.height))))
+        // Bound the dropdown even for many accounts; scrolling preserves all limits.
+        let height = min(380, y)
+        body.frame = NSRect(x: 0, y: 0, width: width, height: y)
+        scroll.frame = NSRect(x: 0, y: 36, width: width, height: height)
+        content.setFrameSize(NSSize(width: width, height: height + 40))
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(origin.y, max(0, y - height))))
         scroll.reflectScrolledClipView(scroll.contentView)
+        content.enclosingMenuItem?.menu?.update()
     }
 }
 
-final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate {
+final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate, NSMenuDelegate {
     lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
     lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
     lazy var quickIssue = NativeQuickIssue(present: present)
@@ -4991,8 +4978,9 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
     let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "o")
     let mindmapsMenuItem = NSMenuItem(title: "Mindmaps…", action: nil, keyEquivalent: "")
-    lazy var subscriptionQuota = SubscriptionQuotaController(present: present)
-    @objc func showSubscriptionQuota() { subscriptionQuota.open(cli: cli) }
+    let subscriptionQuota = SubscriptionQuotaController()
+    func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli) }
+    func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close() }
     let statusMenu = NSMenu()
     let activityMenuItem = NSMenuItem(title: "Activity status unavailable", action: nil, keyEquivalent: "")
     let activityBadge = ActivityBadge(frame: NSRect(x: 15, y: 2, width: 7, height: 7))
@@ -5208,7 +5196,11 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         mindmapsMenuItem.target = self
         menu.addItem(mindmapsMenuItem)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Subscription quota…", action: #selector(showSubscriptionQuota), keyEquivalent: "").target = self
+        let quotaItem = NSMenuItem()
+        quotaItem.view = subscriptionQuota.content
+        menu.addItem(quotaItem)
+        menu.addItem(.separator())
+        menu.delegate = self
         menu.addItem(withTitle: "Agent overview…", action: #selector(show), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Harvester (Terminal)…", action: #selector(showHealth), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Refresh agents", action: #selector(refreshNow), keyEquivalent: "").target = self
