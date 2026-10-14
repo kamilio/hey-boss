@@ -144,7 +144,7 @@ if(typeof document!=='undefined') (()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), icon=HeyBossUI.icon;
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
   let activeFile='', editingMarkdown=false, editorDraft='', codeMirrorInstance=null, editorScriptPromise=null, deletePromptSkill='';
-  let actionError='', actorId='';
+  let actionError='', actorId='', selectionRevision=0;
   let editorContext=null, editorStatus='', skipDraftRestore=false;
   const draftMemory=new Map();
   const draftKey=(skill,file)=>'hey-boss-skill-draft:'+JSON.stringify([actorId,skill,file]);
@@ -287,8 +287,8 @@ if(typeof document!=='undefined') (()=>{
     clearTimeout(timer);if(data.busy)timer=setTimeout(poll,1200);
   }
   async function poll(){try{use(await request());}catch(e){fail(e);timer=setTimeout(poll,4000);}}
-  const current = skill => skill.versions.find(v=>v.digest===choices[skill.name]) || (skill.versions.length===1?skill.versions[0]:null);
-  function changes(){dirty=true;$('#skills-error').hidden=true;render();}
+  const current = skill => choices[skill.name] ? skill.versions.find(v=>v.digest===choices[skill.name]) : (skill.versions.length===1?skill.versions[0]:null);
+  function changes(){selectionRevision++;dirty=true;$('#skills-error').hidden=true;render();}
   function destroyEditor(){if(codeMirrorInstance){codeMirrorInstance.destroy();codeMirrorInstance=null;}}
   function currentEditorContent(){
     if(codeMirrorInstance)return codeMirrorInstance.content();
@@ -434,13 +434,19 @@ if(typeof document!=='undefined') (()=>{
             if (cov.allGreen && skill.versions.length === 1) {
               return `<div class="version-buttons"><span class="version-choose chosen">${icon('check')}Synced everywhere</span></div>`;
             }
-            const btnLabel = skill.versions.length > 1 ? 'Use this version everywhere' : 'Distribute to all machines';
             return `<div class="version-buttons">
-              <button class="button small primary version-unify" data-unify="${esc(v.digest)}" ${pending||data.busy?'disabled':''} title="Sync this version to all machines">${btnLabel}</button>
+              <button type="button" class="button small version-choose ${chosen?.digest===v.digest?'chosen':''}" data-choose="${esc(v.digest)}" aria-pressed="${chosen?.digest===v.digest}" aria-label="Select version ${i+1}">${chosen?.digest===v.digest?icon('check')+'Selected':'Select version'}</button>
             </div>`;
           })():''}
         </div>`;
       }).join('')}</div>
+      ${skill.scope==='global'&&!machineCoverage(skill,data.machines).allGreen?`<div class="skill-version-action">
+        <p id="skill-version-help" role="status">${pending||data.busy
+          ? 'Sync in progress. You can select a version now and apply it when this finishes.'
+          : chosen ? `Version ${skill.versions.indexOf(chosen)+1} selected. Apply it to all machines when ready.`
+          : 'Select a version to apply to all machines.'}</p>
+        <button type="button" class="button small primary version-unify" data-unify="${esc(chosen?.digest||'')}" aria-describedby="skill-version-help" ${pending||data.busy||!chosen?'disabled':''}>Use selected version everywhere</button>
+      </div>`:''}
     </section>
     ${renderDiffSection(skill, chosen, preview)}
     <section class="skill-section skill-files-section">
@@ -517,6 +523,7 @@ if(typeof document!=='undefined') (()=>{
     const delPrompt=e.target.closest('[data-delete-prompt]'), delCancel=e.target.closest('[data-delete-cancel]'), delConfirm=e.target.closest('[data-delete-confirm]');
 
     if(choose){
+      keepDraft();editingMarkdown=false;skipDraftRestore=true;
       choices[skill.name]=choose.dataset.choose;
       selected.add(skill.name);
       previewDigest=choose.dataset.choose;
@@ -600,6 +607,7 @@ if(typeof document!=='undefined') (()=>{
   $('#skills-reset').onclick=()=>{keepDraft();skipDraftRestore=false;dirty=false;previewDigest='';editingMarkdown=false;deletePromptSkill='';poll();};
   async function action(kind, extra={}){
     if(pending||data.busy)return;
+    const submittedSelectionRevision=selectionRevision;
     const savingContext=kind==='save_file'?editorContext:null;
     pending=true;actionError='';$('#skills-error').hidden=true;
     if(savingContext)showEditorStatus('Saving… Your draft is preserved.');
@@ -639,8 +647,11 @@ if(typeof document!=='undefined') (()=>{
           history.replaceState(null,'','#'+params);
         }
       }
-      if(kind==='distribute'||kind==='save_file'||kind==='delete')dirty=false;
-      use(value,kind==='distribute'||kind==='save_file'||kind==='delete');
+      // Choosing a version is local, even while a write is awaiting its reply.
+      // That reply acknowledges the submitted choice, not a later selection.
+      const resetSelection=selectionRevision===submittedSelectionRevision&&(kind==='distribute'||kind==='save_file'||kind==='delete');
+      if(resetSelection)dirty=false;
+      use(value,resetSelection);
     }
     catch(e){fail(e);if(savingContext&&editingMarkdown)showEditorStatus('Could not save · draft preserved. '+e.message);if(!data.busy)timer=setTimeout(poll,1200);}
     finally{pending=false;render();}

@@ -51,7 +51,7 @@
 .gh-diff-actions{display:flex;gap:6px;flex-wrap:wrap}
 .gh-diff-file{border-bottom:1px solid var(--line)}
 .gh-diff-file:last-child{border-bottom:0}
-.gh-diff-file-header{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:color-mix(in srgb,var(--hover) 60%,var(--solid));border-bottom:1px solid var(--line);font-size:11px}
+.gh-diff-file-header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 14px;background:color-mix(in srgb,var(--hover) 60%,var(--solid));border-bottom:1px solid var(--line);font-size:11px}
 .gh-diff-file-path{display:flex;align-items:center;gap:7px;font-weight:600}
 .gh-diff-file-path svg{width:14px;height:14px;color:var(--muted)}
 .gh-diff-file-path small{color:var(--muted);font-weight:400}
@@ -121,4 +121,9 @@
 .version-locations code{display:block;overflow-wrap:anywhere;font-size:10px}
 .version-locations p{margin:8px 0}
 .version-buttons{margin-left:auto}
+.version-choose{min-height:32px;white-space:nowrap}
+.version-choose[aria-pressed=true]{box-shadow:inset 0 0 0 1px var(--accent)}
+.skill-version-action{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.skill-version-action p{flex:1 1 220px;margin:0;font-size:11px;line-height:1.6;color:var(--muted)}
+.skill-version-action .button{white-space:normal}
 @media(max-width:600px){.version-preview,.version-locations{flex:auto}.version-buttons{margin-left:0}.version-unify{white-space:normal}}
