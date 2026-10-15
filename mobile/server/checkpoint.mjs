@@ -1,7 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {HubError,equal} from './store.mjs';
 
-// Fly has no writable user-data volume. A successful mutation is acknowledged
+// The relay has no writable user-data volume. A successful mutation is acknowledged
 // only after the supervisor has fsynced its private checkpoint on the Mac.
 export function checkpointRoutes(app,{store,bridge,enabled,hubToken,onRestore}){
  const epoch=randomUUID();let ready=!enabled,version=0,saved=0;

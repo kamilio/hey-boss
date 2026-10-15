@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {HubStore} from './store.mjs';
 import {createApp} from './index.mjs';
 
-test('shared issue UI relays to the supervisor without retaining content on Fly',async t=>{
+test('shared issue UI relays to the supervisor without retaining content in the relay',async t=>{
  const store=new HubStore();store.setIssueProjects([{id:'named:Atlas',name:'Atlas'}]);
  const key='x'.repeat(64),app=createApp({store,hubToken:key,secure:false,origin:'http://localhost'});
  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));

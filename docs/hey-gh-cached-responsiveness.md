@@ -77,7 +77,3 @@ freshness or readiness. PR 15124 still reported missing review threads,
 `85d3221dd5946c140af7090433f868cf80d79a8b`. PR 15033 retained complete cached
 recovery at unchanged head `4bd3fbb4b4a8b4bd20bdf30d9c7ac8ff5068f7dc`.
 Every response retained source validation times. No explicit refresh was used.
-
-The required hey-boss Fly rolling deployment reused the current immutable mobile
-image because this change only affects the local hey-gh daemon. Deployment smoke
-and machine checks, DNS verification, and the public `/healthz` endpoint passed.

@@ -89,9 +89,4 @@ anchors an 8 KiB limit. Each document supports 1,000 comments within an aggregat
 Artifacts use the same private SQLite project store, local web CSRF protection
 and SSH transport as issues. Like mindmaps, they are authored on the authoritative
 machine rather than replicated into fleet issue queues. Use `--host SUPERVISOR`
-from a companion to work with shared documents. The paired Fly application
-forwards artifact and referring-resource reads and document mutations through
-the existing supervisor phone bridge. Its durable queue stores requests and
-delivery results, never an independent authoritative document collection.
-Offline saves remain pending until the supervisor reconnects. Pairing, project
-registry validation, origin checks and device isolation protect this transport.
+from a companion to work with shared documents. Phones use the same local web interface on explicitly allowed Wi-Fi networks; see [local mobile access](mobile.md).

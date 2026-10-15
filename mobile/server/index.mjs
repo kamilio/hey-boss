@@ -135,6 +135,6 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
 if(process.argv[1]===fileURLToPath(import.meta.url)){
  const store=new HubStore();
  let keys=store.db.prepare("SELECT value FROM metadata WHERE key='vapid'").get();if(!keys){keys={value:JSON.stringify(webpush.generateVAPIDKeys())};store.db.prepare("INSERT INTO metadata VALUES('vapid',?)").run(keys.value);}const vapid={...JSON.parse(keys.value),subject:process.env.VAPID_SUBJECT??process.env.PUBLIC_ORIGIN};
- const app=createApp({store,hubToken:process.env.HUB_TOKEN,origin:process.env.PUBLIC_ORIGIN,secure:process.env.INSECURE_LOCAL!=='1',vapid,checkpoint:true});const server=app.listen(Number(process.env.PORT??8787),'0.0.0.0');const timer=setInterval(()=>app.locals.pump().catch(()=>{}),2000);timer.unref();
+ const app=createApp({store,hubToken:process.env.HUB_TOKEN,origin:process.env.PUBLIC_ORIGIN,secure:process.env.INSECURE_LOCAL!=='1',vapid,checkpoint:true});const server=app.listen(Number(process.env.PORT??8787),'127.0.0.1');const timer=setInterval(()=>app.locals.pump().catch(()=>{}),2000);timer.unref();
  for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{clearInterval(timer);app.locals.close();server.close(()=>{store.close();process.exit(0);});setTimeout(()=>process.exit(1),10000).unref();});
 }

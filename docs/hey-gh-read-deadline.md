@@ -101,11 +101,6 @@ returned unavailable/unknown instead of asserting satisfaction. A bounded
 cached-only PR 15124 read returned in 61 ms. All 68 saved watch IDs were unchanged.
 These observations do not assert current validation or merge readiness.
 
-The required Fly rolling deployment reused the current immutable mobile image,
-`sha256:5c411f4a66b6ffdd32d8f1fb06c328aca03f9353ba51d6d14f5a1ff7cc32763f`,
-because this change affects only the local hey-gh CLI. Deployment smoke and
-machine checks, DNS verification, and the public `/healthz` endpoint passed.
-
 Both connected installed binaries also passed three runtime checks through a
 synthetic stalled loopback API forwarded over temporary SSH connections. Bounded
 CI reads retained the deliberately older validation time and independent missing
