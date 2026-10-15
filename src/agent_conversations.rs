@@ -248,7 +248,16 @@ pub fn assignment(project: &str, number: i64, agent: &str) -> Result<Value> {
     )?
     .ok_or_else(|| Error::invalid("This assignment no longer has a saved Codex session"))?;
     let status = overview()?;
-    let local = run["machine"] == crate::issues::identity::machine()?;
+    assignment_entry(run, &status, agent, &crate::issues::identity::machine()?)
+}
+
+fn assignment_entry(
+    mut run: Value,
+    status: &Value,
+    agent: &str,
+    local_machine: &str,
+) -> Result<Value> {
+    let local = run["machine"] == local_machine;
     let machine = status["machines"]
         .as_array()
         .and_then(|ms| {
@@ -258,8 +267,40 @@ pub fn assignment(project: &str, number: i64, agent: &str) -> Result<Value> {
             })
         })
         .ok_or_else(|| Error::invalid("The assignment's device is no longer available"))?;
+    // Companion attempts live in the worker snapshot, not this device's run
+    // table. Use the same attempt as Workers before falling back to saved history.
+    let attempt = machine["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|worker| {
+            worker["runs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |attempt| (worker, attempt))
+        })
+        .filter(|(_, attempt)| {
+            attempt["project_id"] == run["project_id"]
+                && attempt["number"] == run["number"]
+                && (attempt["session_id"]
+                    .as_str()
+                    .is_some_and(|session| !session.is_empty() && run["session_id"] == session)
+                    || (attempt["session_id"].is_null() && attempt["actor_id"] == agent))
+        })
+        .max_by_key(|(_, attempt)| attempt["started_at"].as_i64());
+    let mut online = machine["state"] == "connected";
+    if let Some((worker, attempt)) = attempt {
+        online &= worker["pid"].as_i64().is_some_and(|pid| pid > 0);
+        if attempt["started_at"].as_i64() >= run["started_at"].as_i64() {
+            run = attempt.clone();
+        }
+    }
+    // Workers may record their launch actor before the session claims the issue.
+    // The response remains bound to the assignment authorized above.
+    run["actor_id"] = json!(agent);
     let device = json!({"host":machine["host"],"hostname":machine["hostname"],"state":machine["state"],"heartbeat":machine["heartbeat"]});
-    Ok(json!({"ok":true,"machine":device,"run":run,"online":machine["state"] == "connected"}))
+    Ok(json!({"ok":true,"machine":device,"run":run,"online":online}))
 }
 
 pub fn local_window(run: &str, window: &Window) -> Result<Value> {
@@ -1243,6 +1284,102 @@ mod tests {
         f.db.execute("UPDATE projects SET hidden_at=1", []).unwrap();
         assert!(window_page(&f.db, &f.root, "chief:local:Atlas", &Window::default()).is_err());
     }
+    fn assignment_fixture() -> (Value, Value) {
+        let saved = json!({"id":"session:exact","project_id":"Atlas","number":4,"session_id":"exact","actor_id":"codex:exact","machine":"remote","host":"devbox.local","state":"running","started_at":null,"finished_at":null,"standalone":true});
+        let run = json!({"id":"attempt","project_id":"Atlas","number":4,"session_id":"exact","actor_id":"worker:attempt","state":"running","started_at":125000,"finished_at":null});
+        let status = json!({"machines":[{"host":"devbox","hostname":"devbox.local","state":"connected","heartbeat":200,"workers":[{"pid":42,"runs":[run]}]}]});
+        (saved, status)
+    }
+
+    #[test]
+    fn assignment_uses_the_workers_attempt_timing_and_claimed_identity() {
+        let (saved, status) = assignment_fixture();
+        let entry = assignment_entry(saved, &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["run"]["id"], "attempt");
+        assert_eq!(entry["run"]["started_at"], 125000);
+        assert_eq!(entry["run"]["actor_id"], "codex:exact");
+        assert_ne!(entry["run"]["standalone"], true);
+        assert_eq!(entry["online"], true);
+    }
+
+    #[test]
+    fn assignment_does_not_borrow_another_tasks_or_devices_runtime() {
+        let (saved, status) = assignment_fixture();
+        for (key, value) in [
+            ("project_id", json!("Other")),
+            ("number", json!(5)),
+            ("session_id", json!("other")),
+            ("session_id", Value::Null),
+        ] {
+            let mut status = status.clone();
+            status["machines"][0]["workers"][0]["runs"][0][key] = value;
+            let entry =
+                assignment_entry(saved.clone(), &status, "codex:exact", "local-id").unwrap();
+            assert_eq!(entry["run"]["id"], "session:exact", "{key}");
+            assert!(entry["run"]["started_at"].is_null());
+        }
+        let mut status = status;
+        let mut other = status["machines"][0].clone();
+        other["host"] = json!("other");
+        other["hostname"] = json!("other.local");
+        status["machines"][0]["workers"] = json!([]);
+        status["machines"].as_array_mut().unwrap().insert(0, other);
+        let entry = assignment_entry(saved, &status, "codex:exact", "local-id").unwrap();
+        assert!(entry["run"]["started_at"].is_null());
+    }
+
+    #[test]
+    fn assignment_selects_latest_attempt_and_preserves_finished_or_offline_state() {
+        let (saved, mut status) = assignment_fixture();
+        let mut latest = status["machines"][0]["workers"][0]["runs"][0].clone();
+        latest["id"] = json!("retry");
+        latest["started_at"] = json!(150000);
+        latest["finished_at"] = json!(180000);
+        latest["state"] = json!("completed");
+        status["machines"][0]["workers"][0]["runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(latest);
+        let entry = assignment_entry(saved.clone(), &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["run"]["id"], "retry");
+        assert_eq!(entry["run"]["finished_at"], 180000);
+        assert_eq!(entry["run"]["state"], "completed");
+        status["machines"][0]["state"] = json!("disconnected");
+        let entry = assignment_entry(saved.clone(), &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["online"], false);
+        assert_eq!(entry["run"]["started_at"], 150000);
+        status["machines"][0]["state"] = json!("connected");
+        status["machines"][0]["workers"][0]["pid"] = Value::Null;
+        let entry = assignment_entry(saved, &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["online"], false);
+    }
+
+    #[test]
+    fn assignment_preserves_saved_history_and_resolves_local_or_early_claims() {
+        let (mut saved, mut status) = assignment_fixture();
+        saved["id"] = json!("newer");
+        saved["started_at"] = json!(160000);
+        saved["finished_at"] = json!(190000);
+        saved["state"] = json!("completed");
+        saved["actor_id"] = json!("worker:launch");
+        let entry = assignment_entry(saved.clone(), &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["run"]["id"], "newer");
+        assert_eq!(entry["run"]["actor_id"], "codex:exact");
+        assert_eq!(entry["run"]["finished_at"], 190000);
+        status["machines"][0]["workers"] = json!([]);
+        let entry = assignment_entry(saved, &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["run"]["id"], "newer");
+
+        let (mut saved, mut status) = assignment_fixture();
+        saved["machine"] = json!("local-id");
+        status["machines"][0]["host"] = json!("local");
+        status["machines"][0]["workers"][0]["runs"][0]["session_id"] = Value::Null;
+        status["machines"][0]["workers"][0]["runs"][0]["actor_id"] = json!("codex:exact");
+        let entry = assignment_entry(saved, &status, "codex:exact", "local-id").unwrap();
+        assert_eq!(entry["machine"]["host"], "local");
+        assert_eq!(entry["run"]["started_at"], 125000);
+    }
+
     #[test]
     fn fleet_overview_uses_one_compact_request_when_identity_is_available() {
         let expected = json!({"machines":[{"workers":[{"runs":runs_for_project(&[json!({"id":"run","project_id":"Atlas","actor_id":"actor","session_id":"session"})], &HashSet::from(["Atlas".into()]))}]}]});
