@@ -30,9 +30,9 @@ request IDs and a SHA-256 fallback for retry keys when `randomUUID` and
 SubtleCrypto are unavailable. No browser security flags or HTTPS exceptions are
 needed. Secure contexts keep using native Web Crypto.
 
-For direct phone access on selected Wi-Fi networks, use the repeatable
-`--allow-wifi 'Home'` option; see [local mobile access](mobile.md). This enables
-the primary port on IPv4 interfaces with per-request Wi-Fi and subnet checks.
+For direct phone access at home, use `--allow-public-ip YOUR_HOME_PUBLIC_IP`;
+see [local mobile access](mobile.md). This enables the primary port on IPv4
+interfaces with cached public-IP verification and per-request subnet checks.
 The optional port-80 socket remains loopback-only.
 
 ## macOS setup

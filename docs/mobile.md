@@ -1,27 +1,23 @@
 # Local phone access
 
-The phone uses the regular Rust web app, served directly from the Mac. Nothing is deployed publicly. The default `hey-boss issue web` binds only to localhost.
+The phone uses the regular Rust web app directly. Nothing is deployed publicly. By default, `hey-boss issue web` binds only to localhost.
 
-Allow LAN access on an explicit list of Wi-Fi names:
+Allow LAN access while the Mac uses your home's public IPv4 address:
 
 ```sh
-hey-boss issue web --allow-wifi 'Home' --allow-wifi 'Office'
+hey-boss issue web --allow-public-ip YOUR_HOME_PUBLIC_IP
 ```
 
-Open the printed `http://192.168.…:4781/` address on a phone connected to the same Wi-Fi. If the usual web service already owns port 4781, stop that service normally or use a separate `--port 4782`. Add the same arguments to your service command for persistent access; an empty list keeps it localhost-only. The desktop and phone share the database, project switcher, issues, documents, mindmaps, and attachments.
+Replace the placeholder with your home public IPv4 address. The service never learns or updates this trusted address automatically. Both Wi-Fi bands work when they share that address; Ethernet works too. No macOS Location or Automation permission is needed for this check.
 
-LAN access requires all of the following on every request:
+Open the printed `http://192.168.…:4781/` address on your phone. Add the same option to your service command for persistent access. If another service owns port 4781, stop it normally or use `--port 4782`. Desktop and phone share the database and web app.
 
-- The Mac's current Wi-Fi name exactly matches an allowed name.
-- Both addresses are private IPv4 addresses on that Wi-Fi interface's subnet.
-- The request uses the Mac's Wi-Fi IP and the primary web port, with a matching browser origin.
+The service checks `https://api.ipify.org` in the background at startup and every 30 seconds, bypassing HTTP proxies and binding to the current IPv4 route's address. Each check has a 3-second timeout and a bounded response. Requests never wait for an external lookup: they read cached verification and kernel network information. Access starts blocked, failed or mismatched checks clear verification, and successful checks expire after 45 seconds. Local interface/address/subnet changes block access immediately until checked again. An external IP change with identical local network settings can take up to 45 seconds to block.
 
-Public addresses, other subnets, IPv6, forwarded requests, unknown Wi-Fi names, and unavailable Wi-Fi information are denied. Switching networks takes effect on the next request. Localhost remains available. Existing CSRF protection applies to phone writes. This grants access to devices on the approved subnet: Wi-Fi names are not cryptographic identities, and the direct web app does not require phone pairing. Only allow networks whose other devices you trust. Do not forward this port through a router or reverse proxy.
+Every LAN request also requires private IPv4 addresses on the checked interface's subnet, the Mac's exact local IP and primary port as Host, and a matching browser origin. IPv6, public peers, other subnets, and forwarded requests are denied. Event streams recheck before sending data. Localhost remains available; port 80 stays loopback-only. Existing CSRF protection applies to phone writes.
 
-Wi-Fi detection uses macOS CoreWLAN. macOS may require Location permission for the hosting application to reveal the network name. If the OS redacts it, LAN access stays blocked and startup reports the cause; it never falls back to trusting every private network. Other operating systems remain localhost-only.
+This grants access to devices on the approved subnet. A public IP can be shared by other households through carrier-grade NAT and is not a cryptographic network identity. Only use this on a trusted LAN, and do not forward the port or expose it through a reverse proxy. An ISP address change or VPN can block access; update the configured address deliberately after confirming you are home.
 
-Local HTTP works for browsing and editing. iPhone Web Push and service-worker installation require trusted HTTPS and are unavailable over this HTTP connection. The retired relay server is restricted to loopback and has no deployment or provisioning workflow. The supervisor no longer publishes phone notifications to it.
+Local HTTP supports browsing and editing. iPhone Web Push and service-worker installation require trusted HTTPS and are unavailable over this HTTP connection. The retired relay server is restricted to loopback and has no deployment workflow. Old local mobile data is left intact; deleting deployment files does not destroy cloud resources.
 
-Existing local data, including any old `mobile.json` and `mobile-relay.json`, is left intact. Cloud resources from previous installations are not managed by this repository; removing deployment files does not destroy a running remote service.
-
-See [local HTTP service setup](local-http.md) for launchd provisioning. Existing explicitly configured private Tailscale access remains separate and cannot be combined with `--allow-wifi`.
+See [local HTTP service setup](local-http.md) for launchd provisioning. Existing explicit private Tailscale access cannot be combined with `--allow-public-ip`.

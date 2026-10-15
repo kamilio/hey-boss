@@ -248,9 +248,9 @@ enum Action {
         /// Keeps the listener on loopback; configure Tailscale Serve separately.
         #[arg(long)]
         mobile_origin: Option<String>,
-        /// Allow direct LAN access only while on these Wi-Fi names (repeatable; macOS).
-        #[arg(long, value_name = "SSID", conflicts_with = "mobile_origin")]
-        allow_wifi: Vec<String>,
+        /// Allow direct private-subnet access while a cached check matches this public IPv4.
+        #[arg(long, value_name = "IP", conflicts_with = "mobile_origin")]
+        allow_public_ip: Option<std::net::Ipv4Addr>,
     },
     /// List projects by recent activity, with issue state counts.
     Projects {
@@ -1353,13 +1353,13 @@ pub fn run(options: &Options) -> Result<()> {
         port,
         no_discovery,
         ref mobile_origin,
-        ref allow_wifi,
+        allow_public_ip,
     } = options.action
     {
         return issues::web::serve(issues::web::Config {
             port,
             mobile_origin: mobile_origin.clone(),
-            allow_wifi: allow_wifi.clone(),
+            allow_public_ip,
             discover: !no_discovery,
             project: options.project.clone().or_else(worker_project),
             actor: options.agent.clone(),

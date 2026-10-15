@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+mod lan;
 #[cfg(test)]
 mod listener_tests;
 mod local_http;
-mod wifi;
 
 fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
     fn decode(input: &str) -> Result<String> {
@@ -49,7 +49,7 @@ fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
 pub struct Config {
     pub port: u16,
     pub mobile_origin: Option<String>,
-    pub allow_wifi: Vec<String>,
+    pub allow_public_ip: Option<std::net::Ipv4Addr>,
     pub discover: bool,
     pub project: Option<String>,
     pub actor: Option<String>,
@@ -69,7 +69,7 @@ struct App {
     authority: String,
     local_ports: Vec<u16>,
     mobile_origin: Option<String>,
-    allow_wifi: Vec<String>,
+    lan: lan::Guard,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -118,19 +118,16 @@ impl App {
 }
 
 pub fn serve(config: Config) -> Result<()> {
-    if !config.allow_wifi.is_empty()
-        && (!cfg!(target_os = "macos") || config.mobile_origin.is_some())
-    {
-        return Err(Error::invalid(
-            "Wi-Fi access requires macOS and cannot be combined with a proxy origin",
-        ));
-    }
     if config
-        .allow_wifi
-        .iter()
-        .any(|ssid| ssid.is_empty() || ssid.len() > 32)
+        .allow_public_ip
+        .is_some_and(|ip| lan::parse_public_ip(&ip.to_string()).is_none())
     {
-        return Err(Error::invalid("Wi-Fi names must contain 1–32 bytes"));
+        return Err(Error::invalid("Expected a public IPv4 address"));
+    }
+    if config.allow_public_ip.is_some() && config.mobile_origin.is_some() {
+        return Err(Error::invalid(
+            "Public-IP LAN access cannot be combined with a proxy origin",
+        ));
     }
 
     let _database_owner = if config.host.is_none() {
@@ -176,7 +173,7 @@ pub fn serve(config: Config) -> Result<()> {
             Backend::Local(path)
         }
     };
-    let bind = if config.allow_wifi.is_empty() {
+    let bind = if config.allow_public_ip.is_none() {
         "127.0.0.1"
     } else {
         "0.0.0.0"
@@ -206,7 +203,7 @@ pub fn serve(config: Config) -> Result<()> {
         authority,
         local_ports,
         mobile_origin,
-        allow_wifi: config.allow_wifi,
+        lan: lan::Guard::start(config.allow_public_ip),
     };
     let resolved = app.execute(
         config.project,
@@ -220,18 +217,16 @@ pub fn serve(config: Config) -> Result<()> {
         .map(str::to_owned)
         .unwrap_or_else(|| format!("http://{}/", app.authority));
     let url = format!("{base_url}{}", if config.mindmap { "mm" } else { "" });
-    let lan_url = (!app.allow_wifi.is_empty())
-        .then(wifi::current)
-        .flatten()
-        .filter(|network| network.permits(&app.allow_wifi, network.address))
+    let lan_url = config
+        .allow_public_ip
+        .and_then(|_| lan::current())
         .map(|network| format!("http://{}:{}/", network.address, app.local_ports[0]));
-    if !app.allow_wifi.is_empty() {
+    if config.allow_public_ip.is_some() {
+        eprintln!(
+            "LAN access awaits a matching background public-IP check (no Location permission required)."
+        );
         if let Some(url) = &lan_url {
-            eprintln!("Wi-Fi · {url}");
-        } else {
-            eprintln!(
-                "LAN access blocked: current Wi-Fi is unavailable or not allowed. macOS requires Location access to read Wi-Fi names."
-            );
+            eprintln!("LAN · {url}");
         }
     }
     if config.json {
@@ -385,7 +380,7 @@ fn serve_requests(servers: &[Server], app: &Arc<App>, stop: &Arc<AtomicBool>) {
                                                 Ok(0) | Err(_) => break,
                                                 Ok(n) => {
                                                     if let Some(peer) = peer.filter(|p| !p.is_loopback()) {
-                                                        if !lan_allowed(peer, host.as_deref(), origin.as_deref(), site.as_deref(), &app, wifi::current()) { break; }
+                                                        if !lan_allowed(peer, host.as_deref(), origin.as_deref(), site.as_deref(), &app, app.lan.network()) { break; }
                                                     }
                                                     if output.write_all(&bytes[..n]).and_then(|_| output.flush()).is_err() { break; }
                                                 }
@@ -478,16 +473,13 @@ fn allowed(request: &tiny_http::Request, app: &App) -> bool {
         return false;
     }
     if !peer.ip().is_loopback() {
-        if app.allow_wifi.is_empty() {
-            return false;
-        }
         return lan_allowed(
             peer.ip(),
             header(request, "host"),
             header(request, "origin"),
             header(request, "sec-fetch-site"),
             app,
-            wifi::current(),
+            app.lan.network(),
         );
     }
 
@@ -506,14 +498,12 @@ fn lan_allowed(
     origin: Option<&str>,
     site: Option<&str>,
     app: &App,
-    network: Option<wifi::Network>,
+    network: Option<lan::Network>,
 ) -> bool {
     let (std::net::IpAddr::V4(peer), Some(network)) = (peer, network) else {
         return false;
     };
-    if !network.permits(&app.allow_wifi, peer)
-        || site.is_some_and(|s| !["same-origin", "none"].contains(&s))
-    {
+    if !network.permits(peer) || site.is_some_and(|s| !["same-origin", "none"].contains(&s)) {
         return false;
     }
     // Exact IP authorities prevent DNS rebinding and restrict LAN to the primary port.
