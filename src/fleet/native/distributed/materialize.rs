@@ -272,6 +272,7 @@ pub(super) fn write(
 
 pub(super) fn apply(db: &Connection) -> Result<usize> {
     let mut count = 0;
+    let mut projects = std::collections::BTreeSet::new();
     db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
     // Dependencies precede their users. Unavailable parents stay dirty and are
     // retried from durable facts; receipt advancement never drops their data.
@@ -334,6 +335,11 @@ pub(super) fn apply(db: &Connection) -> Result<usize> {
             };
             match result {
                 Ok(()) => {
+                    if matches!(*table, "issues" | "issue_subtasks" | "project_settings")
+                        && let Some(project) = key["project_id"].as_str()
+                    {
+                        projects.insert(project.to_owned());
+                    }
                     db.execute(
                         "DELETE FROM distributed_dirty WHERE table_name=?1 AND entity=?2",
                         params![table, entity],
@@ -353,6 +359,9 @@ pub(super) fn apply(db: &Connection) -> Result<usize> {
                 }
             }
         }
+    }
+    for project in projects {
+        crate::issues::blockers::reconcile_replication(db, &project)?;
     }
     db.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
     Ok(count)
