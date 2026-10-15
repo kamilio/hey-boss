@@ -1121,10 +1121,32 @@ impl Supervisor {
             json!({"kind":"configure","worker_history_v1":incremental_history,"project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
         peer.set(node.to_owned()).unwrap();
+        let mut peer_sync_revision = Value::Null;
         let mut last_ping = Instant::now() - Duration::from_secs(5);
         let mut sent_jobs = std::collections::BTreeSet::new();
         while !self.ctx.stopped() {
             if last_ping.elapsed() >= Duration::from_secs(5) {
+                if hello["capabilities"]["peer_sync_v1"] == true {
+                    let observed = self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .machines
+                        .iter()
+                        .filter_map(|(host, machine)| {
+                            machine.get("peer_sync_identity").map(|identity| {
+                                (host.clone(), json!({"peer_sync_identity":identity}))
+                            })
+                        })
+                        .collect();
+                    let settings = super::peer_sync::desired(&self.ctx, host, &observed)?;
+                    if peer_sync_revision != json!(super::context::hash(&settings)) {
+                        send(
+                            &mut *input.lock().unwrap(),
+                            json!({"kind":"sync_config","settings":settings}),
+                        )?;
+                    }
+                }
                 if hello["capabilities"]["job_execution"] == true {
                     let store = crate::issues::Store::open(&self.ctx.path)?;
                     let mut active_jobs = std::collections::BTreeSet::new();
@@ -1189,6 +1211,19 @@ impl Supervisor {
                 return Err(invalid("Protocol version mismatch"));
             }
             match message["kind"].as_str() {
+                Some("sync_config_ack") => {
+                    if let Some(error) = message.get("error") {
+                        self.update(host, json!({"peer_sync_error":error}))?;
+                    } else {
+                        let result = &message["result"];
+                        if !result["identity"].is_null() {
+                            super::peer_sync::accept_identity(&result["identity"], node)?;
+                            self.update(host, json!({"peer_sync_identity":result["identity"]}))?;
+                        }
+                        peer_sync_revision = result["revision"].clone();
+                        self.update(host, json!({"peer_sync_error":null}))?;
+                    }
+                }
                 Some("github_read" | "github_cancel") => {
                     let github = github
                         .as_ref()
@@ -1260,7 +1295,7 @@ impl Supervisor {
                             hello["capabilities"]["pull_gzip_chunks"] == true,
                         )?;
                     }
-                    self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
+                    self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now(),"peer_sync":message["peer_sync"]}))?;
                     self.reconcile_chief_ownership()?;
                     let active = message["workers"]
                         .as_array()

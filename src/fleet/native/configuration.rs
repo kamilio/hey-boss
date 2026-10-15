@@ -38,6 +38,8 @@ struct Document {
 #[serde(deny_unknown_fields)]
 struct Machine {
     #[serde(default)]
+    sync_address: Option<String>,
+    #[serde(default)]
     workers: Vec<Worker>,
     #[serde(default)]
     projects: BTreeMap<String, super::projects::Checkout>,
@@ -87,6 +89,7 @@ fn parse(text: &str) -> Result<Value> {
     }
     let mut machines = serde_json::Map::new();
     let mut ids = HashSet::new();
+    let mut sync_addresses = HashSet::new();
     for (host, machine) in doc.machines {
         if !context::valid_host(&host) {
             return Err(invalid("Invalid machine name"));
@@ -154,6 +157,17 @@ fn parse(text: &str) -> Result<Value> {
             workers.push(row);
         }
         let mut value = json!({"workers":workers});
+        if let Some(address) = machine.sync_address {
+            if host == "local"
+                || !super::peer_sync::valid_address(&address)
+                || !sync_addresses.insert(address.to_ascii_lowercase())
+            {
+                return Err(invalid(
+                    "sync_address must be a unique SSH hostname or IPv4 address on a remote machine",
+                ));
+            }
+            value["sync_address"] = json!(address);
+        }
         if !machine.projects.is_empty() {
             value["projects"] = json!(machine.projects);
         }
@@ -654,6 +668,23 @@ fn changes(old: &Value, new: &Value) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn peer_sync_addresses_survive_configuration_round_trips() {
+        let doc = parse(
+            "machines:\n  a: {sync_address: a.box.internal}\n  b: {sync_address: 10.100.15.63}\n",
+        )
+        .unwrap();
+        assert_eq!(doc["machines"]["a"]["sync_address"], "a.box.internal");
+        assert_eq!(
+            parse(&serde_yaml_ng::to_string(&compact(&doc)).unwrap()).unwrap(),
+            doc
+        );
+        for invalid in ["-option", "user@host", "host;command", "host:22", ""] {
+            assert!(parse(&format!("machines: {{a: {{sync_address: '{invalid}'}}}}\n")).is_err());
+        }
+        assert!(parse("machines: {local: {sync_address: laptop}}\n").is_err());
+        assert!(parse("machines: {a: {sync_address: same}, b: {sync_address: same}}\n").is_err());
+    }
     #[test]
     fn global_utilities_round_trip_and_are_opt_in() {
         let text = "machines: {local: {}}\nutils:\n  ans-ck: {command: ck, destination: local, global: true}\n  private: {command: cat}\n";
