@@ -13,7 +13,10 @@ use the full project ID. Email addresses remain ordinary title text; `\@` insert
 a literal `@`. Unknown projects and conflicting destinations show an inline error.
 
 The first issue needs an explicit project. Later issues default to the last
-successfully used project on that Mac. The footer previews the destination.
+successfully used project on that Mac. The footer previews the destination with
+the project name in bold. Hold **Command** to reveal shortcuts inside the
+**Create** and **Add to bottom** buttons; releasing it hides them without moving
+the controls.
 Press **Enter** to add a line. The editor grows as text wraps or new lines are added,
 then scrolls for longer drafts. The first line becomes the title; subsequent lines
 become the description, preserving paragraphs and indentation.
@@ -32,12 +35,12 @@ switching to another application also dismiss it. Unsent text and placement stay
 available until the desktop app exits. Submission temporarily disables editing
 and dismissal, with a native spinner and a disabled **Creating…** button. The
 panel uses the same clipped Liquid Glass surface as notifications, with transparent
-corners and native rounded buttons. Errors preserve the entered text and reuse the same request ID on retry,
+corners and matching native capsule buttons, with a neutral disabled state. Errors preserve the entered text and reuse the same request ID on retry,
 so an uncertain response cannot create duplicates. Changing title, project, or
 placement starts a new request. Successful creation clears the form and resets
 placement to the top.
 
-Paste a screenshot with **⌘V**. The compact keyboard hint sits below the title. Copied image files also work.
+Paste a screenshot with **⌘V**. Its compact hint sits below the editor. Copied image files also work.
 Up to eight images, totaling at most 10 MiB, appear in a horizontally scrolling preview
 strip; each has a remove button. Ordinary text pastes still edit the title. Images
 stay with the dismissed form and become ordinary issue attachments on creation.
