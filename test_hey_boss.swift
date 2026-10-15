@@ -64,6 +64,7 @@ func audit() {
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_LIBRARY"] == "1" { auditArtifactLibrary(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_POE_CORPUS"] { auditPoeMarkdownCorpus(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-native-reader-"+UUID().uuidString)
@@ -3269,6 +3270,95 @@ func auditPoeMarkdownCorpus(_ path: String) {
         }
     }
     print("Passed: all \(count) upstream document/renderer inputs retain text order and native plain/rich selection copying")
+}
+
+func auditArtifactLibrary() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-library-tests-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cli = root.appendingPathComponent("fixture")
+    try! Data("""
+    #!/bin/sh
+    case "$*" in
+      *projects*) echo '{"projects":[{"id":"named:Atlas","name":"Atlas"},{"id":"named:Studio","name":"Studio"}]}' ;;
+      *slow*) sleep 0.3; echo '{"artifacts":[{"id":"stale","title":"Stale response"}]}' ;;
+      *"--offset 2"*) echo '{"artifacts":[{"id":"page-two","title":"An older document"}],"more":false}' ;;
+      *missing*) echo '{"artifacts":[]}' ;;
+      *failure*) exit 1 ;;
+      *Studio*) echo '{"artifacts":[{"id":"studio","title":"A different project","preview":"Studio document preview","updated_at":1792079305000}]}' ;;
+      *) echo '{"artifacts":[{"id":"atlas","title":"A thoughtful release","preview":"Bring the details together. A calm space for plans, decisions, and the work ahead.","updated_at":1792079305000},{"id":"empty","title":"A fresh page","preview":"","updated_at":1792079305000}],"more":true}' ;;
+    esac
+    """.utf8).write(to: cli)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+    let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:Atlas", host: "test-host"), journalRoot: root, cli: cli.path, present: false)
+    defer { editor.window.delegate = nil; editor.window.close() }
+    func wait(_ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        precondition(condition(), "Library operation completed")
+    }
+    wait { editor.documents.count == 2 && editor.projectPicker.numberOfItems == 2 }
+    precondition(!editor.gallery.isHidden && editor.page.isHidden, "Home displays documents instead of a blank editor")
+    precondition(editor.documents[0].preview?.contains("calm space") == true, "List previews reach the native gallery without per-document reads")
+    precondition(Calendar.current.component(.year, from: editor.documents[0].updatedDate!) == 2026, "Artifact timestamps use milliseconds")
+    editor.moreDocuments()
+    wait { editor.documents.count == 3 }
+    precondition(editor.documents.last?.id == "page-two" && !editor.libraryMore, "Pagination keeps older documents reachable")
+    var opened: [ArtifactLaunch] = []
+    editor.onOpen = { opened.append($0) }
+    editor.gallery.cards[0].performClick(nil)
+    precondition(opened.count == 1 && opened[0].id == "atlas" && opened[0].host == "test-host")
+    editor.projectPicker.selectItem(at: 1); editor.selectProject()
+    wait { editor.documents.first?.id == "studio" }
+    editor.newDocument()
+    precondition(opened.last?.project == "named:Studio" && opened.last?.host == "test-host", "New documents use the selected project and authority")
+    precondition(editor.session.launch.project == "named:Atlas", "Browsing another project never retargets an editing session")
+    editor.search.stringValue = "slow"; editor.refreshLibrary()
+    editor.search.stringValue = ""; editor.refreshLibrary()
+    wait { !editor.libraryLoading }
+    RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+    precondition(editor.documents.first?.id == "studio", "Late search responses cannot replace the current project or query")
+    editor.search.stringValue = "missing"; editor.refreshLibrary()
+    wait { !editor.libraryLoading }
+    precondition(editor.documents.isEmpty && editor.gallery.message.stringValue == "No matching documents")
+    editor.search.stringValue = "failure"; editor.refreshLibrary()
+    wait { !editor.libraryLoading }
+    precondition(editor.gallery.message.stringValue == "Couldn’t load documents" && !editor.gallery.retry.isHidden, "Failures are visible and retryable")
+    editor.search.stringValue = ""; editor.refreshLibrary()
+    wait { editor.documents.count == 1 }
+    if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_LIBRARY_SCREENSHOTS"] {
+        try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        editor.projectPicker.selectItem(at: 0); editor.selectProject()
+        wait { editor.documents.count == 2 }
+        let samples = editor.documents
+        for (name, width, appearance) in [("light", 1100.0, NSAppearance.Name.aqua), ("dark", 1100.0, .darkAqua), ("compact", 720.0, .aqua), ("empty", 960.0, .aqua), ("search", 720.0, .aqua), ("error", 720.0, .darkAqua), ("long", 720.0, .darkAqua)] {
+            editor.documents = ["empty", "search", "error"].contains(name) ? [] : samples
+            editor.libraryMore = ["light", "dark", "compact"].contains(name)
+            editor.search.stringValue = name == "search" ? "unmatched" : ""
+            editor.libraryFailed = name == "error"
+            if name == "long" {
+                editor.documents = [ArtifactLibraryDocument(id: "long", title: "A long title about planning a thoughtful release across every connected device 🦀", preview: String(repeating: "Keep every detail clear, even when ideas take a little more room. ", count: 6), updated_at: nil)]
+            }
+            editor.table.reloadData(); editor.renderLibrary()
+            editor.window.appearance = NSAppearance(named: appearance)
+            editor.window.setContentSize(NSSize(width: width, height: 740)); editor.window.orderFront(nil)
+            editor.window.contentView!.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            let view = editor.window.contentView!, bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
+            precondition(editor.gallery.cards.allSatisfy { $0.frame.maxX <= editor.gallery.scroll.contentView.bounds.width }, "Cards fit the actual viewport, including legacy scrollbars")
+        }
+    }
+    editor.session.adopt(ArtifactDocument(id: "atlas", title: "A thoughtful release", body: "Original", version: 1))
+    editor.loaded()
+    editor.session.writer = { _, _ in }
+    editor.text.string = "Unsent changes"; editor.session.change(title: "A thoughtful release", body: editor.text.string)
+    editor.showLibrary()
+    editor.libraryProject = "named:Atlas"; editor.openDocument("atlas")
+    precondition(editor.gallery.isHidden && editor.text.string == "Unsent changes" && editor.session.dirty, "Returning to an open document preserves its draft")
+    editor.session.timer?.invalidate()
+    print("PASS native library previews, project routing, empty/error recovery, and responsive layout")
 }
 
 func auditArtifactEditor() {

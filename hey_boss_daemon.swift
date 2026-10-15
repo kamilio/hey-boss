@@ -6462,6 +6462,123 @@ final class ArtifactEditorWindow: NSWindow {
     }
 }
 
+struct ArtifactLibraryDocument: Decodable {
+    let id: String
+    let title: String
+    let preview: String?
+    let updated_at: Double?
+    var updatedDate: Date? { updated_at.map { Date(timeIntervalSince1970: $0 / 1_000) } }
+}
+
+final class ArtifactDocumentCard: NSButton {
+    let document: ArtifactLibraryDocument
+    var open: () -> Void = {}
+    override var isFlipped: Bool { true }
+    init(_ document: ArtifactLibraryDocument) {
+        self.document = document
+        super.init(frame: .zero)
+        title = ""; isBordered = false; setButtonType(.momentaryChange)
+        target = self; action = #selector(activate)
+        setAccessibilityLabel(document.title)
+        setAccessibilityHelp(document.preview ?? "Open document")
+        toolTip = document.title
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc func activate() { open() }
+    override func draw(_ dirtyRect: NSRect) {
+        let box = bounds.insetBy(dx: 1, dy: 1)
+        let path = NSBezierPath(roundedRect: box, xRadius: 14, yRadius: 14)
+        (isHighlighted ? NSColor.controlAccentColor.withAlphaComponent(0.09) : NSColor.textBackgroundColor).setFill(); path.fill()
+        NSColor.quaternaryLabelColor.setStroke(); path.lineWidth = 1; path.stroke()
+        let icon = NSImage(systemSymbolName: "doc.text", accessibilityDescription: nil)!
+            .withSymbolConfiguration(.init(paletteColors: [.controlAccentColor]))!
+        NSColor.controlAccentColor.withAlphaComponent(0.08).setFill()
+        NSBezierPath(roundedRect: NSRect(x: 20, y: 20, width: 38, height: 38), xRadius: 10, yRadius: 10).fill()
+        icon.draw(in: NSRect(x: 30, y: 28, width: 18, height: 22), from: .zero, operation: .sourceOver, fraction: 0.65, respectFlipped: true, hints: nil)
+        func label(_ value: String, _ rect: NSRect, _ font: NSFont, _ color: NSColor) {
+            let style = NSMutableParagraphStyle(); style.lineBreakMode = .byWordWrapping; style.lineSpacing = 3
+            (value as NSString).draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: [.font: font, .foregroundColor: color, .paragraphStyle: style])
+        }
+        label(document.title, NSRect(x: 20, y: 73, width: bounds.width - 40, height: 44), .systemFont(ofSize: 16, weight: .semibold), .labelColor)
+        let preview = document.preview.flatMap { $0.isEmpty ? nil : $0 } ?? "A fresh page, ready for your ideas."
+        label(preview, NSRect(x: 20, y: 128, width: bounds.width - 40, height: 66), .systemFont(ofSize: 13), .secondaryLabelColor)
+        let date = document.updatedDate.map { "Updated " + $0.formatted(date: .abbreviated, time: .omitted) } ?? "Document"
+        label(date, NSRect(x: 20, y: 220, width: bounds.width - 40, height: 18), .systemFont(ofSize: 11), .secondaryLabelColor)
+    }
+}
+
+final class ArtifactLibraryGrid: NSView {
+    override var isFlipped: Bool { true }
+}
+
+final class ArtifactLibraryView: NSView {
+    let eyebrow = NSTextField(labelWithString: "YOUR WORKSPACE")
+    let heading = NSTextField(labelWithString: "Documents")
+    let subtitle = NSTextField(labelWithString: "")
+    let create = NSButton(title: "New document", target: nil, action: nil)
+    let scroll = NSScrollView()
+    let grid = ArtifactLibraryGrid()
+    let message = NSTextField(labelWithString: "Loading documents…")
+    let detail = NSTextField(wrappingLabelWithString: "")
+    let retry = NSButton(title: "Try again", target: nil, action: nil)
+    let more = NSButton(title: "Load more documents", target: nil, action: nil)
+    var cards: [ArtifactDocumentCard] = []
+    override var isFlipped: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        eyebrow.font = .systemFont(ofSize: 10, weight: .semibold); eyebrow.textColor = .secondaryLabelColor
+        heading.font = .systemFont(ofSize: 30, weight: .bold)
+        subtitle.font = .systemFont(ofSize: 13); subtitle.textColor = .secondaryLabelColor; subtitle.lineBreakMode = .byTruncatingMiddle
+        create.bezelStyle = .rounded; create.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil); create.imagePosition = .imageLeading
+        create.contentTintColor = .controlAccentColor
+        scroll.documentView = grid; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false
+        message.font = .systemFont(ofSize: 20, weight: .semibold); message.alignment = .center
+        detail.font = .systemFont(ofSize: 13); detail.textColor = .secondaryLabelColor; detail.alignment = .center
+        retry.bezelStyle = .rounded; retry.isHidden = true
+        more.bezelStyle = .rounded; more.isHidden = true; grid.addSubview(more)
+        [eyebrow, heading, subtitle, create, scroll, message, detail, retry].forEach { addSubview($0) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); bounds.fill() }
+    func update(_ documents: [ArtifactLibraryDocument], project: String, query: String, loading: Bool, failed: Bool, hasMore: Bool, open: @escaping (String) -> Void) {
+        cards.forEach { $0.removeFromSuperview() }
+        cards = documents.map { document in let card = ArtifactDocumentCard(document); card.open = { open(document.id) }; grid.addSubview(card); return card }
+        subtitle.stringValue = project + (loading ? " · Loading…" : " · \(documents.count)\(hasMore ? "+" : "") \(documents.count == 1 ? "document" : "documents")")
+        let empty = documents.isEmpty
+        message.isHidden = !empty; detail.isHidden = !empty; scroll.isHidden = empty; retry.isHidden = !failed || !empty
+        more.isHidden = !hasMore || empty; more.isEnabled = !loading
+        more.title = failed ? "Couldn’t load more · Try again" : loading ? "Loading…" : "Load more documents"
+        message.stringValue = failed ? "Couldn’t load documents" : loading ? "Loading documents…" : !query.isEmpty ? "No matching documents" : "Make room for your next idea"
+        detail.stringValue = failed ? "Check your connection, then try again." : loading ? "Your workspace will be ready in a moment." : !query.isEmpty ? "Try a different title or a phrase from the document." : "Start a document, or open a Markdown file from your Mac."
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        let margin: CGFloat = bounds.width < 520 ? 24 : 36, width = max(1, bounds.width - margin * 2)
+        eyebrow.frame = NSRect(x: margin, y: 32, width: width, height: 14)
+        heading.frame = NSRect(x: margin - 2, y: 55, width: width, height: 40)
+        subtitle.frame = NSRect(x: margin, y: 104, width: width, height: 20)
+        create.frame = NSRect(x: margin, y: 142, width: 146, height: 32)
+        scroll.frame = NSRect(x: margin, y: 200, width: width, height: max(0, bounds.height - 224))
+        scroll.tile()
+        // A legacy scrollbar consumes width only after the document's height is
+        // known. Retile before the second pass so resizing never clips a card.
+        for _ in 0..<2 {
+            let available = scroll.contentSize.width, columns = max(1, Int((available + 16) / 256)), gap: CGFloat = 16
+            let cardWidth = (available - CGFloat(columns - 1) * gap) / CGFloat(columns)
+            for (index, card) in cards.enumerated() { card.frame = NSRect(x: CGFloat(index % columns) * (cardWidth + gap), y: CGFloat(index / columns) * 272, width: cardWidth, height: 256) }
+            let bottom = CGFloat((cards.count + columns - 1) / columns) * 272
+            more.frame = NSRect(x: (available - 230) / 2, y: bottom, width: 230, height: 32)
+            grid.frame = NSRect(x: 0, y: 0, width: available, height: max(scroll.contentSize.height, bottom + (more.isHidden ? 0 : 48)))
+            scroll.tile()
+        }
+        let top = min(270, max(205, bounds.height * 0.4))
+        message.frame = NSRect(x: margin, y: top, width: width, height: 30)
+        detail.frame = NSRect(x: margin + 12, y: top + 44, width: width - 24, height: 48)
+        retry.frame = NSRect(x: (bounds.width - 100) / 2, y: top + 104, width: 100, height: 32)
+    }
+}
+
 final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     let window: ArtifactEditorWindow
     let session: ArtifactEditingSession
@@ -6486,7 +6603,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let modes = NSToolbarItem(itemIdentifier: .init("reading"))
     let modeControl = NSSegmentedControl(labels: ["Edit", "Read"], trackingMode: .selectOne, target: nil, action: nil)
     let recovery = NSButton(title: "Save Copy…", target: nil, action: nil)
-    var documents: [(String, String)] = []
+    let gallery = ArtifactLibraryView(frame: .zero)
+    let projectPicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    var libraryProject: String
+    var libraryLoading = false
+    var libraryFailed = false
+    var libraryMore = false
+    var documents: [ArtifactLibraryDocument] = []
     var headings: [(String, NSRange)] = []
     var searchTimer: Timer?
     var renderTimer: Timer?
@@ -6514,6 +6637,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     init(launch: ArtifactLaunch, journalRoot: URL, cli: String? = nil, present: Bool = true) {
         session = ArtifactEditingSession(launch: launch, journalRoot: journalRoot)
         backend = ArtifactBackend(launch, cli: cli)
+        libraryProject = launch.project
         self.present = present
         window = ArtifactEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         super.init()
@@ -6528,6 +6652,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         session.writer = { [weak self] request, completion in self?.write(request, completion: completion) }
         load()
         refreshLibrary()
+        refreshProjects()
     }
     func buildUI() {
         let toolbar = NSToolbar(identifier: "artifact-writing")
@@ -6549,6 +6674,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         libraryTitle.font = .systemFont(ofSize: 12, weight: .semibold); libraryTitle.textColor = .secondaryLabelColor
         search.placeholderString = "Search notes"; search.delegate = self; search.controlSize = .regular
         search.toolTip = "Quick switch (⌘P)"
+        projectPicker.addItem(withTitle: libraryProject.components(separatedBy: "/").last?.replacingOccurrences(of: "named:", with: "") ?? libraryProject)
+        projectPicker.selectedItem?.representedObject = libraryProject
+        projectPicker.target = self; projectPicker.action = #selector(selectProject)
+        projectPicker.setAccessibilityLabel("Project"); projectPicker.toolTip = libraryProject
+        projectPicker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let home = NSButton(title: "All documents", target: self, action: #selector(returnToLibrary))
+        home.bezelStyle = .accessoryBar; home.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: nil); home.imagePosition = .imageLeading
         let new = NSButton(image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New note")!, target: self, action: #selector(newDocument))
         new.isBordered = false; new.toolTip = "New note (⌘N)"
         let header = NSStackView(views: [libraryTitle, NSView(), new]); header.spacing = 8
@@ -6560,13 +6692,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         table.dataSource = self; table.delegate = self; table.target = self; table.doubleAction = #selector(openSelection)
         table.setAccessibilityLabel("Notes")
         libraryScroll.documentView = table; libraryScroll.hasVerticalScroller = true; libraryScroll.autohidesScrollers = true; libraryScroll.drawsBackground = false
-        let side = NSStackView(views: [search, header, libraryScroll, open])
+        let side = NSStackView(views: [projectPicker, search, home, header, libraryScroll, open])
         side.orientation = .vertical; side.alignment = .leading; side.spacing = 16; side.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(side)
         NSLayoutConstraint.activate([
             side.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16), side.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -16),
             side.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 16), side.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -16),
-            search.widthAnchor.constraint(equalTo: side.widthAnchor), header.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)
+            projectPicker.widthAnchor.constraint(equalTo: side.widthAnchor), search.widthAnchor.constraint(equalTo: side.widthAnchor), header.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)
         ])
         recovery.target = self; recovery.action = #selector(exportCopy); recovery.toolTip = "Export your current text as Markdown (⌘⇧S)"
         reload.target = self; reload.action = #selector(reloadDocument); reload.toolTip = "Load the latest saved revision; a recovery copy keeps unsent edits"
@@ -6578,6 +6710,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
             page.widthAnchor.constraint(equalTo: paper.widthAnchor)
         ])
+        gallery.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(gallery); gallery.isHidden = true
+        NSLayoutConstraint.activate([
+            gallery.leadingAnchor.constraint(equalTo: paper.leadingAnchor), gallery.trailingAnchor.constraint(equalTo: paper.trailingAnchor),
+            gallery.topAnchor.constraint(equalTo: paper.topAnchor), gallery.bottomAnchor.constraint(equalTo: paper.bottomAnchor)
+        ])
+        gallery.create.target = self; gallery.create.action = #selector(newDocument)
+        gallery.retry.target = self; gallery.retry.action = #selector(retryLibrary)
+        gallery.more.target = self; gallery.more.action = #selector(moreDocuments)
         [scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
         configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
         text.isRichText = false; text.isEditable = false; text.allowsUndo = true; text.delegate = self
@@ -6655,6 +6795,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     @objc func formatCommand(_ sender: NSMenuItem) {
+        guard gallery.isHidden && session.ready else { return }
         if sender.keyEquivalent != "\r" { writeMode() }
         _ = command(sender.keyEquivalent, shift: sender.keyEquivalentModifierMask.contains(.shift))
     }
@@ -6698,12 +6839,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             session.launch.id = nil; session.savedTitle = ""; session.savedBody = ""
             loaded(); session.flush()
         } else {
-            loading = false; titleField.stringValue = "Your writing space"; titleField.isEditable = false
-            if focusMode { toggleFocus() }
-            status.stringValue = "Choose a note, open Markdown, or start with ⌘N."
+            loading = false; showLibrary()
         }
     }
     func loaded() {
+        gallery.isHidden = true; page.isHidden = false; setDocumentControls(true)
         loading = false; titleField.stringValue = session.title; titleField.isEditable = session.launch.file == nil
         text.string = session.body; bodyByteCount = session.body.utf8.count; text.isEditable = true; text.undoManager?.removeAllActions()
         text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -6939,7 +7079,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     @objc func modeChanged() { if (modeControl.selectedSegment == 1) != previewing { togglePreview() } }
     func togglePreview() {
-        guard session.ready else { return }; previewing.toggle()
+        guard session.ready && gallery.isHidden else { return }; previewing.toggle()
         modeControl.selectedSegment = previewing ? 1 : 0
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
         if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
@@ -7052,33 +7192,99 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             reader.layoutManager?.invalidateDisplay(forCharacterRange: range)
         }
     }
-    func refreshLibrary() {
-        listGeneration += 1; let generation = listGeneration
-        backend.request(["list", "--query", search.stringValue]) { [weak self] result in
-            guard let self, generation == self.listGeneration else { return }
+    func refreshProjects() {
+        backend.request(["projects"], command: "issue") { [weak self] result in
+            guard let self else { return }
             do {
-                let json = try JSONSerialization.jsonObject(with: result.get()) as? [String: Any]
-                self.documents = (json?["artifacts"] as? [[String: Any]] ?? []).compactMap { row in guard let id = row["id"] as? String, let title = row["title"] as? String else { return nil }; return (id, title) }
+                struct Projects: Decodable { let projects: [QuickIssueProject] }
+                let projects = try JSONDecoder().decode(Projects.self, from: result.get()).projects
+                let names = Dictionary(grouping: projects, by: \.name)
+                self.projectPicker.removeAllItems()
+                for project in projects {
+                    let duplicate = (names[project.name]?.count ?? 0) > 1
+                    self.projectPicker.addItem(withTitle: duplicate ? project.id : project.name)
+                    self.projectPicker.lastItem?.representedObject = project.id
+                    self.projectPicker.lastItem?.toolTip = project.id
+                }
+                if !projects.contains(where: { $0.id == self.libraryProject }) {
+                    self.projectPicker.addItem(withTitle: self.libraryProject)
+                    self.projectPicker.lastItem?.representedObject = self.libraryProject
+                }
+                self.projectPicker.select(self.projectPicker.itemArray.first { $0.representedObject as? String == self.libraryProject })
+                self.renderLibrary()
+            } catch {
+                self.projectPicker.toolTip = "Couldn’t load projects. Choose All documents to retry."
+            }
+        }
+    }
+    @objc func selectProject() {
+        guard let project = projectPicker.selectedItem?.representedObject as? String, project != libraryProject else { return }
+        session.flush(); libraryProject = project; projectPicker.toolTip = project
+        searchTimer?.invalidate(); search.stringValue = ""
+        showLibrary(); refreshLibrary()
+    }
+    func setDocumentControls(_ enabled: Bool) {
+        modeControl.isEnabled = enabled; outline.isEnabled = enabled
+        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "format" }?.isEnabled = enabled
+    }
+    @objc func showLibrary() {
+        session.flush(); gallery.isHidden = false; page.isHidden = true
+        titleField.stringValue = "Your writing space"; titleField.isEditable = false
+        setDocumentControls(false)
+        if focusMode { toggleFocus() }
+        table.deselectAll(nil); renderLibrary(); window.makeFirstResponder(search)
+    }
+    @objc func retryLibrary() { refreshLibrary(); refreshProjects() }
+    @objc func returnToLibrary() { showLibrary(); retryLibrary() }
+    @objc func moreDocuments() { if !libraryLoading && libraryMore { refreshLibrary(append: true) } }
+    func renderLibrary() {
+        gallery.update(documents, project: projectPicker.titleOfSelectedItem ?? libraryProject, query: search.stringValue, loading: libraryLoading, failed: libraryFailed, hasMore: libraryMore) { [weak self] id in self?.openDocument(id) }
+    }
+    func refreshLibrary(append: Bool = false) {
+        listGeneration += 1; let generation = listGeneration
+        libraryLoading = true; libraryFailed = false
+        if !append { documents = []; libraryMore = false; table.reloadData(); gallery.scroll.contentView.scroll(to: .zero) }
+        renderLibrary()
+        let context = ArtifactLaunch(project: libraryProject, host: session.launch.host)
+        ArtifactBackend(context, cli: backend.cli).request(["list", "--query", search.stringValue, "--offset", String(documents.count)]) { [weak self] result in
+            guard let self, generation == self.listGeneration else { return }
+            self.libraryLoading = false
+            do {
+                struct Response: Decodable { let artifacts: [ArtifactLibraryDocument]; let more: Bool? }
+                let response = try JSONDecoder().decode(Response.self, from: result.get())
+                self.documents += response.artifacts.filter { row in !self.documents.contains { $0.id == row.id } }
+                self.libraryMore = response.more == true
                 self.table.reloadData()
-            } catch { self.search.toolTip = error.localizedDescription }
+            } catch { self.libraryFailed = true }
+            self.renderLibrary()
         }
     }
     func numberOfRows(in tableView: NSTableView) -> Int { documents.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("artifact-row")
         let label = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField ?? NSTextField(labelWithString: "")
-        label.identifier = identifier; label.stringValue = documents[row].1; label.lineBreakMode = .byTruncatingTail; label.font = .systemFont(ofSize: 13)
+        label.identifier = identifier; label.stringValue = documents[row].title; label.lineBreakMode = .byTruncatingTail; label.font = .systemFont(ofSize: 13)
         return label
     }
     func tableViewSelectionDidChange(_ notification: Notification) { if table.selectedRow >= 0 { openSelection() } }
     @objc func openSelection() {
         guard documents.indices.contains(table.selectedRow) else { return }
-        let doc = documents[table.selectedRow]
-        if doc.0 == session.launch.id { window.makeFirstResponder(text); return }
-        session.flush(); onOpen(ArtifactLaunch(project: session.launch.project, id: doc.0, host: session.launch.host))
+        openDocument(documents[table.selectedRow].id)
+    }
+    func openDocument(_ id: String) {
+        if id == session.launch.id && libraryProject == session.launch.project && session.ready {
+            revealDocument(); return
+        }
+        session.flush(); onOpen(ArtifactLaunch(project: libraryProject, id: id, host: session.launch.host))
+    }
+    func revealDocument() {
+        guard session.ready else { return }
+        gallery.isHidden = true; page.isHidden = false; setDocumentControls(true)
+        titleField.stringValue = session.title; titleField.isEditable = session.launch.file == nil
+        window.makeFirstResponder(previewing ? reader : text)
     }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        if control === search, selector == #selector(NSResponder.insertNewline(_:)), !documents.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); openSelection(); return true }
+        if control === search, selector == #selector(NSResponder.insertNewline(_:)), !documents.isEmpty { openDocument(documents[0].id); return true }
         if control === search, selector == #selector(NSResponder.moveDown(_:)), !documents.isEmpty { window.makeFirstResponder(table); table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); return true }
         return false
     }
@@ -7086,15 +7292,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         focusMode.toggle()
         if focusMode { split.removeArrangedSubview(sidebar); sidebar.removeFromSuperview() }
         else { split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0) }
-        if session.ready { window.makeFirstResponder(previewing ? reader : text) }
+        if session.ready && gallery.isHidden { window.makeFirstResponder(previewing ? reader : text) }
         updateStatus()
     }
-    @objc func newDocument() { onOpen(ArtifactLaunch(project: session.launch.project, host: session.launch.host, title: "Untitled artifact")) }
+    @objc func newDocument() { onOpen(ArtifactLaunch(project: libraryProject, host: session.launch.host, title: "Untitled artifact")) }
     @objc func openFile() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.plainText]; panel.allowsOtherFileTypes = true; panel.allowsMultipleSelection = true
         panel.beginSheetModal(for: window) { [weak self] result in
             guard result == .OK, let self else { return }
-            for url in panel.urls { self.onOpen(ArtifactLaunch(project: self.session.launch.project, file: url.resolvingSymlinksInPath().path)) }
+            for url in panel.urls { self.onOpen(ArtifactLaunch(project: self.libraryProject, file: url.resolvingSymlinksInPath().path)) }
         }
     }
     @objc func exportCopy() {
@@ -7155,9 +7361,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case ("f", true): toggleFocus()
         case ("e", false): togglePreview()
         case ("s", false): session.flush()
-        case ("s", true): exportCopy()
+        case ("s", true): if gallery.isHidden && session.ready { exportCopy() }
         case ("w", false): window.performClose(nil)
         case ("f", false), ("g", false), ("g", true):
+            if !gallery.isHidden { if focusMode { toggleFocus() }; window.makeFirstResponder(search); search.selectText(nil); return true }
             let target = previewing ? reader : text
             window.makeFirstResponder(target)
             let item = NSMenuItem(); item.tag = key == "f" ? NSTextFinder.Action.showFindInterface.rawValue : shift ? NSTextFinder.Action.previousMatch.rawValue : NSTextFinder.Action.nextMatch.rawValue
@@ -7265,7 +7472,7 @@ final class ArtifactEditors: NSObject, NSApplicationDelegate {
         if let existing = windows.first(where: { editor in
             let previous = editor.session.launch
             return launch.file != nil ? previous.file == launch.file : launch.id != nil && previous.id == launch.id && previous.project == launch.project && previous.host == launch.host
-        }) { existing.show(); return }
+        }) { existing.revealDocument(); existing.show(); return }
         let editor = NativeArtifactEditor(launch: launch, journalRoot: root)
         editor.onOpen = { [weak self] launch in self?.open(launch) }
         editor.onClose = { [weak self, weak editor] in self?.windows.removeAll { $0 === editor && !$0.session.dirty } }
