@@ -55,6 +55,7 @@ fn definition() -> Definition {
         harness: "codex".into(),
         model: "gpt-6-astra".into(),
         machines: Vec::new(),
+        all_machines: false,
     }
 }
 fn request(op: JobOperation) -> Request {
@@ -142,7 +143,9 @@ fn old_job_history_and_ownership_survive_migration_without_new_tasks() {
         )
         .unwrap();
     f.store.assign_job(&run.id, "remote", "pool").unwrap();
-    let columns = RUN_COLUMNS.replace(",worker_id", "");
+    let columns = RUN_COLUMNS
+        .replace(",worker_id", "")
+        .replace(",parent_run_id,target_machine", "");
     // Recreate the pre-change table, including its issue-required CHECK.
     f.store.db.execute_batch("CREATE TEMP TABLE old_runs AS SELECT * FROM scheduled_job_runs; CREATE TEMP TABLE old_owners AS SELECT * FROM scheduled_job_owners; DROP TABLE scheduled_job_owners; DROP TABLE scheduled_job_runs;").unwrap();
     let old_schema = SCHEMA.replace(",worker_id TEXT", "").replace("CHECK(state<>'skipped' OR (task_number IS NULL AND finished_at IS NOT NULL))", "CHECK((state='skipped' AND task_number IS NULL AND finished_at IS NOT NULL) OR (state<>'skipped' AND task_number IS NOT NULL))");
@@ -1397,6 +1400,16 @@ fn calendar_history_cursor_handles_equal_times_and_deleted_jobs() {
 #[test]
 fn machine_targets_are_optional_ordered_and_validated() {
     let legacy = serde_json::to_value(definition()).unwrap();
+    assert!(legacy.get("all_machines").is_none());
+    let mut conflicting = legacy.clone();
+    conflicting["all_machines"] = json!(true);
+    conflicting["machines"] = json!(["node-a"]);
+    assert!(
+        serde_json::from_value::<Definition>(conflicting)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
     assert!(legacy.get("machines").is_none());
     for machines in [json!(["node-a", "node-b"]), json!([])] {
         let mut value = legacy.clone();

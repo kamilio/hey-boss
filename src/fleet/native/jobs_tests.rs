@@ -77,6 +77,7 @@ impl Fixture {
                 harness: "codex".into(),
                 model: "exact-model".into(),
                 machines: Vec::new(),
+                all_machines: false,
             },
             markdown: MARKDOWN.into(),
             enabled: false,
@@ -710,4 +711,302 @@ fn ordered_machine_targets_control_dispatch_and_fallback() {
             "targets={targets:?}, failure={failure}"
         );
     }
+}
+
+#[test]
+fn all_machines_fans_out_once_pins_offline_targets_and_stops_as_a_group() {
+    let mut f = Fixture::new();
+    f.op(Operation::Create {
+        id: "maintenance".into(),
+        definition: serde_json::from_value(json!({"name":"Maintenance","cron":"* * * * *","timezone":"UTC","harness":"codex","model":"exact-model","all_machines":true})).unwrap(),
+        markdown: MARKDOWN.into(), enabled: false,
+    });
+    let root = f.op(Operation::RunNow {
+        id: "maintenance".into(),
+    })["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut machines = f.machines();
+    let mut remote = machines[0].clone();
+    remote["node"] = json!("offline");
+    remote["state"] = json!("disconnected");
+    machines.push(remote);
+    schedule(&f.ctx, &machines).unwrap();
+    schedule(&f.ctx, &machines).unwrap();
+    let history = f.op(Operation::History {
+        id: "maintenance".into(),
+        before: None,
+        limit: 100,
+    });
+    let runs = history["runs"].as_array().unwrap();
+    assert_eq!(
+        runs.len(),
+        3,
+        "one occurrence plus two machine executions; ticks cannot duplicate them"
+    );
+    let children: Vec<_> = runs.iter().filter(|r| r["parent_run_id"] == root).collect();
+    assert_eq!(children.len(), 2);
+    let offline = children
+        .iter()
+        .find(|r| r["target_machine"] == "offline")
+        .unwrap();
+    assert!(
+        f.store
+            .job_owner(offline["id"].as_str().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        children
+            .iter()
+            .filter(|r| f
+                .store
+                .job_owner(r["id"].as_str().unwrap())
+                .unwrap()
+                .is_some())
+            .count(),
+        1
+    );
+    let overlap = f.op(Operation::RunNow {
+        id: "maintenance".into(),
+    });
+    assert_eq!(overlap["run"]["reason"], "overlap");
+    let mut newcomer = machines[0].clone();
+    newcomer["node"] = json!("newcomer");
+    machines.push(newcomer);
+    machines[1]["state"] = json!("connected");
+    schedule(&f.ctx, &machines).unwrap();
+    assert_eq!(
+        f.store
+            .job_owner(offline["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .0,
+        "offline"
+    );
+    let history = f.op(Operation::History {
+        id: "maintenance".into(),
+        before: None,
+        limit: 100,
+    });
+    assert_eq!(
+        history["runs"].as_array().unwrap().len(),
+        4,
+        "new machines do not join an existing occurrence"
+    );
+    f.op(Operation::Stop {
+        id: "maintenance".into(),
+        run_id: root.clone(),
+    });
+    for child in children {
+        let id = child["id"].as_str().unwrap();
+        let (node, generation, revoking) = f.store.job_owner(id).unwrap().unwrap();
+        assert!(revoking);
+        f.store
+            .accept_job_report(
+                &node,
+                &Report {
+                    run_id: id.into(),
+                    generation,
+                    state: "released".into(),
+                    session_id: None,
+                    cwd: None,
+                    started_at: None,
+                    finished_at: Some(now()),
+                    reason: None,
+                },
+            )
+            .unwrap();
+    }
+    schedule(&f.ctx, &machines).unwrap();
+    let run = f.op(Operation::Run {
+        id: "maintenance".into(),
+        run_id: root,
+    });
+    assert_eq!(run["run"]["state"], "cancelled");
+}
+
+#[test]
+fn all_machines_aggregates_independent_outcomes_and_preserves_execution_snapshots() {
+    for failure in [false, true] {
+        let mut f = Fixture::new();
+        let definition:Definition=serde_json::from_value(json!({"name":"Maintenance","cron":"* * * * *","timezone":"UTC","harness":"codex","model":"exact-model","all_machines":true})).unwrap();
+        f.op(Operation::Create {
+            id: "all".into(),
+            definition: definition.clone(),
+            markdown: MARKDOWN.into(),
+            enabled: false,
+        });
+        let root = f.op(Operation::RunNow { id: "all".into() })["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        schedule(&f.ctx, &[]).unwrap();
+        let mut machines = f.machines();
+        let mut other = machines[0].clone();
+        other["node"] = json!("other");
+        machines.push(other);
+        schedule(&f.ctx, &machines).unwrap();
+        f.op(Operation::Edit {
+            id: "all".into(),
+            if_revision: 1,
+            definition: Definition {
+                all_machines: false,
+                ..definition
+            },
+            markdown: None,
+        });
+        let children = f
+            .store
+            .active_job_runs()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.parent_run_id.as_deref() == Some(&root))
+            .collect::<Vec<_>>();
+        assert_eq!(children.len(), 2);
+        for (i, child) in children.iter().enumerate() {
+            assert!(child.snapshot.definition.all_machines);
+            let (node, generation, _) = f.store.job_owner(&child.id).unwrap().unwrap();
+            f.store
+                .accept_job_report(
+                    &node,
+                    &Report {
+                        run_id: child.id.clone(),
+                        generation,
+                        state: if failure && i == 0 {
+                            "failed"
+                        } else {
+                            "succeeded"
+                        }
+                        .into(),
+                        session_id: Some(format!("session-{i}")),
+                        cwd: None,
+                        started_at: Some(now()),
+                        finished_at: Some(now() + 1),
+                        reason: None,
+                    },
+                )
+                .unwrap();
+            if i == 0 {
+                f.store.reconcile_job_groups().unwrap();
+                assert_eq!(
+                    f.op(Operation::Run {
+                        id: "all".into(),
+                        run_id: root.clone()
+                    })["run"]["state"],
+                    "running"
+                );
+            }
+        }
+        f.store.reconcile_job_groups().unwrap();
+        let job = f.op(Operation::View { id: "all".into() });
+        assert!(job["job"]["active_run"].is_null());
+        assert_eq!(job["job"]["last_run"]["id"], root);
+        assert_eq!(
+            job["job"]["last_run"]["state"],
+            if failure { "failed" } else { "succeeded" }
+        );
+        assert_eq!(job["job"]["last_run"]["reason"], "2 of 2 machines finished");
+    }
+}
+
+#[test]
+fn stopping_all_machines_before_dispatch_cancels_every_waiting_execution() {
+    let mut f = Fixture::new();
+    f.op(Operation::Create{id:"waiting-all".into(),definition:serde_json::from_value(json!({"name":"Maintenance","cron":"* * * * *","timezone":"UTC","harness":"codex","model":"exact-model","all_machines":true})).unwrap(),markdown:MARKDOWN.into(),enabled:false});
+    let root = f.op(Operation::RunNow {
+        id: "waiting-all".into(),
+    })["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.store
+        .expand_job_machines(&root, &["down".into(), "down".into(), "also-down".into()])
+        .unwrap();
+    let stopped = f.op(Operation::Stop {
+        id: "waiting-all".into(),
+        run_id: root,
+    });
+    assert_eq!(stopped["run"]["state"], "cancelled");
+    let history = f.op(Operation::History {
+        id: "waiting-all".into(),
+        before: None,
+        limit: 100,
+    });
+    assert_eq!(history["runs"].as_array().unwrap().len(), 3);
+    assert!(
+        history["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["state"] == "cancelled")
+    );
+}
+
+#[test]
+fn all_machines_launches_one_real_session_per_machine_and_never_replays() {
+    if isolated(
+        "all_machines_launches_one_real_session_per_machine_and_never_replays",
+        &[],
+    ) {
+        return;
+    }
+    let mut supervisor = Fixture::new();
+    let mut companion = Fixture::new();
+    companion.ctx.node = "other".into();
+    companion
+        .ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE issue_workers SET machine='other' WHERE id='pool'",
+            [],
+        )
+        .unwrap();
+    supervisor.op(Operation::Create{id:"fanout-runtime".into(),definition:serde_json::from_value(json!({"name":"Maintenance","cron":"* * * * *","timezone":"UTC","harness":"codex","model":"exact-model","all_machines":true})).unwrap(),markdown:MARKDOWN.into(),enabled:false});
+    let root = supervisor.op(Operation::RunNow {
+        id: "fanout-runtime".into(),
+    })["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut machines = supervisor.machines();
+    machines.extend(companion.machines());
+    schedule(&supervisor.ctx, &machines).unwrap();
+    for ctx in [&supervisor.ctx, &companion.ctx] {
+        let dispatch = supervisor
+            .store
+            .job_dispatches(&ctx.node)
+            .unwrap()
+            .remove(0);
+        assert_eq!(dispatch.run.parent_run_id.as_deref(), Some(root.as_str()));
+        assert_eq!(
+            dispatch.run.target_machine.as_deref(),
+            Some(ctx.node.as_str())
+        );
+        receive(ctx, &dispatch, MARKDOWN).unwrap();
+        execute(ctx, &dispatch).unwrap();
+        let saved = reports(ctx).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].state, "succeeded");
+        assert!(saved[0].session_id.is_some());
+        let before = saved[0].clone();
+        execute(ctx, &dispatch).unwrap();
+        assert_eq!(reports(ctx).unwrap()[0], before);
+        supervisor
+            .store
+            .accept_job_report(&ctx.node, &before)
+            .unwrap();
+        acknowledge(ctx, &before).unwrap();
+    }
+    schedule(&supervisor.ctx, &machines).unwrap();
+    assert_eq!(
+        supervisor.op(Operation::Run {
+            id: "fanout-runtime".into(),
+            run_id: root
+        })["run"]["state"],
+        "succeeded"
+    );
+    assert!(supervisor.store.active_job_runs().unwrap().is_empty());
 }

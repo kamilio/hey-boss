@@ -122,21 +122,37 @@ impl Store {
         if run.snapshot.project_id != project || run.snapshot.job_id != job {
             return Err(Error::new("not_found", "Run does not belong to this job"));
         }
-        if matches!(run.state.as_str(), "pending" | "running") {
-            tx.execute(
-                "UPDATE scheduled_job_owners SET revoking=1,stop_requested=1 WHERE run_id=?1",
-                [id],
-            )?;
-            let assigned: bool = tx.query_row(
-                "SELECT node IS NOT NULL FROM scheduled_job_owners WHERE run_id=?1",
-                [id],
-                |r| r.get(0),
-            )?;
-            if !assigned {
-                complete(&tx, &run, "cancelled", Some("Stopped before dispatch"), now)?;
+        let runs = tx.query_collect(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE id=?1 OR parent_run_id=?1"
+            ),
+            [id],
+            run_row,
+        )?;
+        for run in runs {
+            let id = &run.id;
+            if matches!(run.state.as_str(), "pending" | "running") {
+                tx.execute(
+                    "UPDATE scheduled_job_owners SET revoking=1,stop_requested=1 WHERE run_id=?1",
+                    [id],
+                )?;
+                let assigned: bool = tx.query_row(
+                    "SELECT node IS NOT NULL FROM scheduled_job_owners WHERE run_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                let group: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE parent_run_id=?1)",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                if !assigned && !group {
+                    complete(&tx, &run, "cancelled", Some("Stopped before dispatch"), now)?;
+                }
             }
         }
         tx.commit()?;
+        self.reconcile_job_groups()?;
         Ok(())
     }
     pub(crate) fn accept_job_report(&self, node: &str, report: &Report) -> Result<bool> {
@@ -270,4 +286,89 @@ fn complete(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: 
     )?;
     super::super::super::blockers::reconcile(db, &run.snapshot.project_id, Some(&actor), now)?;
     Ok(())
+}
+
+impl Store {
+    /// Freeze the fleet once per occurrence. The transaction publishes every
+    /// child together; retries and supervisor restarts cannot duplicate targets.
+    pub(crate) fn expand_job_machines(&self, id: &str, nodes: &[String]) -> Result<()> {
+        authority(&self.db)?;
+        let tx =
+            crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let run = get_run(&tx, id)?;
+        if run.parent_run_id.is_some()
+            || !run.snapshot.definition.all_machines
+            || run.state != "pending"
+        {
+            return Ok(());
+        }
+        let expanded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE parent_run_id=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if expanded || nodes.is_empty() {
+            return Ok(());
+        }
+        let stopped: bool = tx.query_row(
+            "SELECT stop_requested FROM scheduled_job_owners WHERE run_id=?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        if stopped {
+            return Ok(());
+        }
+        for node in nodes {
+            identifier(node, "machine node ID", 128)?;
+            let child = super::super::super::worker::random_id()?;
+            tx.execute("INSERT OR IGNORE INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,created_at,snapshot,parent_run_id,target_machine) SELECT ?2,job_id,job_revision,project_id,scheduled_at,trigger,request_key,'pending',created_at,snapshot,id,?3 FROM scheduled_job_runs WHERE id=?1",params![id,child,node])?;
+            tx.execute("INSERT OR IGNORE INTO scheduled_job_owners(run_id,generation) SELECT id,1 FROM scheduled_job_runs WHERE id=?1",[child])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn reconcile_job_groups(&self) -> Result<()> {
+        authority(&self.db)?;
+        let tx =
+            crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
+        let roots=tx.query_collect("SELECT id FROM scheduled_job_runs WHERE parent_run_id IS NULL AND state IN('pending','running') AND json_extract(snapshot,'$.definition.all_machines')=1",[],|r|r.get::<_,String>(0))?;
+        for id in roots {
+            let children = tx.query_collect(
+                &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE parent_run_id=?1"),
+                [&id],
+                run_row,
+            )?;
+            if children.is_empty() {
+                continue;
+            }
+            let done = children
+                .iter()
+                .filter(|r| !matches!(r.state.as_str(), "pending" | "running"))
+                .count();
+            let reason = format!("{} of {} machines finished", done, children.len());
+            let started = children.iter().filter_map(|r| r.started_at).min();
+            if done == children.len() {
+                let stopped: bool = tx.query_row(
+                    "SELECT stop_requested FROM scheduled_job_owners WHERE run_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                let state = if stopped {
+                    "cancelled"
+                } else if children.iter().any(|r| r.state == "failed") {
+                    "failed"
+                } else if children.iter().any(|r| r.state == "cancelled") {
+                    "cancelled"
+                } else {
+                    "succeeded"
+                };
+                let finished = children.iter().filter_map(|r| r.finished_at).max().unwrap();
+                tx.execute("UPDATE scheduled_job_runs SET state=?2,reason=?3,started_at=?4,finished_at=?5 WHERE id=?1",params![id,state,reason,started,finished])?;
+            } else {
+                tx.execute("UPDATE scheduled_job_runs SET state=?2,reason=?3,started_at=?4 WHERE id=?1 AND (state<>?2 OR reason IS NOT ?3 OR started_at IS NOT ?4)",params![id,if started.is_some(){"running"}else{"pending"},reason,started])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

@@ -35,6 +35,23 @@ async (page) => {
  await page.waitForFunction(()=>document.querySelector('#job-placement')?.value==='auto'&&document.querySelector('.job-panel-subtitle')?.textContent.includes('Revision 2'));
  await page.reload();await page.waitForSelector('#job-placement');
  check(await page.locator('#job-placement').inputValue()==='auto','Restoring automatic persists');
+ await page.locator('#job-placement').selectOption('all');
+ check(await page.locator('#job-targets').isHidden(),'All machines hides ordered targets');
+ check(await page.locator('#job-all-help').isVisible(),'All machines explains offline waiting');
+ await page.getByRole('button',{name:'Save changes',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Revision 3'));
+ await page.reload();await page.waitForSelector('#job-placement');
+ check(await page.locator('#job-placement').inputValue()==='all','All machines persists after reload');
+ await page.locator('#job-placement').scrollIntoViewIfNeeded();
+ await page.screenshot({path:'/tmp/jobs-all-machines-mobile.png'});
+ await page.getByRole('button',{name:'Run now',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#job-history')?.textContent.includes('All machines'));
+ await page.getByRole('button',{name:'Refresh run history',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#job-history')?.textContent.includes('0 of 1 machines finished'));
+ check((await page.locator('#job-history .job-run').count())===2,'History shows the occurrence and machine execution');
+ await page.getByRole('button',{name:'Stop current run',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#job-stop').hidden);
+ check((await page.locator('#job-history').textContent()).includes('cancelled'),'Stop cancels waiting machine execution');
  check(errors.length===0,'No JavaScript errors');
- return {ok:true,checks:'default, offline selection, reorder, save/reload, automatic reset, desktop/mobile light/dark'};
+ return {ok:true,checks:'default, offline selection, reorder, save/reload, automatic reset, all machines save/reload/history/stop, desktop/mobile light/dark'};
 }

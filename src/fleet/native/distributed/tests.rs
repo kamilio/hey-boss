@@ -344,6 +344,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             harness: "codex".into(),
             model: "gpt-6-astra".into(),
             machines: Vec::new(),
+            all_machines: false,
         },
         markdown: include_str!("../../../jobs/fixtures/original.md").into(),
         enabled: true,
@@ -1640,4 +1641,21 @@ fn capture_commits_with_local_edits_and_retries_after_storage_restart() {
     assert_eq!(export(&db, &mut engine).unwrap(), 2);
     assert_eq!(engine.head().unwrap(), 2);
     assert!(install(&db, "different-node").is_err());
+}
+
+#[test]
+fn upgrading_job_history_view_refreshes_machine_metadata_capture() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    db.execute_batch("DROP VIEW distributed_job_runs; CREATE VIEW distributed_job_runs AS SELECT sequence,id FROM distributed_job_attempts;
+        DROP TRIGGER distributed_capture_scheduled_job_runs_INSERT;
+        CREATE TRIGGER distributed_capture_scheduled_job_runs_INSERT AFTER INSERT ON scheduled_job_runs BEGIN SELECT 1; END;") .unwrap();
+    install(&db, "a").unwrap();
+    let columns = replica::rows(&db, "PRAGMA table_info(distributed_job_runs)", &[]).unwrap();
+    assert!(columns.iter().any(|c| c["name"] == "parent_run_id"));
+    assert!(columns.iter().any(|c| c["name"] == "target_machine"));
+    let trigger:String=db.query_row("SELECT sql FROM sqlite_master WHERE name='distributed_capture_scheduled_job_runs_INSERT'",[],|r|r.get(0)).unwrap();
+    assert!(trigger.contains("parent_run_id"));
+    assert!(trigger.contains("target_machine"));
 }

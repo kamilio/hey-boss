@@ -512,6 +512,7 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             acknowledge(ctx, &report)?;
         }
     }
+    store.reconcile_job_groups()?;
     for occurrence in store.due_jobs(now(), 100)? {
         if let Err(error) = store.enqueue_job(&occurrence)
             && error.code != "conflict"
@@ -520,6 +521,18 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         }
     }
     for run in store.active_job_runs()? {
+        if run.snapshot.definition.all_machines && run.parent_run_id.is_none() {
+            let nodes = machines
+                .iter()
+                .filter_map(|m| m["node"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            store.expand_job_machines(&run.id, &nodes)?;
+        }
+    }
+    for run in store.active_job_runs()? {
+        if run.snapshot.definition.all_machines && run.parent_run_id.is_none() {
+            continue;
+        }
         if let Some((node, generation, revoking)) = store.job_owner(&run.id)? {
             if !revoking
                 && run.started_at.is_none()
@@ -532,7 +545,9 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         }
         let eligible = |m| connected(m) && eligible_workers(m, &run).next().is_some();
         let targets = &run.snapshot.definition.machines;
-        let machine = if targets.is_empty() {
+        let machine = if let Some(node) = &run.target_machine {
+            machines.iter().find(|m| m["node"] == *node && eligible(*m))
+        } else if targets.is_empty() {
             machines.iter().find(|m| eligible(*m))
         } else {
             targets
@@ -550,7 +565,11 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 worker,
             )?;
         } else {
-            let reason = if targets.is_empty() {
+            let reason = if let Some(node) = &run.target_machine {
+                format!(
+                    "Waiting for an eligible worker on machine {node}. This execution cannot move to another machine."
+                )
+            } else if targets.is_empty() {
                 "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.".to_owned()
             } else {
                 format!(
@@ -561,6 +580,7 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             store.unavailable_job(&run.id, &reason)?;
         }
     }
+    store.reconcile_job_groups()?;
     for dispatch in store.job_dispatches(&ctx.node)? {
         let markdown = store.job_instructions(&dispatch.run.snapshot)?;
         receive(ctx, &dispatch, &markdown)?;
