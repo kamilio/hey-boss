@@ -40,6 +40,7 @@ func audit() {
         if state.contains("empty") { ui.input.string = "" }
         if state.contains("success") { ui.succeeded = true; ui.context.stringValue = "Created #42 in Visual" }
         if state.contains("compact") { ui.window.setContentSize(NSSize(width: 520, height: ui.window.frame.height)) }
+        if state.contains("command") { ui.showShortcuts(true) }
         ui.updateEnabled(); ui.layout()
         withExtendedLifetime(ui) { app.run() }; return
     }
@@ -372,6 +373,29 @@ func auditNativeQuickIssue() {
     ui.open(cli: nil); precondition(ui.ready && ui.current == nil)
     precondition(ui.canvas.bounds.width == ui.window.frame.width && ui.canvas.bounds.height == ui.window.frame.height, "Glass content must fill the quick-add panel")
     ui.current = projects[1]; ui.input.string = "Title"; ui.changed()
+    precondition(ui.mediaHint.stringValue == "⌘V Attach image", "Only the attachment hint belongs below the editor")
+    let destination = ui.context.attributedStringValue
+    let projectRange = (destination.string as NSString).range(of: projects[1].name)
+    let destinationFont = destination.attribute(.font, at: projectRange.location, effectiveRange: nil) as! NSFont
+    precondition(NSFontManager.shared.traits(of: destinationFont).contains(.boldFontMask), "Emphasize the destination project")
+    precondition(ui.bottom.frame.height == ui.submit.frame.height && ui.bottom.bezelStyle == ui.submit.bezelStyle, "Footer actions share one native button style")
+    let actionFrames = [ui.bottom.frame, ui.submit.frame]
+    func commandHeld(_ held: Bool) {
+        let event = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: held ? .command : [], timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55)!
+        ui.window.sendEvent(event)
+    }
+    commandHeld(true)
+    precondition(ui.submit.title == "Create  ⌘↵" && ui.bottom.title == "Add to bottom  ⌘⇧B", "Holding Command reveals each shortcut on its button")
+    precondition([ui.bottom.frame, ui.submit.frame] == actionFrames, "Shortcut disclosure must not shift actions")
+    commandHeld(false)
+    precondition(ui.submit.title == "Create" && ui.bottom.title == "Add to bottom", "Releasing Command hides shortcuts")
+    ui.bottom.performClick(nil)
+    precondition(ui.bottom.state == .on && ui.bottom.title == "✓ Add to bottom", "The queue toggle visibly confirms its selected state")
+    let toggle = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "B", charactersIgnoringModifiers: "b", isARepeat: false, keyCode: 11)!
+    ui.window.sendEvent(toggle)
+    precondition(ui.bottom.state == .off, "The displayed queue shortcut toggles the same control")
+    commandHeld(true); ui.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification))
+    precondition(!ui.bottom.showsShortcut && !ui.submit.showsShortcut, "Losing focus clears held-key hints")
     let compactHeight = ui.window.frame.height
     let originalTop = ui.window.frame.maxY
     ui.window.makeFirstResponder(ui.input)
@@ -477,14 +501,15 @@ func auditNativeQuickIssue() {
             ui.window.appearance?.performAsCurrentDrawingAppearance {
                 ui.canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
             }
-            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "saving", "success", "compact", "multiline", "multiline-projects", "multiline-images", "multiline-compact", "scrolling"] {
+            for state in ["empty", "empty-command", "command", "selected-command", "loading", "projects", "error", "long", "images", "image-error", "saving", "saving-command", "success", "compact", "compact-command", "multiline", "multiline-projects", "multiline-images", "multiline-compact", "scrolling"] {
                 ui.images = []; ui.rebuildImages()
                 ui.window.setContentSize(NSSize(width: state.contains("compact") ? 520 : 680, height: ui.window.frame.height))
-                ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
-                ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
-                ui.input.string = state == "empty" ? "" : "Fix reconnect @po"
+                ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.showDestination(projects[1])
+                ui.showShortcuts(state.contains("command")); ui.bottom.state = state == "selected-command" ? .on : .off
+                ui.saving = state.hasPrefix("saving"); ui.succeeded = state == "success"; ui.ready = state != "loading"
+                ui.input.string = state.hasPrefix("empty") ? "" : "Fix reconnect @po"
                 if state == "loading" { ui.input.string = ""; ui.context.stringValue = "Loading projects…" }
-                if state == "saving" { ui.input.string = "Fix reconnect"; ui.context.stringValue = "Creating in poe-code…" }
+                if state.hasPrefix("saving") { ui.input.string = "Fix reconnect"; ui.context.stringValue = "Creating in poe-code…" }
                 if state == "success" { ui.input.string = ""; ui.context.stringValue = "Created #7 in poe-code" }
                 if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.string).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
                 if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.string = "Fix reconnect @missing" }
@@ -510,6 +535,8 @@ func auditNativeQuickIssue() {
                 if state == "image-error" { ui.fail("Project is unavailable. Nothing was created. You can edit and try again.") }
 
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
+                if !ui.succeeded { precondition(ui.context.frame.maxX <= ui.bottom.frame.minX && ui.bottom.frame.maxX < ui.submit.frame.minX, "Destination and buttons stay separated even at compact widths") }
+                if !ui.submit.isEnabled { precondition(ui.submit.bezelColor == nil, "Disabled Create uses a neutral native surface") }
                 if !ui.succeeded { precondition(ui.inputScroll.frame.maxY <= ui.canvas.bounds.height && ui.inputScroll.frame.minY > ui.mediaHint.frame.maxY, "Editor and hint never overlap") }
                 if !ui.picker.isHidden { precondition(ui.inputScroll.frame.minY > ui.heading.frame.maxY && ui.picker.frame.minY > ui.hint.frame.maxY) }
                 precondition(ui.window.frame.height <= (ui.window.screen?.visibleFrame.height ?? 900) - 24, "Expanded content stays within the display")

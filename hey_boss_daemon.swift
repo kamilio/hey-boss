@@ -4063,6 +4063,7 @@ struct QuickIssueImage {
 }
 
 final class QuickIssuePanel: NSPanel {
+    var commandChanged: ((Bool) -> Void)?
     var toggleBottom: (() -> Void)?
     var submitIssue: (() -> Void)?
     var pasteImage: (() -> Bool)?
@@ -4096,8 +4097,41 @@ final class QuickIssuePanel: NSPanel {
         return super.performKeyEquivalent(with: event)
     }
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .flagsChanged { commandChanged?(event.modifierFlags.contains(.command)) }
         if event.type == .keyDown && performKeyEquivalent(with: event) { return }
         super.sendEvent(event)
+    }
+}
+
+/// Use the app's native capsule buttons, with shortcuts inside their action.
+/// Fixed button widths keep the footer still while Command is held.
+final class QuickIssueButton: ActionButton {
+    let shortcut: String
+    var label: String
+    var showsShortcut = false { didSet { refreshTitle() } }
+    init(_ label: String, shortcut: String, style: ButtonStyle) {
+        self.label = label; self.shortcut = shortcut
+        super.init(label, frame: .zero, style: style, action: {})
+        controlSize = .large
+        refreshTitle()
+    }
+    required init?(coder: NSCoder) { nil }
+    override var isEnabled: Bool { didSet { refreshTitle() } }
+    override var state: NSControl.StateValue { didSet { refreshTitle() } }
+    func setLabel(_ value: String) { label = value; refreshTitle() }
+    func refreshTitle() {
+        // A disabled action belongs to the neutral surface, not a faded blue pill.
+        bezelColor = style == .primary && isEnabled ? .controlAccentColor : nil
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) { tintProminence = style == .primary && isEnabled ? .primary : .none }
+        #endif
+        // AppKit chooses text contrast for active, inactive and disabled bezels.
+        let value = NSMutableAttributedString(string: state == .on ? "✓ \(label)" : label, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .medium)])
+        if showsShortcut {
+            value.append(NSAttributedString(string: "  \(shortcut)", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+        }
+        attributedTitle = value
+        setAccessibilityLabel(label)
     }
 }
 
@@ -4128,8 +4162,8 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     let context = NSTextField(labelWithString: "Loading projects…")
     let overflowNote = NSTextField(wrappingLabelWithString: "")
     let error = NSTextField(wrappingLabelWithString: "")
-    let bottom = NSButton(title: "Add to bottom", target: nil, action: nil)
-    let submit = NSButton(title: "Create", target: nil, action: nil)
+    let bottom = QuickIssueButton("Add to bottom", shortcut: "⌘⇧B", style: .secondary)
+    let submit = QuickIssueButton("Create", shortcut: "⌘↵", style: .primary)
     let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close quick add")!, target: nil, action: nil)
     let table = NSTableView()
     let picker = NSScrollView()
@@ -4140,8 +4174,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     let icon = NSImageView()
     let confirmation = NSTextField(labelWithString: "Issue created")
     let progress = NSProgressIndicator()
-    let submitHint = NSTextField(labelWithString: "⌘↵")
-    let mediaHint = NSTextField(labelWithString: "↵ New line · ⌘↵ Create · ⌘V Attach image")
+    let mediaHint = NSTextField(labelWithString: "⌘V Attach image")
     let imageStrip = NSScrollView()
     let imageCanvas = NSView()
     var images: [QuickIssueImage] = []
@@ -4200,13 +4233,12 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         context.font = .systemFont(ofSize: 12); context.textColor = .secondaryLabelColor; context.lineBreakMode = .byTruncatingMiddle
         context.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         overflowNote.font = .systemFont(ofSize: 12); overflowNote.textColor = .secondaryLabelColor
-        bottom.setButtonType(.pushOnPushOff); bottom.bezelStyle = .rounded; bottom.controlSize = .regular
+        bottom.setButtonType(.pushOnPushOff)
+        bottom.invoke = { [weak self] in self?.bottom.refreshTitle() }
         bottom.font = .systemFont(ofSize: 12); bottom.toolTip = "Toggle add to bottom (⌘⇧B)"
         bottom.setAccessibilityLabel("Add issue to bottom of queue")
-        submit.bezelStyle = .rounded; submit.controlSize = .large; submit.bezelColor = .controlAccentColor
         submit.font = .systemFont(ofSize: 13, weight: .semibold); submit.target = self; submit.action = #selector(create); submit.isEnabled = false
         submit.toolTip = "Create issue (⌘Enter)"
-        submitHint.font = .systemFont(ofSize: 11); submitHint.textColor = .tertiaryLabelColor
         confirmation.font = .systemFont(ofSize: 22, weight: .medium); confirmation.isHidden = true
         progress.style = .spinning; progress.controlSize = .small; progress.isDisplayedWhenStopped = false
         progress.setAccessibilityLabel("Quick Add is loading")
@@ -4222,7 +4254,8 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         imageStrip.documentView = imageCanvas; imageStrip.hasHorizontalScroller = true; imageStrip.drawsBackground = false
         imageStrip.setAccessibilityLabel("Attached images")
         for view in [icon, inputScroll, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, mediaHint, imageStrip] { canvas.addSubview(view) }
-        for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
+        for view in [progress, context, bottom, submit] { footer.addSubview(view) }
+        window.commandChanged = { [weak self] held in self?.showShortcuts(held) }
         window.submitIssue = { [weak self] in self?.create() }
         window.pasteImage = { [weak self] in self?.pasteImages(.general) ?? false }
         window.cancel = { [weak self] in self?.dismiss() }
@@ -4286,12 +4319,15 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         progress.frame = NSRect(x: 24, y: 23, width: 16, height: 16)
         let contextX: CGFloat = busy ? 48 : 24
         context.frame = NSRect(x: contextX, y: 22, width: succeeded ? width - contextX - 24 : width - contextX - 310, height: 17)
-        bottom.frame = NSRect(x: width - 302, y: 14, width: 132, height: 32)
-        submitHint.frame = NSRect(x: width - 157, y: 23, width: 32, height: 16)
-        submit.frame = NSRect(x: width - 120, y: 12, width: 96, height: 36)
+        bottom.frame = NSRect(x: width - 302, y: 14, width: 162, height: 32)
+        submit.frame = NSRect(x: width - 132, y: 14, width: 108, height: 32)
+    }
+    func showShortcuts(_ held: Bool) {
+        bottom.showsShortcut = held; submit.showsShortcut = held
     }
     func open(cli: String?) {
         self.cli = cli
+        showShortcuts(NSEvent.modifierFlags.contains(.command))
         if window.isVisible {
             if succeeded { generation += 1; succeeded = false; changed() }
             window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }; return
@@ -4323,8 +4359,8 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         mediaHint.isHidden = succeeded
         for button in imageCanvas.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = editable }
         input.isHidden = succeeded; inputScroll.isHidden = succeeded; confirmation.isHidden = !succeeded
-        bottom.isHidden = succeeded; submit.isHidden = succeeded; submitHint.isHidden = succeeded
-        submit.title = saving ? "Creating…" : mediaSubmission == nil ? "Create" : "Retry"
+        bottom.isHidden = succeeded; submit.isHidden = succeeded
+        submit.setLabel(saving ? "Creating…" : mediaSubmission == nil ? "Create" : "Retry")
         icon.image = NSImage(systemSymbolName: succeeded ? "checkmark.circle.fill" : "circle.dashed", accessibilityDescription: succeeded ? "Issue created" : "Issue")
         icon.contentTintColor = succeeded ? .systemGreen : .controlAccentColor
         if saving || (!ready && error.stringValue.isEmpty) { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
@@ -4341,12 +4377,19 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         error.stringValue = ""; updateEnabled()
         if ready {
             if let value = try? QuickIssueText.parse(input.string, projects: projects, current: current) {
-                context.stringValue = "Create in \(value.project.name)"
+                showDestination(value.project)
                 if value.title.utf8.count > 512 { overflowNote.stringValue = "Long title · Extra text will move to the description." }
             }
-            else { context.stringValue = current.map { "Create in \($0.name) · @project to switch" } ?? "@project to choose a project" }
+            else if let current { showDestination(current) }
+            else { context.stringValue = "@project to choose a project"; context.toolTip = context.stringValue }
         }
         updatePicker()
+    }
+    func showDestination(_ project: QuickIssueProject) {
+        let value = NSMutableAttributedString(string: "Create in ", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
+        value.append(NSAttributedString(string: project.name, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.labelColor]))
+        context.attributedStringValue = value
+        context.toolTip = "Create in \(project.name) · @project to switch"
     }
     func textDidChange(_ obj: Notification) { changed(); input.scrollRangeToVisible(input.selectedRange()) }
     func updatePicker() {
@@ -4448,10 +4491,12 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     }
     @objc func dismiss() {
         guard !saving else { return }
+        showShortcuts(false)
         updateEnabled()
         generation += 1; window.orderOut(nil)
     }
     func windowDidResignKey(_ notification: Notification) {
+        showShortcuts(false)
         if !saving { dismiss() }
     }
     @objc func create() {
