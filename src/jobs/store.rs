@@ -46,6 +46,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         tx.execute_batch(SCHEMA)?; tx.commit()?;
     }
     migrate_worker_runs(db)?;
+    migrate_fanout(db)?;
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='scheduled_job_calendar')",[],|r|r.get::<_,bool>(0))? {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_calendar ON scheduled_job_runs(project_id,scheduled_at,id); CREATE INDEX IF NOT EXISTS scheduled_job_calendar_job ON scheduled_job_runs(project_id,job_id,scheduled_at,id);")?;
@@ -162,7 +163,7 @@ fn get_job(db: &Connection, project: &str, id: &str) -> Result<Job> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job not found in this project"))
 }
-const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,worker_id";
+const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,worker_id,parent_run_id,target_machine";
 fn run_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
         sequence: r.get(0)?,
@@ -175,6 +176,8 @@ fn run_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Run> {
         reason: r.get(7)?,
         task_number: r.get(8)?,
         worker_id: r.get(14)?,
+        parent_run_id: r.get(15)?,
+        target_machine: r.get(16)?,
         machine: r.get(9)?,
         session_id: r.get(10)?,
         created_at: r.get(11)?,
@@ -223,14 +226,14 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
     let last: Option<Run> = db
         .query_row(
             &format!(
-                "SELECT {RUN_COLUMNS} FROM {history} WHERE job_id=?1 ORDER BY sequence DESC LIMIT 1"
+                "SELECT {RUN_COLUMNS} FROM {history} WHERE job_id=?1 AND parent_run_id IS NULL ORDER BY sequence DESC LIMIT 1"
             ),
             [&job.id],
             run_row,
         )
         .optional()?;
     let active: Option<Run> = db.query_row(
-        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND state IN ('pending','running') LIMIT 1"),
+        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND parent_run_id IS NULL AND state IN ('pending','running') LIMIT 1"),
         [&job.id], run_row,
     ).optional()?;
     let mut value = serde_json::to_value(job)?;
@@ -241,11 +244,11 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
 fn existing(db: &Connection, o: &Occurrence) -> Result<Option<Run>> {
     let sql = if o.request_key.is_some() {
         format!(
-            "SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND request_key=?2 AND trigger='manual'"
+            "SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND request_key=?2 AND trigger='manual' AND parent_run_id IS NULL"
         )
     } else {
         format!(
-            "SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND scheduled_at=?2 AND trigger='scheduled'"
+            "SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND scheduled_at=?2 AND trigger='scheduled' AND parent_run_id IS NULL"
         )
     };
     if let Some(key) = &o.request_key {
@@ -625,7 +628,7 @@ impl Store {
         authority(&self.db)?;
         identifier(key, "Run now request key", 256)?;
         let job = get_job(&self.db, project, id)?;
-        let saved=self.db.query_row(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND request_key=?2 AND trigger='manual'"),params![id,key],run_row).optional()?;
+        let saved=self.db.query_row(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND request_key=?2 AND trigger='manual' AND parent_run_id IS NULL"),params![id,key],run_row).optional()?;
         let snapshot = if let Some(saved) = saved {
             saved.snapshot
         } else {
@@ -762,3 +765,17 @@ fn with_project(mut response: Value, project: &Project) -> Value {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+fn migrate_fanout(db: &Connection) -> Result<()> {
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('scheduled_job_runs') WHERE name='parent_run_id')", [], |r| r.get::<_,bool>(0))? { return Ok(()); }
+    let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+    tx.execute_batch("ALTER TABLE scheduled_job_runs ADD COLUMN parent_run_id TEXT;
+        ALTER TABLE scheduled_job_runs ADD COLUMN target_machine TEXT;
+        DROP INDEX scheduled_job_occurrence; DROP INDEX scheduled_job_manual; DROP INDEX scheduled_job_active;
+        CREATE UNIQUE INDEX scheduled_job_occurrence ON scheduled_job_runs(job_id,scheduled_at) WHERE trigger='scheduled' AND parent_run_id IS NULL;
+        CREATE UNIQUE INDEX scheduled_job_manual ON scheduled_job_runs(job_id,request_key) WHERE trigger='manual' AND parent_run_id IS NULL;
+        CREATE UNIQUE INDEX scheduled_job_active ON scheduled_job_runs(job_id) WHERE state IN('pending','running') AND parent_run_id IS NULL;
+        CREATE UNIQUE INDEX scheduled_job_machine ON scheduled_job_runs(parent_run_id,target_machine) WHERE parent_run_id IS NOT NULL;")?;
+    tx.commit()?;
+    Ok(())
+}

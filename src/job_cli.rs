@@ -43,6 +43,9 @@ struct Fields {
     /// Restrict to these fleet node IDs in fallback order; repeat for each machine.
     #[arg(long = "machine", value_name = "NODE_ID")]
     machines: Vec<String>,
+    /// Run once on every known fleet machine; unavailable machines wait.
+    #[arg(long, conflicts_with = "machines")]
+    all_machines: bool,
 }
 impl Fields {
     fn definition(&self) -> Definition {
@@ -53,6 +56,7 @@ impl Fields {
             harness: self.harness.name().into(),
             model: self.model.clone(),
             machines: self.machines.clone(),
+            all_machines: self.all_machines,
         }
     }
 }
@@ -413,6 +417,9 @@ fn print_job(job: &Value) {
         d["harness"].as_str().unwrap_or(""),
         d["model"].as_str().unwrap_or("")
     );
+    if d["all_machines"] == true {
+        println!("  Machines: all fleet machines (one execution each)");
+    }
     if let Some(machines) = d["machines"].as_array().filter(|m| !m.is_empty()) {
         println!(
             "  Machines: {}",

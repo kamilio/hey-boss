@@ -20,11 +20,18 @@ pub struct Definition {
     /// Ordered fleet node IDs. Empty preserves automatic placement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_machines: bool,
 }
 impl Definition {
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
         identifier(&self.model, "logical model", 256)?;
+        if self.all_machines && !self.machines.is_empty() {
+            return Err(Error::invalid(
+                "All machines cannot be combined with an ordered machine list",
+            ));
+        }
         let mut seen = std::collections::HashSet::new();
         for machine in &self.machines {
             identifier(machine, "machine node ID", 128)?;
@@ -284,6 +291,10 @@ pub struct Run {
     pub task_number: Option<i64>,
     #[serde(default)]
     pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_machine: Option<String>,
     pub machine: Option<String>,
     pub session_id: Option<String>,
     pub created_at: i64,
