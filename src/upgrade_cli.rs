@@ -22,6 +22,7 @@ const INPUTS: &[&str] = &[
     "skills/hey-boss",
     "packages/hey-gh",
     "packages/hey-boss-http",
+    "packages/hey-boss-sync",
     "packages/hey-proxy",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
@@ -38,6 +39,7 @@ const PAYLOAD: &[&str] = &[
     "skills/hey-boss",
     "packages/hey-gh",
     "packages/hey-boss-http",
+    "packages/hey-boss-sync",
     "packages/hey-proxy",
     "tools/upgrade_hey_boss.py",
     "tools/drain_github_issues.py",
@@ -53,7 +55,7 @@ const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
 // Archives can have older mtimes than artifacts from another snapshot in the
 // shared Cargo target. Refresh every packaged source, including companion crates.
-const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; for source in src packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; for source in src packages/hey-boss-sync packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
 
 #[derive(Args)]
 pub struct Options {
