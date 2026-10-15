@@ -26,14 +26,13 @@ func audit() {
         ui.window.delegate = nil
         ui.window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
         ui.input.stringValue = "Fix the screenshot preview @Visual"; ui.changed()
-        if state.contains("images") || state.contains("listening") || state.contains("saving") {
+        if state.contains("images") || state.contains("saving") {
             let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
                 NSColor.systemIndigo.setFill(); rect.fill()
                 NSColor.systemTeal.setFill(); NSBezierPath(roundedRect: rect.insetBy(dx: 30, dy: 25), xRadius: 12, yRadius: 12).fill(); return true
             }
             ui.images = (1...5).map { QuickIssueImage(name: "Screenshot \($0).png", data: Data(), thumbnail: image) }; ui.rebuildImages()
         }
-        if state.contains("listening") { ui.beginVoice(range: NSRange(location: 0, length: 0)) }
         if state.contains("saving") { ui.saving = true; ui.context.stringValue = "Attaching image 2 of 5…" }
         if state.contains("error") { ui.error.stringValue = "Cannot read this image. Choose an image up to 10 MiB." }
         if state.contains("empty") { ui.input.stringValue = "" }
@@ -308,8 +307,8 @@ func auditQuickIssue() {
     let item = overview.statusMenu.items.first { $0.action == #selector(AgentsOverview.showQuickIssue) }!
     precondition(item.keyEquivalent == "i" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
-    auditNativeQuickIssue()
     auditQuickIssueMedia()
+    auditNativeQuickIssue()
     if ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_INTEGRATION"] == "1" { auditQuickIssueMediaIntegration() }
     var calls = 0
     let shortcut = QuickIssueShortcut { calls += 1 }
@@ -436,8 +435,8 @@ func auditNativeQuickIssue() {
             ui.window.appearance?.performAsCurrentDrawingAppearance {
                 ui.canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
             }
-            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "listening", "finishing", "permission", "saving", "success", "compact"] {
-                ui.voiceBase = nil; ui.voiceFinishing = false; ui.images = []; ui.rebuildImages()
+            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "saving", "success", "compact"] {
+                ui.images = []; ui.rebuildImages()
                 ui.window.setContentSize(NSSize(width: state == "compact" ? 520 : 680, height: ui.window.frame.height))
                 ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
                 ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
@@ -448,7 +447,7 @@ func auditNativeQuickIssue() {
                 if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.stringValue).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
                 if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.stringValue = "Fix reconnect @missing" }
                 if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30); ui.changed() }
-                if ["images", "image-error", "listening", "finishing", "saving", "compact"].contains(state) {
+                if ["images", "image-error", "saving", "compact"].contains(state) {
                     let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
                         NSColor.systemIndigo.setFill(); rect.fill()
                         NSColor.systemTeal.setFill(); NSBezierPath(roundedRect: rect.insetBy(dx: 30, dy: 25), xRadius: 12, yRadius: 12).fill()
@@ -458,8 +457,6 @@ func auditNativeQuickIssue() {
                     ui.input.stringValue = "Fix the screenshot preview @poe-code"
                 }
                 if state == "image-error" { ui.fail("Project is unavailable. Nothing was created. You can edit and try again.") }
-                if state == "listening" || state == "finishing" { ui.beginVoice(range: NSRange(location: 0, length: 0)); ui.voiceFinishing = state == "finishing" }
-                if state == "permission" { ui.error.stringValue = "Allow Microphone for Hey Boss in System Settings → Privacy & Security." }
 
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
                 for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
@@ -501,6 +498,10 @@ func auditQuickIssueMedia() {
     let ui = NativeQuickIssue(present: false, preferences: prefs)
     ui.ready = true; ui.current = QuickIssueProject(id: "named:Media", name: "Media")
     ui.projects = [ui.current!]; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    let mediaButtons = ui.canvas.subviews.compactMap { $0 as? NSButton }
+    precondition(!mediaButtons.contains { ["Dictate", "Paste image"].contains($0.title) }, "Quick Add keeps screenshot paste on the keyboard without media buttons")
+    precondition(ui.mediaHint.frame.minX == ui.context.frame.minX, "The paste hint aligns with the footer destination")
+    precondition(ui.window.frame.height == 166, "The keyboard hint uses a compact row")
     let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
         NSColor.systemBlue.setFill(); rect.fill(); return true
     }
@@ -537,7 +538,7 @@ func auditQuickIssueMedia() {
     let rejected = calls.last!
     let rejectedFile = rejected[rejected.firstIndex(of: "--attachment")! + 1]
     reply?(.failure(QuickIssueRequestError(message: "Project is unavailable.", rejected: true)))
-    precondition(ui.input.isEnabled && ui.bottom.isEnabled && ui.pasteButton.isEnabled, "Rejected saves restore editing")
+    precondition(ui.input.isEnabled && ui.bottom.isEnabled, "Rejected saves restore editing")
     precondition(ui.mediaSubmission == nil && ui.images.count == 1 && ui.input.stringValue == "Fix screenshot")
     precondition(ui.error.stringValue.contains("Nothing was created") && !ui.context.stringValue.contains("Draft"))
     precondition(!FileManager.default.fileExists(atPath: rejectedFile))
@@ -556,15 +557,7 @@ func auditQuickIssueMedia() {
     precondition(!FileManager.default.fileExists(atPath: file), "Upload staging files are removed")
     precondition(calls.allSatisfy { $0.first != "undraft" && $0.first != "attachment" }, "No draft or partial upload steps")
 
-    ui.succeeded = false; ui.input.stringValue = "Fix  please @Media"; ui.changed()
-    ui.beginVoice(range: NSRange(location: 4, length: 0))
-    ui.receiveVoice(.transcript("the layout"))
-    precondition(ui.input.stringValue == "Fix the layout please @Media")
-    ui.receiveVoice(.transcript("the button"))
-    precondition(ui.input.stringValue == "Fix the button please @Media", "Partial transcripts replace only the dictated range")
-    ui.create(); precondition(calls.last! == save, "Cannot submit while listening")
-    ui.receiveVoice(.finished("Microphone disconnected"))
-    precondition(ui.input.isEnabled && ui.input.stringValue.contains("the button") && !ui.error.stringValue.isEmpty)
+    ui.succeeded = false; ui.input.stringValue = "Fix screenshot"; ui.changed()
 
     board.clearContents(); board.setString("ordinary text", forType: .string)
     precondition(!ui.pasteImages(board), "Plain text keeps normal paste behavior")
@@ -582,12 +575,6 @@ func auditQuickIssueMedia() {
     precondition(ui.pasteImages(board) && ui.images.map(\.name) == ["Screen one.png", "Screen two.png"], "Copied Finder images retain filenames and order")
     precondition(ui.images.allSatisfy { $0.data == png.data }, "Image contents survive paste")
     ui.images = []; ui.rebuildImages()
-    ui.beginVoice(range: NSRange(location: 0, length: 3)); ui.receiveVoice(.transcript("Repair"))
-    precondition(ui.input.stringValue.hasPrefix("Repair the button"), "Dictation replaces a selection")
-    ui.window.cancelOperation(nil)
-    precondition(ui.voiceBase == nil && ui.input.isEnabled, "Escape releases dictation and restores editing")
-    let retained = ui.input.stringValue; ui.receiveVoice(.transcript("late callback"))
-    precondition(ui.input.stringValue == retained)
     board.clearContents(); board.writeObjects([image])
     for _ in 0..<8 { precondition(ui.pasteImages(board)) }
     precondition(ui.images.count == 8)
@@ -599,10 +586,10 @@ func auditQuickIssueMedia() {
     while !ui.images.isEmpty {
         ui.removeImage(ui.imageCanvas.subviews.compactMap { $0 as? NSButton }.first!)
     }
-    precondition(ui.imageStrip.isHidden && ui.window.frame.height == 182, "Removing all images collapses the preview strip")
+    precondition(ui.imageStrip.isHidden && ui.window.frame.height == 166, "Removing all images collapses the preview strip")
     ui.window.pasteImage = nil
     ui.window.close()
-    print("Passed: native pasted images, atomic creation, editable rejection, safe retries, cleanup and dictation replacement")
+    print("Passed: native pasted images, atomic creation, editable rejection, safe retries, cleanup and keyboard-only media controls")
 
 }
 

@@ -33,8 +33,6 @@ let info: [String: Any] = [
     "CFBundleIconFile": "hey-boss.icns",
     "LSMinimumSystemVersion": "15.0",
     "NSHighResolutionCapable": true,
-    "NSMicrophoneUsageDescription": "Dictate a new issue in Quick Add.",
-    "NSSpeechRecognitionUsageDescription": "Turn your Quick Add dictation into editable issue text.",
     // The local Issues service intentionally uses HTTP. Keep ATS for all other hosts.
     "NSAppTransportSecurity": [
         "NSExceptionDomains": [
