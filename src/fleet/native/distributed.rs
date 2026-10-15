@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS distributed_dirty(
 CREATE TABLE IF NOT EXISTS distributed_aliases(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,local_id INTEGER NOT NULL,
  PRIMARY KEY(table_name,entity),UNIQUE(table_name,local_id));
+CREATE INDEX IF NOT EXISTS distributed_legacy_identity ON fleet_row_ids(origin,table_name,local_id,origin_id);
 CREATE TABLE IF NOT EXISTS distributed_rejections(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(table_name,entity));
 CREATE TABLE IF NOT EXISTS distributed_archives(key TEXT PRIMARY KEY,pages TEXT NOT NULL,cursor TEXT NOT NULL,complete INTEGER NOT NULL);
@@ -206,6 +207,8 @@ pub(super) fn baseline(
             &[json!(after)],
         )?;
         let mut cursor = after;
+        let mut bytes = 0;
+        let mut count = 0;
         for mut row in rows.iter().cloned() {
             let next_cursor = row
                 .as_object_mut()
@@ -239,12 +242,18 @@ pub(super) fn baseline(
                 origin,
                 &hey_boss_sync::digest(fact.after.as_ref().unwrap().to_string().as_bytes())[..16]
             );
-            engine.put(&serde_json::to_string(&fact)?)?;
+            let payload = serde_json::to_string(&fact)?;
+            if count > 0 && bytes + payload.len() > 2 * 1024 * 1024 {
+                break;
+            }
+            engine.put(&payload)?;
+            bytes += payload.len();
+            count += 1;
             cursor = next_cursor;
         }
         tx.execute(
             "UPDATE distributed_baseline SET after_rowid=?2,complete=?3 WHERE table_name=?1",
-            rusqlite::params![table, cursor, rows.len() < 64],
+            rusqlite::params![table, cursor, rows.len() < 64 && count == rows.len()],
         )?;
         tx.commit()?;
         return Ok(false);
