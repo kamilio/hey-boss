@@ -1196,12 +1196,16 @@ fn worktree_slug(text: &str, limit: usize, fallback: &str) -> String {
     }
 }
 fn worktree_name(job: &Job) -> String {
-    format!(
+    let name = format!(
         "{}-{}-{}",
         worktree_slug(&job.project.name, 60, "project"),
         worktree_slug(job.issue["title"].as_str().unwrap_or(""), 15, "issue"),
         worktree_slug(&number_text(job), 20, "number"),
-    )
+    );
+    match job.issue["_worktree_attempt"].as_str() {
+        Some(attempt) => format!("{name}-{}", worktree_slug(attempt, 32, "attempt")),
+        None => name,
+    }
 }
 fn worktree_path(job: &Job) -> String {
     Path::new(&job.config.cwd)

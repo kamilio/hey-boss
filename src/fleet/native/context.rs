@@ -35,6 +35,22 @@ pub(super) struct Context {
     pub stop: Arc<AtomicBool>,
 }
 impl Context {
+    /// Execution authority becomes peer-local; service configuration keeps its
+    /// existing main/companion location throughout cutover.
+    pub fn service_role(&self) -> Result<String> {
+        let db = self.db()?;
+        let role: String =
+            db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+        if role != "peer" {
+            return Ok(role);
+        }
+        let controller: bool = db.query_row(
+            "SELECT controller=origin FROM distributed_meta WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(if controller { "controller" } else { "agent" }.into())
+    }
     pub fn new() -> Result<Self> {
         Self::with_database(None)
     }
@@ -132,9 +148,7 @@ impl Context {
     }
     fn enrich_workers(&self, mut workers: Vec<Value>) -> Result<Vec<Value>> {
         let db = self.db()?;
-        let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
-            row.get(0)
-        })?;
+        let role = self.service_role()?;
         let saved = self.read_json(
             &self.state.join(if role == "agent" {
                 "fleet-agent.json"

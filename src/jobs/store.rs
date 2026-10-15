@@ -191,13 +191,44 @@ fn get_run(db: &Connection, id: &str) -> Result<Run> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job run not found"))
 }
+// Observation history includes every machine's attempt. Execution paths keep
+// using scheduled_job_runs, so a received result cannot become runnable work.
+fn history_table(db: &Connection) -> Result<&'static str> {
+    Ok(
+        if db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get::<_, bool>(0)
+        })? {
+            "distributed_job_runs"
+        } else {
+            "scheduled_job_runs"
+        },
+    )
+}
+fn observed_run(db: &Connection, id: &str) -> Result<Run> {
+    db.query_row(
+        &format!(
+            "SELECT {RUN_COLUMNS} FROM {} WHERE id=?1",
+            history_table(db)?
+        ),
+        [id],
+        run_row,
+    )
+    .optional()?
+    .ok_or_else(|| Error::new("not_found", "Job run not found"))
+}
 // Indexed, bounded lookups keep controls truthful even when the latest
 // occurrence was skipped while an older execution still owns the job.
 fn job_summary(db: &Connection, job: Job) -> Result<Value> {
-    let last: Option<Run> = db.query_row(
-        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 ORDER BY sequence DESC LIMIT 1"),
-        [&job.id], run_row,
-    ).optional()?;
+    let history = history_table(db)?;
+    let last: Option<Run> = db
+        .query_row(
+            &format!(
+                "SELECT {RUN_COLUMNS} FROM {history} WHERE job_id=?1 ORDER BY sequence DESC LIMIT 1"
+            ),
+            [&job.id],
+            run_row,
+        )
+        .optional()?;
     let active: Option<Run> = db.query_row(
         &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND state IN ('pending','running') LIMIT 1"),
         [&job.id], run_row,
@@ -395,7 +426,8 @@ impl Store {
                 }
                 JobOperation::History { id, before, limit } => {
                     get_job(&tx, &project.id, id)?;
-                    let runs=tx.query_collect(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3"),params![id,before.unwrap_or(i64::MAX),limit+1],run_row)?;
+                    let history = history_table(&tx)?;
+                    let runs=tx.query_collect(&format!("SELECT {RUN_COLUMNS} FROM {history} WHERE job_id=?1 AND sequence<?2 ORDER BY sequence DESC LIMIT ?3"),params![id,before.unwrap_or(i64::MAX),limit+1],run_row)?;
                     let next = (runs.len() > *limit).then(|| runs[limit - 1].sequence);
                     json!({"runs":runs.into_iter().take(*limit).collect::<Vec<_>>(),"next_cursor":next})
                 }
@@ -407,7 +439,7 @@ impl Store {
                 }
                 JobOperation::Run { id, run_id } => {
                     get_job(&tx, &project.id, id)?;
-                    let run = get_run(&tx, run_id)?;
+                    let run = observed_run(&tx, run_id)?;
                     if run.snapshot.job_id != *id {
                         return Err(Error::new("not_found", "Run does not belong to this job"));
                     }
@@ -490,7 +522,27 @@ impl Store {
                 sha.clone()
             }
         };
-        let revision = expected.unwrap_or(0) + 1;
+        let revision = if self.db.query_row(
+            "SELECT role='peer' FROM fleet_meta WHERE id=1",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            let slot: i64 =
+                self.db
+                    .query_row("SELECT slot FROM distributed_meta WHERE id=1", [], |r| {
+                        r.get(0)
+                    })?;
+            let base = slot << 32;
+            let next:i64=self.db.query_row("SELECT coalesce(max(revision),?2)+1 FROM scheduled_job_revisions WHERE job_id=?1 AND revision>?2 AND revision<?3",params![id,base,base+(1i64<<32)],|r|r.get(0))?;
+            if next >= base + (1i64 << 32) {
+                return Err(Error::conflict(
+                    "This machine's job revision namespace is exhausted",
+                ));
+            }
+            next
+        } else {
+            expected.unwrap_or(0) + 1
+        };
         let snapshot = Snapshot {
             job_id: id.clone(),
             project_id: project.id.clone(),

@@ -788,6 +788,18 @@ impl Supervisor {
         workers: &Value,
         message: &Value,
     ) -> Result<(Value, Vec<Value>, Vec<Value>)> {
+        if message["distributed_active"] == true
+            || db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                r.get::<_, bool>(0)
+            })?
+        {
+            let signals = replica::rows(
+                db,
+                "SELECT * FROM fleet_signals WHERE host=? AND state='pending' ORDER BY created_at",
+                &[json!(host)],
+            )?;
+            return Ok((Value::Null, Vec::new(), signals));
+        }
         let changes = message["changes"]
             .as_array()
             .ok_or_else(|| invalid("Missing companion journal"))?;
@@ -1029,6 +1041,17 @@ impl Supervisor {
         let node = hello["node"]
             .as_str()
             .ok_or_else(|| invalid("Companion has no machine identity"))?;
+        if hello["capabilities"]["distributed_v1"] != true
+            && self.ctx.db()?.query_row(
+                "SELECT role='peer' FROM fleet_meta WHERE id=1",
+                [],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            return Err(invalid(
+                "This peer must be upgraded before joining distributed synchronization",
+            ));
+        }
         {
             let db = self.ctx.db()?;
             let tx = db.unchecked_transaction()?;
@@ -1229,12 +1252,14 @@ impl Supervisor {
                             "Companion needs upgrading to receive archived issues; no archive manifest was sent",
                         ));
                     }
-                    pull::send_pull(
-                        &mut *input.lock().unwrap(),
-                        payload,
-                        receipts,
-                        hello["capabilities"]["pull_gzip_chunks"] == true,
-                    )?;
+                    if !payload.is_null() {
+                        pull::send_pull(
+                            &mut *input.lock().unwrap(),
+                            payload,
+                            receipts,
+                            hello["capabilities"]["pull_gzip_chunks"] == true,
+                        )?;
+                    }
                     self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now()}))?;
                     self.reconcile_chief_ownership()?;
                     let active = message["workers"]
@@ -1711,6 +1736,13 @@ impl Supervisor {
                     .cloned()
                     .collect::<Vec<_>>();
                 machines.insert(0,json!({"node":self.ctx.node,"state":"connected","heartbeat":now(),"jobs":capability}));
+                if self.ctx.db()?.query_row(
+                    "SELECT role='peer' FROM fleet_meta WHERE id=1",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )? {
+                    machines.truncate(1);
+                }
                 super::jobs::schedule(&self.ctx, &machines)?;
                 super::jobs::reconcile(&self.ctx)
             })();
@@ -2008,6 +2040,7 @@ pub(super) fn run(ctx: Context) -> Result<()> {
         return Err("Fleet supervisor is already running".into());
     };
     let app = Supervisor::new(ctx.clone())?;
+    super::distributed::start(ctx.clone(), true);
     super::model_recovery::start(ctx.clone());
     let socket = ctx.state.join("fleet.sock");
     if socket.exists() {

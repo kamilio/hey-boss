@@ -7,6 +7,7 @@ mod configuration;
 mod context;
 mod control;
 mod conversation;
+mod distributed;
 mod github_reads;
 mod github_relay;
 mod global_utilities;
@@ -52,6 +53,16 @@ pub(super) fn signal_request(mut value: Value) -> crate::issues::Result<Value> {
     use super::signal::not_sent;
     let ctx = Context::new().map_err(not_sent)?;
     let db = ctx.db().map_err(not_sent)?;
+    if db
+        .query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get::<_, bool>(0)
+        })
+        .map_err(not_sent)?
+        && ctx.service_role().map_err(not_sent)? == "agent"
+    {
+        return distributed::local_request(&ctx, &value)
+            .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string()));
+    }
     let companion: bool = db
         .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {
             r.get(0)
@@ -152,6 +163,16 @@ fn run_inner(action: &super::Action) -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::Release))?;
     }
     match action {
+        super::Action::Sync { controller } => distributed::serve(ctx, controller),
+        super::Action::SyncStatus => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&distributed::status(&ctx)?)?
+            );
+            Ok(())
+        }
+        super::Action::SyncEnroll { node, slot } => distributed::enroll(&ctx, node, *slot),
+        super::Action::SyncActivate => distributed::activate(&ctx),
         super::Action::Setup { source } => {
             if let Some(source) = source {
                 save_upgrade_source(&ctx, source)?;
@@ -212,6 +233,15 @@ fn run_inner(action: &super::Action) -> Result<()> {
 }
 
 fn local_request(ctx: &Context, mut value: Value) -> Result<Value> {
+    if ctx
+        .db()?
+        .query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get::<_, bool>(0)
+        })?
+        && ctx.service_role()? == "agent"
+    {
+        return distributed::local_request(ctx, &value);
+    }
     let companion: bool =
         ctx.db()?
             .query_row("SELECT role='agent' FROM fleet_meta WHERE id=1", [], |r| {

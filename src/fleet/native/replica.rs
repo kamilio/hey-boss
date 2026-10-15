@@ -344,6 +344,11 @@ pub(super) fn ensure_metadata(db: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result<()> {
+    let distributed: bool =
+        db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get(0)
+        })?;
+    let role = if distributed { "peer" } else { role };
     let tx = if db.is_autocommit() {
         Some(db.unchecked_transaction()?)
     } else {
@@ -430,7 +435,7 @@ pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result
                 row_json(after)
             };
             let sql = format!(
-                "CREATE TRIGGER {name} AFTER {operation} ON {table} WHEN (SELECT syncing FROM fleet_meta WHERE id=1)=0{different} BEGIN INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('{table}',{},{},CAST(strftime('%s','now') AS INTEGER)*1000); END",
+                "CREATE TRIGGER {name} AFTER {operation} ON {table} WHEN (SELECT syncing=0 AND role<>'peer' FROM fleet_meta WHERE id=1){different} BEGIN INSERT INTO fleet_outbox(table_name,before_json,after_json,created_at) VALUES('{table}',{},{},CAST(strftime('%s','now') AS INTEGER)*1000); END",
                 before_json, after_json
             );
             let existing: Option<String> = db
