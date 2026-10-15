@@ -1,6 +1,6 @@
 # Local HTTP and hey-boss.test
 
-The normal `hey-boss issue web` service serves the same application, CSRF token,
+By default, the `hey-boss issue web` service serves the same application, CSRF token,
 and issue database on IPv4 loopback ports 4781 and 80. It never redirects URLs:
 paths, queries, and browser fragments stay intact. The old address remains
 `http://127.0.0.1:4781/`; the short address is `http://hey-boss.test/`.
@@ -29,6 +29,11 @@ resolves to loopback. Shared UI helpers therefore use `getRandomValues` for
 request IDs and a SHA-256 fallback for retry keys when `randomUUID` and
 SubtleCrypto are unavailable. No browser security flags or HTTPS exceptions are
 needed. Secure contexts keep using native Web Crypto.
+
+For direct phone access on selected Wi-Fi networks, use the repeatable
+`--allow-wifi 'Home'` option; see [local mobile access](mobile.md). This enables
+the primary port on IPv4 interfaces with per-request Wi-Fi and subnet checks.
+The optional port-80 socket remains loopback-only.
 
 ## macOS setup
 

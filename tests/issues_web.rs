@@ -373,6 +373,16 @@ fn mobile_proxy_uses_the_authoritative_database_and_preserves_origin_and_csrf_ch
                 .contains("cache-control: no-store")
         );
     }
+    assert_eq!(
+        web.http(
+            "GET",
+            "/api/bootstrap",
+            &[("Host", host), ("X-Forwarded-For", "100.64.0.2")],
+            b""
+        )
+        .status,
+        200
+    );
     let boot = web
         .http("GET", "/api/bootstrap", &[("Host", host)], b"")
         .json();
@@ -447,7 +457,7 @@ fn mobile_proxy_uses_the_authoritative_database_and_preserves_origin_and_csrf_ch
                 b""
             )
             .status,
-        200
+        403
     );
 }
 
@@ -2115,5 +2125,35 @@ fn file_attachments_share_authenticated_actions_and_all_page_assets() {
         )
         .status,
         404
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn unapproved_wifi_preserves_local_access_and_cannot_bypass_host_checks() {
+    let web = Web::start_with_args(&["--allow-wifi", "hey-boss-test-denied"]);
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!("http://{}/api/bootstrap", web.authority);
+    assert_eq!(client.get(&url).send().unwrap().status(), 200);
+    assert_eq!(
+        client
+            .get(&url)
+            .header("Host", "192.168.1.10:4781")
+            .send()
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .header("Forwarded", "for=127.0.0.1")
+            .send()
+            .unwrap()
+            .status(),
+        403
     );
 }
