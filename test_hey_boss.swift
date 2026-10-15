@@ -100,6 +100,7 @@ func audit() {
     auditSubscriptionQuota()
     auditQuickIssue()
     auditArtifactEditor()
+    auditArtifactLibrary()
     auditIssuesShortcut()
     auditSecretInput()
     auditNotificationReplay()
