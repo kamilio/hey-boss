@@ -457,6 +457,61 @@ fn deleted_attachments_keep_bytes_until_disconnected_peers_replay_their_facts() 
 }
 
 #[test]
+fn removed_commit_links_stay_removed_when_history_ids_sort_out_of_order() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
+    // Canonical identities a:10 and a:2 sort differently from event chronology.
+    a.execute_batch("INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data)
+        VALUES(2,'p',1,'human:test','commit_attached',1,'{\"sha\":\"abcdef0123456789\",\"url\":\"https://example.invalid/commit/abcdef0123456789\",\"title\":\"Old result\"}');
+        INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data)
+        VALUES(10,'p',1,'human:test','commit_removed',2,'{\"sha\":\"abcdef0123456789\"}');").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    for db in [&a, &b] {
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM issue_commits", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+    a.execute_batch("INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data)
+        VALUES(11,'p',1,'human:test','commit_attached',3,'{\"sha\":\"abcdef0123456789\",\"url\":\"https://example.invalid/commit/abcdef0123456789\",\"title\":\"Reattached result\"}');").unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row("SELECT title FROM issue_commits", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Reattached result"
+    );
+    b.execute("UPDATE distributed_meta SET projected=0", [])
+        .unwrap();
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row("SELECT title FROM issue_commits", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Reattached result"
+    );
+}
+
+#[test]
 fn remote_dependencies_release_waiting_tasks_without_stealing_local_claims() {
     use serde_json::json;
     let fa = Fixture::new();

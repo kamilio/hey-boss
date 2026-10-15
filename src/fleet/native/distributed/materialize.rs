@@ -273,7 +273,9 @@ pub(super) fn write(
 pub(super) fn apply(db: &Connection) -> Result<usize> {
     let mut count = 0;
     let mut projects = std::collections::BTreeSet::new();
-    db.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+    // Preserve immutable history without legacy notice deduplication or
+    // arrival-ordered commit-link projections. Their state is reduced directly.
+    db.execute("UPDATE fleet_meta SET syncing=2 WHERE id=1", [])?;
     // Dependencies precede their users. Unavailable parents stay dirty and are
     // retried from durable facts; receipt advancement never drops their data.
     for table in capture::TABLES {
