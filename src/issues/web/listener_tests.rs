@@ -90,8 +90,14 @@ struct Fixture {
 
 impl Fixture {
     fn start() -> Self {
-        let root =
-            std::env::temp_dir().join(format!("hey-boss-71-listeners-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "hey-boss-listeners-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&root).unwrap();
         let machine = identity::machine().unwrap();
         let project = identity::project(&root, &machine).unwrap();
@@ -130,6 +136,7 @@ impl Fixture {
             token: "one-shared-csrf-token".into(),
             authority: addresses[0].to_string(),
             local_ports: addresses.iter().map(|a| a.port()).collect(),
+            allow_wifi: vec![],
             mobile_origin: Some("https://mac.example.ts.net".into()),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -314,5 +321,119 @@ fn simultaneous_listeners_share_writes_csrf_routes_and_release_both_sockets() {
                 Err(error) => panic!("Listener {address} was not released: {error}"),
             }
         }
+    }
+}
+
+#[test]
+fn lan_requests_require_the_current_named_wifi_private_peer_and_exact_origin() {
+    let mut fixture = Fixture::start();
+    fixture.shutdown();
+    let app = Arc::get_mut(&mut fixture.app).unwrap();
+    app.allow_wifi = vec!["Home".into(), "Office".into()];
+    let port = app.local_ports[0];
+    let host = format!("192.168.1.10:{port}");
+    let origin = format!("http://{host}");
+    let network = || {
+        Some(wifi::Network {
+            ssid: "Home".into(),
+            address: "192.168.1.10".parse().unwrap(),
+            mask: "255.255.255.0".parse().unwrap(),
+        })
+    };
+    let peer = "192.168.1.20".parse().unwrap();
+    assert!(lan_allowed(
+        peer,
+        Some(&host),
+        Some(&origin),
+        Some("same-origin"),
+        app,
+        network()
+    ));
+    assert!(!lan_allowed(peer, Some(&host), None, None, app, None));
+    let mut changed = network().unwrap();
+    changed.ssid = "Cafe".into();
+    assert!(!lan_allowed(
+        peer,
+        Some(&host),
+        None,
+        None,
+        app,
+        Some(changed)
+    ));
+    for remote in [
+        "203.0.113.5",
+        "192.168.2.20",
+        "127.0.0.1",
+        "::1",
+        "::ffff:192.168.1.20",
+    ] {
+        assert!(!lan_allowed(
+            remote.parse().unwrap(),
+            Some(&host),
+            None,
+            None,
+            app,
+            network()
+        ));
+    }
+    for bad in [
+        "evil.example",
+        "localhost:4781",
+        "192.168.1.10:80",
+        "192.168.1.11:4781",
+    ] {
+        assert!(!lan_allowed(peer, Some(bad), None, None, app, network()));
+    }
+    assert!(!lan_allowed(
+        peer,
+        Some(&host),
+        Some("https://evil.example"),
+        None,
+        app,
+        network()
+    ));
+    assert!(!lan_allowed(
+        peer,
+        Some(&host),
+        None,
+        Some("cross-site"),
+        app,
+        network()
+    ));
+    app.allow_wifi.clear();
+    assert!(!lan_allowed(
+        peer,
+        Some(&host),
+        Some(&origin),
+        None,
+        app,
+        network()
+    ));
+}
+
+#[test]
+fn forwarded_headers_cannot_turn_a_proxy_into_a_local_client() {
+    let fixture = Fixture::start();
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let url = format!("http://{}/api/bootstrap", fixture.addresses[0]);
+    assert_eq!(client.get(&url).send().unwrap().status(), 200);
+    for (name, value) in [
+        ("Forwarded", "for=192.168.1.5"),
+        ("X-Forwarded-For", "127.0.0.1"),
+        ("X-Forwarded-Host", "localhost"),
+        ("X-Forwarded-Proto", "http"),
+    ] {
+        assert_eq!(
+            client
+                .get(&url)
+                .header(name, value)
+                .send()
+                .unwrap()
+                .status(),
+            403
+        );
     }
 }

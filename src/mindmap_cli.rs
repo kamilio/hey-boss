@@ -471,6 +471,7 @@ pub fn run(options: &Options) -> Result<()> {
         return issues::web::serve(issues::web::Config {
             port: *port,
             mobile_origin: None,
+            allow_wifi: vec![],
             discover: !*no_discovery,
             project: project_override,
             actor: options.agent.clone(),

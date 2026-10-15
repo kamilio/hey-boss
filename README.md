@@ -578,7 +578,7 @@ Read an item from a copied web link with `hey-boss lookup 'URL'`. For example:
 
 ```sh
 hey-boss lookup 'http://hey-boss.test/#project=github.com%2Fpoe-platform%2Fpoe-code&view=issues&issue=114'
-hey-boss lookup 'https://hey-boss-mobile-kamil.fly.dev/artifacts#project=named%3AAtlas&artifact=a-ID' --json
+hey-boss lookup 'http://192.168.1.10:4781/artifacts#project=named%3AAtlas&artifact=a-ID' --json
 ```
 
 Lookup shares the web's resource route definitions for issues, Inbox notices,
@@ -1020,11 +1020,9 @@ Repository groups start collapsed. Click anywhere on a repository header to togg
 it. Expanded repositories and inline agent details are saved locally and restored
 when the viewer or app reopens. New repositories remain collapsed.
 
-## iPhone Home Screen companion
+## Local phone access
 
-The mobile companion provides a glass-style inbox, real Apple Web Push, approvals
-and questions. Mac and phone share one authoritative outcome so only one answer
-can be accepted. See [mobile setup and platform limits](docs/mobile.md).
+The phone interface runs on your Mac and is localhost-only by default. Allow selected Wi-Fi networks with `hey-boss issue web --allow-wifi 'Home' --allow-wifi 'Office'`. See [local mobile access](docs/mobile.md).
 
 Codex sessions on a managed app-server can be steered and their saved goals paused
 or re-enabled from expanded Agents rows. See [Codex controls](docs/codex-steering.md)

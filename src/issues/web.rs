@@ -11,6 +11,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 #[cfg(test)]
 mod listener_tests;
 mod local_http;
+mod wifi;
 
 fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
     fn decode(input: &str) -> Result<String> {
@@ -48,6 +49,7 @@ fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
 pub struct Config {
     pub port: u16,
     pub mobile_origin: Option<String>,
+    pub allow_wifi: Vec<String>,
     pub discover: bool,
     pub project: Option<String>,
     pub actor: Option<String>,
@@ -67,6 +69,7 @@ struct App {
     authority: String,
     local_ports: Vec<u16>,
     mobile_origin: Option<String>,
+    allow_wifi: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,6 +118,21 @@ impl App {
 }
 
 pub fn serve(config: Config) -> Result<()> {
+    if !config.allow_wifi.is_empty()
+        && (!cfg!(target_os = "macos") || config.mobile_origin.is_some())
+    {
+        return Err(Error::invalid(
+            "Wi-Fi access requires macOS and cannot be combined with a proxy origin",
+        ));
+    }
+    if config
+        .allow_wifi
+        .iter()
+        .any(|ssid| ssid.is_empty() || ssid.len() > 32)
+    {
+        return Err(Error::invalid("Wi-Fi names must contain 1–32 bytes"));
+    }
+
     let _database_owner = if config.host.is_none() {
         Some(crate::database::Owner::host(&super::database_path()?)?)
     } else {
@@ -158,9 +176,14 @@ pub fn serve(config: Config) -> Result<()> {
             Backend::Local(path)
         }
     };
-    let server = Server::http(("127.0.0.1", config.port))
-        .map_err(|e| Error::new("io_error", e.to_string()))?;
-    let authority = server.server_addr().to_ip().unwrap().to_string();
+    let bind = if config.allow_wifi.is_empty() {
+        "127.0.0.1"
+    } else {
+        "0.0.0.0"
+    };
+    let server =
+        Server::http((bind, config.port)).map_err(|e| Error::new("io_error", e.to_string()))?;
+    let authority = format!("127.0.0.1:{}", server.server_addr().to_ip().unwrap().port());
     let mut servers = vec![server];
     // Custom and ephemeral ports deliberately remain a single isolated service.
     let (socket_activated, local_http_error) = if config.port == 4781 {
@@ -183,6 +206,7 @@ pub fn serve(config: Config) -> Result<()> {
         authority,
         local_ports,
         mobile_origin,
+        allow_wifi: config.allow_wifi,
     };
     let resolved = app.execute(
         config.project,
@@ -196,10 +220,24 @@ pub fn serve(config: Config) -> Result<()> {
         .map(str::to_owned)
         .unwrap_or_else(|| format!("http://{}/", app.authority));
     let url = format!("{base_url}{}", if config.mindmap { "mm" } else { "" });
+    let lan_url = (!app.allow_wifi.is_empty())
+        .then(wifi::current)
+        .flatten()
+        .filter(|network| network.permits(&app.allow_wifi, network.address))
+        .map(|network| format!("http://{}:{}/", network.address, app.local_ports[0]));
+    if !app.allow_wifi.is_empty() {
+        if let Some(url) = &lan_url {
+            eprintln!("Wi-Fi · {url}");
+        } else {
+            eprintln!(
+                "LAN access blocked: current Wi-Fi is unavailable or not allowed. macOS requires Location access to read Wi-Fi names."
+            );
+        }
+    }
     if config.json {
         println!(
             "{}",
-            json!({"ok":true,"url":url,"local_url":local_url,"local_http_error":local_http_error,"mobile_url":app.mobile_origin,"project":app.project,"actor":app.actor.id})
+            json!({"ok":true,"url":url,"local_url":local_url,"local_http_error":local_http_error,"mobile_url":app.mobile_origin,"lan_url":lan_url,"project":app.project,"actor":app.actor.id})
         );
     } else {
         println!(
@@ -334,13 +372,24 @@ fn serve_requests(servers: &[Server], app: &Arc<App>, stop: &Arc<AtomicBool>) {
                                 }
                                 match crate::fleet::subscribe() {
                                     Ok(mut stream) => {
+                                        let peer = request.remote_addr().map(|p| p.ip());
+                                        let host = header(&request, "host").map(str::to_owned);
+                                        let origin = header(&request, "origin").map(str::to_owned);
+                                        let site = header(&request, "sec-fetch-site").map(str::to_owned);
                                         let mut output = request.into_writer();
+
                                         if output.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").and_then(|_| output.flush()).is_err() { return; }
                                         let mut bytes = [0u8; 8192];
                                         while !stop.load(Ordering::Relaxed) {
                                             match stream.read(&mut bytes) {
                                                 Ok(0) | Err(_) => break,
-                                                Ok(n) => if output.write_all(&bytes[..n]).and_then(|_| output.flush()).is_err() { break; }
+                                                Ok(n) => {
+                                                    if let Some(peer) = peer.filter(|p| !p.is_loopback()) {
+                                                        if !lan_allowed(peer, host.as_deref(), origin.as_deref(), site.as_deref(), &app, wifi::current()) { break; }
+                                                    }
+                                                    if output.write_all(&bytes[..n]).and_then(|_| output.flush()).is_err() { break; }
+                                                }
+
                                             }
                                         }
                                     }
@@ -411,6 +460,37 @@ fn validate_mobile_origin(origin: String) -> Result<String> {
     Ok(origin)
 }
 fn allowed(request: &tiny_http::Request, app: &App) -> bool {
+    let Some(peer) = request.remote_addr() else {
+        return false;
+    };
+    let forwarded = request.headers().iter().any(|h| {
+        let name = h.field.as_str().as_str();
+        name.eq_ignore_ascii_case("forwarded")
+            || name.to_ascii_lowercase().starts_with("x-forwarded-")
+    });
+    // Only the existing, explicitly configured loopback Tailscale proxy may forward.
+    let private_proxy = peer.ip().is_loopback()
+        && app
+            .mobile_origin
+            .as_deref()
+            .is_some_and(|origin| header(request, "host") == origin.strip_prefix("https://"));
+    if forwarded && !private_proxy {
+        return false;
+    }
+    if !peer.ip().is_loopback() {
+        if app.allow_wifi.is_empty() {
+            return false;
+        }
+        return lan_allowed(
+            peer.ip(),
+            header(request, "host"),
+            header(request, "origin"),
+            header(request, "sec-fetch-site"),
+            app,
+            wifi::current(),
+        );
+    }
+
     same_origin(
         header(request, "host"),
         header(request, "origin"),
@@ -418,6 +498,33 @@ fn allowed(request: &tiny_http::Request, app: &App) -> bool {
         &app.local_ports,
         app.mobile_origin.as_deref(),
     )
+}
+
+fn lan_allowed(
+    peer: std::net::IpAddr,
+    host: Option<&str>,
+    origin: Option<&str>,
+    site: Option<&str>,
+    app: &App,
+    network: Option<wifi::Network>,
+) -> bool {
+    let (std::net::IpAddr::V4(peer), Some(network)) = (peer, network) else {
+        return false;
+    };
+    if !network.permits(&app.allow_wifi, peer)
+        || site.is_some_and(|s| !["same-origin", "none"].contains(&s))
+    {
+        return false;
+    }
+    // Exact IP authorities prevent DNS rebinding and restrict LAN to the primary port.
+    let port = app.local_ports[0];
+    let expected = if port == 80 {
+        network.address.to_string()
+    } else {
+        format!("{}:{port}", network.address)
+    };
+    host == Some(expected.as_str())
+        && origin.is_none_or(|origin| origin == format!("http://{expected}"))
 }
 
 fn same_origin(
