@@ -42,6 +42,7 @@ impl IssueReference {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     List,
+    Unread,
     Count,
     Related {
         issue: IssueReference,
@@ -102,6 +103,7 @@ pub enum Action {
 impl Action {
     pub fn payload(&self) -> Result<Value> {
         let (command, id) = match self {
+            Self::Unread => ("inbox_unread", None),
             Self::List | Self::Count | Self::Related { .. } => ("inbox_list", None),
             Self::Clear { .. } => ("inbox_clear", None),
             Self::View { task_id } => ("inbox_view", Some(task_id)),
@@ -446,6 +448,17 @@ mod tests {
                 serde_json::from_value(json!({"action":"related","issue":reference})).unwrap();
             assert!(invalid.payload().is_err());
         }
+    }
+
+    #[test]
+    fn unread_list_uses_the_indexed_native_projection() {
+        let action: Action = serde_json::from_value(json!({"action":"unread"})).unwrap();
+        assert_eq!(action.payload().unwrap()["command"], "inbox_unread");
+        let reply = json!({"tasks":[],"unread":0,"archived":7000,"projects":["History"]});
+        let projected = project_response(&action, reply.clone()).unwrap();
+        assert_eq!(projected["tasks"], reply["tasks"]);
+        assert_eq!(projected["archived"], 7000);
+        assert_eq!(projected["projects"], reply["projects"]);
     }
 
     #[test]

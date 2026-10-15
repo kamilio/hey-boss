@@ -3,7 +3,10 @@ let inboxSearchFocus = null;
 let inboxTasks = [],
   inboxDetail = null,
   inboxAt = 0,
-  inboxLoading = null,
+  inboxLoading = new Map(),
+  inboxScope = "",
+  inboxArchived = 0,
+  inboxProjects = [],
   inboxCountLoading = null,
   inboxRelatedLoading = new Map(),
   inboxBadgeVersion = 0,
@@ -165,17 +168,23 @@ async function inboxApi(action) {
   return post("/api/inbox", action);
 }
 async function inboxSnapshot(force = false) {
-  if (!force && Date.now() - inboxAt < 4000) return inboxTasks;
-  if (!inboxLoading)
-    inboxLoading = inboxApi({ action: "list" })
+  const scope = model.route.inbox_state === "archive" ? "list" : "unread";
+  if (!force && inboxScope === scope && Date.now() - inboxAt < 4000) return inboxTasks;
+  if (!inboxLoading.has(scope))
+    inboxLoading.set(scope, inboxApi({ action: scope })
       .then((value) => {
+        // A slower Activity reply must not replace the unread snapshot.
+        if (scope !== (model.route.inbox_state === "archive" ? "list" : "unread")) return value.tasks;
         inboxTasks = value.tasks;
+        inboxScope = scope;
+        inboxArchived = scope === "unread" ? value.archived : value.tasks.length - value.unread;
+        inboxProjects = value.projects || [...new Set(value.tasks.map(task => task.project).filter(Boolean))];
         inboxAt = Date.now();
         updateInboxBadge(value.unread);
         return inboxTasks;
       })
-      .finally(() => (inboxLoading = null));
-  return inboxLoading;
+      .finally(() => inboxLoading.delete(scope)));
+  return inboxLoading.get(scope);
 }
 async function refreshInboxBadge() {
   if (document.hidden) return;
@@ -222,6 +231,9 @@ function noticeIssueChip(task) {
     : "";
 }
 function renderInboxList() {
+  const search = $("#inbox-search");
+  if (search && search === document.activeElement)
+    inboxSearchFocus = [search.selectionStart, search.selectionEnd];
   const focusedPage = document.activeElement?.closest("#inbox-view .list-pagination") ? document.activeElement.getAttribute("aria-label") : null;
   const route = model.route,
     query = route.inbox_search.trim().toLocaleLowerCase();
@@ -242,18 +254,18 @@ function renderInboxList() {
     history.replaceState(null, "", routeHash(route));
   }
   const pagination = HeyBossUI.pagination(page, "notices", target => routeHash({...route, inbox_page:target}));
-  const projects = [
-    ...new Set(inboxTasks.map((task) => task.project).filter(Boolean)),
-  ].sort((a, b) => a.localeCompare(b));
+  const projects = [...inboxProjects].sort((a, b) => a.localeCompare(b));
   const unread = inboxTasks.filter((task) => task.status === "pending").length;
   inboxSignature = JSON.stringify([
     tasks,
+    inboxArchived,
+    inboxProjects,
     route.inbox_state,
     route.inbox_project,
     route.inbox_search,
   ]);
   $("#inbox-view").innerHTML =
-    `<div class="page-heading inbox-heading"><div><div class="eyebrow">${icon("inbox")}Your attention, in one place</div><h1>Inbox <span class="heading-count">${unread}</span></h1><p class="page-description">${unread ? `${unread} ${unread === 1 ? "notice needs" : "notices need"} your attention.` : "A clear view of what needs you next."}</p></div><div class="detail-heading-actions">${route.inbox_state !== "archive" ? `<button class="button" data-inbox-clear-all ${!unread || inboxBusy ? "disabled" : ""}>${icon("check")}Clear all</button>` : ""}<button class="button" data-inbox-refresh>${icon("refresh")}Refresh</button></div></div><div class="toolbar"><label class="search-field">${icon("search")}<input type="search" id="inbox-search" aria-label="Search Inbox" placeholder="Search notices…" value="${esc(route.inbox_search)}" autocomplete="off" /><kbd>/</kbd></label><label class="select-control">${icon("folder")}<select id="inbox-project-filter" aria-label="Filter Inbox by project"><option value="">All projects</option>${projects.map((project) => `<option value="${esc(project)}" ${project === route.inbox_project ? "selected" : ""}>${esc(project)}</option>`).join("")}</select></label></div><div class="glass inbox-panel"><div class="list-heading"><div class="state-tabs" role="tablist" aria-label="Inbox state"><button data-inbox-state="unread" role="tab" aria-selected="${route.inbox_state !== "archive"}" class="${route.inbox_state !== "archive" ? "selected" : ""}" tabindex="${route.inbox_state !== "archive" ? 0 : -1}">${icon("inbox")}Unread<span class="tab-count">${unread}</span></button><button data-inbox-state="archive" role="tab" aria-selected="${route.inbox_state === "archive"}" class="${route.inbox_state === "archive" ? "selected" : ""}" tabindex="${route.inbox_state === "archive" ? 0 : -1}">${icon("clock")}Activity<span class="tab-count">${inboxTasks.length - unread}</span></button></div><span class="list-sort">Newest first</span></div>${pagination}<div role="tabpanel" aria-label="Notices" id="notice-list">${tasks.length ? page.items.map((task) => `<article class="notice-row notice-tone ${noticeSeverity(task)} ${noticeDecision(task) || noticeReview(task) ? "needs-response" : ""}" data-notice-row="${esc(task.taskID)}">${noticeBadge(task)}<div class="notice-row-main"><div class="notice-card-heading"><span class="notice-project">${esc(task.project || "Notifications")} ·</span><a class="notice-title" href="${esc(noticeRoute(task.taskID))}">${esc(task.title || "Untitled notice")}</a></div>${task.summary ? `<p class="notice-summary">${esc(task.summary)}</p>` : ""}<div class="notice-meta"><span class="notice-severity-label">${esc(noticeLabel(task))}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span>${task.agent ? `<span title="${esc(task.agent.id)}">· ${esc(task.agent.model || task.agent.kind)} · ${esc(task.agent.id.slice(-8))}</span>` : ""}${task.agentMuted ? "<span>· Muted delivery</span>" : ""}<span>·</span>${date(task.createdAt * 1000)}${noticeIssueChip(task)}</div></div><div class="notice-row-end">${noticeDecision(task) || noticeReview(task) ? `<span class="notice-state">${noticeStatus(task)}</span>` : route.inbox_state === "archive" ? `<span class="notice-state">${noticeStatus(task)}</span>` : ""}<a class="notice-open" href="${esc(noticeRoute(task.taskID))}" aria-label="Open ${esc(task.title)}">${icon("arrow-right")}</a></div></article>`).join("") : inboxEmpty(Boolean(query || route.inbox_project))}</div>${pagination}</div><div class="list-footer inbox-footer"><span>${tasks.length} ${tasks.length === 1 ? "notice" : "notices"}</span><span>Answers and read receipts stay in sync.</span></div>`;
+    `<div class="page-heading inbox-heading"><div><div class="eyebrow">${icon("inbox")}Your attention, in one place</div><h1>Inbox <span class="heading-count">${unread}</span></h1><p class="page-description">${unread ? `${unread} ${unread === 1 ? "notice needs" : "notices need"} your attention.` : "A clear view of what needs you next."}</p></div><div class="detail-heading-actions">${route.inbox_state !== "archive" ? `<button class="button" data-inbox-clear-all ${!unread || inboxBusy ? "disabled" : ""}>${icon("check")}Clear all</button>` : ""}<button class="button" data-inbox-refresh>${icon("refresh")}Refresh</button></div></div><div class="toolbar"><label class="search-field">${icon("search")}<input type="search" id="inbox-search" aria-label="Search Inbox" placeholder="Search notices…" value="${esc(route.inbox_search)}" autocomplete="off" /><kbd>/</kbd></label><label class="select-control">${icon("folder")}<select id="inbox-project-filter" aria-label="Filter Inbox by project"><option value="">All projects</option>${projects.map((project) => `<option value="${esc(project)}" ${project === route.inbox_project ? "selected" : ""}>${esc(project)}</option>`).join("")}</select></label></div><div class="glass inbox-panel"><div class="list-heading"><div class="state-tabs" role="tablist" aria-label="Inbox state"><button data-inbox-state="unread" role="tab" aria-selected="${route.inbox_state !== "archive"}" class="${route.inbox_state !== "archive" ? "selected" : ""}" tabindex="${route.inbox_state !== "archive" ? 0 : -1}">${icon("inbox")}Unread<span class="tab-count">${unread}</span></button><button data-inbox-state="archive" role="tab" aria-selected="${route.inbox_state === "archive"}" class="${route.inbox_state === "archive" ? "selected" : ""}" tabindex="${route.inbox_state === "archive" ? 0 : -1}">${icon("clock")}Activity<span class="tab-count">${inboxArchived}</span></button></div><span class="list-sort">Newest first</span></div>${pagination}<div role="tabpanel" aria-label="Notices" id="notice-list">${tasks.length ? page.items.map((task) => `<article class="notice-row notice-tone ${noticeSeverity(task)} ${noticeDecision(task) || noticeReview(task) ? "needs-response" : ""}" data-notice-row="${esc(task.taskID)}">${noticeBadge(task)}<div class="notice-row-main"><div class="notice-card-heading"><span class="notice-project">${esc(task.project || "Notifications")} ·</span><a class="notice-title" href="${esc(noticeRoute(task.taskID))}">${esc(task.title || "Untitled notice")}</a></div>${task.summary ? `<p class="notice-summary">${esc(task.summary)}</p>` : ""}<div class="notice-meta"><span class="notice-severity-label">${esc(noticeLabel(task))}</span><span>·</span><span>${esc(task.sourceHost || "Source unavailable")}</span>${task.agent ? `<span title="${esc(task.agent.id)}">· ${esc(task.agent.model || task.agent.kind)} · ${esc(task.agent.id.slice(-8))}</span>` : ""}${task.agentMuted ? "<span>· Muted delivery</span>" : ""}<span>·</span>${date(task.createdAt * 1000)}${noticeIssueChip(task)}</div></div><div class="notice-row-end">${noticeDecision(task) || noticeReview(task) ? `<span class="notice-state">${noticeStatus(task)}</span>` : route.inbox_state === "archive" ? `<span class="notice-state">${noticeStatus(task)}</span>` : ""}<a class="notice-open" href="${esc(noticeRoute(task.taskID))}" aria-label="Open ${esc(task.title)}">${icon("arrow-right")}</a></div></article>`).join("") : inboxEmpty(Boolean(query || route.inbox_project))}</div>${pagination}</div><div class="list-footer inbox-footer"><span>${tasks.length} ${tasks.length === 1 ? "notice" : "notices"}</span><span>Answers and read receipts stay in sync.</span></div>`;
   if (focusedPage) {
     const control = $$("#inbox-view .list-pagination a").find(link => link.getAttribute("aria-label") === focusedPage);
     (control || $("#inbox-view .list-pagination") || $("#inbox-search"))?.focus({preventScroll:true});
@@ -284,7 +296,9 @@ async function renderInboxRoute(sequence) {
       $("#inbox-search").selectionEnd,
     ];
   inboxDetail = null;
-  $("#inbox-view").innerHTML =
+  const cached = !model.route.notice && inboxAt > 0 && inboxScope === (model.route.inbox_state === "archive" ? "list" : "unread");
+  if (cached) renderInboxList();
+  else $("#inbox-view").innerHTML =
     '<div class="loading-state"><span class="spinner"></span>Opening Inbox…</div>';
   try {
     if (model.route.notice) {
@@ -317,6 +331,7 @@ async function renderInboxRoute(sequence) {
     }
   } catch (error) {
     if (sequence !== model.sequence) return;
+    if (cached) { toast(error.message, true); return; }
     $("#inbox-view").innerHTML =
       `<div class="empty-state"><div class="empty-icon">${icon("inbox")}</div><h1>Let’s reconnect</h1><p>${esc(error.message)}</p><button class="button" data-inbox-refresh>Try again</button><a class="button" href="${esc(routeHash({ ...model.route, view: "issues", notice: "" }))}">Go to issues</a></div>`;
   }
@@ -510,6 +525,8 @@ async function refreshInbox(quiet = true) {
       if (
         JSON.stringify([
           tasks,
+          inboxArchived,
+          inboxProjects,
           model.route.inbox_state,
           model.route.inbox_project,
           model.route.inbox_search,
