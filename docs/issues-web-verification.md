@@ -561,8 +561,7 @@ passed Linux and mobile; macOS was still running at completion.
 Release build `935c44e2e7ed4651` was installed and verified current on this
 MacBook, `kamils-macbook-pro.local`, and `devbox`. Four read-only checks against
 the installed Mac web app verified the served JavaScript hash, readiness UI,
-and claim/editor restrictions. Fly app `hey-boss-mobile-kamil` was deployed,
-returned a healthy `/healthz`, and served the verified stylesheet hash. A
+and claim/editor restrictions. A
 read-only fleet check against the committed release export confirmed all three
 installations; unrelated in-progress changes in the shared checkout were
 excluded from that release comparison.

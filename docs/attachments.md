@@ -43,9 +43,7 @@ and SHA-256. Back up the database and this directory together. Attachment mutati
 are not replicated as issue rows; fleet companions must use `--host SUPERVISOR`.
 Moving an issue to another project moves its attachment access atomically.
 Removed resources do not delete attachments implicitly: files remain accessible by
-ID until explicitly removed. Paired Fly devices use the authenticated supervisor
-bridge; the existing persistent transport journal carries pending uploads and
-download results while the authoritative disk remains on the supervisor.
+ID until explicitly removed. Phones access these files directly through the local web interface on allowed Wi-Fi networks; see [local mobile access](mobile.md).
 
 Verification: `cargo test --locked --test attachments --test issues_web --test artifacts`,
 `npm --prefix mobile test`, and `tools/attachments_browser_checks.js` against an

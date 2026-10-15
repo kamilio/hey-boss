@@ -144,12 +144,6 @@ both themes; the native audit completed with four ownership-detail captures
 at 820/920 points. The full selected ownership reason remains readable and
 wraps without clipping. The isolated browser fixture has no inbox service.
 
-Fly release 211 was deployed from the validated commit with a normal exit,
-completed machine checks, and image digest
-`sha256:6bf1ba856422381f2568e82b99697836fe056986f7713661ef27b969eb5e2c4f`.
-The fresh machine audit reports it started and passing; `/healthz` returns
-`{"ok":true}`.
-
 **Standalone health workers must be verified separately.** Remote health
 commands prefer `~/.local/bin/hey-boss-health` over the main CLI. All three
 standalone workers initially remained at `d7552906194359d1`; the ownership

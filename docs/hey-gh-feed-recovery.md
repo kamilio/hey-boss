@@ -47,7 +47,7 @@ The CLI contains the daemon. Replace the installed binary and restart an
 existing daemon gracefully to load the new implementation, preserving its
 cache and watches. Recovery replacements appear when individual observations
 or subsequent account cycles validate their sources. There is no hey-gh web
-UI or Fly service; the hey-boss issue viewer is checked separately at desktop
+UI; the hey-boss issue viewer is checked separately at desktop
 and phone widths.
 
 ## Installed verification — September 20, 2026
@@ -81,7 +81,3 @@ keyboard navigation. There was no document overflow or browser console error.
 Its Chrome session, server, screenshots, reports, and temporary build snapshot
 were removed after review. Existing checkout edits and other browser sessions
 were preserved.
-
-The required hey-boss Fly deployment reused its current immutable mobile image
-because this fix changes a local hey-gh daemon. Rolling deployment checks and
-the public `/healthz` endpoint passed; uncommitted mobile changes were preserved.

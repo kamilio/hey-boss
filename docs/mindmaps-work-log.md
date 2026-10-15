@@ -904,10 +904,7 @@ whitespace and native debug build passed. Imported main's latest shared-page
 commit into the worktree; the entire merged index was checked equal to main
 before committing the merge.
 
-Deployment audit: Fly's health check passes and all four built frontend files
-(index, CSS, main JS and Markdown worker) exactly match the live HTTPS assets
-(`out/mm-fly-assets-1825.json`). The mindmap is served by the native CLI, not that
-mobile bundle. Installed-native asset verification correctly found the earlier
+Installed-native asset verification correctly found the earlier
 renderer missing the continuous-touch fix. Updating expected HTML composition
 for the new Workers slot eliminated a verifier-only HTML mismatch; the five
 other shared files matched (`out/mm-installed-shared-assets-1825.json`). Final
@@ -993,14 +990,6 @@ final installed-build verification remains pending. Evidence
 `out/mm-controls-baseline-failure.txt`, `out/mm-controls-after-chrome.txt` and
 `out/mm-controls-after-webkit.txt`.
 
-Final Fly deployment completed at 19:13:53 UTC, release 25 of
-`hey-boss-mobile-kamil`, image deployment-01M2XHDCWBAZDPYWMD21KZWH51.
-The machine is started with a passing health check; `/healthz` returns ok.
-All 15 files in the local mobile dist match live bytes, including JavaScript,
-CSS, workers, icons, shell and service worker. Evidence
-`out/mm-fly-postdeploy-status-1914.json` and
-`out/mm-fly-postdeploy-assets-1914.json`.
-
 The overlap fix also passes the existing interaction suite with its new CSS:
 Chrome 40 checks (including native CDP touch), WebKit 25 (focus and shell).
 Evidence `out/mm-controls-core-chrome.txt` and
@@ -1067,11 +1056,3 @@ This proves this Map delivery on all three machines while preserving concurrent
 dashboard work. Evidence `out/mm-delivered-fleet-check-1950.json`,
 `out/mm-installed-shared-assets-local-final.json` and
 `out/mm-completion-audit.json`. No other installer or upgrade lock was removed.
-
-The final Fly deployment command exited zero; the currently deployed service
-has a started machine, passing health check and all 15 dist files identical to
-local bytes. Evidence `out/mm-fly-final-deploy-1946.log`,
-`out/mm-fly-final-status.json`, `out/mm-fly-final-assets.json`. The viewer renderer
-is unchanged from the measured 10,000-node/20,000-link edition; performance
-measurements and their scope are recorded above. The final readiness notification
-follows the completed duration and audit.

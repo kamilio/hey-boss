@@ -1428,7 +1428,7 @@ def local_request(value):
 
 
 class MobileIssues:
-    """Only the supervisor consumes Fly's durable phone creation queue."""
+    """Only the supervisor consumes the relay's durable phone creation queue."""
     def __init__(self, path, node):
         self.path, self.node = path, node
 
@@ -1533,7 +1533,7 @@ class MobileIssues:
             try:
                 self.sync()
             except Exception:
-                # Offline/configuration/database failures leave Fly's queue pending.
+                # Offline/configuration/database failures leave the relay's queue pending.
                 # Do not log exceptions containing request headers or pairing data.
                 pass
             STOP.wait(5)

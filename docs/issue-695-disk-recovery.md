@@ -132,13 +132,6 @@ rollout failures are not reported as successful installs. This incident
 introduced no executable changes requiring that newer release; the recovery
 and existing installed builds were verified independently.
 
-Fly deployment completed successfully for `hey-boss-mobile-kamil`, machine
-`811de36a995918` in `ord`, using its existing immutable image:
-`registry.fly.io/hey-boss-mobile-kamil@sha256:cc1cd8a4873d95751ead833b3ae9920e9960210a025a24b631e5bc37485c4f76`.
-The rolling deployment, smoke/machine checks and DNS checks passed. Readback
-confirmed the started machine and passing health check; the public `/healthz`
-returned `{"ok":true}`. Pending unrelated local UI edits were not deployed.
-
 ## Visual verification and cleanup
 
 The installed dashboard was tested in isolated Chrome at **1440 × 1000** and
