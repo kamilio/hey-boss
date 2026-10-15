@@ -37,14 +37,19 @@ pub(super) fn blockers(db: &Connection, project: &str) -> Result<BTreeMap<i64, V
     db.execute("DELETE FROM distributed_rejections WHERE table_name='issue_blockers' AND json_extract(entity,'$.project_id')=?1", [project])?;
     let mut edges = BTreeMap::<String, Vec<String>>::new();
     let mut result = BTreeMap::new();
-    let mut proposed = rows(db, "issues", project)?;
-    proposed.sort_by_key(|(_, r)| r["number"].as_i64().unwrap_or(0));
-    for (_, row) in proposed {
-        let number = row["number"]
+    // Read the covering dependency index, never full documents or the retained
+    // requirement snapshots. A cutover can include thousands of archived tasks.
+    let mut proposed = replica::rows(db,
+        "SELECT f.entity,json_extract(f.value,'$.blockers') AS blockers FROM distributed_fields f WHERE f.table_name='issues' AND f.field='@lifecycle' AND json_extract(f.entity,'$.project_id')=?1 AND EXISTS(SELECT 1 FROM distributed_fields a WHERE a.table_name='issues' AND a.entity=f.entity AND a.field='@alive' AND a.value='true')",
+        &[json!(project)])?.into_iter().map(|row| -> Result<(i64, Vec<i64>)> {
+        let key: Value = serde_json::from_str(row["entity"].as_str().unwrap())?;
+        let number = key["number"]
             .as_i64()
             .ok_or_else(|| replica::invalid("Invalid task graph identity"))?;
-        let mut blockers: Vec<i64> =
-            serde_json::from_str(row["blockers"].as_str().unwrap_or("[]"))?;
+        Ok((number, serde_json::from_str(row["blockers"].as_str().unwrap_or("[]"))?))
+    }).collect::<Result<Vec<_>>>()?;
+    proposed.sort_by_key(|(number, _)| *number);
+    for (number, mut blockers) in proposed {
         blockers.sort_unstable();
         blockers.dedup();
         let mut accepted = vec![];

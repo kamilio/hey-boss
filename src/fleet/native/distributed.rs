@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS distributed_fields(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,field TEXT NOT NULL,
  clock INTEGER NOT NULL,origin TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(table_name,entity,field)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS distributed_dependency_graph ON distributed_fields(json_extract(entity,'$.project_id'),entity,json_extract(value,'$.blockers')) WHERE table_name='issues' AND field='@lifecycle';
 CREATE TABLE IF NOT EXISTS distributed_dirty(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,PRIMARY KEY(table_name,entity)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS distributed_aliases(

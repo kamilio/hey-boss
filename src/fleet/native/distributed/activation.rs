@@ -97,7 +97,7 @@ pub(in crate::fleet::native) fn activate(ctx: &Context) -> Result<()> {
     }
     // Validate and materialize the complete shadow state before exposing peer
     // execution. A missing dependency rolls back the whole cutover.
-    while materialize::apply(&tx)? > 0 {}
+    materialize::drain(&tx)?;
     let pending: i64 = tx.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r.get(0))?;
     if pending > 0 {
         let errors = replica::rows(

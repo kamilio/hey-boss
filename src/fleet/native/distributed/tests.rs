@@ -74,6 +74,25 @@ fn preflight_existing_store_without_changing_the_source() {
     crate::issues::archive::backup_store(&snapshot, &f.0.join("issues.db")).unwrap();
     snapshot.commit().unwrap();
     drop(original);
+    // A saved shadow rehearsal can resume without repeating its full backfill.
+    // Copy the append-only journal after the application snapshot so it covers
+    // every already-exported checkpoint, just as independent recovery requires.
+    let journal = source.with_extension("sync.db");
+    if journal.exists() {
+        let saved =
+            Connection::open_with_flags(&journal, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let snapshot = saved.read_transaction().unwrap();
+        snapshot
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        snapshot
+            .backup("main", f.0.join("issues.sync.db"), None)
+            .unwrap();
+        snapshot.commit().unwrap();
+    }
     eprintln!("Preflight private snapshot copied");
     for extension in ["attachments", "jobs"] {
         copy_resources(
@@ -98,6 +117,9 @@ fn preflight_existing_store_without_changing_the_source() {
         count("events"),
     ];
     install(&db, &node).unwrap();
+    // Refresh capture/index additions when validating a prepared shadow copy.
+    db.execute_batch(SCHEMA).unwrap();
+    capture::install(&db).unwrap();
     let ctx = f.context(&node);
     activation::enroll(&ctx, &node, 0).unwrap();
     let mut engine = hey_boss_sync::Engine::open(&ctx.path.with_extension("sync.db")).unwrap();
@@ -125,7 +147,23 @@ fn preflight_existing_store_without_changing_the_source() {
     .unwrap();
     capture_all(&db, &mut engine);
     drop(engine);
+    let probe = db.unchecked_transaction().unwrap();
+    probe
+        .execute("UPDATE distributed_meta SET active=1", [])
+        .unwrap();
+    materialize::apply(&probe).unwrap();
+    let rejected = replica::rows(&probe, "SELECT table_name,reason,count(*) AS affected FROM distributed_rejections GROUP BY table_name,reason LIMIT 10", &[]).unwrap();
+    if !rejected.is_empty() {
+        eprintln!(
+            "Preflight initial projection diagnostics: {}",
+            serde_json::to_string(&rejected).unwrap()
+        );
+    }
+    probe.rollback().unwrap();
+    let cutover = std::time::Instant::now();
+    eprintln!("Preflight starting activation after {:?}", start.elapsed());
     activation::activate(&ctx).unwrap();
+    eprintln!("Preflight activation completed in {:?}", cutover.elapsed());
     let after = [
         count("projects"),
         count("issues"),
@@ -898,6 +936,102 @@ fn outline_cycles_and_alias_conflicts_converge_without_discarding_nodes() {
     assert_eq!(
         replica::rows(&a, "SELECT * FROM mindmap_nodes ORDER BY id", &[]).unwrap(),
         replica::rows(&b, "SELECT * FROM mindmap_nodes ORDER BY id", &[]).unwrap()
+    );
+}
+
+#[test]
+fn dependency_projection_does_not_load_large_requirement_bodies() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    db.execute("UPDATE issues SET body=?1", ["x".repeat(1_500_000)])
+        .unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    capture_all(&db, &mut engine);
+    let (dependencies, bytes) =
+        crate::test_allocations::measure(|| graph::blockers(&db, "p").unwrap());
+    assert_eq!(dependencies[&1], Vec::<i64>::new());
+    assert!(
+        bytes < 256 * 1024,
+        "Dependency projection loaded document bodies: {bytes} bytes"
+    );
+}
+
+#[test]
+fn cutover_does_not_stop_at_a_full_page_of_pending_comment_parents() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    a.execute_batch("INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at) VALUES('p','doc','Document','',1,1);").unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    a.execute_batch("INSERT INTO artifact_comments(id,project_id,artifact_id,author,body,created_at) VALUES(2000,'p','doc','human:test','Parent',1);
+        WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<1129)
+        INSERT INTO artifact_comments(id,project_id,artifact_id,parent,author,body,created_at) SELECT n,'p','doc',2000,'human:test','Reply',2 FROM numbers;").unwrap();
+    b.execute("UPDATE distributed_meta SET active=0", [])
+        .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let tx = b.unchecked_transaction().unwrap();
+    tx.execute("UPDATE distributed_meta SET active=1", [])
+        .unwrap();
+    materialize::drain(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM artifact_comments", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        131
+    );
+    assert_eq!(b.query_row("SELECT count(*) FROM artifact_comments c JOIN artifact_comments p ON c.parent=p.id WHERE p.body='Parent'", [], |r| r.get::<_,i64>(0)).unwrap(), 130);
+}
+
+#[test]
+fn shadow_cutover_retries_relationships_after_later_task_pages_materialize() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    a.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(2) UNION ALL SELECT n+1 FROM numbers WHERE n<130)
+        INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+        SELECT 'p',n,'Task','','open','human:test',1,1,1,'[]' FROM numbers;
+        INSERT INTO issue_subtasks(project_id,parent_number,child_number,created_by,created_at) VALUES('p',99,98,'human:test',1);").unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let tx = b.unchecked_transaction().unwrap();
+    tx.execute("UPDATE distributed_meta SET active=1", [])
+        .unwrap();
+    materialize::drain(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        130
+    );
+    assert_eq!(
+        b.query_row(
+            "SELECT parent_number FROM issue_subtasks WHERE child_number=98",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        99
     );
 }
 
