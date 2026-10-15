@@ -64,9 +64,17 @@ fn preflight_existing_store_without_changing_the_source() {
     std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o700)).unwrap();
     let original = crate::issues::Store::open_read_connection(&source).unwrap();
     let snapshot = original.read_transaction().unwrap();
+    // BEGIN DEFERRED alone does not pin a WAL snapshot. Read first so ongoing
+    // production writes cannot repeatedly restart the private backup.
+    snapshot
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap();
     crate::issues::archive::backup_store(&snapshot, &f.0.join("issues.db")).unwrap();
     snapshot.commit().unwrap();
     drop(original);
+    eprintln!("Preflight private snapshot copied");
     for extension in ["attachments", "jobs"] {
         copy_resources(
             &source.with_extension(extension),
@@ -148,6 +156,50 @@ fn transfer(from: &hey_boss_sync::Engine, to: &mut hey_boss_sync::Engine) {
             break;
         }
         to.ingest(&batch).unwrap();
+    }
+}
+
+#[test]
+fn baseline_bounds_large_documents_without_skipping_rows() {
+    let f = Fixture::new();
+    let db = f.db();
+    seed(&db);
+    let body = "x".repeat(1_500_000);
+    db.execute("UPDATE issues SET body=?1", [&body]).unwrap();
+    for number in 2..=3 {
+        db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',?1,'Large document',?2,'open','human:test',1,1,1,'[]')", rusqlite::params![number, body]).unwrap();
+    }
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    for _ in 0..2 {
+        baseline(&db, &mut engine, true).unwrap();
+    }
+    for number in 1..=3 {
+        let before = engine.head().unwrap();
+        baseline(&db, &mut engine, true).unwrap();
+        assert_eq!(
+            engine.head().unwrap() - before,
+            1,
+            "Each page should hold only one large document"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT after_rowid FROM distributed_baseline WHERE table_name='issues'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            number
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT complete FROM distributed_baseline WHERE table_name='issues'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap(),
+            number == 3
+        );
     }
 }
 
