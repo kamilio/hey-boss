@@ -555,7 +555,7 @@ fn apply_signal_locked(
         && phase == "starting"
         && !worker["pid"].is_null()
         && worker["pid"] != prior;
-    let role: String = db.query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let role = ctx.service_role()?;
     let config_path = ctx.state.join(if role == "controller" {
         "fleet-main.json"
     } else {

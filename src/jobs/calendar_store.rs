@@ -79,10 +79,11 @@ fn summary_day(
     now: i64,
 ) -> Result<Value> {
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+    let history_table = history_table(db)?;
     // Aggregate in SQLite; deserialize at most SAMPLE history snapshots, even
     // when a minute schedule has thousands of executions in the visible range.
     let history = db.query_collect(
-        "SELECT job_id,state,COUNT(*),MIN(scheduled_at),MAX(scheduled_at),MIN(id) FROM scheduled_job_runs WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) GROUP BY job_id,state",
+        &format!("SELECT job_id,state,COUNT(*),MIN(scheduled_at),MAX(scheduled_at),MIN(id) FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) GROUP BY job_id,state"),
         params![project, day.start, day.end, q.job_id],
         |r| -> rusqlite::Result<_> { Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,String>(5)?)) },
     )?;
@@ -116,7 +117,7 @@ fn summary_day(
         let entry = if let Some(snapshot) = &group.snapshot {
             Entry::projection(snapshot, group.first)
         } else {
-            Entry::run(get_run(db, group.run_id.as_deref().unwrap())?)
+            Entry::run(observed_run(db, group.run_id.as_deref().unwrap())?)
         };
         let mut entry = serde_json::to_value(entry)?;
         entry["scheduled_at"] = json!(group.first);
@@ -137,6 +138,7 @@ pub(super) fn read(
     detail: bool,
 ) -> Result<Value> {
     let bounds = q.bounds()?;
+    let history_table = history_table(db)?;
     let start = bounds[0].start;
     let end = bounds.last().unwrap().end;
     if let Some(id) = &q.job_id {
@@ -161,7 +163,7 @@ pub(super) fn read(
         let limit = PAGE + 1;
         let mut entries = Vec::new();
         let lower = q.cursor.as_ref().map_or(day.start, |c| c.at.max(day.start));
-        let runs=db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) AND (scheduled_at>?5 OR (scheduled_at=?5 AND 'run:'||id>?6)) ORDER BY scheduled_at,id LIMIT ?7"),params![project,lower,day.end,q.job_id,q.cursor.as_ref().map_or(i64::MIN,|c|c.at),q.cursor.as_ref().map_or("",|c|c.key.as_str()),limit],run_row)?;
+        let runs=db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) AND (scheduled_at>?5 OR (scheduled_at=?5 AND 'run:'||id>?6)) ORDER BY scheduled_at,id LIMIT ?7"),params![project,lower,day.end,q.job_id,q.cursor.as_ref().map_or(i64::MIN,|c|c.at),q.cursor.as_ref().map_or("",|c|c.key.as_str()),limit],run_row)?;
         entries.extend(runs.into_iter().map(Entry::run));
         for (job, schedule) in jobs.iter().zip(&schedules) {
             let mut after = (day.start - 1).max(now).max(job.schedule_from);

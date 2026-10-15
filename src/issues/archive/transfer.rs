@@ -480,11 +480,27 @@ pub(crate) fn map_local_history(
         )?;
         let own: String =
             tx.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+        let distributed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_aliases')",
+            [],
+            |r| r.get(0),
+        )?;
         for (kind, source_id, origin, origin_id) in origins {
             if !matches!(kind.as_str(), "comments" | "events") {
                 return Err(unavailable("Invalid archived append kind"));
             }
-            let known:Option<i64>=tx.query_row("SELECT local_id FROM fleet_row_ids WHERE origin=?1 AND table_name=?2 AND origin_id=?3",params![origin,kind,origin_id],|r|r.get(0)).optional()?;
+            let entity = format!("{origin}:{origin_id}");
+            let canonical: Option<i64> = if distributed {
+                tx.query_row(
+                    "SELECT local_id FROM distributed_aliases WHERE table_name=?1 AND entity=?2",
+                    params![kind, entity],
+                    |r| r.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            let known:Option<i64>=canonical.or(tx.query_row("SELECT local_id FROM fleet_row_ids WHERE origin=?1 AND table_name=?2 AND origin_id=?3",params![origin,kind,origin_id],|r|r.get(0)).optional()?);
             let id = if let Some(known) = known {
                 known
             } else if origin == own {
@@ -507,6 +523,11 @@ pub(crate) fn map_local_history(
                 ));
             }
             tx.execute("INSERT OR IGNORE INTO fleet_row_ids(origin,table_name,origin_id,local_id) VALUES(?1,?2,?3,?4)",params![origin,kind,origin_id,id])?;
+            if distributed {
+                // Retain a canonical mapping before hot history is restored.
+                // A subsequent ordinary fact must reuse this allocation.
+                tx.execute("INSERT OR IGNORE INTO distributed_aliases(table_name,entity,local_id) VALUES(?1,?2,?3)", params![kind,entity,id])?;
+            }
             // Own-origin rows may have been removed on a previous replica.
             // Keep SQLite's next allocation above every restored identity.
             tx.execute("INSERT INTO sqlite_sequence(name,seq) SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name=?1)",params![kind,id])?;

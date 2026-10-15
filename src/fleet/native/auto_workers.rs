@@ -46,11 +46,7 @@ fn definitions(value: &Value) -> Result<Vec<Value>> {
 fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'static str)> {
     let agent_path = ctx.state.join("fleet-agent.json");
     let agent = ctx.read_json(&agent_path, Value::Null)?;
-    let role: String =
-        ctx.db()?
-            .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |row| {
-                row.get(0)
-            })?;
+    let role = ctx.service_role()?;
     let (source, config, role) = if role == "agent" {
         (agent_path, agent["workers"].clone(), "agent")
     } else {
@@ -95,9 +91,7 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
 // Ownership is local and explicit. Fleet discovery must never enroll workers in
 // this dashboard, including workers added later from a separate terminal.
 fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
-    let role: String = ctx
-        .db()?
-        .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let role = ctx.service_role()?;
     let companion = ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?;
     if (role != "agent" && super::configuration::is_yaml(&ctx.desired))
         || companion["declarative"] == true
@@ -116,9 +110,7 @@ fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
     Ok(ids.into_iter().collect())
 }
 fn save_owned_ids(ctx: &Context, ids: &HashSet<String>) -> Result<()> {
-    let role: String = ctx
-        .db()?
-        .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let role = ctx.service_role()?;
     if role != "agent" && super::configuration::is_yaml(&ctx.desired) {
         return Ok(());
     }

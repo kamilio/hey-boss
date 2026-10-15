@@ -1824,6 +1824,61 @@ fn legacy_upgrade_state_migrates_without_stopping_active_sessions() {
 }
 
 #[test]
+fn disconnected_peers_independently_pick_up_and_complete_the_same_task() {
+    let a = Fixture::new("distributed-offline-a");
+    let b = Fixture::new("distributed-offline-b");
+    let mut ids = Vec::new();
+    for f in [&a, &b] {
+        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        f.setup(&[]);
+        let node = f.cli(&["whoami"])["agent"]["machine"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env("HEY_BOSS_FLEET_STATE", f.root.join("fleet"))
+            .args(["fleet", "sync-enroll", &node, "1"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.execute("UPDATE fleet_meta SET role='peer',node=?1", [&node])
+            .unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(f.cli(&["worker", "status"])["eligible"], 1);
+        let mut worker = f.worker();
+        let finished = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+        assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
+        assert!(!finished["runs"][0]["summary"].as_str().unwrap().is_empty());
+        let run = finished["runs"][0]["id"].as_str().unwrap().to_owned();
+        let suffix: String = db
+            .query_row(
+                "SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs WHERE id=?1",
+                [&run],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(suffix, run);
+        ids.push(run);
+        worker.stop();
+        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    }
+    assert_ne!(ids[0], ids[1]);
+}
+
+#[test]
 fn offline_replica_launches_only_work_allocated_to_its_machine() {
     let f = Fixture::new("offline-replica-pickup");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
@@ -2982,7 +3037,7 @@ fn worker_worktree_choice_requires_project_permission() {
             assert!(text.contains("Reuse that worktree and branch"), "{text}");
             assert!(!text.contains("{{worktree_"), "{text}");
             assert!(
-                text.contains("branch `worker-fixture-fixture-issue-1`"),
+                text.contains("branch `worker-fixture-fixture-issue-1-"),
                 "{text}"
             );
             assert!(

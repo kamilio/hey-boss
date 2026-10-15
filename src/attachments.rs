@@ -281,6 +281,20 @@ pub(crate) fn prepare_upload(
     tests::before_write()?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    // Enrollment creates this private cache. Keep bytes addressable after a
+    // local delete until every offline peer has received the immutable fact.
+    let replication = root.join(".replication");
+    if replication.try_exists()? {
+        if !fs::symlink_metadata(&replication)?.is_dir() {
+            return Err(Error::invalid("Invalid attachment replication directory"));
+        }
+        match fs::hard_link(root.join(&id), replication.join(digest(bytes))) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::File::open(&replication)?.sync_all()?;
+    }
     // Metadata must never commit before the directory entry is durable.
     fs::File::open(root)?.sync_all()?;
     Ok(PreparedUpload {

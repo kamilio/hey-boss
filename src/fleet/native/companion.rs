@@ -379,7 +379,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
     let mut incremental_history = false;
     startup.phase("snapshot");
     let chief_ownership = crate::chief_ownership::read(&db)?;
-    let hello = json!({"kind":"hello","capabilities":{"utils_v1":true,"worker_history_v1":true,"job_execution":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
+    let hello = json!({"kind":"hello","capabilities":{"distributed_v1":true,"utils_v1":true,"worker_history_v1":true,"job_execution":true,"pull_gzip_chunks":true,"issue_archives":true,"github_reads_v1":github.is_some()},"node":ctx.node,"hostname":crate::issues::identity::host(),"build":Context::running_build(),"projects":replica::rows(&db,"SELECT * FROM projects",&[])?,"local_config":local_config(&ctx)?,"chief_ownership":chief_ownership,"workers":workers,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"revision":replica::state_get(&db,"revision",Value::Null)?,"pending":count(&db,"fleet_outbox")?});
     let status = Arc::new(Mutex::new(ConnectionStatus::new(
         ctx.clone(),
         replica::state_get(&db, "last_sync", Value::Null)?,
@@ -443,6 +443,13 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 reply(&output, control::configure_companion(&ctx, &message)?)?;
             }
             Some("pull") => {
+                if db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                    r.get::<_, bool>(0)
+                })? {
+                    return Err(invalid(
+                        "Legacy replication is fenced after distributed cutover; upgrade the relay",
+                    ));
+                }
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
                     let payload = super::archive::prepare_pull(
@@ -550,8 +557,18 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 }
                 // Acknowledgment precedes observation of the stopped Chief.
                 let chief_ownership = crate::chief_ownership::read(&db)?;
-                let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":replica::journal(&db,0)?,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
+                let distributed_active =
+                    db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                        r.get::<_, bool>(0)
+                    })?;
+                let changes = if distributed_active {
+                    vec![]
+                } else {
+                    replica::journal(&db, 0)?
+                };
+                let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":changes,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
                 let mut heartbeat = heartbeat;
+                heartbeat["distributed_active"] = json!(distributed_active);
                 heartbeat["utility_error"] = utility_error;
                 // The peer can send its next ping as soon as it receives this reply.
                 input.finish_ping();
@@ -571,9 +588,30 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
         return Err("Fleet companion is already running".into());
     };
     super::model_recovery::start(ctx.clone());
+    super::distributed::start(ctx.clone(), false);
     let jobs = ctx.clone();
     std::thread::spawn(move || {
         while !jobs.stopped() {
+            if let Ok(db) = jobs.db()
+                && db
+                    .query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                        r.get::<_, bool>(0)
+                    })
+                    .unwrap_or(false)
+            {
+                let result = (|| -> Result<()> {
+                    let capability = super::jobs::capability(&jobs)?;
+                    super::jobs::schedule(
+                        &jobs,
+                        &[
+                            json!({"node":jobs.node,"state":"connected","heartbeat":now(),"jobs":capability}),
+                        ],
+                    )
+                })();
+                if let Err(error) = result {
+                    eprintln!("Local schedule: {error}");
+                }
+            }
             if let Err(error) = super::jobs::reconcile(&jobs) {
                 let _ = jobs.atomic_json(
                     &jobs.state.join("jobs-error.json"),

@@ -42,6 +42,18 @@ pub const COMPANION_ROLE: &str = "agent";
 
 #[derive(Subcommand)]
 pub enum Action {
+    /// Internal authenticated SSH replication stream.
+    #[command(hide = true)]
+    Sync {
+        #[arg(long)]
+        controller: String,
+    },
+    /// Inspect local replication, including while the relay is unavailable.
+    SyncStatus,
+    #[command(hide = true)]
+    SyncEnroll { node: String, slot: u16 },
+    #[command(hide = true)]
+    SyncActivate,
     /// Read a known local agent conversation; requests arrive on stdin.
     #[command(hide = true)]
     Conversation,

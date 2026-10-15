@@ -383,9 +383,7 @@ pub(super) fn edit(ctx: &Context, edit: impl FnOnce(&mut Value) -> Result<()>) -
 
 pub(super) fn record_local(id: &str, settings: Option<&Settings>, intent: &str) -> Result<bool> {
     let ctx = Context::new()?;
-    let role: String = ctx
-        .db()?
-        .query_row("SELECT role FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+    let role = ctx.service_role()?;
     if role == "agent" || !is_yaml(&ctx.desired) {
         return Ok(false);
     }

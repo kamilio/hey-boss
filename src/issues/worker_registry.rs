@@ -1160,7 +1160,7 @@ pub(super) fn reserve(
                 creation_run: None,
                 model: None,
             };
-            let issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
+            let mut issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
             // Thread rollouts and unfinished checkout edits belong to this host
             // and directory. A completed latest attempt starts fresh when reopened.
             // A rejected startup schema cannot be recovered by resuming the same
@@ -1183,6 +1183,16 @@ pub(super) fn reserve(
             } else {
                 None
             };
+            // Preserve the checkout of a resumed or pre-migration session.
+            // Fresh attempts on different machines must never share a branch.
+            let worktree_attempt = if let Some(session) = &resume_session {
+                tx.query_row("SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 AND machine=?4 ORDER BY started_at DESC LIMIT 1",params![project.id,number,session,machine],|r|r.get::<_,Option<String>>(0)).optional()?.flatten()
+            } else {
+                Some(id.clone())
+            };
+            if let Some(attempt) = worktree_attempt {
+                issue["_worktree_attempt"] = json!(attempt);
+            }
             let job = Job {
                 session_ref,
                 id: id.clone(),
