@@ -511,6 +511,37 @@ pub(crate) fn reconcile(
     reconcile_graph(db, project, actor, now, false, false)
 }
 
+/// Replicated dependencies derive queue eligibility locally. They must not
+/// release an existing claim or manufacture another replica's audit notices.
+pub(crate) fn reconcile_replication(db: &Connection, project: &str) -> Result<()> {
+    let graph = Graph::load_active(db, project)?;
+    for (&number, issue) in &graph.issues {
+        if !issue["deleted_at"].is_null()
+            || issue["state"] == "closed"
+            || !issue["assignee"].is_null()
+            || issue["reserved"] == true
+        {
+            continue;
+        }
+        let state = if issue["manual_blocked"] == true
+            || (issue["draft"] != true && graph.has_active(number))
+        {
+            "blocked"
+        } else if issue["state"] == "ready" {
+            "ready"
+        } else {
+            "open"
+        };
+        if issue["state"] != state {
+            db.execute(
+                "UPDATE issues SET state=?3,version=version+1 WHERE project_id=?1 AND number=?2",
+                params![project, number, state],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Upstream rework pauses future pickups without taking running work away.
 pub(super) fn reconcile_rework(
     db: &Connection,

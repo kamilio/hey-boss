@@ -405,6 +405,70 @@ fn deleted_attachments_keep_bytes_until_disconnected_peers_replay_their_facts() 
 }
 
 #[test]
+fn remote_dependencies_release_waiting_tasks_without_stealing_local_claims() {
+    use serde_json::json;
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        db.execute("UPDATE fleet_meta SET node=?1,role='peer'", [node])
+            .unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+    }
+    seed(&a);
+    a.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,blockers)
+        VALUES('p',2,'Waiting task','','blocked','human:test',1,1,1,'[]','[1]');").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    a.execute_batch(
+        "UPDATE issues SET state='closed',closed_by='human:test',closed_at=3 WHERE number=1;",
+    )
+    .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let task =
+        || replica::current_row(&b, "issues", &json!({"project_id":"p","number":2})).unwrap();
+    assert_eq!(task()["state"], "open");
+    b.execute_batch("INSERT INTO agents VALUES('worker:b','{\"machine\":\"b\"}',1);
+        UPDATE issues SET assignee='worker:b' WHERE number=2;
+        INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,claimed_at)
+        VALUES('attempt-b','p',2,'{}','worker:b','running',100,'synthetic','b',4,4,4);").unwrap();
+    capture_all(&b, &mut eb);
+    a.execute_batch("UPDATE issues SET state='open',closed_by=NULL,closed_at=NULL WHERE number=1;")
+        .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert_eq!(task()["state"], "open");
+    assert_eq!(task()["assignee"], "worker:b");
+    assert_eq!(
+        b.query_row(
+            "SELECT stop_requested FROM worker_runs WHERE id='attempt-b'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let version = task()["version"].clone();
+    capture_all(&b, &mut eb);
+    assert_eq!(task()["version"], version);
+}
+
+#[test]
 fn remote_completion_preserves_both_attempts_and_never_cancels_local_execution() {
     use serde_json::json;
     let fa = Fixture::new();
