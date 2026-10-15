@@ -129,6 +129,7 @@ pub(in crate::fleet::native) fn status(ctx: &Context) -> Result<Value> {
     } else {
         "shadow"
     });
+    status["peer_sync"] = super::super::peer_sync::status(ctx)?;
     status["members"] = json!(replica::rows(
         &db,
         "SELECT * FROM distributed_members ORDER BY slot",
