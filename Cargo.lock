@@ -1311,6 +1311,7 @@ dependencies = [
  "ctrlc",
  "flate2",
  "hey-boss-http",
+ "hey-boss-sync",
  "hey-gh",
  "html-escape",
  "httpdate",
@@ -1344,6 +1345,19 @@ dependencies = [
  "rustls 0.20.9",
  "rustls-pemfile",
  "zeroize",
+]
+
+[[package]]
+name = "hey-boss-sync"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
