@@ -185,6 +185,7 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "skills/hey-boss",
                     "packages/hey-gh",
                     "packages/hey-boss-http",
+                    "packages/hey-boss-sync",
                     "packages/hey-proxy",
                     "README.md",
                     "LICENSE",
