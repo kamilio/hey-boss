@@ -521,160 +521,9 @@ final class Database {
     }
 }
 
-final class MobileHub {
-    struct Configuration: Decodable { let url: String; let token: String }
-    unowned let store: Store
-    let configuration: Configuration
-    var timer: DispatchSourceTimer?
-    let networkQueue = DispatchQueue(label: "hey-boss.mobile-sync", qos: .utility)
-    var presence: () -> [String: Any] = { ["idleSeconds": 0.0, "unavailable": false] }
-    var onRouting: ([String: Any]) -> Void = { _ in }
-    init(store: Store, configuration: Configuration) throws {
-        guard let url = URL(string: configuration.url), url.scheme == "https" || (["127.0.0.1", "localhost"].contains(url.host ?? "") && url.scheme == "http"), configuration.token.count >= 32 else { throw StorageError(description: "Invalid mobile configuration") }
-        self.store = store; self.configuration = configuration
-        try store.database.execute("CREATE TABLE IF NOT EXISTS mobile_outbox(id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)")
-        let columns = try store.database.statement("PRAGMA table_info(mobile_outbox)")
-        var hasRevision = false
-        while sqlite3_step(columns) == SQLITE_ROW { if let name = sqlite3_column_text(columns, 1), String(cString: name) == "revision" { hasRevision = true } }
-        sqlite3_finalize(columns)
-        if !hasRevision { try store.database.execute("ALTER TABLE mobile_outbox ADD COLUMN revision INTEGER NOT NULL DEFAULT 0") }
-    }
-    static func load(store: Store, directory: String) -> MobileHub? {
-        let file = URL(fileURLWithPath: directory).appendingPathComponent("mobile.json")
-        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-        do { return try MobileHub(store: store, configuration: JSONDecoder().decode(Configuration.self, from: Data(contentsOf: file))) }
-        catch { reportFailure(StorageError(description: "Mobile sync configuration could not be loaded: \(error)")); return nil }
-    }
-    func start() {
-        store.queue.async {
-            do { for row in try self.store.database.pending() { try self.track(row) } }
-            catch { reportFailure(error) }
-        }
-        let timer = DispatchSource.makeTimerSource(queue: networkQueue)
-        timer.schedule(deadline: .now(), repeating: 5, leeway: .milliseconds(500))
-        timer.setEventHandler { [weak self] in self?.sync() }
-        timer.resume(); self.timer = timer
-    }
-    func track(_ row: Record) throws { try store.database.execute("INSERT INTO mobile_outbox(id, revision) VALUES('\(row.taskID.replacingOccurrences(of: "'", with: "''"))', 1) ON CONFLICT(id) DO UPDATE SET revision=revision+1") }
-    func call(_ path: String, method: String = "GET", body: [String: Any]? = nil) throws -> (Int, [String: Any]) {
-        guard let base = URL(string: configuration.url), let url = URL(string: path, relativeTo: base)?.absoluteURL, url.host == base.host else { throw StorageError(description: "Invalid mobile endpoint") }
-        var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 10
-        request.setValue("Bearer " + configuration.token, forHTTPHeaderField: "Authorization")
-        if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let completed = DispatchSemaphore(value: 0); let lock = NSLock()
-        var response: (Int, [String: Any])?; var failure: Error?
-        let task = URLSession.shared.dataTask(with: request) { data, reply, error in
-            lock.lock(); defer { lock.unlock(); completed.signal() }
-            if let error { failure = error; return }
-            guard let data, data.count <= 2 * 1024 * 1024, let http = reply as? HTTPURLResponse, let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { failure = StorageError(description: "Invalid mobile service response"); return }
-            response = (http.statusCode, json)
-        }
-        task.resume()
-        guard completed.wait(timeout: .now() + 11) == .success else { task.cancel(); throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
-        lock.lock(); defer { lock.unlock() }
-        if failure != nil { throw StorageError(description: "Mobile service unavailable. The request remains open; try again when connected.") }
-        guard let response else { throw StorageError(description: "No mobile response") }; return response
-    }
-    func payload(_ row: Record) -> [String: Any] {
-        ["taskID":row.taskID,"kind":row.kind,"title":String((row.title ?? "Update").prefix(256)),"project":String((row.project ?? "Workspace").prefix(256)),"question":row.question,"description":row.description,"options":row.options,"sourceHost":row.sourceLabel,"agentMuted":row.agentMuted ?? false,"origin":row.origin.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull(),"severity":row.severity ?? "info","createdAt":row.createdAt,"linkURL":row.linkURL as Any? ?? NSNull(),"linkLabel":row.linkLabel as Any? ?? NSNull(),"commentsEnabled":row.commentsEnabled ?? false,"issue":row.issue.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]
-    }
-    func publish(_ row: Record, presenceAlreadyPublished: Bool = false) throws -> [String: Any] {
-        // Publish presence first so a new item cannot race an outdated away state.
-        if !presenceAlreadyPublished { try publishPresence() }
-        let (status, json) = try call("/api/bridge/tasks/" + row.taskID, method: "PUT", body: payload(row))
-        guard status == 200, let task = json["task"] as? [String: Any] else { throw StorageError(description: json["error"] as? String ?? "Mobile service rejected this request") }
-        return task
-    }
-    func resolve(_ row: Record, result: String?, cancel: Bool, presenceAlreadyPublished: Bool = false) throws -> [String: Any] {
-        let path = "/api/bridge/tasks/" + row.taskID + "/resolve"
-        let answer: [String: Any] = ["result": result as Any? ?? NSNull(), "cancel": cancel]
-        // Already-published items need one round trip, not presence + republish + resolve.
-        var (status, json) = try call(path, method: "POST", body: answer)
-        if status == 404 {
-            let task = try publish(row, presenceAlreadyPublished: presenceAlreadyPublished)
-            if task["status"] as? String != "pending" { return task }
-            (status, json) = try call(path, method: "POST", body: answer)
-        }
-        guard [200,409].contains(status), let resolved = json["task"] as? [String: Any] else { throw StorageError(description: json["error"] as? String ?? "Mobile service rejected the answer") }
-        return resolved
-    }
-    func clear(_ rows: [Record], apply: ([[String: Any]]) throws -> Void) throws {
-        // Bound response size and network work even for a large native history.
-        var start = 0
-        while start < rows.count {
-            var batch: [Record] = [], tasks: [[String: Any]] = [], bytes = 0
-            while start < rows.count && batch.count < 100 {
-                let task = payload(rows[start])
-                let size = try JSONSerialization.data(withJSONObject: task).count
-                // Stay below the relay's 16 MiB body limit even for documents.
-                if !batch.isEmpty && bytes + size > 8 * 1024 * 1024 { break }
-                batch.append(rows[start]); tasks.append(task); bytes += size; start += 1
-            }
-            let ids = batch.map { $0.taskID }
-            let body: [String:Any] = ["taskIDs":ids, "tasks":tasks]
-            var (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
-            if status == 404 {
-                try publishPresence()
-                for row in batch { _ = try publish(row, presenceAlreadyPublished: true) }
-                (status,json) = try call("/api/bridge/tasks/clear",method:"POST",body:body)
-            }
-            guard status == 200, let tasks = json["tasks"] as? [[String:Any]], tasks.count == ids.count,
-                  Set(tasks.compactMap { $0["taskID"] as? String }) == Set(ids) else { throw StorageError(description:json["error"] as? String ?? "Mobile service could not clear Inbox; refresh and retry") }
-            // Apply each acknowledged batch before another network call can fail.
-            try apply(tasks)
-        }
-    }
-    func sync() {
-        do {
-            try publishPresence()
-            // Only short database operations share the store queue; HTTP never does.
-            let batch: [(Record, Int64)] = try store.queue.sync {
-                let statement = try store.database.statement("SELECT id, revision FROM mobile_outbox LIMIT 5")
-                defer { sqlite3_finalize(statement) }
-                var rows: [(Record, Int64)] = []
-                while sqlite3_step(statement) == SQLITE_ROW {
-                    if let raw = sqlite3_column_text(statement, 0) { rows.append((try store.database.get(String(cString: raw)), sqlite3_column_int64(statement, 1))) }
-                }
-                return rows
-            }
-            for (row, revision) in batch {
-                if row.status == "pending" {
-                    let task = try publish(row, presenceAlreadyPublished: true)
-                    if task["status"] as? String != "pending" { try store.queue.sync { try store.applyMobile(task) } }
-                } else { _ = try resolve(row, result: row.result, cancel: row.status == "cancelled", presenceAlreadyPublished: true) }
-                // A newer enqueue while HTTP was in flight must remain durable.
-                try store.queue.sync { try store.database.execute("DELETE FROM mobile_outbox WHERE id='\(row.taskID.replacingOccurrences(of: "'", with: "''"))' AND revision=\(revision)") }
-            }
-            let (status, json) = try call("/api/bridge/tasks")
-            guard status == 200 else { return }
-            for task in json["tasks"] as? [[String: Any]] ?? [] {
-                try store.queue.sync { try store.applyMobile(task) }
-                if let id = task["taskID"] as? String, let version = task["version"] as? Int { _ = try call("/api/bridge/tasks/" + id + "/ack", method: "POST", body: ["version":version]) }
-            }
-        } catch { onRouting(["macState": "unknown"]); /* Persistent outbox is retried. Foreground answers surface errors. */ }
-    }
-    func publishPresence() throws {
-        let (status, response) = try call("/api/bridge/presence", method: "POST", body: presence())
-        guard status == 200, let routing = response["notifications"] as? [String: Any] else { throw StorageError(description: "Activity status unavailable") }
-        onRouting(routing)
-    }
-}
-
 final class Store {
     let queue = DispatchQueue(label: "hey-boss.store", qos: .userInitiated)
-    // Native bulk dismissal must not wait behind periodic sync or block the
-    // database queue while the relay is responding.
-    let actionQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "hey-boss.notification-actions"
-        queue.qualityOfService = .userInitiated
-        queue.maxConcurrentOperationCount = 4
-        return queue
-    }()
-    let dismissalQueue = DispatchQueue(label: "hey-boss.dismissal", qos: .userInitiated)
     let database: Database
-    var mobile: MobileHub?
-    var mobileRequired = false
     var waiters: [String: [Reply]] = [:]
     var feedbackWaiters: [String: [Reply]] = [:]
     var show: (Record) -> Void = { _ in }
@@ -734,7 +583,7 @@ final class Store {
             if request.command != "alert", request.description == nil { throw invalid("Description is required") }
             let receipt = try request.notificationReceipt()
             var stored: Record!, created = false
-            // Receipt, native row and mobile outbox commit together, before replying or showing.
+            // Receipt and native row commit together, before replying or showing.
             try database.transaction {
                 if let receipt, let replay = try database.replay(receipt) { stored = replay; return }
                 var row = Record(taskID: UUID().uuidString.lowercased(), kind: request.command == "update" ? "update" : (request.command == "alert" ? "alert" : (options.isEmpty ? "prompt" : "approval")), question: question, project: project, title: title, description: request.description ?? "", options: request.command == "ask" ? options : [], autoclose: request.autoclose, linkURL: request.link_url, linkLabel: request.link_label, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: request.origin)
@@ -748,7 +597,7 @@ final class Store {
                 row.iconData = request.icon_path.flatMap(snapshotIcon)
                 row.quietHoursMuted = notificationsMuted()
                 row.agentMuted = try database.agentMuted(row.origin?.agent)
-                try database.save(row); try mobile?.track(row)
+                try database.save(row)
                 if let receipt { try database.saveReceipt(receipt, taskID: row.taskID) }
                 stored = row; created = true
             }
@@ -848,7 +697,7 @@ final class Store {
                 if muted {
                     for var pending in try database.pending() where pending.origin?.agent?.key == agent.key {
                         pending.agentMuted = true
-                        try database.save(pending); try mobile?.track(pending)
+                        try database.save(pending)
                         hidden.append(pending.taskID)
                     }
                 }
@@ -873,7 +722,7 @@ final class Store {
             try request.issue?.validate()
             if row.issue != request.issue {
                 row.issue = request.issue
-                try database.transaction { try database.save(row); try mobile?.track(row) }
+                try database.transaction { try database.save(row) }
             }
         case "inbox_open_link":
             guard let raw = row.linkURL, let url = URL(string:raw), ["https","http","file"].contains(url.scheme?.lowercased() ?? "") else { throw StorageError(description:"This notice has no supported destination") }
@@ -931,103 +780,36 @@ final class Store {
         guard row.status == "pending" else { return }
         if row.kind == "approval", result == nil || !row.options.contains(result ?? "") { throw StorageError(description: "Invalid approval answer") }
         if row.kind == "prompt", result == nil { throw StorageError(description: "Missing prompt answer") }
-        if mobileRequired && mobile == nil { throw StorageError(description: "Mobile configuration is invalid. Fix mobile.json before answering; the request remains open.") }
-        if let mobile { try applyMobile(mobile.resolve(row, result: result, cancel: false)); return }
         row.status = "ok"; row.completedAt = Date().timeIntervalSince1970; row.result = result
         try database.save(row)
         for reply in (waiters.removeValue(forKey: id) ?? []) + (feedbackWaiters.removeValue(forKey: id) ?? []) { reply.send(row.response) }
         remove(id)
     }
-    // Called on the store queue. Only snapshots and acknowledgement commits use
-    // that queue; a slow relay cannot stall subsequent notification clicks.
+    // Completion commits locally before notifying the waiting command.
     func finishAsync(_ id: String, _ result: String?, completion: @escaping (Result<Record, Error>) -> Void) {
-        do {
-            let row = try database.get(id)
-            guard row.status == "pending" else { completion(.success(row)); return }
-            if row.kind == "approval", result == nil || !row.options.contains(result ?? "") { throw StorageError(description: "Invalid approval answer") }
-            if row.kind == "prompt", result == nil { throw StorageError(description: "Missing prompt answer") }
-            guard let mobile else {
-                try finish(id, result)
-                completion(.success(try database.get(id)))
-                return
-            }
-            actionQueue.addOperation {
-                do {
-                    let task = try mobile.resolve(row, result: result, cancel: false)
-                    guard task["taskID"] as? String == id else { throw StorageError(description: "Mobile acknowledgement belongs to a different notice") }
-                    self.queue.async {
-                        do {
-                            try self.applyMobile(task)
-                            completion(.success(try self.database.get(id)))
-                        } catch { completion(.failure(error)) }
-                    }
-                } catch { self.queue.async { completion(.failure(error)) } }
-            }
-        } catch { completion(.failure(error)) }
+        do { try finish(id, result); completion(.success(try database.get(id))) }
+        catch { completion(.failure(error)) }
     }
     func dismiss(_ ids: [String], completion: ((Result<Void, Error>) -> Void)? = nil) {
-        do {
-            guard let mobile else { try dismissRecords(ids); completion?(.success(())); return }
-            let snapshot = Array(Set(ids))
-            dismissalQueue.async {
-                do {
-                    for start in stride(from: 0, to: snapshot.count, by: 100) {
-                        let batch = Array(snapshot[start..<min(start + 100, snapshot.count)])
-                        let rows = try self.queue.sync { try batch.map { try self.database.get($0) }.filter { $0.status == "pending" } }
-                        try mobile.clear(rows) { tasks in try self.queue.sync { try self.applyMobileMany(tasks) } }
-                    }
-                    self.queue.async { completion?(.success(())) }
-                } catch {
-                    reportFailure(error)
-                    self.queue.async { completion?(.failure(error)) }
-                }
-            }
-        } catch { reportFailure(error); completion?(.failure(error)) }
+        do { try dismissRecords(ids); completion?(.success(())) }
+        catch { reportFailure(error); completion?(.failure(error)) }
     }
-    func applyMobile(_ task: [String: Any]) throws {
-        try applyMobileMany([task])
-    }
-    func applyMobileMany(_ tasks: [[String: Any]]) throws {
+    func dismissRecords(_ ids: [String]) throws {
         defer { refreshPendingCount() }
         var changed: [Record] = []
         try database.transaction {
-            for task in tasks {
-                guard let id = task["taskID"] as? String, let status = task["status"] as? String, ["ok", "cancelled"].contains(status) else { throw StorageError(description: "Invalid mobile outcome") }
+            for id in Set(ids) {
                 var row = try database.get(id)
                 guard row.status == "pending" else { continue }
-                row.status = status; row.result = task["result"] as? String; row.completedAt = Date().timeIntervalSince1970
+                row.status = row.kind == "prompt" || row.kind == "approval" || row.commentsEnabled == true ? "cancelled" : "ok"
+                row.completedAt = Date().timeIntervalSince1970
                 try database.save(row); changed.append(row)
             }
         }
         for row in changed {
-            let id = row.taskID
-            for reply in (waiters.removeValue(forKey: id) ?? []) + (feedbackWaiters.removeValue(forKey: id) ?? []) { reply.send(row.response) }
+            for reply in (waiters.removeValue(forKey: row.taskID) ?? []) + (feedbackWaiters.removeValue(forKey: row.taskID) ?? []) { reply.send(row.response) }
         }
-        if !changed.isEmpty { removeMany(changed.map(\.taskID)) }
-    }
-    func dismissRecords(_ ids: [String]) throws {
-        defer { refreshPendingCount() }
-        if mobileRequired && mobile == nil { throw StorageError(description: "Mobile configuration is invalid; requests remain open.") }
-        if let mobile {
-            let rows = try Set(ids).map { try database.get($0) }.filter { $0.status == "pending" }
-            try mobile.clear(rows, apply: applyMobileMany)
-            return
-        }
-
-            var changed: [Record] = []
-            try database.transaction {
-                for id in Set(ids) {
-                    var row = try database.get(id)
-                    guard row.status == "pending" else { continue }
-                    row.status = row.kind == "prompt" || row.kind == "approval" || row.commentsEnabled == true ? "cancelled" : "ok"
-                    row.completedAt = Date().timeIntervalSince1970
-                    try database.save(row); changed.append(row)
-                }
-            }
-            for row in changed {
-                for reply in (waiters.removeValue(forKey: row.taskID) ?? []) + (feedbackWaiters.removeValue(forKey: row.taskID) ?? []) { reply.send(row.response) }
-            }
-            removeMany(ids)
+        removeMany(ids)
     }
 }
 
@@ -3777,7 +3559,7 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
         let content = window.contentView!
         let heading = NSTextField(wrappingLabelWithString: request.title ?? "Enter credentials"); heading.font = .systemFont(ofSize: 22, weight: .semibold)
         let destination = NSTextField(wrappingLabelWithString: form.destination + "\nRequested on " + (request.source_host ?? "This Mac"))
-        let note = NSTextField(wrappingLabelWithString: "Sent once to the requesting command. Not saved in Hey Boss history or sent to the mobile app. Show reveals a value only in this window.")
+        let note = NSTextField(wrappingLabelWithString: "Sent once to the requesting command. Not saved in Hey Boss history. Show reveals a value only in this window.")
         note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 12)
         let stack = SecretFormStack(views: [heading, destination, note] + entries.map(\.view) + [message]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
         let scroll = NSScrollView(); scroll.contentView = SecretFormClip(); scroll.documentView = stack; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
@@ -7627,12 +7409,6 @@ struct Daemon {
         quietTimer.schedule(deadline: .now(), repeating: 1)
         quietTimer.setEventHandler { store.mutePendingNotifications() }
         quietTimer.resume()
-        store.mobileRequired = FileManager.default.fileExists(atPath: directory + "/mobile.json")
-        store.mobile = MobileHub.load(store: store, directory: directory)
-        let presence = MacPresence()
-        store.mobile?.presence = { presence.snapshot }
-        store.mobile?.onRouting = { routing in onMain { overview.updateActivity(routing) } }
-        store.mobile?.start()
         connectNotificationActions(store, ui)
         store.pendingChanged = { count in onMain { overview.updateInboxCount(count) } }
         store.queue.async { store.restore() }

@@ -81,9 +81,13 @@ func audit() {
         return
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_CLICKS"] == "1" { auditNotificationClicks(); return }
-    if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_HUB"] { auditNotificationLatency(endpoint:endpoint); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_LOCAL_COMPLETION"] == "1" {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-local-completion-" + UUID().uuidString)
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        auditCloseAll(root: root); return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_OPTIMISTIC"] == "1" { auditOptimisticNotifications(); return }
-    if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLOSE_ALL_HUB"] { auditCloseAllPerformance(endpoint: endpoint); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ISSUES_SHORTCUT_ONLY"] == "1" { auditIssuesShortcut(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_NATIVE_QUICK_ISSUE_PREVIEW"] == "1" {
         let prefs = UserDefaults(suiteName: "hey-boss-issue66-preview")!
@@ -975,119 +979,6 @@ func auditCloseAll(root: URL) {
     print("Passed: global Close all, grouped/multi-project dismissal, active/queued cancellation, waiter completion, history/readers preserved, concurrent arrivals retained")
 }
 
-// Real delayed HTTP responses expose both serialized network work and repeated
-// AppKit layout. Run with tools/close_all_fixture.mjs, using disposable state.
-func auditCloseAllPerformance(endpoint: String) {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-close-all-" + UUID().uuidString)
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    auditCloseAll(root: root)
-    let store = try! Store(root.appendingPathComponent("history.db").path)
-    let hub = try! MobileHub(store: store, configuration: .init(url: endpoint, token: String(repeating: "x", count: 32)))
-    store.mobile = hub
-    let ui = Interface(present: true)
-    ui.coalescesArrivalLayout = true
-    connectNotificationActions(store, ui)
-    var removals = 0
-    store.removeMany = { ids in onMain { removals += 1; ui.remove(ids) } }
-    store.remove = { id in onMain { ui.remove(id) } }
-    let rows = (0..<205).map { index -> Record in
-        var row = Record(taskID: "bulk-\(index)", kind: index % 5 == 0 ? "approval" : "alert", question: "Ready for review", project: index % 2 == 0 ? "Atlas" : "Orion", title: "Review \(index)", description: "Checks passed", options: ["Approve", "Reject"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Double(index), presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
-        row.sourceHost = "This Mac"; row.sourceKnown = true
-        return row
-    }
-    try! store.database.transaction { for row in rows { try store.database.save(row) } }
-    // No partial persistence or UI removal on a malformed acknowledgement.
-    do {
-        try store.applyMobileMany([["taskID": "bulk-1", "status": "ok"], ["taskID": "bulk-2", "status": "pending"]])
-        preconditionFailure("Invalid acknowledgement must fail")
-    } catch { precondition((try! store.database.get("bulk-1")).status == "pending" && removals == 0) }
-    var fds: [Int32] = [0, 0]
-    precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
-    let waiter = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
-    store.waiters["bulk-5"] = [Reply(fds[1])]
-    for row in rows { ui.add(row) }
-    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-    func snapshot(_ name: String, window: NSWindow) {
-        guard let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"] else { return }
-        try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        window.contentView!.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
-        // Compositor-hosted glass controls are absent from cacheDisplay.
-        let capture = Process(); capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        capture.arguments = ["-x", "-o", "-l", String(window.windowNumber), URL(fileURLWithPath: directory).appendingPathComponent(name + ".png").path]
-        try! capture.run(); capture.waitUntilExit()
-        precondition(capture.terminationStatus == 0, "Native visual audit requires Screen Recording access")
-    }
-    ui.stack.appearance = NSAppearance(named: .aqua)
-    snapshot("close-all-light", window: ui.stack)
-    ui.stack.appearance = NSAppearance(named: .darkAqua)
-    snapshot("close-all-dark", window: ui.stack)
-    ui.expandedProjects.insert("Atlas"); ui.layout()
-    snapshot("close-all-expanded", window: ui.stack)
-    ui.expandedProjects.removeAll(); ui.layout()
-    snapshot("close-all-question", window: ui.question)
-    let start = ProcessInfo.processInfo.systemUptime
-    ui.closeAll.performClick(nil)
-    precondition(ui.cards.isEmpty && ui.current == nil && removals == 0, "Close all must update before its first HTTP response")
-    let queueStart = ProcessInfo.processInfo.systemUptime // Exclude AppKit's simulated button highlight delay.
-    var queueDelay: Double = -1
-    store.queue.async { let delay = (ProcessInfo.processInfo.systemUptime - queueStart) * 1000; onMain { queueDelay = delay } }
-    // A notice arriving after the click must survive the whole operation.
-    let arrival = Record(taskID: "new-arrival", kind: "alert", question: "Arrived after the click", project: "New arrival", title: "New arrival", description: "Keep this notice", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 300, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
-    let arriving = arrival
-    store.queue.async { try! store.database.save(arriving) }
-    ui.add(arrival)
-    while ui.cards.count > 1 || ui.current != nil || ui.dismissalAnimations > 0 || queueDelay < 0 {
-        precondition(ProcessInfo.processInfo.systemUptime - start < 8, "Close all exceeded its time budget")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    }
-    let elapsed = (ProcessInfo.processInfo.systemUptime - start) * 1000
-    print("Close all metrics: elapsed_ms=\(elapsed), store_queue_ms=\(queueDelay), removals=\(removals), cards=\(ui.cards.count), questions=\(ui.questions.count)")
-    precondition(queueDelay < 100, "Close all must not block the store queue on HTTP")
-    precondition(elapsed < 2000, "Three delayed bulk requests should finish within two seconds")
-    while !ui.pendingCompletions.isEmpty {
-        precondition(ProcessInfo.processInfo.systemUptime - start < 8, "Bulk acknowledgements did not settle")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    }
-    precondition(removals == 3, "One removal per 100-item acknowledgement, not per card")
-    precondition(ui.cards.map { $0.row.taskID } == [arrival.taskID])
-    let cancelled = try! JSONDecoder().decode([String: String].self, from: waiter.readToEnd()!)
-    precondition(cancelled["status"] == "cancelled" && cancelled["result"] == nil)
-    store.queue.sync {
-        for row in rows {
-            let saved = try! store.database.get(row.taskID)
-            if saved.status != (row.taskID == "bulk-0" ? "ok" : row.kind == "approval" ? "cancelled" : "ok") || saved.result != (row.taskID == "bulk-0" ? "Approve" : nil) { print("Unexpected saved outcome: \(saved.taskID) \(saved.status) \(String(describing: saved.result))") }
-            precondition(saved.status == (row.taskID == "bulk-0" ? "ok" : row.kind == "approval" ? "cancelled" : "ok"))
-            precondition(saved.result == (row.taskID == "bulk-0" ? "Approve" : nil))
-        }
-    }
-    snapshot("close-all-arrival", window: ui.stack)
-    let (_, metrics) = try! hub.call("/metrics")
-    precondition(metrics["clearCalls"] as? Int == 3 && metrics["resolveCalls"] as? Int == 0 && metrics["publishCalls"] as? Int == 0)
-    print("Passed: 205 notices, three bulk requests/removals, remote answer preserved, concurrent arrival retained; elapsed_ms=\(elapsed), store_queue_ms=\(queueDelay), disposable_state=\(root.path)")
-    _ = try! hub.call("/fail", method: "POST")
-    ui.closeAll.performClick(nil)
-    store.queue.sync {} // Ensure the native callback has enqueued network work.
-    var failed = false
-    store.dismissalQueue.async { onMain { failed = true } }
-    let failureStart = ProcessInfo.processInfo.systemUptime
-    while !failed || !ui.pendingCompletions.isEmpty {
-        precondition(ProcessInfo.processInfo.systemUptime - failureStart < 3)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    }
-    precondition(ui.cards.count == 1 && ui.stack.isVisible)
-    precondition(try! store.queue.sync { try store.database.get(arrival.taskID).status } == "pending")
-    snapshot("close-all-failure", window: ui.stack)
-    ui.closeAll.performClick(nil)
-    while !ui.cards.isEmpty || ui.dismissalAnimations > 0 {
-        precondition(ProcessInfo.processInfo.systemUptime - failureStart < 5)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    }
-    precondition(!ui.stack.isVisible)
-    print("Passed: failed bulk response preserves pending notice and visible retry; retry clears and hides empty stack")
-    ui.stack.orderOut(nil); ui.question.orderOut(nil)
-}
 
 func auditAppearance(root: URL, sample: Record) {
     let legacy = try! JSONDecoder().decode(Record.self, from: JSONEncoder().encode(sample))
@@ -1462,21 +1353,6 @@ func auditArrivalLayoutBatching() {
     print("Passed: 20 notification arrivals coalesce to one layout, all cards retained")
 }
 
-func auditMobileOutboxRevisions() {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-outbox-" + UUID().uuidString)
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let store = try! Store(root.appendingPathComponent("history.db").path)
-    try! store.database.execute("CREATE TABLE mobile_outbox(id TEXT PRIMARY KEY)")
-    let hub = try! MobileHub(store: store, configuration: .init(url: "http://127.0.0.1", token: String(repeating: "x", count: 32)))
-    let row = Record(taskID: "race-test", kind: "update", question: "Test", project: "Test", title: "Test", description: "Test", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 1, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
-    try! hub.track(row); try! hub.track(row)
-    try! store.database.execute("DELETE FROM mobile_outbox WHERE id='race-test' AND revision=1")
-    let statement = try! store.database.statement("SELECT revision FROM mobile_outbox WHERE id='race-test'")
-    precondition(sqlite3_step(statement) == SQLITE_ROW && sqlite3_column_int64(statement, 0) == 2)
-    sqlite3_finalize(statement)
-    print("Passed: existing outbox migration and newer enqueue survives stale network completion")
-}
 
 func auditAgentControlPanel() {
     let panel = AgentControlPanel()
@@ -1551,7 +1427,6 @@ func auditActiveAgentFilter() {
 func auditAgentOverview() -> AgentsOverview {
     auditActiveAgentFilter()
     auditArrivalLayoutBatching()
-    auditMobileOutboxRevisions()
     auditAgentControlPanel()
     let closedOverview = AgentsOverview(present: true)
     precondition(closedOverview.timer == nil && !closedOverview.scanning && closedOverview.hostScans.isEmpty)
@@ -2757,26 +2632,7 @@ func auditPerformance() {
         overview.window.displayIfNeeded()
         draw.append((ProcessInfo.processInfo.systemUptime - frameStart) * 1000)
     }
-    var metrics: [String: Any] = ["click_handler_ms": stats(click), "layout_display_ms": stats(draw), "interaction_metrics": overview.performanceMetrics(), "agents": agents.count, "warm_rebuild_ms": stats(warm), "search_ms": stats(search)]
-    if let endpoint = ProcessInfo.processInfo.environment["HEY_BOSS_PERF_HUB"] {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-perf-" + UUID().uuidString)
-        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let store = try! Store(root.appendingPathComponent("history.db").path)
-        let hub = try! MobileHub(store: store, configuration: .init(url: endpoint, token: String(repeating: "x", count: 32)))
-        hub.start()
-        Thread.sleep(forTimeInterval: 0.15)
-        let semaphore = DispatchSemaphore(value: 0), lock = NSLock()
-        var elapsed: Double = -1
-        let start = ProcessInfo.processInfo.systemUptime
-        store.queue.async { lock.lock(); elapsed = (ProcessInfo.processInfo.systemUptime - start) * 1000; lock.unlock(); semaphore.signal() }
-        precondition(semaphore.wait(timeout: .now() + 10) == .success)
-        lock.lock(); metrics["store_queue_ms_during_slow_sync"] = elapsed; lock.unlock()
-        hub.timer?.cancel()
-        hub.networkQueue.sync {}
-        RunLoop.main.run(until: Date().addingTimeInterval(2.5))
-        withExtendedLifetime((store, hub)) {}
-        try? FileManager.default.removeItem(at: root)
-    }
+    let metrics: [String: Any] = ["click_handler_ms": stats(click), "layout_display_ms": stats(draw), "interaction_metrics": overview.performanceMetrics(), "agents": agents.count, "warm_rebuild_ms": stats(warm), "search_ms": stats(search)]
     print(String(decoding: try! JSONSerialization.data(withJSONObject: metrics, options: [.sortedKeys]), as: UTF8.self))
 }
 
@@ -3098,62 +2954,6 @@ func auditOptimisticNotifications() {
     print("Passed: card clicks open immediately; optimistic read, dismiss-all and answers; stale-refresh suppression; partial rollback and draft recovery")
 }
 
-func auditNotificationLatency(endpoint: String) {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-notification-latency-" + UUID().uuidString)
-    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-    let store = try! Store(root.appendingPathComponent("history.db").path)
-    store.mobile = try! MobileHub(store: store, configuration: .init(url: endpoint, token: String(repeating:"x",count:32)))
-    let ui = Interface(present:false)
-    connectNotificationActions(store, ui)
-    func add(_ id: String, kind: String = "alert", review: Bool = false) -> Record {
-        var row = Record(taskID:id,kind:kind,question:"# Synthetic notice",project:"Latency",title:id,description:"Fixture",options:[],autoclose:nil,linkURL:nil,linkLabel:nil,createdAt:1,presentedAt:nil,expiresAt:nil,status:"pending",result:nil,origin:nil)
-        row.commentsEnabled = review
-        store.queue.sync { try! store.database.save(row) }
-        ui.add(row)
-        return row
-    }
-    func until(_ predicate: () -> Bool) {
-        let deadline = Date().addingTimeInterval(5)
-        while !predicate() {
-            precondition(Date() < deadline, "Delayed notification action did not settle")
-            RunLoop.main.run(until:Date().addingTimeInterval(0.01))
-        }
-    }
-    _ = add("read-ok"); _ = add("read-fail")
-    let start = ProcessInfo.processInfo.systemUptime
-    ui.completeNotification("read-ok",nil); ui.completeNotification("read-fail",nil)
-    precondition(ui.cards.isEmpty, "Read waits for HTTP")
-    _ = add("phone-won",kind:"prompt")
-    ui.answer("Desktop answer")
-    precondition(ui.current == nil, "Answer waits for HTTP")
-    var queueDelay = -1.0
-    store.queue.async { let elapsed = ProcessInfo.processInfo.systemUptime - start; onMain { queueDelay = elapsed } }
-    until { queueDelay >= 0 }
-    precondition(queueDelay < 0.35, "HTTP blocks the shared store queue")
-    precondition(store.queue.sync { try! store.database.get("read-ok").status } == "pending", "Fixture did not hold the response")
-    until { ui.pendingCompletions.isEmpty }
-    precondition(ui.cards.map { $0.row.taskID } == ["read-fail"])
-    precondition(store.queue.sync { try! store.database.get("phone-won").result } == "Phone answer", "Relay answer must remain authoritative")
-    _ = add("dismiss-fail")
-    ui.closeAll.invoke()
-    precondition(ui.cards.isEmpty, "Dismiss waits for HTTP")
-    _ = add("arrival")
-    until { ui.pendingCompletions.isEmpty }
-    precondition(Set(ui.cards.map { $0.row.taskID }) == Set(["read-fail","dismiss-fail","arrival"]))
-    let review = add("review-fail",kind:"update",review:true)
-    ui.openPreview(review)
-    let preview = ui.previews[review.taskID]!
-    preview.makeKeyAndOrderFront(nil)
-    preview.performClose(nil)
-    precondition(!preview.isVisible && preview.finishInFlight, "Closing a review waits for HTTP")
-    precondition(!ui.cards.contains { $0.row.taskID == review.taskID })
-    until { !preview.finishInFlight }
-    precondition(preview.isVisible && preview.reviewSidebar?.completed == false, "Failed review must return with its content")
-    precondition(ui.cards.contains { $0.row.taskID == review.taskID })
-    preview.close()
-    print("Passed: delayed real HTTP; immediate read, answer, dismiss and review close; shared store queue \(Int(queueDelay * 1000))ms; rollback, arrivals and authoritative phone answer")
-}
 
 func auditNotificationClicks() {
     let window = panel("Synthetic notification click audit")

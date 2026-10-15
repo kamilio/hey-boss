@@ -4,10 +4,9 @@ use crate::issues::{Error, Result};
 use rusqlite::{OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 pub struct Window {
@@ -715,182 +714,10 @@ fn text(value: Option<&Value>) -> String {
 
 // Drain pipes concurrently and enforce a wall-clock timeout. Credentials and
 // request content use stdin, never command arguments or diagnostic output.
-fn transport(mut command: Command, input: &[u8], timeout: Duration) -> Result<Value> {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (status, bytes, sent) = std::thread::scope(|scope| -> Result<_> {
-        let writer = scope.spawn(move || stdin.write_all(input));
-        let reader = scope.spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(crate::issues::WIRE_LIMIT as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            if let Some(s) = child.try_wait()? {
-                break Some(s);
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        Ok((status, reader.join().unwrap()?, writer.join().unwrap()))
-    })?;
-    if !status.is_some_and(|s| s.success()) || sent.is_err() {
-        return Err(Error::new(
-            "device_unavailable",
-            "The device did not respond. Try again when it reconnects.",
-        ));
-    }
-    if bytes.len() > crate::issues::WIRE_LIMIT {
-        return Err(Error::invalid("Conversation response exceeds 16 MiB"));
-    }
-    let value: Value = serde_json::from_slice(&bytes)?;
-    if value["ok"] == false {
-        return Err(Error::new(
-            "conversation_unavailable",
-            value["error"]
-                .as_str()
-                .unwrap_or("Conversation unavailable"),
-        ));
-    }
-    Ok(value)
-}
-
-pub fn start_bridge(path: PathBuf) {
-    if std::env::var_os("HEY_BOSS_ISSUE_DB").is_some() {
-        return;
-    }
-    std::thread::spawn(move || {
-        loop {
-            let _ = bridge(&path);
-            std::thread::sleep(Duration::from_secs(3));
-        }
-    });
-}
-fn bridge(path: &Path) -> Result<()> {
-    let config: Value =
-        serde_json::from_slice(&std::fs::read(path.with_file_name("mobile.json"))?)?;
-    let url = config["url"]
-        .as_str()
-        .ok_or_else(|| Error::invalid("Mobile service is not configured"))?;
-    let uri: tungstenite::http::Uri = url
-        .parse()
-        .map_err(|_| Error::invalid("Invalid mobile origin"))?;
-    if uri.scheme_str() != Some("https")
-        || uri.authority().is_none_or(|a| a.as_str().contains('@'))
-        || uri.query().is_some()
-        || url.contains('#')
-    {
-        return Err(Error::invalid("Invalid mobile origin"));
-    }
-    let token = config["token"]
-        .as_str()
-        .filter(|t| !t.contains(['\r', '\n']))
-        .ok_or_else(|| Error::invalid("Invalid mobile pairing"))?;
-    let projects = visible(&database(path)?)?;
-    let mut status = compact(fleet_overview(crate::fleet::call)?, &projects)?;
-    for m in status["machines"].as_array_mut().into_iter().flatten() {
-        for w in m["workers"].as_array_mut().into_iter().flatten() {
-            if let Some(obj) = w.as_object_mut() {
-                obj.remove("config");
-            }
-        }
-    }
-    status["signals"] = json!([]);
-    status["conflicts"] = json!([]);
-    mobile_call(url, token, "/api/bridge/agents/status", Some(&status))?;
-    let requests = mobile_call(url, token, "/api/bridge/agents", None)?;
-    for request in requests["requests"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .take(4)
-    {
-        let id = request["id"]
-            .as_str()
-            .filter(|id| {
-                !id.is_empty()
-                    && id.len() <= 128
-                    && id
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            })
-            .ok_or_else(|| Error::invalid("Invalid conversation transport ID"))?;
-        let result = if !projects.contains(request["project"].as_str().unwrap_or("")) {
-            Err(Error::invalid("This project is no longer available"))
-        } else if request["action"] == "takeover" || request["action"] == "steer" {
-            crate::fleet::call(
-                &json!({"kind":request["action"],"host":request["host"],"run":request["run"],"scope":request["scope"],"text":request["text"],"request_id":request["request_id"]}),
-            )
-        } else if request["action"] == "assignment" {
-            assignment(
-                request["project"].as_str().unwrap_or(""),
-                request["issue"].as_i64().unwrap_or(0),
-                request["agent"].as_str().unwrap_or(""),
-            )
-        } else {
-            conversation(
-                request["host"].as_str().unwrap_or(""),
-                request["run"].as_str().unwrap_or(""),
-                &serde_json::from_value::<Window>(request.clone())?,
-            )
-        };
-        let result = result.unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
-        mobile_call(
-            url,
-            token,
-            &format!("/api/bridge/agents/{id}/result"),
-            Some(&result),
-        )?;
-    }
-    Ok(())
-}
-fn mobile_call(url: &str, token: &str, path: &str, body: Option<&Value>) -> Result<Value> {
-    fn quote(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    }
-    let mut config = format!(
-        "header = \"Authorization: Bearer {}\"\nheader = \"Content-Type: application/json\"\n",
-        quote(token)
-    );
-    if let Some(body) = body {
-        config += &format!("data-binary = \"{}\"\n", quote(&body.to_string()));
-    }
-    let mut command = Command::new("curl");
-    command.args([
-        "--silent",
-        "--fail",
-        "--max-time",
-        "10",
-        "--max-filesize",
-        "16777216",
-        "--proto",
-        "=https",
-        "--config",
-        "-",
-        "--url",
-        &format!("{}{path}", url.trim_end_matches('/')),
-    ]);
-    transport(command, config.as_bytes(), Duration::from_secs(12))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     #[test]
     fn remote_history_uses_the_authenticated_fleet_and_preserves_paging() {
         let window = Window {
