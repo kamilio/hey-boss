@@ -131,7 +131,7 @@ const HeyBossJobs = (() => {
     }
     function renderEditor(job,markdown){
       const deleted=!!job?.deleted_at,d=job?.snapshot.definition||{name:'',cron:'0 9 * * *',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',harness:'codex',model:''};
-      editor={job,markdown};
+      editor={job,markdown,targets:[...(d.machines||[])]};
       $('#job-panel').innerHTML=`<div class="job-panel-heading"><div><h2 id="job-panel-title">${job?esc(d.name):'New job'}</h2><p class="job-panel-subtitle">${deleted?'Deleted · Instructions and history are preserved':job?'Revision '+job.revision+' · '+(job.enabled?'Runs '+esc(summary(d.cron).toLowerCase()):'No upcoming runs'):'Choose what runs and when.'}</p></div>${job?`<span class="job-badge ${deleted?'deleted':job.enabled?'enabled':'disabled'}">${deleted?'Deleted':job.enabled?'Enabled':'Disabled'}</span>`:''}</div>
        ${job?`<div class="job-section job-controls"><h3 class="job-section-title">RUN CONTROLS</h3><div class="job-actions">${!deleted?'<button class="job-switch" id="job-enabled-toggle" type="button" role="switch" aria-checked="'+job.enabled+'" aria-label="'+(job.enabled?'Disable job':'Enable job')+'" data-mutation><span class="job-switch-track" aria-hidden="true"></span>'+(job.enabled?'Enabled':'Disabled')+'</button><button class="button" id="job-run" type="button" data-mutation>Run now</button>':''}<button class="button danger" id="job-stop" type="button" data-mutation hidden>Stop current run</button></div><p class="job-help" id="job-run-status">Run now also works while the schedule is disabled.</p></div>`:''}
        <form id="job-form"><fieldset ${deleted?'disabled':''} style="border:0;padding:0;margin:0;min-width:0"><div class="job-fields">${field('job-name','Name',d.name,'required maxlength="256" wide')}<label class="job-field wide" for="job-project" ${job?'hidden':''}>Project<select id="job-project" ${job?'disabled':''}>${boot.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===context.project?'selected':''}>${esc(p.name)}</option>`).join('')}</select>${job?'<small>A job stays with the project where it was created.</small>':''}</label><label class="job-field wide" for="job-markdown">Instructions <small>Used exactly as written</small><textarea id="job-markdown" required spellcheck="false" aria-label="Task instructions">${esc(markdown)}</textarea></label></div>
@@ -147,6 +147,7 @@ const HeyBossJobs = (() => {
         <details class="job-cron-reference"><summary>Syntax & examples</summary><p>Use <code>*</code> for any value, <code>,</code> for lists, <code>-</code> for ranges, and <code>/</code> for steps.</p><dl><dt>Minutes / hours</dt><dd>0–59 / 0–23</dd><dt>Days / months</dt><dd>1–31 / 1–12 or JAN–DEC</dd><dt>Weekdays</dt><dd>0–7 or SUN–SAT · Sunday is 0 or 7</dd></dl><div class="job-cron-examples"><button type="button" data-cron-example="*/15 * * * *"><code>*/15 * * * *</code>Every 15 minutes</button><button type="button" data-cron-example="0 9,17 * * MON-FRI"><code>0 9,17 * * MON-FRI</code>Weekdays at 09:00 & 17:00</button><button type="button" data-cron-example="0 9 1 JAN,APR,JUL,OCT *"><code>0 9 1 JAN,APR,JUL,OCT *</code>First day of each quarter</button></div><p>When both day fields are restricted, either may match. Missing daylight-saving times are skipped; repeated times run once.</p></details>
        </div><div id="job-preview" class="job-preview" aria-live="polite">Checking schedule…</div></section>
        <div class="job-section"><h3 class="job-section-title">Agent</h3><div class="job-fields"><label class="job-field" for="job-harness">Harness<select id="job-harness">${['codex','claude','pi'].map(h=>`<option ${h===d.harness?'selected':''}>${h}</option>`).join('')}</select></label><label class="job-field" for="job-model">Model<input id="job-model" list="job-models" value="${esc(d.model)}" required maxlength="256" autocomplete="off" aria-describedby="job-model-status"><datalist id="job-models"></datalist></label></div><p id="job-model-status" class="job-model-status" role="status">Discovering models…</p><button class="button" id="job-model-refresh" type="button">Refresh models</button>${!job?'<label class="job-toggle"><input id="job-enabled" type="checkbox" checked> Enable this schedule</label>':''}<p class="job-help">Overlapping occurrences are skipped. Disabling a job leaves its current run alone.</p></div>
+       <section class="job-section" aria-label="Machines"><h3 class="job-section-title">Machines</h3><label class="job-field" for="job-placement">Run on<select id="job-placement"><option value="auto" ${d.machines?.length?'':'selected'}>Automatic · Any eligible machine</option><option value="specific" ${d.machines?.length?'selected':''}>Specific machines · In priority order</option></select></label><div id="job-targets" ${d.machines?.length?'':'hidden'}><p class="job-help">Use the first available machine with a running worker for this project and harness. If none are ready, the run waits.</p><ol id="job-machine-list" class="job-machine-list"></ol><button class="button" id="job-machine-add" type="button">Add fallback machine</button><p class="job-help" id="job-machine-help" role="status"></p></div></section>
        </fieldset></form>
 
        ${job?'<section class="job-section" aria-label="Run history"><div class="job-history-heading"><h3>Run history</h3><button class="icon-button" id="job-history-refresh" type="button" aria-label="Refresh run history"><span data-icon="refresh"></span></button></div><div id="job-history" aria-live="polite"></div><button class="button" id="job-history-more" type="button" hidden>Older runs</button></section>':''}`;
@@ -156,6 +157,9 @@ const HeyBossJobs = (() => {
       HeyBossUI.icons($('#job-panel'));pendingUI();
       $('#job-form').oninput=()=>{dirty=true;};
       $('#job-form').onsubmit=save;
+      $('#job-placement').onchange=()=>{dirty=true;$('#job-targets').hidden=$('#job-placement').value==='auto';renderTargets();};
+      $('#job-machine-add').onclick=()=>{dirty=true;editor.targets.push(machines.find(m=>!editor.targets.includes(m.node))?.node||'');renderTargets();};
+      renderTargets();
       const frequency=$('#job-frequency'),time=$('#job-time'),cron=$('#job-cron');
       const cronLegend=()=>{const parts=cron.value.trim().split(/\s+/);document.querySelectorAll('[data-cron-part]').forEach((el,i)=>{el.textContent=parts[i]||'—';});};
       const scheduleVisibility=()=>{
@@ -202,11 +206,22 @@ const HeyBossJobs = (() => {
         if(!value.occurrences.length)$('#job-preview').innerHTML+='<p>No occurrences in the next nine years.</p>';
       }catch(e){if(seq===previewGeneration&&$('#job-preview')){$('#job-preview').textContent=e.message;$('#job-preview').classList.add('error');if(e.code==='invalid_input')$(e.message.includes('timezone')?'#job-timezone':'#job-cron').setAttribute('aria-invalid','true');}}
     }
+    function renderTargets(){
+      const list=$('#job-machine-list');if(!list)return;
+      list.innerHTML=editor.targets.map((node,i)=>{
+        const choices=[...new Set([node,...machines.map(m=>m.node)].filter(Boolean))];
+        return '<li><span class="job-machine-rank">'+(i+1)+'</span><label class="job-field"><span class="sr-only">Machine '+(i+1)+'</span><select data-machine="'+i+'" required><option value="">Choose a machine</option>'+choices.filter(id=>id===node||!editor.targets.includes(id)).map(id=>{const m=machines.find(m=>m.node===id);return '<option value="'+esc(id)+'" '+(id===node?'selected':'')+'>'+esc(m?.host||id)+(m?.state==='connected'?'':' · Offline')+'</option>';}).join('')+'</select></label><button class="button" type="button" data-machine-up="'+i+'" aria-label="Move machine '+(i+1)+' up" '+(i===0?'disabled':'')+'>↑</button><button class="button" type="button" data-machine-remove="'+i+'" aria-label="Remove machine '+(i+1)+'">×</button></li>';
+      }).join('');
+      for(const select of list.querySelectorAll('select')){select.disabled=$('#job-placement').value==='auto';select.onchange=()=>{dirty=true;editor.targets[Number(select.dataset.machine)]=select.value;renderTargets();};}
+      for(const button of list.querySelectorAll('[data-machine-up]'))button.onclick=()=>{dirty=true;const i=Number(button.dataset.machineUp);[editor.targets[i-1],editor.targets[i]]=[editor.targets[i],editor.targets[i-1]];renderTargets();};
+      for(const button of list.querySelectorAll('[data-machine-remove]'))button.onclick=()=>{dirty=true;editor.targets.splice(Number(button.dataset.machineRemove),1);renderTargets();};
+      $('#job-machine-help').textContent=machines.length?'Only the listed machines will be used.':'No fleet machines are currently known. Saved selections are preserved.';
+    }
     async function discover(){
       const seq=++modelGeneration,harness=$('#job-harness').value,saved=$('#job-model').value;
       catalogResult=null;$('#job-model-status').textContent='Discovering '+harness+' models…';$('#job-models').innerHTML='';
       try{const value=await post({provider:harness,configured:saved?[saved]:[]},'/api/jobs/runtime');if(seq!==modelGeneration||!$('#job-model'))return;
-        catalogResult=value;renderModels(value);
+        catalogResult=value;machines=value.machines||machines;renderTargets();renderModels(value);
       }catch(e){if(seq===modelGeneration&&$('#job-model-status'))$('#job-model-status').textContent=e.message+' The current model is preserved.';}
     }
     function renderModels(value){
@@ -218,6 +233,7 @@ const HeyBossJobs = (() => {
     async function save(event){
       event.preventDefault();if(busy||mutation.pending)return;
       const job=editor.job,definition={name:$('#job-name').value,cron:$('#job-cron').value,timezone:$('#job-timezone').value,harness:$('#job-harness').value,model:$('#job-model').value};
+      if($('#job-placement').value==='specific'){if(!editor.targets.length){message('Add at least one machine or choose Automatic.');return;}definition.machines=[...editor.targets];}
       const operation={command:job?'edit':'create',id:job?.id||HeyBossUI.requestId(),definition,markdown:$('#job-markdown').value,...(job?{if_revision:job.revision}:{enabled:$('#job-enabled').checked})};
       await act(operation,$('#job-project').value);
     }

@@ -54,6 +54,7 @@ fn definition() -> Definition {
         timezone: "UTC".into(),
         harness: "codex".into(),
         model: "gpt-6-astra".into(),
+        machines: Vec::new(),
     }
 }
 fn request(op: JobOperation) -> Request {
@@ -1391,4 +1392,30 @@ fn calendar_history_cursor_handles_equal_times_and_deleted_jobs() {
     }
     assert!(cursor.is_null());
     assert_eq!(ids.len(), 205);
+}
+
+#[test]
+fn machine_targets_are_optional_ordered_and_validated() {
+    let legacy = serde_json::to_value(definition()).unwrap();
+    assert!(legacy.get("machines").is_none());
+    for machines in [json!(["node-a", "node-b"]), json!([])] {
+        let mut value = legacy.clone();
+        value["machines"] = machines.clone();
+        let d: Definition = serde_json::from_value(value).unwrap();
+        d.validate().unwrap();
+        if machines.as_array().unwrap().len() > 0 {
+            assert_eq!(serde_json::to_value(d).unwrap()["machines"], machines);
+        }
+    }
+    for machines in [
+        json!(["same", "same"]),
+        json!([""]),
+        json!([" padded "]),
+        json!(["bad\nnode"]),
+    ] {
+        let mut value = legacy.clone();
+        value["machines"] = machines;
+        let d: Definition = serde_json::from_value(value).unwrap();
+        assert!(d.validate().is_err());
+    }
 }
