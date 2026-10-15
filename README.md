@@ -2,6 +2,26 @@
 
 Licensed under [MIT](LICENSE).
 
+For direct SSH synchronization while the main laptop is offline, add `sync_address`
+to the participating remote machines in `~/.hey-boss/fleet.yaml`:
+
+```yaml
+machines:
+  devbox:
+    sync_address: devbox.box.internal
+  another-devbox:
+    sync_address: another-devbox.box.internal
+```
+
+Merge these fields into the existing machine definitions, keeping their workers.
+Rollout provisions dedicated local keys and exchanges public keys and verified
+host keys through the existing trusted fleet connections. The keys authorize only
+the sync command. Every pair uses one bidirectional SSH connection; cached routes
+and local services keep it running without the laptop. Removing `sync_address`
+revokes the managed access when the affected machines next receive configuration.
+Initial distributed activation must still finish before relying on offline work.
+`hey-boss fleet sync-status` includes direct peer connection status.
+
 `hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged without a daemon.
 Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
 

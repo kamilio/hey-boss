@@ -71,25 +71,35 @@ pub(in crate::fleet::native) fn serve(ctx: Context, controller: &str) -> Result<
     Ok(())
 }
 
-fn exchange(ctx: &Context, host: &str) -> Result<()> {
+fn exchange(
+    ctx: &Context,
+    host: &str,
+    peer: Option<(&super::super::peer_sync::Peer, &str)>,
+) -> Result<bool> {
     if !crate::health::remote::valid_host(host) {
         return Err(replica::invalid("Invalid sync host"));
     }
     let Some(_lock) = ctx.lock("distributed-sync.lock", false)? else {
-        return Ok(());
+        return Ok(false);
     };
     let db = ctx.db()?;
     let mut engine = engine(ctx)?;
-    prepare(ctx, &db, &mut engine, true)?;
-    let mut command = Command::new("ssh");
-    crate::ssh::reuse_connection(&mut command, &ctx.state, host);
+    prepare(ctx, &db, &mut engine, peer.is_none())?;
+    let mut command = if let Some((peer, _)) = peer {
+        super::super::peer_sync::ssh(ctx, peer)
+    } else {
+        let mut command = Command::new("ssh");
+        crate::ssh::reuse_connection(&mut command, &ctx.state, host);
+        command
+    };
+    let controller = peer.map(|(_, controller)| controller).unwrap_or(&ctx.node);
     // The machine identity is validated by Context; it is a fixed hex string.
-    if ctx.node.len() != 32 || !ctx.node.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if controller.len() != 32 || !controller.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(replica::invalid("Invalid local machine identity"));
     }
     let script = format!(
         "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; exec hey-boss fleet sync --controller {}",
-        ctx.node
+        controller
     );
     let mut child = command
         .args([
@@ -159,7 +169,7 @@ fn exchange(ctx: &Context, host: &str) -> Result<()> {
             break;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Shadow capture and exchange leave legacy scheduling intact until cutover.
@@ -176,10 +186,14 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                     let hosts = ctx.inventory()?;
                     for machine in hosts {
                         if let Some(host) = machine["host"].as_str().filter(|h| *h != "local") {
-                            if let Err(error) = exchange(&ctx, host) {
-                                ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"disconnected","error":error.to_string()}))?;
-                            } else {
-                                ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"connected","at":super::super::context::now()}))?;
+                            match exchange(&ctx, host, None) {
+                                Err(error) => {
+                                    ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"disconnected","error":error.to_string()}))?;
+                                }
+                                Ok(true) => {
+                                    ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"connected","at":super::super::context::now()}))?;
+                                }
+                                Ok(false) => {}
                             }
                         }
                     }
@@ -187,6 +201,34 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                     let db = ctx.db()?;
                     let mut engine = engine(&ctx)?;
                     prepare(&ctx, &db, &mut engine, false)?;
+                }
+                // One initiator per pair keeps the graph acyclic and avoids two
+                // peers each holding their journal lock while dialing the other.
+                // The cached plan survives loss of the controller connection.
+                if !controller && let Some(settings) = super::super::peer_sync::cached(&ctx)? {
+                    for peer in settings
+                        .peers
+                        .iter()
+                        .filter(|peer| settings.enabled && settings.machine < peer.machine)
+                    {
+                        let state = match exchange(
+                            &ctx,
+                            &peer.address,
+                            Some((peer, &settings.controller)),
+                        ) {
+                            Ok(false) => continue,
+                            Ok(true) => {
+                                json!({"state":"connected","at":super::super::context::now()})
+                            }
+                            Err(error) => {
+                                json!({"state":"disconnected","error":error.to_string(),"at":super::super::context::now()})
+                            }
+                        };
+                        ctx.atomic_json(
+                            &super::super::peer_sync::diagnostic_path(&ctx, &peer.machine),
+                            &state,
+                        )?;
+                    }
                 }
                 Ok(())
             })();
@@ -196,4 +238,56 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
             ctx.wait(Duration::from_secs(2));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn peer_preparation_keeps_controller_and_baseline_ownership() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.json"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "b".repeat(32),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let db = crate::issues::Store::open(&ctx.path).unwrap().into_database();
+        db.execute("UPDATE fleet_meta SET role='agent',node=?1", [&ctx.node])
+            .unwrap();
+        install(&db, &ctx.node).unwrap();
+        db.execute(
+            "UPDATE distributed_meta SET controller=?1",
+            ["a".repeat(32)],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO distributed_members(node,slot,ready) VALUES(?1,0,0)",
+            ["a".repeat(32)],
+        )
+        .unwrap();
+        let mut journal = engine(&ctx).unwrap();
+        for _ in 0..5 {
+            prepare(&ctx, &db, &mut journal, false).unwrap();
+        }
+        assert_eq!(
+            db.query_row("SELECT controller FROM distributed_meta", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "a".repeat(32)
+        );
+        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            db.query_row("SELECT ready FROM distributed_members", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(journal);
+        let _held = ctx.lock("distributed-sync.lock", false).unwrap().unwrap();
+        assert!(!exchange(&ctx, "unused.invalid", None).unwrap());
+    }
 }
