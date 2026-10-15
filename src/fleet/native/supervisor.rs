@@ -2145,6 +2145,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn distributed_cutover_rejects_old_peers_before_importing_their_rows() {
+        let (_directory, app) = test_supervisor();
+        let app = Arc::new(app);
+        app.ctx
+            .db()
+            .unwrap()
+            .execute("UPDATE fleet_meta SET role='peer'", [])
+            .unwrap();
+        let hello = json!({"version":1,"kind":"hello","node":"old-peer","projects":[{"id":"unexpected","name":"Unexpected"}]});
+        let script = format!("printf '%s\\n' '{hello}'; cat >/dev/null");
+        let mut child = TestTransport(
+            Command::new("sh")
+                .args(["-c", &script])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let error = app
+            .channel_inner("old-peer", &mut child.0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must be upgraded"), "{error}");
+        assert_eq!(
+            app.ctx
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM projects WHERE id='unexpected'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn distributed_cutover_fences_legacy_mutations_in_both_transition_orders() {
+        let (_directory, app) = test_supervisor();
+        let db = app.ctx.db().unwrap();
+        for (role, remote_active) in [("controller", true), ("peer", false)] {
+            db.execute("UPDATE fleet_meta SET role=?1", [role]).unwrap();
+            // A malformed legacy mutation would fail if it reached the importer.
+            let (pull, receipts, _) = app.heartbeat_pull(&db, "peer", "peer", &json!([]),
+                &json!({"distributed_active":remote_active,"changes":[{"invalid":"stale legacy mutation"}]})).unwrap();
+            assert!(pull.is_null());
+            assert!(receipts.is_empty());
+        }
+    }
+
+    #[test]
     fn utility_roundtrips_and_liveness_survive_a_blocked_sync_handler() {
         let (_directory, mut app) = test_supervisor();
         app.ctx.desired = app.ctx.state.join("fleet.yaml");
@@ -3539,6 +3592,7 @@ done"#
             "skills/hey-boss/file",
             "packages/hey-gh/file",
             "packages/hey-boss-http/file",
+            "packages/hey-boss-sync/file",
             "packages/hey-proxy/file",
             "tools/upgrade_hey_boss.py",
             "tools/drain_github_issues.py",
