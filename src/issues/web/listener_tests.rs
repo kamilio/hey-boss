@@ -136,7 +136,7 @@ impl Fixture {
             token: "one-shared-csrf-token".into(),
             authority: addresses[0].to_string(),
             local_ports: addresses.iter().map(|a| a.port()).collect(),
-            allow_wifi: vec![],
+            lan: lan::Guard::default(),
             mobile_origin: Some("https://mac.example.ts.net".into()),
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -325,17 +325,17 @@ fn simultaneous_listeners_share_writes_csrf_routes_and_release_both_sockets() {
 }
 
 #[test]
-fn lan_requests_require_the_current_named_wifi_private_peer_and_exact_origin() {
+fn lan_requests_require_verified_network_private_peer_and_exact_origin() {
     let mut fixture = Fixture::start();
     fixture.shutdown();
     let app = Arc::get_mut(&mut fixture.app).unwrap();
-    app.allow_wifi = vec!["Home".into(), "Office".into()];
+
     let port = app.local_ports[0];
     let host = format!("192.168.1.10:{port}");
     let origin = format!("http://{host}");
     let network = || {
-        Some(wifi::Network {
-            ssid: "Home".into(),
+        Some(lan::Network {
+            interface: "en0".into(),
             address: "192.168.1.10".parse().unwrap(),
             mask: "255.255.255.0".parse().unwrap(),
         })
@@ -350,16 +350,6 @@ fn lan_requests_require_the_current_named_wifi_private_peer_and_exact_origin() {
         network()
     ));
     assert!(!lan_allowed(peer, Some(&host), None, None, app, None));
-    let mut changed = network().unwrap();
-    changed.ssid = "Cafe".into();
-    assert!(!lan_allowed(
-        peer,
-        Some(&host),
-        None,
-        None,
-        app,
-        Some(changed)
-    ));
     for remote in [
         "203.0.113.5",
         "192.168.2.20",
@@ -397,15 +387,6 @@ fn lan_requests_require_the_current_named_wifi_private_peer_and_exact_origin() {
         Some(&host),
         None,
         Some("cross-site"),
-        app,
-        network()
-    ));
-    app.allow_wifi.clear();
-    assert!(!lan_allowed(
-        peer,
-        Some(&host),
-        Some(&origin),
-        None,
         app,
         network()
     ));

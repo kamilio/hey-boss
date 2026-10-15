@@ -1022,7 +1022,7 @@ when the viewer or app reopens. New repositories remain collapsed.
 
 ## Local phone access
 
-The phone interface runs on your Mac and is localhost-only by default. Allow selected Wi-Fi networks with `hey-boss issue web --allow-wifi 'Home' --allow-wifi 'Office'`. See [local mobile access](docs/mobile.md).
+The phone interface runs on your Mac and is localhost-only by default. Allow your home LAN with `hey-boss issue web --allow-public-ip YOUR_HOME_PUBLIC_IP`; the public-IP check runs in the background without Location permission. See [local mobile access](docs/mobile.md).
 
 Codex sessions on a managed app-server can be steered and their saved goals paused
 or re-enabled from expanded Agents rows. See [Codex controls](docs/codex-steering.md)

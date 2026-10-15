@@ -2130,8 +2130,8 @@ fn file_attachments_share_authenticated_actions_and_all_page_assets() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn unapproved_wifi_preserves_local_access_and_cannot_bypass_host_checks() {
-    let web = Web::start_with_args(&["--allow-wifi", "hey-boss-test-denied"]);
+fn unverified_public_ip_preserves_local_access_and_cannot_bypass_host_checks() {
+    let web = Web::start_with_args(&["--allow-public-ip", "8.8.8.8"]);
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
         .build()
