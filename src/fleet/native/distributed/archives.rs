@@ -97,7 +97,16 @@ pub(super) fn capture(db: &Connection, fact: &mut Revision) -> Result<bool> {
             )?);
         }
     }
-    let Some(row) = &fact.after else {
+    let Some(row) = fact
+        .after
+        .as_ref()
+        .filter(|r| r["archive_key"].is_string())
+        .or_else(|| {
+            fact.before
+                .as_ref()
+                .filter(|r| r["archive_key"].is_string())
+        })
+    else {
         return Ok(true);
     };
     let Some(key) = row["archive_key"].as_str() else {
@@ -122,12 +131,147 @@ pub(super) fn capture(db: &Connection, fact: &mut Revision) -> Result<bool> {
     Ok(true)
 }
 
+pub(super) fn remember(db: &Connection, manifest: &Manifest) -> Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO distributed_archive_history(key,project_id,number) VALUES(?1,?2,?3)",
+        params![manifest.key, manifest.project, manifest.number],
+    )?;
+    Ok(())
+}
+
+/// Hydrate one bounded history page while the issue still has its cold header.
+/// Header publication and the final page commit together. All cursor movement
+/// is in the caller's savepoint, so failures and restarts safely retry.
+pub(super) fn project(db: &Connection, desired: &mut Value) -> Result<bool> {
+    let project = desired["project_id"].as_str().unwrap();
+    let number = desired["number"].as_i64().unwrap();
+    let current: Option<Option<String>> = db
+        .query_row(
+            "SELECT archive_key FROM issues WHERE project_id=?1 AND number=?2",
+            params![project, number],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",params![project,number],|r|r.get(0))?;
+    for key in [
+        current.as_ref().and_then(|k| k.as_deref()),
+        desired["archive_key"].as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        db.execute("INSERT OR IGNORE INTO distributed_archive_history(key,project_id,number) VALUES(?1,?2,?3)",params![key,project,number])?;
+    }
+    let history_changed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM distributed_history_edits WHERE project_id=?1 AND number=?2)",
+        params![project, number],
+        |r| r.get(0),
+    )?;
+    let warm =
+        desired["archive_key"].is_null() || current == Some(None) || active || history_changed;
+    if !warm {
+        return Ok(true);
+    }
+    let pending = replica::rows(db,
+        "SELECT key,cursor_kind,cursor_id FROM distributed_archive_history WHERE project_id=?1 AND number=?2 AND complete=0 ORDER BY key LIMIT 1",
+        &[json!(project),json!(number)])?.into_iter().next();
+    if let Some(pending) = pending {
+        let key = pending["key"].as_str().unwrap();
+        if current.is_none() {
+            // Missing parents can retry through ordinary projection ordering.
+            // A cold staging header keeps the history reachable across a crash;
+            // draft prevents pickup before the requested content is published.
+            let mut staging = desired.clone();
+            staging["archive_key"] = json!(key);
+            staging["draft"] = json!(1);
+            materialize::write(
+                db,
+                "issues",
+                &json!({"project_id":project,"number":number}),
+                Some(staging),
+            )?;
+        }
+        let page = crate::issues::archive::projection_history_page(
+            db,
+            key,
+            project,
+            number,
+            pending["cursor_kind"].as_str().unwrap(),
+            pending["cursor_id"].as_str().unwrap(),
+        )?;
+        for (table, cursor, row) in &page {
+            restore_row(db, table, row, false)?;
+            db.execute(
+                "UPDATE distributed_archive_history SET cursor_kind=?2,cursor_id=?3 WHERE key=?1",
+                params![key, table, cursor],
+            )?;
+        }
+        if !page.is_empty() {
+            return Ok(false);
+        }
+        db.execute(
+            "UPDATE distributed_archive_history SET complete=1 WHERE key=?1",
+            [key],
+        )?;
+        return Ok(false);
+    }
+    // Storage temperature is local. Once warm, a remote archive cannot cool an
+    // active task or hide locally retained history behind another cold copy.
+    db.execute(
+        "DELETE FROM distributed_history_edits WHERE project_id=?1 AND number=?2",
+        params![project, number],
+    )?;
+    desired["archive_key"] = Value::Null;
+    desired["archived_comments"] = json!(0);
+    Ok(true)
+}
+
+pub(super) fn restore_row(
+    db: &Connection,
+    table: &str,
+    row: &Value,
+    preserve_hot: bool,
+) -> Result<()> {
+    let exists = preserve_hot
+        && db.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id=?1)"),
+            crate::database::params_from_iter(replica::args(&[row["id"].clone()])),
+            |r| r.get::<_, bool>(0),
+        )?;
+    let mut fact = Revision {
+        protocol: 1,
+        origin: "archive".into(),
+        clock: 0,
+        table: table.into(),
+        before: None,
+        after: Some(row.clone()),
+        resource: None,
+        archive: None,
+    };
+    identity::normalize(db, &mut fact)?;
+    let row = fact.after.unwrap();
+    projection::seed_history(db, table, &row, "archive")?;
+    if exists {
+        // Ordinary local restore may race unexported edits. Keep existing hot
+        // rows until the projector catches up with their captured revisions.
+        return Ok(());
+    }
+    let key = projection::key(db, table, &row)?;
+    materialize::write(db, table, &key, projection::row(db, table, &key)?)?;
+    db.execute(
+        "DELETE FROM distributed_dirty WHERE table_name=?1 AND entity=?2",
+        params![table, key.to_string()],
+    )?;
+    Ok(())
+}
+
 pub(super) fn receive(
     db: &Connection,
     engine: &hey_boss_sync::Engine,
     manifest: &Manifest,
 ) -> Result<()> {
     if transfer::Catalog::new(db)?.contains(&manifest.key, &manifest.project, manifest.number)? {
+        remember_pages(db, manifest)?;
         return Ok(());
     }
     let mut download =
@@ -148,6 +292,13 @@ pub(super) fn receive(
     }
     drop(download);
     transfer::map_local_history(db, &manifest.key, &manifest.project, manifest.number)?;
+    remember_pages(db, manifest)?;
+    Ok(())
+}
+
+fn remember_pages(db: &Connection, manifest: &Manifest) -> Result<()> {
+    db.execute("INSERT INTO distributed_archives VALUES(?1,?2,'null',1) ON CONFLICT(key) DO UPDATE SET pages=excluded.pages,cursor='null',complete=1",
+        params![manifest.key,serde_json::to_string(&manifest.pages)?])?;
     Ok(())
 }
 

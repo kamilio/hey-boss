@@ -19,10 +19,17 @@ Task revisions and attempt results remain available even when current views pick
 one conflicting field value. Completion is tied to the requirements used.
 
 Application changes and their outgoing journal commit together locally. Import
-checkpoints commit with projected changes. Replication storage and application
+checkpoints commit with reduced facts and pending projection work. Replication storage and application
 storage may recover independently without losing an acknowledged mutation.
 Credentials, process identities, filesystem locks and machine-local checkouts
 are never imported as another machine's executable state.
+
+Archive storage changes are independent of logical requirement edits. Cold
+headers stay compact; warming an issue restores history in resumable pages
+before publishing its hot body. History already cold at enrollment supplies
+clock-zero baselines, preserving later edits and deletion tombstones. Incoming
+pages wait for locally captured revisions at the end of the journal before
+updating application views.
 
 Rollout is additive: install capture, backfill, synchronize in shadow mode, verify
 coverage, then switch scheduling and disable legacy mutation replication in a

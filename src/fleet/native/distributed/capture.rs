@@ -75,6 +75,17 @@ fn row_json(columns: &[String], prefix: &str) -> String {
 }
 
 pub(super) fn install(db: &Connection) -> Result<()> {
+    // Canonical merges can reopen an archived task without changing its cold
+    // content. Only the active projector may update that compact header.
+    db.execute_batch("DROP TRIGGER IF EXISTS issue_archive_mutation_guard;
+        CREATE TRIGGER issue_archive_mutation_guard BEFORE UPDATE ON issues
+        WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key
+        AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at)
+        AND NOT ((SELECT active FROM distributed_meta WHERE id=1)=1 AND (SELECT syncing FROM fleet_meta WHERE id=1)=2)
+        BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
+    db.execute_batch("CREATE TRIGGER IF NOT EXISTS distributed_archive_cooled AFTER UPDATE OF archive_key ON issues
+        WHEN NEW.archive_key IS NOT NULL AND NEW.archive_key IS NOT OLD.archive_key
+        BEGIN UPDATE distributed_archive_history SET cursor_kind='',cursor_id='',complete=0 WHERE key=NEW.archive_key; END;")?;
     for table in TABLES {
         let columns = columns(db, table)?;
         if columns.is_empty() {

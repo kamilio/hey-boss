@@ -18,9 +18,9 @@ fn where_key(key: &Value) -> Result<(String, Vec<Value>)> {
 fn issue_overlay(db: &Connection, row: &mut Value) -> Result<()> {
     // Only this machine can operate its active processes. Canonical lifecycle
     // changes stay retained in the reducer until its local attempt finishes.
-    let current=replica::rows(db,"SELECT state,assignee,closed_by,closed_at,deleted_at,draft,manual_blocked,blockers,version FROM issues WHERE project_id=?1 AND number=?2",
+    let current=replica::rows(db,"SELECT state,assignee,closed_by,closed_at,deleted_at,draft,manual_blocked,blockers,version,body,archive_key,archived_comments FROM issues WHERE project_id=?1 AND number=?2",
         &[row["project_id"].clone(),row["number"].clone()])?.into_iter().next();
-    if let Some(current) = current {
+    if let Some(ref current) = current {
         let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",params![row["project_id"].as_str(),row["number"].as_i64()],|r|r.get(0))?;
         if active {
             for name in [
@@ -40,8 +40,20 @@ fn issue_overlay(db: &Connection, row: &mut Value) -> Result<()> {
             row["assignee"] = Value::Null;
         }
         row["version"] = current["version"].clone();
+        if !row["archive_key"].is_null() {
+            // The reducer carries logical content; the hot row is only an
+            // archive header. Replaying it must not hydrate or revise storage.
+            row["body"] = if row["archive_key"] == current["archive_key"] {
+                current["body"].clone()
+            } else {
+                json!("")
+            };
+        }
     } else if row["state"] == "open" && foreign_assignment(db, row)? {
         row["assignee"] = Value::Null;
+    }
+    if current.is_none() && !row["archive_key"].is_null() {
+        row["body"] = json!("");
     }
     Ok(())
 }
@@ -329,10 +341,23 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
                 )?);
             }
             db.execute_batch("SAVEPOINT distributed_row")?;
-            let result = if *table == "issue_subtasks" {
+            let mut complete = true;
+            let result = if *table == "issues" {
+                (|| -> Result<()> {
+                    if let Some(row) = &mut desired {
+                        complete = archives::project(db, row)?;
+                    }
+                    if complete {
+                        write(db, table, &key, desired)?;
+                    }
+                    Ok(())
+                })()
+            } else if *table == "issue_subtasks" {
                 let project = key["project_id"].as_str().unwrap();
-                if rebuilt.insert(project.to_owned()) {
-                    graph::subtasks(db, project)
+                if !rebuilt.contains(project) {
+                    graph::subtasks(db, project).map(|()| {
+                        rebuilt.insert(project.to_owned());
+                    })
                 } else {
                     Ok(())
                 }
@@ -352,9 +377,11 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
                         .flatten()
                     });
                 if let Some(project) = project
-                    && rebuilt.insert(project.clone())
+                    && !rebuilt.contains(&project)
                 {
-                    graph::mindmap(db, &project)
+                    graph::mindmap(db, &project).map(|()| {
+                        rebuilt.insert(project);
+                    })
                 } else {
                     Ok(())
                 }
@@ -368,10 +395,12 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
                     {
                         projects.insert(project.to_owned());
                     }
-                    db.execute(
-                        "DELETE FROM distributed_dirty WHERE table_name=?1 AND entity=?2",
-                        params![table, entity],
-                    )?;
+                    if complete {
+                        db.execute(
+                            "DELETE FROM distributed_dirty WHERE table_name=?1 AND entity=?2",
+                            params![table, entity],
+                        )?;
+                    }
                     if !matches!(*table, "issue_subtasks" | "mindmap_nodes") {
                         db.execute(
                             "DELETE FROM distributed_rejections WHERE table_name=?1 AND entity=?2",

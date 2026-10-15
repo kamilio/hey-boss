@@ -59,6 +59,9 @@ CREATE INDEX IF NOT EXISTS distributed_legacy_identity ON fleet_row_ids(origin,t
 CREATE TABLE IF NOT EXISTS distributed_rejections(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(table_name,entity));
 CREATE TABLE IF NOT EXISTS distributed_archives(key TEXT PRIMARY KEY,pages TEXT NOT NULL,cursor TEXT NOT NULL,complete INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS distributed_archive_history(key TEXT PRIMARY KEY,project_id TEXT NOT NULL,number INTEGER NOT NULL,cursor_kind TEXT NOT NULL DEFAULT '',cursor_id TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS distributed_archive_history_pending ON distributed_archive_history(project_id,number,key) WHERE complete=0;
+CREATE TABLE IF NOT EXISTS distributed_history_edits(project_id TEXT NOT NULL,number INTEGER NOT NULL,PRIMARY KEY(project_id,number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS distributed_members(node TEXT PRIMARY KEY,slot INTEGER NOT NULL UNIQUE,ready INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS distributed_attempts(
  id TEXT PRIMARY KEY,machine TEXT NOT NULL,project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,
@@ -75,6 +78,27 @@ CREATE VIEW IF NOT EXISTS distributed_job_runs AS SELECT sequence,id,project_id,
  json_extract(payload,'$.finished_at') AS finished_at,json_extract(payload,'$.worker_id') AS worker_id
  FROM distributed_job_attempts;
 ";
+
+pub(crate) fn restore_history_row(
+    db: &Connection,
+    table: &str,
+    row: &Value,
+) -> crate::issues::Result<bool> {
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_meta')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? || !db.query_row(
+        "SELECT active=1 FROM distributed_meta WHERE id=1",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(false);
+    }
+    archives::restore_row(db, table, row, true)
+        .map_err(|e| crate::issues::Error::new("archive_sync", e.to_string()))?;
+    Ok(true)
+}
 
 /// Installing capture does not change scheduling, authorities, or running work.
 pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
@@ -280,6 +304,9 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
     let tx = db.unchecked_transaction()?;
     for (position, _, payload) in &facts {
         if let Some(fact) = archives::revision(payload)? {
+            if let Some(archive) = &fact.archive {
+                archives::remember(&tx, archive)?;
+            }
             if let Some(resource) = &fact.resource {
                 resources::receive(&tx, resource)?;
             }
@@ -305,7 +332,9 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
             [position],
         )?;
     }
-    let ready:bool=tx.query_row("SELECT active=1 AND exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) FROM distributed_meta WHERE id=1",[],|r|r.get(0))?;
+    // Do not publish an earlier remote page over local changes whose exported
+    // facts are still waiting later in this journal's delivery order.
+    let ready:bool=tx.query_row("SELECT active=1 AND exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) AND projected=?1 FROM distributed_meta WHERE id=1",[engine.head()?],|r|r.get(0))?;
     if ready {
         materialize::apply(&tx)?;
     }

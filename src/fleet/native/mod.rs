@@ -8,6 +8,7 @@ mod context;
 mod control;
 mod conversation;
 mod distributed;
+pub(crate) use distributed::restore_history_row;
 mod github_reads;
 mod github_relay;
 mod global_utilities;
