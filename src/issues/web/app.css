@@ -2,6 +2,15 @@
   overflow: hidden;
   min-height: 354px;
 }
+.distributed-attempts { margin-top: 18px; }
+.distributed-attempts .attempts-note { margin: 14px 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.distributed-attempts ol { list-style: none; padding: 0 18px 6px; margin: 0; }
+.distributed-attempts li { padding: 12px 0; border-top: 1px solid var(--line); }
+.distributed-attempts .attempt-title { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.distributed-attempts time { color: var(--muted); font-size: 12px; }
+.distributed-attempts li > p { margin: 7px 0; font-size: 12px; }
+.distributed-attempts summary { cursor: pointer; font-weight: 600; padding: 5px 0; }
+.distributed-attempts .attempt-summary { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 .label.yolo-badge {
   display: inline-flex;
   align-items: center;

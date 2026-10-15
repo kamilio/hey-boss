@@ -2631,6 +2631,15 @@ impl Store {
         actor_labels::enrich(&tx, &mut result)?;
         if let Some(issue) = result.get_mut("issue") {
             attempts::enrich(&tx, &response_project.id, issue)?;
+            if tx.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                r.get::<_, bool>(0)
+            })? {
+                issue["attempts"]=json!(tx.query_collect("WITH attempts AS (
+                    SELECT id,machine,state,started_at,finished_at,summary,actor_id FROM worker_runs WHERE project_id=?1 AND issue_number=?2
+                    UNION ALL SELECT id,machine,state,started_at,finished_at,summary,json_extract(payload,'$.actor_id') FROM distributed_attempts d WHERE project_id=?1 AND issue_number=?2 AND NOT EXISTS(SELECT 1 FROM worker_runs w WHERE w.id=d.id))
+                    SELECT t.id,t.machine,t.state,t.started_at,t.finished_at,t.summary,coalesce(json_extract(a.metadata,'$.host'),t.machine),count(*) OVER() FROM attempts t LEFT JOIN agents a ON a.id=t.actor_id ORDER BY t.started_at DESC,t.id DESC LIMIT 50",params![response_project.id,issue["number"].as_i64()],|row|Ok::<_,rusqlite::Error>(json!({"id":row.get::<_,String>(0)?,"machine":row.get::<_,String>(1)?,"state":row.get::<_,String>(2)?,"started_at":row.get::<_,i64>(3)?,"finished_at":row.get::<_,Option<i64>>(4)?,"summary":row.get::<_,String>(5)?,"host":row.get::<_,String>(6)?,"total":row.get::<_,i64>(7)?})))?);
+                issue["sync_conflicts"]=json!(tx.query_collect("SELECT reason FROM distributed_rejections WHERE table_name IN ('issues','issue_blockers') AND json_extract(entity,'$.project_id')=?1 AND json_extract(entity,'$.number')=?2",params![response_project.id,issue["number"].as_i64()],|row|row.get::<_,String>(0))?);
+            }
         }
         if matches!(r.operation, Operation::Claim { .. }) {
             result["instructions"] = json!(registry::claim_instructions(
