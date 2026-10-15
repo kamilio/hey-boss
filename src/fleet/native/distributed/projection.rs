@@ -53,7 +53,9 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         {
             "@lifecycle"
         }
-        "issues" if matches!(column, "body" | "archive_key" | "archived_comments") => "@content",
+        // Storage-only cooling/restoration must not overwrite a concurrent
+        // requirements edit just because it has a later logical clock.
+        "issues" if matches!(column, "archive_key" | "archived_comments") => "@storage",
         "scheduled_jobs" | "scheduled_job_revisions" | "scheduled_job_runs" | "worker_runs" => {
             "@row"
         }
@@ -115,6 +117,16 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
     if before_key.is_some() && after_key.is_some() && before_key != after_key {
         return Err(replica::invalid("Distributed primary keys are immutable"));
     }
+    // Cold history may predate enrollment and have no ordinary birth fact.
+    // Its before-image supplies missing clock-zero fields, never a new birth
+    // at the update clock that could resurrect a concurrent deletion.
+    if matches!(
+        fact.table.as_str(),
+        "comments" | "events" | "issue_status_updates"
+    ) && let Some(before) = &fact.before
+    {
+        seed_history(db, &fact.table, before, "before")?;
+    }
     let entity = after_key.or(before_key).unwrap().to_string();
     let before = fact
         .before
@@ -140,6 +152,11 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         let row = fact.after.as_ref().unwrap();
         lifecycle["@requirements"] = json!([row["title"], row["body"], row["labels"]]);
     }
+    if fact.table == "issues"
+        && let Some(storage) = changes.get_mut("@storage")
+    {
+        storage["@archived_body"] = fact.after.as_ref().unwrap()["body"].clone();
+    }
     if fact.before.is_none() {
         changes.insert("@alive".into(), json!(true));
     }
@@ -162,6 +179,25 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         [fact.clock],
     )?;
     if changed {
+        if fact.clock > 0
+            && matches!(
+                fact.table.as_str(),
+                "comments" | "events" | "issue_status_updates"
+            )
+        {
+            let row = fact.after.as_ref().or(fact.before.as_ref()).unwrap();
+            db.execute(
+                "INSERT OR IGNORE INTO distributed_history_edits VALUES(?1,?2)",
+                params![row["project_id"].as_str(), row["issue_number"].as_i64()],
+            )?;
+            db.execute(
+                "INSERT OR IGNORE INTO distributed_dirty VALUES('issues',?1)",
+                [
+                    json!({"project_id":row["project_id"],"number":row["issue_number"]})
+                        .to_string(),
+                ],
+            )?;
+        }
         db.execute(
             "INSERT OR IGNORE INTO distributed_dirty VALUES(?1,?2)",
             params![fact.table, entity],
@@ -191,6 +227,26 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn seed_history(db: &Connection, table: &str, row: &Value, source: &str) -> Result<()> {
+    reduce(
+        db,
+        &Revision {
+            protocol: 1,
+            // Synthetic baselines sort below enrolled machine baselines.
+            origin: format!(
+                "!{source}:{}",
+                hey_boss_sync::digest(row.to_string().as_bytes())
+            ),
+            clock: 0,
+            table: table.into(),
+            before: None,
+            after: Some(row.clone()),
+            resource: None,
+            archive: None,
+        },
+    )
+}
+
 pub(super) fn row(db: &Connection, table: &str, key: &Value) -> Result<Option<Value>> {
     let values = replica::rows(
         db,
@@ -204,7 +260,10 @@ pub(super) fn row(db: &Connection, table: &str, key: &Value) -> Result<Option<Va
         let value: Value = serde_json::from_str(field["value"].as_str().unwrap())?;
         match name {
             "@alive" => alive = value == true,
-            "@row" | "@lifecycle" | "@content" => {
+            "@row" | "@lifecycle" | "@storage" | "@content" => {
+                if name == "@content" {
+                    result["@archived_body"] = value["body"].clone();
+                }
                 result.as_object_mut().unwrap().extend(
                     value
                         .as_object()
@@ -221,6 +280,13 @@ pub(super) fn row(db: &Connection, table: &str, key: &Value) -> Result<Option<Va
         return Ok(None);
     }
     if table == "issues" {
+        let archived_body = result.as_object_mut().unwrap().remove("@archived_body");
+        if !result["archive_key"].is_null() && archived_body != Some(result["body"].clone()) {
+            // The winning body is newer/different than the chosen cold copy.
+            // Hydrate its history before publishing the merged hot content.
+            result["archive_key"] = Value::Null;
+            result["archived_comments"] = json!(0);
+        }
         let requirements = result.as_object_mut().unwrap().remove("@requirements");
         if matches!(result["state"].as_str(), Some("closed" | "ready"))
             && requirements != Some(json!([result["title"], result["body"], result["labels"]]))

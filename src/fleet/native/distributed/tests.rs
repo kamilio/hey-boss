@@ -766,6 +766,308 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
 }
 
 #[test]
+fn incoming_pages_wait_for_local_revisions_at_the_end_of_the_journal() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    a.execute("UPDATE issues SET title='Remote edit'", [])
+        .unwrap();
+    a.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<140) INSERT INTO agents SELECT 'padding:'||x,'{}',0 FROM n;").unwrap();
+    capture_all(&a, &mut ea);
+    b.execute("UPDATE issues SET title='Local edit'", [])
+        .unwrap();
+    transfer(&ea, &mut eb);
+    while export(&b, &mut eb).unwrap() > 0 {}
+    assert_eq!(import(&b, &eb).unwrap(), 128);
+    assert_eq!(
+        b.query_row("SELECT title FROM issues", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "Local edit"
+    );
+    while import(&b, &eb).unwrap() > 0 {}
+    assert_eq!(
+        b.query_row("SELECT title FROM issues", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "Local edit"
+    );
+}
+
+#[test]
+fn paged_cold_history_resumes_after_restart_and_keeps_deletions() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    db.execute("UPDATE fleet_meta SET node='a'", []).unwrap();
+    seed(&db);
+    db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<70)
+        INSERT INTO comments(id,project_id,issue_number,author,body,created_at) SELECT x,'p',1,'human:test','Cold finding '||x,1 FROM n;
+        UPDATE issues SET state='closed',closed_by='human:test',closed_at=2;").unwrap();
+    let removed = replica::rows(&db, "SELECT * FROM comments WHERE id=7", &[])
+        .unwrap()
+        .remove(0);
+    assert!(crate::issues::archive::archive_issue(&db, "p", 1, 10_000_000_000).unwrap());
+    while crate::issues::archive::cleanup_history(&db).unwrap() > 0 {}
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    loop {
+        archives::prepare(&db, &mut engine).unwrap();
+        if baseline(&db, &mut engine, true).unwrap() {
+            break;
+        }
+    }
+    capture_all(&db, &mut engine);
+    db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
+    let mut deleted = Revision {
+        protocol: 1,
+        origin: "b".into(),
+        clock: 20,
+        table: "comments".into(),
+        before: Some(removed),
+        after: None,
+        resource: None,
+        archive: None,
+    };
+    identity::normalize(&db, &mut deleted).unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    projection::reduce(&tx, &deleted).unwrap();
+    materialize::apply(&tx).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        db.query_row("SELECT archive_key IS NOT NULL FROM issues", [], |r| r
+            .get::<_, bool>(0))
+            .unwrap()
+    );
+    assert!(
+        db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+            < 69
+    );
+    drop(db);
+    drop(engine);
+    let db = f.db();
+    let tx = db.unchecked_transaction().unwrap();
+    materialize::drain(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        69
+    );
+    assert!(
+        db.query_row("SELECT archive_key IS NULL FROM issues", [], |r| r
+            .get::<_, bool>(0))
+            .unwrap()
+    );
+    assert!(
+        projection::row(&db, "comments", &json!({"id":"a:7"}))
+            .unwrap()
+            .is_none()
+    );
+    let key: String = db
+        .query_row("SELECT key FROM distributed_archive_history", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    // Reusing a cooled copy invalidates its old hydration checkpoint.
+    db.execute(
+        "UPDATE issues SET archive_key=?1,body='',archive_cleanup=1",
+        [&key],
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT complete FROM distributed_archive_history",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    while crate::issues::archive::cleanup_history(&db).unwrap() > 0 {}
+    crate::issues::archive::restore_issue(&db, "p", 1, 10_000_000_001).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        69
+    );
+}
+
+#[test]
+fn cold_history_before_images_supply_birth_without_reviving_deleted_comments() {
+    use serde_json::json;
+    let before = json!({"id":"a:7","project_id":"p","issue_number":1,"author":"human:test","body":"Before enrollment","created_at":1});
+    let mut after = before.clone();
+    after["body"] = json!("Edited offline");
+    let edit = Revision {
+        protocol: 1,
+        origin: "b".into(),
+        clock: 5,
+        table: "comments".into(),
+        before: Some(before.clone()),
+        after: Some(after.clone()),
+        resource: None,
+        archive: None,
+    };
+    let deleted = Revision {
+        protocol: 1,
+        origin: "c".into(),
+        clock: 6,
+        table: "comments".into(),
+        before: Some(before.clone()),
+        after: None,
+        resource: None,
+        archive: None,
+    };
+    let key = json!({"id":"a:7"});
+    for order in [[&edit, &deleted], [&deleted, &edit]] {
+        let f = Fixture::new();
+        let db = f.db();
+        install(&db, "a").unwrap();
+        projection::reduce(&db, &edit).unwrap();
+        assert_eq!(
+            projection::row(&db, "comments", &key).unwrap(),
+            Some(after.clone())
+        );
+        for fact in order {
+            projection::reduce(&db, fact).unwrap();
+        }
+        projection::seed_history(&db, "comments", &before, "archive").unwrap();
+        assert!(projection::row(&db, "comments", &key).unwrap().is_none());
+    }
+}
+
+#[test]
+fn storage_transitions_cannot_overwrite_concurrent_requirements() {
+    use serde_json::json;
+    let original = json!({"project_id":"p","number":1,"title":"Task","body":"Original","labels":"[]","archive_key":null,"archived_comments":0,"state":"closed","assignee":null,"closed_by":"human:test","closed_at":1});
+    let mut archived = original.clone();
+    archived["archive_key"] = json!("cold-copy");
+    archived["archived_comments"] = json!(2);
+    let mut edited = original.clone();
+    edited["body"] = json!("New requirements");
+    let fact = |origin: &str, clock, before, after| Revision {
+        protocol: 1,
+        origin: origin.into(),
+        clock,
+        table: "issues".into(),
+        before,
+        after: Some(after),
+        resource: None,
+        archive: None,
+    };
+    let seed = fact("seed", 0, None, original.clone());
+    let cool = fact("a", 10, Some(original.clone()), archived.clone());
+    let warm = fact("a", 11, Some(archived.clone()), original.clone());
+    let edit = fact("b", 2, Some(original), edited);
+    for order in [
+        vec![&seed, &edit, &cool],
+        vec![&cool, &seed, &edit],
+        vec![&seed, &edit, &cool, &warm],
+        vec![&warm, &cool, &edit, &seed],
+    ] {
+        let f = Fixture::new();
+        let db = f.db();
+        install(&db, "a").unwrap();
+        for fact in order {
+            projection::reduce(&db, fact).unwrap();
+        }
+        let row = projection::row(&db, "issues", &json!({"project_id":"p","number":1}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["body"], "New requirements");
+        assert_eq!(row["state"], "open");
+        assert!(row["archive_key"].is_null());
+    }
+}
+
+#[test]
+fn archived_headers_replay_without_hydration_and_accept_merged_requirement_changes() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    db.execute("UPDATE fleet_meta SET node='a'", []).unwrap();
+    seed(&db);
+    db.execute_batch("INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('p',1,'human:test','Retained history',1);
+        UPDATE issues SET state='closed',closed_by='human:test',closed_at=2;").unwrap();
+    assert!(crate::issues::archive::archive_issue(&db, "p", 1, 10_000_000_000).unwrap());
+    while crate::issues::archive::cleanup_history(&db).unwrap() > 0 {}
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    loop {
+        archives::prepare(&db, &mut engine).unwrap();
+        if baseline(&db, &mut engine, true).unwrap() {
+            break;
+        }
+    }
+    capture_all(&db, &mut engine);
+    let key = json!({"project_id":"p","number":1});
+    let before = replica::current_row(&db, "issues", &key).unwrap();
+    db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
+    materialize::drain(&db).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let replayed = replica::current_row(&db, "issues", &key).unwrap();
+    assert_eq!(replayed["body"], before["body"]);
+    assert_eq!(replayed["version"], before["version"]);
+    // Ordinary mutations still have to restore an archive first.
+    assert!(
+        db.execute("UPDATE issues SET body='Invalid direct mutation'", [])
+            .is_err()
+    );
+    let mut original = projection::row(&db, "issues", &key).unwrap().unwrap();
+    original["archive_key"] = Value::Null;
+    original["archived_comments"] = json!(0);
+    let mut edited = original.clone();
+    edited["title"] = json!("Updated requirements from an offline peer");
+    let tx = db.unchecked_transaction().unwrap();
+    projection::reduce(
+        &tx,
+        &Revision {
+            protocol: 1,
+            origin: "offline".into(),
+            clock: 1,
+            table: "issues".into(),
+            before: Some(original),
+            after: Some(edited),
+            resource: None,
+            archive: None,
+        },
+    )
+    .unwrap();
+    materialize::drain(&tx).unwrap();
+    tx.commit().unwrap();
+    let merged = replica::current_row(&db, "issues", &key).unwrap();
+    assert_eq!(merged["state"], "open");
+    assert_eq!(merged["archive_key"], before["archive_key"]);
+    crate::issues::archive::restore_issue(&db, "p", 1, 10_000_000_001).unwrap();
+    assert_eq!(
+        db.query_row("SELECT body FROM comments", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "Retained history"
+    );
+    assert_eq!(
+        replica::current_row(&db, "issues", &key).unwrap()["body"],
+        "Original requirements"
+    );
+}
+
+#[test]
 fn archived_inputs_remain_readable_after_relay_and_hot_history_cleanup() {
     use serde_json::json;
     let source = Fixture::new();
@@ -817,6 +1119,64 @@ fn archived_inputs_remain_readable_after_relay_and_hot_history_cleanup() {
             .unwrap(),
         1
     );
+    b.execute("UPDATE comments SET body='Edited after enrollment'", [])
+        .unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    a.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
+    capture_all(&a, &mut ea);
+    for _ in 0..10 {
+        import(&a, &ea).unwrap();
+    }
+    assert_eq!(
+        a.query_row("SELECT archive_key IS NULL FROM issues", [], |r| r
+            .get::<_, bool>(0))
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        a.query_row("SELECT body FROM comments", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "Edited after enrollment"
+    );
+    assert_eq!(
+        a.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // A fresh replica may reduce the archive birth and hot restore in one page.
+    let third = Fixture::new();
+    let c = third.db();
+    install(&c, "c").unwrap();
+    c.execute_batch("UPDATE fleet_meta SET node='c',role='peer'; UPDATE distributed_meta SET active=1,controller='a';").unwrap();
+    let mut ec = hey_boss_sync::Engine::open(&third.0.join("sync.db")).unwrap();
+    transfer(&eb, &mut ec);
+    capture_all(&c, &mut ec);
+    for _ in 0..10 {
+        import(&c, &ec).unwrap();
+    }
+    assert_eq!(
+        c.query_row("SELECT body FROM comments", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "Edited after enrollment"
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT archive_key IS NULL AND draft=0 FROM issues",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap(),
+        true
+    );
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -855,7 +1215,14 @@ fn legacy_companion_comment_keeps_identity_across_hot_sync_archive_and_restore()
     );
     capture_all(&b, &mut eb);
     transfer(&eb, &mut ea);
+    a.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
     capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row("SELECT body FROM comments", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "From companion"
+    );
     assert_eq!(
         a.query_row(
             "SELECT count(*) FROM distributed_aliases WHERE table_name='comments'",

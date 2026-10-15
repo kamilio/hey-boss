@@ -663,6 +663,39 @@ struct RestoreRow {
     reference: Option<ReferenceOrigin>,
 }
 
+/// Read local identities in dependency order without loading a whole archive.
+/// The caller applies these rows and persists its cursor in the hot transaction.
+pub(crate) fn projection_history_page(
+    db: &HotConnection,
+    key: &str,
+    project: &str,
+    number: i64,
+    kind: &str,
+    id: &str,
+) -> Result<Vec<(String, String, Value)>> {
+    let archive = Archive::read(&archive_path(db)?)?;
+    if kind.is_empty() {
+        mapped_history_ready(&archive, key)?;
+        verify_copy(&archive, key, project, number)?;
+    }
+    let mut query = archive.db.prepare("SELECT kind,text_id,record FROM issue_history WHERE archive_key=?1 AND (kind,text_id)>(?2,?3) ORDER BY kind,text_id LIMIT 32")?;
+    let mut rows = query.query(params![key, kind, id])?;
+    let mut page = Vec::new();
+    let mut bytes = 0;
+    while let Some(row) = rows.next()? {
+        let table: String = row.get(0)?;
+        let cursor: String = row.get(1)?;
+        let encoded: String = row.get(2)?;
+        if !page.is_empty() && bytes + encoded.len() > 1024 * 1024 {
+            break;
+        }
+        bytes += encoded.len();
+        let saved = RestoreRow::prepare(&archive, key, &table, &encoded)?;
+        page.push((table, cursor, saved.row));
+    }
+    Ok(page)
+}
+
 struct ReferenceOrigin {
     event_origin: String,
     event_origin_id: i64,
@@ -838,6 +871,9 @@ fn restore_rows(
 
 fn restore_row(db: &HotConnection, table: &str, saved: &RestoreRow) -> Result<()> {
     let row = &saved.row;
+    if crate::fleet::restore_history_row(db, table, row)? {
+        return Ok(());
+    }
     let id = match &row["id"] {
         Value::String(v) => SqlValue::Text(v.clone()),
         Value::Number(v) => SqlValue::Integer(

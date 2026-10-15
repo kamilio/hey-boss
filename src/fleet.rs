@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 mod native;
 pub(crate) use native::WorkerJobs;
+pub(crate) use native::restore_history_row;
 mod signal;
 pub use signal::queue_signal;
 

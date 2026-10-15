@@ -12,7 +12,7 @@ pub(crate) mod transfer;
 pub(crate) use history::cleanup_history;
 pub(crate) use history::{
     archive_issue, history_connection, issue_body, materialize_history, mutation_targets,
-    restore_issue, search_bodies,
+    projection_history_page, restore_issue, search_bodies,
 };
 #[cfg(test)]
 mod history_tests;
