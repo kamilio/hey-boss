@@ -17,7 +17,7 @@ function fixture() {
     },
     post: async (_url, action) => {
       requests.push(action.action);
-      return action.action === 'count' ? {ok: true, unread: 4} : {ok: true, unread: 4, tasks: [{taskID: 'notice', title: 'Linked notice', status: 'pending', issue: {project: 'fixture', number: 7}}]};
+      return action.action === 'count' ? {ok: true, unread: 4} : {ok: true, unread: 4, archived: 7000, projects: ['fixture', 'History'], tasks: [{taskID: 'notice', title: 'Linked notice', status: 'pending', issue: {project: 'fixture', number: 7}}]};
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/issues/web/inbox.js'), 'utf8'), context);
@@ -31,7 +31,7 @@ test('inactive inbox badge coalesces count requests without loading notice rows'
   assert.equal(f.elements.get('#inbox-unread').textContent, 4);
   assert.equal(f.run('inboxTasks.length'), 0);
   await f.run('inboxSnapshot()');
-  assert.deepEqual(f.requests, ['count', 'list']);
+  assert.deepEqual(f.requests, ['count', 'unread']);
   assert.equal(f.run('inboxTasks.length'), 1);
 });
 
@@ -51,7 +51,7 @@ test('details request related notices; inbox retains complete lookup and hidden 
   f.context.model.detail = null;
   f.context.model.route.view = 'inbox';
   await f.run('refreshInboxBadge()');
-  assert.deepEqual(f.requests, ['related', 'list']);
+  assert.deepEqual(f.requests, ['related', 'unread']);
 });
 
 test('related reads coalesce by full reference and discard replies after navigation', async () => {
@@ -100,6 +100,47 @@ test('a late count cannot overwrite the badge refreshed by opening Inbox', async
   resolve({ok: true, unread: 99});
   await counting;
   assert.equal(f.elements.get('#inbox-unread').textContent, 4);
+});
+
+test('unread requests coalesce and retain history metadata without archived rows', async () => {
+  const f = fixture();
+  await Promise.all([f.run('inboxSnapshot()'), f.run('inboxSnapshot()')]);
+  assert.deepEqual(f.requests, ['unread']);
+  assert.equal(f.run('inboxArchived'), 7000);
+  assert.equal(f.run('inboxProjects.includes("History")'), true);
+  f.context.model.route.inbox_state = 'archive';
+  await f.run('inboxSnapshot()');
+  assert.deepEqual(f.requests, ['unread', 'list']);
+});
+
+test('late Activity responses cannot overwrite unread rows or counts', async () => {
+  const f = fixture(), pending = [];
+  f.context.post = async (_url, action) => new Promise(resolve => pending.push({action, resolve}));
+  f.context.model.route.inbox_state = 'archive';
+  const archive = f.run('inboxSnapshot()');
+  f.context.model.route.inbox_state = 'unread';
+  const unread = f.run('inboxSnapshot()');
+  pending[1].resolve({tasks: [], unread: 0, archived: 7000, projects: ['History']});
+  await unread;
+  pending[0].resolve({tasks: [{taskID: 'archived'}], unread: 99});
+  await archive;
+  assert.equal(f.run('inboxTasks.length'), 0);
+  assert.equal(f.run('inboxArchived'), 7000);
+  assert.equal(f.elements.get('#inbox-unread').textContent, 0);
+});
+
+test('warm navigation renders immediately and retains the list on refresh failure', async () => {
+  const f = fixture();
+  await f.run('inboxSnapshot()');
+  f.run('inboxAt = Date.now() - 5000; renderInboxList = () => { $("#inbox-view").innerHTML = "cached rows"; }; toast = () => {};');
+  let reject;
+  f.context.post = async () => new Promise((_, fail) => { reject = fail; });
+  const opening = f.run('renderInboxRoute(0)');
+  assert.equal(f.elements.get('#inbox-view').innerHTML, 'cached rows');
+  reject(Error('offline'));
+  await opening;
+  assert.equal(f.elements.get('#inbox-view').innerHTML, 'cached rows');
+  assert.equal(f.run('inboxLoading.size'), 0);
 });
 
 test('a late count cannot overwrite a related-notice update after returning to the list', async () => {

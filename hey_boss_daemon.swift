@@ -366,6 +366,7 @@ final class Database {
         try execute("CREATE TABLE IF NOT EXISTS muted_agents (sender TEXT PRIMARY KEY)")
         try execute("CREATE TABLE IF NOT EXISTS notification_receipts (source TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES dialogs(id), PRIMARY KEY(source, request_id)) WITHOUT ROWID")
         try execute("CREATE INDEX IF NOT EXISTS inbox_issue ON dialogs(json_extract(body,'$.issue.project'),json_extract(body,'$.issue.number'),coalesce(json_extract(body,'$.issue.host'),'')) WHERE json_valid(body)")
+        try execute("CREATE INDEX IF NOT EXISTS inbox_summary ON dialogs(status,json_extract(body,'$.project')) WHERE json_valid(body)")
         try execute("UPDATE dialogs SET body=json_set(body, '$.title', json_extract(body, '$.description')) WHERE json_valid(body) AND json_extract(body, '$.kind')='update' AND json_extract(body, '$.title') IS NULL;")
         try execute("CREATE VIEW IF NOT EXISTS notifications AS SELECT id, json_extract(body, '$.project') AS project, json_extract(body, '$.title') AS title, json_extract(body, '$.kind') AS kind, json_extract(body, '$.question') AS message, json_extract(body, '$.description') AS summary, status, json_extract(body, '$.createdAt') AS created_at, json_extract(body, '$.presentedAt') AS presented_at, json_extract(body, '$.completedAt') AS completed_at FROM dialogs;")
     }
@@ -465,9 +466,9 @@ final class Database {
         guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
         return Int(sqlite3_column_int64(stmt,0))
     }
-    func inboxRows() throws -> [[String: Any]] {
+    func inboxRows(unreadOnly: Bool = false) throws -> [[String: Any]] {
         // Project list metadata and bounded 128px icon snapshots, never document/attachment bodies.
-        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'agent',json_extract(body,'$.origin.agent'),'agentMuted',json_extract(body,'$.agentMuted'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
+        let stmt = try statement("SELECT json_object('taskID',id,'kind',json_extract(body,'$.kind'),'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'project',json_extract(body,'$.project'),'summary',substr(CASE WHEN json_extract(body,'$.kind')='alert' THEN json_extract(body,'$.question') ELSE json_extract(body,'$.description') END,1,500),'createdAt',json_extract(body,'$.createdAt'),'completedAt',json_extract(body,'$.completedAt'),'sourceHost',json_extract(body,'$.sourceHost'),'agent',json_extract(body,'$.origin.agent'),'agentMuted',json_extract(body,'$.agentMuted'),'severity',json_extract(body,'$.severity'),'icon',json_extract(body,'$.icon'),'iconData',json_extract(body,'$.iconData'),'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue'),'status',status) FROM dialogs WHERE json_valid(body) \(unreadOnly ? "AND status='pending'" : "") ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
         defer { sqlite3_finalize(stmt) }
         var rows: [[String: Any]] = []
         while true {
@@ -483,6 +484,20 @@ final class Database {
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { throw failure() }
         return Int(sqlite3_column_int64(stmt,0))
+    }
+    func inboxSummary() throws -> [String: Any] {
+        // Read the small covering index, not archived document bodies or icons.
+        let stmt = try statement("SELECT status,json_extract(body,'$.project'),count(*) FROM dialogs INDEXED BY inbox_summary WHERE json_valid(body) GROUP BY status,json_extract(body,'$.project')")
+        defer { sqlite3_finalize(stmt) }
+        var unread = 0, archived = 0, projects = Set<String>()
+        while true {
+            let code = sqlite3_step(stmt)
+            if code == SQLITE_DONE { return ["unread":unread,"archived":archived,"projects":projects.sorted()] }
+            guard code == SQLITE_ROW else { throw failure() }
+            let count = Int(sqlite3_column_int64(stmt,2))
+            if let status = sqlite3_column_text(stmt,0), String(cString:status) == "pending" { unread += count } else { archived += count }
+            if let project = sqlite3_column_text(stmt,1), !String(cString:project).isEmpty { projects.insert(String(cString:project)) }
+        }
     }
     func inboxRelatedRows(_ issue: IssueReference) throws -> [[String: Any]] {
         let stmt = try statement("SELECT json_object('taskID',id,'title',substr(coalesce(json_extract(body,'$.title'),json_extract(body,'$.question')),1,256),'kind',json_extract(body,'$.kind'),'status',status,'commentsEnabled',json_extract(body,'$.commentsEnabled'),'issue',json_extract(body,'$.issue')) FROM dialogs WHERE json_valid(body) AND json_extract(body,'$.issue.project')=?1 AND json_extract(body,'$.issue.number')=?2 AND coalesce(json_extract(body,'$.issue.host'),'')=?3 ORDER BY coalesce(json_extract(body,'$.createdAt'),0) DESC,id")
@@ -779,6 +794,13 @@ final class Store {
         reply.send(["task_id":task?.taskID ?? "inbox", "status":"ok","result":String(decoding:data,as:UTF8.self)])
     }
     func processInbox(_ request: Request, _ reply: Reply) throws {
+        if request.command == "inbox_unread" {
+            var value = try database.inboxSummary()
+            value["tasks"] = try database.inboxRows(unreadOnly:true)
+            let data = try JSONSerialization.data(withJSONObject:value)
+            reply.send(["task_id":"inbox", "status":"ok", "result":String(decoding:data,as:UTF8.self)])
+            return
+        }
         if request.command == "inbox_list", let issue = request.issue {
             try issue.validate()
             let data = try JSONSerialization.data(withJSONObject:["tasks":database.inboxRelatedRows(issue),"unread":database.inboxUnreadCount()])

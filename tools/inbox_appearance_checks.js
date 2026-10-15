@@ -3,7 +3,7 @@ async (page) => {
   const checks = [];
   const check = (ok, label) => { if (!ok) throw Error(label); checks.push(label); };
   await page.goto(page.url().split('/').slice(0,3).join('/') + '/#view=inbox');
-  await page.waitForFunction(() => inboxTasks.length === 6);
+  await page.waitForFunction(() => inboxTasks.length === 5);
   check(await page.evaluate(() => inboxTasks.find(t => t.taskID === 'notice-5').icon === 'deploy'),
     'Native list preserves the selected icon');
   await page.evaluate(() => {
