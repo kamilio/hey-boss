@@ -766,6 +766,36 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
 }
 
 #[test]
+fn cutover_rebuilds_a_large_outline_once_across_projection_pages() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    let tx = db.unchecked_transaction().unwrap();
+    for n in 0..260 {
+        projection::reduce(&tx,&Revision {protocol:1,origin:"a".into(),clock:n+1,table:"mindmap_nodes".into(),before:None,
+            after:Some(json!({"id":format!("node-{n:03}"),"project_id":"p","alias":null,"parent_id":null,"position":n,"kind":"markdown","title":"Node","body":"","reference":null,"reference_project":null,"created_at":1,"updated_at":1})),resource:None,archive:None}).unwrap();
+    }
+    tx.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';
+        CREATE TABLE outline_writes(n INTEGER NOT NULL); INSERT INTO outline_writes VALUES(0);
+        CREATE TRIGGER count_outline_inserts AFTER INSERT ON mindmap_nodes BEGIN UPDATE outline_writes SET n=n+1; END;").unwrap();
+    materialize::drain(&tx).unwrap();
+    assert_eq!(
+        tx.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        260
+    );
+    assert_eq!(
+        tx.query_row("SELECT n FROM outline_writes", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        260
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
 fn incoming_pages_wait_for_local_revisions_at_the_end_of_the_journal() {
     let fa = Fixture::new();
     let a = fa.db();

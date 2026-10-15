@@ -89,6 +89,8 @@ pub(super) fn subtasks(db: &Connection, project: &str) -> Result<()> {
             }
         }
     }
+    // This rebuild handled the complete project, including later dirty pages.
+    db.execute("DELETE FROM distributed_dirty WHERE table_name='issue_subtasks' AND json_extract(entity,'$.project_id')=?1",[project])?;
     Ok(())
 }
 
@@ -179,5 +181,6 @@ pub(super) fn mindmap(db: &Connection, project: &str) -> Result<()> {
         )?;
     }
     db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='mindmap_links' AND field='@alive'",[])?;
+    db.execute("DELETE FROM distributed_dirty WHERE table_name='mindmap_nodes' AND entity IN (SELECT entity FROM distributed_fields WHERE table_name='mindmap_nodes' AND field='project_id' AND value=?1)",[json!(project).to_string()])?;
     Ok(())
 }
