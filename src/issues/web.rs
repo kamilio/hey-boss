@@ -173,9 +173,6 @@ pub fn serve(config: Config) -> Result<()> {
         .map(|server| server.server_addr().to_ip().unwrap().port())
         .collect::<Vec<_>>();
     let local_url = local_ports.contains(&80).then_some("http://hey-boss.test/");
-    if let Backend::Local(path) = &backend {
-        crate::agent_conversations::start_bridge(path.clone());
-    }
     let mut secret = [0_u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut secret)?;
     let mut app = App {

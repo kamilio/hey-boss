@@ -13,7 +13,6 @@ mod global_utilities;
 mod handshake;
 mod jobs;
 pub(crate) use jobs::WorkerJobs;
-mod mobile;
 mod model_recovery;
 mod pr_monitor;
 mod projects;

@@ -2024,8 +2024,6 @@ pub(super) fn run(ctx: Context) -> Result<()> {
     std::thread::spawn(move || jobs.jobs());
     let maintenance = app.clone();
     std::thread::spawn(move || maintenance.maintenance());
-    let mobile = ctx.clone();
-    std::thread::spawn(move || super::mobile::run(mobile));
     let monitor = ctx.clone();
     std::thread::spawn(move || super::pr_monitor::run(monitor));
     while !ctx.stopped() {
