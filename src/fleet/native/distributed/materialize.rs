@@ -271,6 +271,25 @@ pub(super) fn write(
 }
 
 pub(super) fn apply(db: &Connection) -> Result<usize> {
+    apply_page(db, &mut DependencyGraphs::new(), capture::TABLES)
+}
+
+type DependencyGraphs =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<i64, Vec<i64>>>;
+
+/// Cutover holds one transaction with an immutable set of reduced facts. Reuse
+/// dependency graphs across its pages; ordinary imports get a fresh cache.
+pub(super) fn drain(db: &Connection) -> Result<()> {
+    let mut blockers = DependencyGraphs::new();
+    // Finish dependency tables before their users. An empty peer can have
+    // thousands of actors/projects waiting ahead of its first task page.
+    for table in capture::TABLES {
+        while apply_page(db, &mut blockers, std::slice::from_ref(table))? > 0 {}
+    }
+    Ok(())
+}
+
+fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str]) -> Result<usize> {
     let mut count = 0;
     let mut projects = std::collections::BTreeSet::new();
     // Preserve immutable history without legacy notice deduplication or
@@ -278,14 +297,21 @@ pub(super) fn apply(db: &Connection) -> Result<usize> {
     db.execute("UPDATE fleet_meta SET syncing=2 WHERE id=1", [])?;
     // Dependencies precede their users. Unavailable parents stay dirty and are
     // retried from durable facts; receipt advancement never drops their data.
-    for table in capture::TABLES {
+    for table in tables {
         let mut rebuilt = std::collections::BTreeSet::new();
-        let mut blockers = std::collections::BTreeMap::new();
-        for record in replica::rows(
+        let mut pending = replica::rows(
             db,
-            "SELECT entity FROM distributed_dirty d WHERE table_name=?1 ORDER BY EXISTS(SELECT 1 FROM distributed_rejections r WHERE r.table_name=d.table_name AND r.entity=d.entity),entity LIMIT 128",
+            "SELECT entity FROM distributed_dirty d WHERE table_name=?1 AND NOT EXISTS(SELECT 1 FROM distributed_rejections r WHERE r.table_name=d.table_name AND r.entity=d.entity) ORDER BY entity LIMIT 128",
             &[json!(table)],
-        )? {
+        )?;
+        if pending.is_empty() {
+            pending = replica::rows(
+                db,
+                "SELECT entity FROM distributed_dirty WHERE table_name=?1 ORDER BY entity LIMIT 128",
+                &[json!(table)],
+            )?;
+        }
+        for record in pending {
             let entity = record["entity"].as_str().unwrap();
             let key: Value = serde_json::from_str(entity)?;
             let mut desired = projection::row(db, table, &key)?;
@@ -357,8 +383,18 @@ pub(super) fn apply(db: &Connection) -> Result<usize> {
                 }
                 Err(error) => {
                     db.execute_batch("ROLLBACK TO distributed_row; RELEASE distributed_row")?;
-                    db.execute("INSERT INTO distributed_rejections VALUES(?1,?2,?3) ON CONFLICT(table_name,entity) DO UPDATE SET reason=excluded.reason",params![table,entity,error.to_string()])?;
+                    // Discovering a newly pending parent is progress: continue
+                    // to later unseen rows instead of stopping at a failed page.
+                    count += db.execute("INSERT INTO distributed_rejections VALUES(?1,?2,?3) ON CONFLICT(table_name,entity) DO UPDATE SET reason=excluded.reason WHERE reason<>excluded.reason",params![table,entity,error.to_string()])?;
                 }
+            }
+        }
+        if *table == "issues" {
+            // Shadow facts can all arrive before any task is materialized.
+            // Retry edges after each task page, including parents beyond the
+            // first 128 rows, before treating a missing parent as a conflict.
+            for project in &projects {
+                db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='issue_subtasks' AND field='@alive' AND json_extract(entity,'$.project_id')=?1", [project])?;
             }
         }
     }
