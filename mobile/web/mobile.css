@@ -63,7 +63,7 @@ main{padding-top:10px!important}
 .list-footer,.page-footer{background:none;border:0}
 
 @media(max-width:600px){
- .issue-row:not(.subtask-row)>.issue-row-end{display:flex;flex-direction:row;align-items:center;justify-content:flex-end;gap:8px;margin:-6px -6px -8px 0}
+ .issue-row:not(.subtask-row)>.issue-row-end{gap:8px;margin:-6px -6px -8px 0}
  .detail-top h1{overflow-wrap:anywhere}
  .editor-dialog{max-height:calc(100dvh - 16px)}
 }
