@@ -13,6 +13,7 @@ pub(super) const TABLES: &[&str] = &[
     "issue_subtasks",
     "comments",
     "events",
+    "issue_commits",
     "project_settings",
     "global_settings",
     "issue_pull_requests",
