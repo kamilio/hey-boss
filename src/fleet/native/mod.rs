@@ -16,6 +16,7 @@ mod handshake;
 mod jobs;
 pub(crate) use jobs::WorkerJobs;
 mod model_recovery;
+mod peer_sync;
 mod pr_monitor;
 mod projects;
 mod pull;
