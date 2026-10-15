@@ -76,6 +76,7 @@ impl Fixture {
                 timezone: "UTC".into(),
                 harness: "codex".into(),
                 model: "exact-model".into(),
+                machines: Vec::new(),
             },
             markdown: MARKDOWN.into(),
             enabled: false,
@@ -662,4 +663,51 @@ fn unavailable_runtime_or_model_is_visible_without_false_success() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn ordered_machine_targets_control_dispatch_and_fallback() {
+    for (targets, failure, expected) in [
+        (vec![], "", Some("other")),
+        (vec!["preferred", "other"], "", Some("preferred")),
+        (vec!["preferred", "other"], "offline", Some("other")),
+        (vec!["preferred", "other"], "stale", Some("other")),
+        (vec!["preferred", "other"], "runtime", Some("other")),
+        (vec!["preferred", "other"], "worker", Some("other")),
+        (vec!["preferred"], "offline", None),
+        (vec!["missing"], "", None),
+    ] {
+        let mut f = Fixture::new();
+        f.op(Operation::Create {
+            id: "targeted".into(),
+            definition: serde_json::from_value(json!({"name":"Targeted","cron":"* * * * *","timezone":"UTC","harness":"codex","model":"exact-model","machines":targets})).unwrap(),
+            markdown: MARKDOWN.into(),
+            enabled: false,
+        });
+        let run = f.op(Operation::RunNow {
+            id: "targeted".into(),
+        })["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut machines = vec![
+            json!({"node":"other","state":"connected","heartbeat":super::super::context::now(),"jobs":{"available":true,"workers":[{"id":"other-worker","projects":[PROJECT]}],"runtimes":{"codex":{"available":true}}}}),
+        ];
+        let mut preferred = machines[0].clone();
+        preferred["node"] = json!("preferred");
+        match failure {
+            "offline" => preferred["state"] = json!("disconnected"),
+            "stale" => preferred["heartbeat"] = json!(0),
+            "runtime" => preferred["jobs"]["runtimes"]["codex"]["available"] = json!(false),
+            "worker" => preferred["jobs"]["workers"] = json!([]),
+            _ => {}
+        }
+        machines.push(preferred);
+        schedule(&f.ctx, &machines).unwrap();
+        assert_eq!(
+            f.store.job_owner(&run).unwrap().map(|o| o.0),
+            expected.map(str::to_owned),
+            "targets={targets:?}, failure={failure}"
+        );
+    }
 }

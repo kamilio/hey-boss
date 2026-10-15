@@ -17,11 +17,26 @@ pub struct Definition {
     pub timezone: String,
     pub harness: String,
     pub model: String,
+    /// Ordered fleet node IDs. Empty preserves automatic placement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machines: Vec<String>,
 }
 impl Definition {
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
         identifier(&self.model, "logical model", 256)?;
+        let mut seen = std::collections::HashSet::new();
+        for machine in &self.machines {
+            identifier(machine, "machine node ID", 128)?;
+            if machine.trim() != machine
+                || machine.chars().any(char::is_whitespace)
+                || !seen.insert(machine)
+            {
+                return Err(Error::invalid(
+                    "Machine node IDs must be unique and contain no whitespace",
+                ));
+            }
+        }
         serde_json::from_value::<crate::agent_runtime::Provider>(serde_json::json!(self.harness))
             .map_err(|_| Error::invalid("Job harness must be codex, claude, or pi"))?;
         schedule::Schedule::parse(&self.cron, &self.timezone)?;

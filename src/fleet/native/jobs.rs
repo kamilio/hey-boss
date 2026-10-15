@@ -530,10 +530,17 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             }
             continue;
         }
-        let candidate = machines
-            .iter()
-            .filter(|m| connected(m))
-            .find_map(|m| eligible_workers(m, &run).next().map(|worker| (m, worker)));
+        let eligible = |m| connected(m) && eligible_workers(m, &run).next().is_some();
+        let targets = &run.snapshot.definition.machines;
+        let machine = if targets.is_empty() {
+            machines.iter().find(|m| eligible(*m))
+        } else {
+            targets
+                .iter()
+                .find_map(|node| machines.iter().find(|m| m["node"] == *node && eligible(*m)))
+        };
+        let candidate =
+            machine.and_then(|m| eligible_workers(m, &run).next().map(|worker| (m, worker)));
         if let Some((machine, worker)) = candidate {
             store.assign_job(
                 &run.id,
@@ -543,7 +550,15 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 worker,
             )?;
         } else {
-            store.unavailable_job(&run.id, "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.")?;
+            let reason = if targets.is_empty() {
+                "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.".to_owned()
+            } else {
+                format!(
+                    "Waiting for an eligible worker on the selected machines ({}). No other machines will be used.",
+                    targets.join(" → ")
+                )
+            };
+            store.unavailable_job(&run.id, &reason)?;
         }
     }
     for dispatch in store.job_dispatches(&ctx.node)? {

@@ -40,6 +40,9 @@ struct Fields {
     /// Logical model name, preserved in every execution snapshot.
     #[arg(long)]
     model: String,
+    /// Restrict to these fleet node IDs in fallback order; repeat for each machine.
+    #[arg(long = "machine", value_name = "NODE_ID")]
+    machines: Vec<String>,
 }
 impl Fields {
     fn definition(&self) -> Definition {
@@ -49,6 +52,7 @@ impl Fields {
             timezone: self.timezone.clone(),
             harness: self.harness.name().into(),
             model: self.model.clone(),
+            machines: self.machines.clone(),
         }
     }
 }
@@ -409,6 +413,16 @@ fn print_job(job: &Value) {
         d["harness"].as_str().unwrap_or(""),
         d["model"].as_str().unwrap_or("")
     );
+    if let Some(machines) = d["machines"].as_array().filter(|m| !m.is_empty()) {
+        println!(
+            "  Machines: {}",
+            machines
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
     if let Some(next) = job["next_at"]
         .as_i64()
         .and_then(|n| jiff::Timestamp::from_millisecond(n).ok())

@@ -343,6 +343,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             timezone: "UTC".into(),
             harness: "codex".into(),
             model: "gpt-6-astra".into(),
+            machines: Vec::new(),
         },
         markdown: include_str!("../../../jobs/fixtures/original.md").into(),
         enabled: true,
