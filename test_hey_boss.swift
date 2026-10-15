@@ -25,7 +25,7 @@ func audit() {
         ui.open(cli: nil); ui.current = ui.projects.first
         ui.window.delegate = nil
         ui.window.appearance = NSAppearance(named: state.contains("dark") ? .darkAqua : .aqua)
-        ui.input.stringValue = "Fix the screenshot preview @Visual"; ui.changed()
+        ui.input.string = "Fix the screenshot preview @Visual"; ui.changed()
         if state.contains("images") || state.contains("saving") {
             let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
                 NSColor.systemIndigo.setFill(); rect.fill()
@@ -35,7 +35,9 @@ func audit() {
         }
         if state.contains("saving") { ui.saving = true; ui.context.stringValue = "Attaching image 2 of 5…" }
         if state.contains("error") { ui.error.stringValue = "Cannot read this image. Choose an image up to 10 MiB." }
-        if state.contains("empty") { ui.input.stringValue = "" }
+        if state.contains("multiline") { ui.input.string = "Fix reconnect after sleep\n\nSteps to reproduce:\n  - Sleep the Mac\n  - Wake and reconnect 🦀"; ui.changed() }
+        if state.contains("long") { ui.input.string = "Long draft\n" + String(repeating: "Keep every line visible while editing.\n", count: 40); ui.changed() }
+        if state.contains("empty") { ui.input.string = "" }
         if state.contains("success") { ui.succeeded = true; ui.context.stringValue = "Created #42 in Visual" }
         if state.contains("compact") { ui.window.setContentSize(NSSize(width: 520, height: ui.window.frame.height)) }
         ui.updateEnabled(); ui.layout()
@@ -351,6 +353,11 @@ func auditNativeQuickIssue() {
     precondition((try? QuickIssueText.parse("Fix", projects: projects, current: nil)) == nil)
     let longTitle = String(repeating: "é", count: 513)
     precondition(try! QuickIssueText.parse(longTitle, projects: projects, current: projects[0]).title == longTitle, "Pass all text to the Rust title splitter")
+    let multiline = try! QuickIssueText.parse("Fix reconnect @poe-code\n\nSteps:\n  - Sleep the Mac\n  - Wake it 🦀", projects: projects, current: projects[0])
+    precondition(multiline.title == "Fix reconnect", "The first line is the title; later lines must not be flattened into it")
+    precondition(multiline.body == "Steps:\n  - Sleep the Mac\n  - Wake it 🦀" && multiline.project == projects[1])
+    let windowsPaste = try! QuickIssueText.parse("Title\r\n\r\nParagraph\r\n\r\n    code", projects: projects, current: projects[0])
+    precondition(windowsPaste.title == "Title" && windowsPaste.body == "Paragraph\n\n    code", "Pasted paragraphs and code indentation survive")
     let suite = "hey-boss-native-quick-issue-\(UUID().uuidString)"; let prefs = UserDefaults(suiteName: suite)!
     defer { prefs.removePersistentDomain(forName: suite) }
     let ui = NativeQuickIssue(present: false, preferences: prefs)
@@ -362,7 +369,40 @@ func auditNativeQuickIssue() {
     }
     ui.open(cli: nil); precondition(ui.ready && ui.current == nil)
     precondition(ui.canvas.bounds.width == ui.window.frame.width && ui.canvas.bounds.height == ui.window.frame.height, "Glass content must fill the quick-add panel")
-    ui.input.stringValue = longTitle + " @poe-code"; ui.changed()
+    ui.current = projects[1]; ui.input.string = "Title"; ui.changed()
+    let compactHeight = ui.window.frame.height
+    let originalTop = ui.window.frame.maxY
+    ui.window.makeFirstResponder(ui.input)
+    ui.input.setSelectedRange(NSRange(location: 5, length: 0))
+    precondition(!ui.textView(ui.input, doCommandBy: #selector(NSResponder.insertNewline(_:))), "Enter is native newline editing")
+    ui.input.insertNewline(nil)
+    precondition(ui.input.string == "Title\n" && requests.count == 1, "Return must add a newline without creating an issue")
+    precondition(ui.window.frame.height > compactHeight && ui.window.frame.maxY == originalTop, "New lines expand downward, including the trailing blank line")
+    ui.input.insertText("Details 🦀\n\n  - Keep indentation", replacementRange: ui.input.selectedRange())
+    ui.create()
+    let multilineRequest = requests.last!
+    precondition(multilineRequest[multilineRequest.firstIndex(of: "--title")! + 1] == "Title")
+    precondition(multilineRequest[multilineRequest.firstIndex(of: "--body")! + 1] == "Details 🦀\n\n  - Keep indentation")
+    reply?(.failure(StorageError(description: "Disconnected")))
+    ui.create(); precondition(requests.last == multilineRequest, "Multiline retries preserve text and request identity")
+    reply?(.failure(StorageError(description: "Disconnected")))
+    let draft = ui.input.string
+    ui.dismiss(); ui.open(cli: nil)
+    precondition(ui.input.string == draft, "Dismissal preserves the entire multiline draft")
+    ui.current = projects[1]
+    ui.input.string = String(repeating: "Wrapped content 🦀 ", count: 150); ui.changed()
+    precondition(ui.inputScroll.frame.height <= 240 && ui.input.frame.height > ui.inputScroll.frame.height, "Large drafts scroll within a bounded editor")
+    ui.input.setSelectedRange(NSRange(location: ui.input.string.utf16.count, length: 0))
+    ui.input.scrollRangeToVisible(ui.input.selectedRange())
+    precondition(ui.inputScroll.contentView.bounds.minY > 0, "The end of a long draft remains reachable")
+    ui.input.string = "Short"; ui.changed()
+    precondition(ui.window.frame.height == compactHeight && ui.inputScroll.contentView.bounds.minY == 0, "Deleting content restores the compact layout: \(ui.window.frame.height) / \(compactHeight), scroll \(ui.inputScroll.contentView.bounds)")
+    ui.input.string = "Heading\nDetails @po"; ui.input.setSelectedRange(NSRange(location: ui.input.string.utf16.count, length: 0)); ui.changed()
+    precondition(ui.matches == [projects[1]], "Project completion works on subsequent lines")
+    precondition(ui.textView(ui.input, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+    precondition(ui.input.string == "Heading\nDetails @poe-code ", "Selecting a project preserves line breaks")
+    requests = [requests[0]]; ui.current = nil
+    ui.input.string = longTitle + " @poe-code"; ui.changed()
     precondition(ui.submit.isEnabled && !ui.overflowNote.isHidden && ui.error.stringValue.isEmpty)
     ui.create()
     let longRequest = requests.last!
@@ -371,10 +411,10 @@ func auditNativeQuickIssue() {
     ui.create(); precondition(requests.last == longRequest, "Long-title retry must preserve request identity")
     reply?(.failure(StorageError(description: "Disconnected")))
     requests.removeLast(2)
-    ui.input.stringValue = "Fix @poe-code reconnect"; ui.changed()
+    ui.input.string = "Fix @poe-code reconnect"; ui.changed()
     precondition(ui.overflowNote.isHidden, "Shortening the title hides the note")
     precondition(ui.window.makeFirstResponder(ui.input))
-    let editor = ui.input.currentEditor() as! NSTextView
+    let editor = ui.input
     editor.setSelectedRange(NSRange(location: 13, length: 0)); ui.updatePicker()
     precondition(ui.matches == [projects[1]], "Test Command+Enter while project suggestions and the field editor are active")
     let repeatedReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: true, keyCode: 36)!
@@ -384,10 +424,10 @@ func auditNativeQuickIssue() {
     precondition(editor.hasMarkedText())
     ui.window.sendEvent(commandReturn)
     precondition(requests.count == 1, "Command+Enter must not submit during input-method composition")
-    editor.unmarkText(); ui.input.stringValue = "Fix @poe-code reconnect"
+    editor.unmarkText(); ui.input.string = "Fix @poe-code reconnect"
     editor.setSelectedRange(NSRange(location: 13, length: 0)); ui.changed()
     ui.window.sendEvent(commandReturn)
-    precondition(ui.saving && !ui.input.isEnabled && !ui.closeButton.isEnabled && !ui.bottom.isEnabled)
+    precondition(ui.saving && !ui.input.isEditable && !ui.closeButton.isEnabled && !ui.bottom.isEnabled)
     precondition(ui.submit.title == "Creating…" && !ui.progress.isHidden)
     precondition(ui.window.contentView is Surface && !ui.window.isOpaque && ui.window.backgroundColor == .clear, "Use the clipped Liquid Glass surface")
     let firstRequest = requests.last!; precondition(firstRequest.contains("--at-top") && firstRequest.contains("human:boss") && firstRequest.contains(projects[1].name))
@@ -395,26 +435,26 @@ func auditNativeQuickIssue() {
     precondition(ui.window.performKeyEquivalent(with: commandReturn) && requests.count == 2, "Duplicate Command+Enter while saving")
     ui.dismiss(); precondition(ui.saving, "Cannot close an in-flight mutation")
     reply?(.failure(StorageError(description: "Disconnected")))
-    precondition(!ui.saving && ui.input.stringValue == "Fix @poe-code reconnect" && ui.error.stringValue == "Disconnected")
+    precondition(!ui.saving && ui.input.string == "Fix @poe-code reconnect" && ui.error.stringValue == "Disconnected")
     precondition(ui.submit.title == "Create" && ui.context.stringValue == "Your text is kept", "Failure restores editing and reassures that text is retained")
     let keypadReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\u{3}", charactersIgnoringModifiers: "\u{3}", isARepeat: false, keyCode: 76)!
     precondition(ui.window.performKeyEquivalent(with: keypadReturn), "Command+keypad Enter submits too")
     precondition(requests.last == firstRequest, "Retry reuses the mutation ID")
     reply?(.success(Data("{\"issue\":{\"number\":7}}".utf8)))
-    precondition(ui.input.stringValue.isEmpty && ui.pending == nil && ui.current == projects[1] && ui.bottom.state == .off)
+    precondition(ui.input.string.isEmpty && ui.pending == nil && ui.current == projects[1] && ui.bottom.state == .off)
     precondition(firstRequest[firstRequest.firstIndex(of: "--project")! + 1] == projects[1].name)
     precondition(prefs.string(forKey: "quickIssueProject") == projects[1].name && ui.context.stringValue.contains("#7"))
     precondition(ui.succeeded && ui.input.isHidden && !ui.confirmation.isHidden && ui.submit.isHidden && ui.bottom.isHidden)
     precondition(ui.window.performKeyEquivalent(with: commandReturn) && requests.count == 3, "Success cannot resubmit")
-    ui.input.stringValue = "Preserved draft"; ui.bottom.state = .on; ui.dismiss(); ui.open(cli: nil)
-    precondition(ui.input.stringValue == "Preserved draft" && ui.bottom.state == .on && ui.current == projects[1])
+    ui.input.string = "Preserved draft"; ui.bottom.state = .on; ui.dismiss(); ui.open(cli: nil)
+    precondition(ui.input.string == "Preserved draft" && ui.bottom.state == .on && ui.current == projects[1])
     ui.create(); precondition(!requests.last!.contains("--at-top"))
     reply?(.failure(StorageError(description: "Retry later")))
-    let previous = requests.last!; ui.input.stringValue = "Edited draft"; ui.changed(); ui.create()
+    let previous = requests.last!; ui.input.string = "Edited draft"; ui.changed(); ui.create()
     precondition(requests.last!.last != previous.last, "Changed draft gets a fresh request ID")
     reply?(.success(Data("{\"ok\":true}".utf8)))
-    precondition(ui.error.stringValue.contains("confirm") && ui.input.stringValue == "Edited draft", "Malformed response preserves draft and request ID")
-    ui.input.stringValue = ""; ui.error.stringValue = ""; ui.changed()
+    precondition(ui.error.stringValue.contains("confirm") && ui.input.string == "Edited draft", "Malformed response preserves draft and request ID")
+    ui.input.string = ""; ui.error.stringValue = ""; ui.changed()
     // Render real AppKit controls, not a mock. Screenshots are opt-in and the
     // caller owns cleanup; normal audits leave no visual artifacts behind.
     let renders = ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_RENDERS"]
@@ -435,18 +475,18 @@ func auditNativeQuickIssue() {
             ui.window.appearance?.performAsCurrentDrawingAppearance {
                 ui.canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
             }
-            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "saving", "success", "compact"] {
+            for state in ["empty", "loading", "projects", "error", "long", "images", "image-error", "saving", "success", "compact", "multiline", "multiline-projects", "multiline-images", "multiline-compact", "scrolling"] {
                 ui.images = []; ui.rebuildImages()
-                ui.window.setContentSize(NSSize(width: state == "compact" ? 520 : 680, height: ui.window.frame.height))
+                ui.window.setContentSize(NSSize(width: state.contains("compact") ? 520 : 680, height: ui.window.frame.height))
                 ui.error.stringValue = ""; ui.overflowNote.stringValue = ""; ui.mention = nil; ui.matches = []; ui.current = projects[1]; ui.context.stringValue = "Create in poe-code · @project to switch"
                 ui.saving = state == "saving"; ui.succeeded = state == "success"; ui.ready = state != "loading"
-                ui.input.stringValue = state == "empty" ? "" : "Fix reconnect @po"
-                if state == "loading" { ui.input.stringValue = ""; ui.context.stringValue = "Loading projects…" }
-                if state == "saving" { ui.input.stringValue = "Fix reconnect"; ui.context.stringValue = "Creating in poe-code…" }
-                if state == "success" { ui.input.stringValue = ""; ui.context.stringValue = "Created #7 in poe-code" }
-                if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.stringValue).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
-                if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.stringValue = "Fix reconnect @missing" }
-                if state == "long" { ui.input.stringValue = String(repeating: "Very long issue title ", count: 30); ui.changed() }
+                ui.input.string = state == "empty" ? "" : "Fix reconnect @po"
+                if state == "loading" { ui.input.string = ""; ui.context.stringValue = "Loading projects…" }
+                if state == "saving" { ui.input.string = "Fix reconnect"; ui.context.stringValue = "Creating in poe-code…" }
+                if state == "success" { ui.input.string = ""; ui.context.stringValue = "Created #7 in poe-code" }
+                if state == "projects" { ui.mention = QuickIssueText.mentions(ui.input.string).first; ui.matches = projects; ui.table.reloadData(); ui.table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false) }
+                if state == "error" { ui.error.stringValue = "Unknown project @missing. Use a known name or full project ID."; ui.input.string = "Fix reconnect @missing" }
+                if state == "long" { ui.input.string = String(repeating: "Very long issue title ", count: 30); ui.changed() }
                 if ["images", "image-error", "saving", "compact"].contains(state) {
                     let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in
                         NSColor.systemIndigo.setFill(); rect.fill()
@@ -454,11 +494,23 @@ func auditNativeQuickIssue() {
                         return true
                     }
                     ui.images = (1...5).map { QuickIssueImage(name: "Screenshot \($0).png", data: Data(), thumbnail: image) }; ui.rebuildImages()
-                    ui.input.stringValue = "Fix the screenshot preview @poe-code"
+                    ui.input.string = "Fix the screenshot preview @poe-code"
                 }
+                if state.hasPrefix("multiline") {
+                    ui.input.string = "Fix reconnect after sleep\n\nSteps to reproduce:\n  - Sleep the Mac\n  - Wake and reconnect 🦀"
+                    if state == "multiline-images" {
+                        let image = NSImage(size: NSSize(width: 240, height: 120), flipped: false) { rect in NSColor.systemTeal.setFill(); rect.fill(); return true }
+                        ui.images = [QuickIssueImage(name: "Reconnect.png", data: Data(), thumbnail: image)]; ui.rebuildImages()
+                    }
+                    if state == "multiline-projects" { ui.input.string += "\n@po"; ui.mention = QuickIssueText.mentions(ui.input.string).last; ui.matches = projects; ui.table.reloadData() }
+                }
+                if state == "scrolling" { ui.input.string = "Long draft\n" + String(repeating: "Paragraph with preserved indentation.\n", count: 40) }
                 if state == "image-error" { ui.fail("Project is unavailable. Nothing was created. You can edit and try again.") }
 
                 ui.updateEnabled(); ui.layout(); ui.window.contentView!.layoutSubtreeIfNeeded()
+                if !ui.succeeded { precondition(ui.inputScroll.frame.maxY <= ui.canvas.bounds.height && ui.inputScroll.frame.minY > ui.mediaHint.frame.maxY, "Editor and hint never overlap") }
+                if !ui.picker.isHidden { precondition(ui.inputScroll.frame.minY > ui.heading.frame.maxY && ui.picker.frame.minY > ui.hint.frame.maxY) }
+                precondition(ui.window.frame.height <= (ui.window.screen?.visibleFrame.height ?? 900) - 24, "Expanded content stays within the display")
                 for row in ui.matches.indices { _ = ui.table.view(atColumn: 0, row: row, makeIfNecessary: true) }
                 ui.window.displayIfNeeded()
                 RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
@@ -497,7 +549,7 @@ func auditQuickIssueMedia() {
     defer { prefs.removePersistentDomain(forName: suite) }
     let ui = NativeQuickIssue(present: false, preferences: prefs)
     ui.ready = true; ui.current = QuickIssueProject(id: "named:Media", name: "Media")
-    ui.projects = [ui.current!]; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    ui.projects = [ui.current!]; ui.input.string = "Fix screenshot"; ui.changed()
     let mediaButtons = ui.canvas.subviews.compactMap { $0 as? NSButton }
     precondition(!mediaButtons.contains { ["Dictate", "Paste image"].contains($0.title) }, "Quick Add keeps screenshot paste on the keyboard without media buttons")
     precondition(ui.mediaHint.frame.minX == ui.context.frame.minX, "The paste hint aligns with the footer destination")
@@ -513,7 +565,7 @@ func auditQuickIssueMedia() {
     let paste = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)!
     ui.window.makeFirstResponder(ui.bottom)
     precondition(ui.window.performKeyEquivalent(with: paste) && ui.images.count == 1, "Command-V attaches with button focus too")
-    precondition(ui.input.stringValue == "Fix screenshot", "Image paste preserves the title")
+    precondition(ui.input.string == "Fix screenshot", "Image paste preserves the title")
     ui.window.makeFirstResponder(ui.input)
     ui.window.sendEvent(paste)
     precondition(ui.images.count == 2, "Command-V reaches images through the field editor")
@@ -538,17 +590,17 @@ func auditQuickIssueMedia() {
     let rejected = calls.last!
     let rejectedFile = rejected[rejected.firstIndex(of: "--attachment")! + 1]
     reply?(.failure(QuickIssueRequestError(message: "Project is unavailable.", rejected: true)))
-    precondition(ui.input.isEnabled && ui.bottom.isEnabled, "Rejected saves restore editing")
-    precondition(ui.mediaSubmission == nil && ui.images.count == 1 && ui.input.stringValue == "Fix screenshot")
+    precondition(ui.input.isEditable && ui.bottom.isEnabled, "Rejected saves restore editing")
+    precondition(ui.mediaSubmission == nil && ui.images.count == 1 && ui.input.string == "Fix screenshot")
     precondition(ui.error.stringValue.contains("Nothing was created") && !ui.context.stringValue.contains("Draft"))
     precondition(!FileManager.default.fileExists(atPath: rejectedFile))
-    ui.input.stringValue = "Fixed screenshot"; ui.changed(); ui.create()
+    ui.input.string = "Fixed screenshot"; ui.changed(); ui.create()
     let save = calls.last!
     let file = save[save.firstIndex(of: "--attachment")! + 1]
     ui.window.sendEvent(paste)
     precondition(ui.images.count == 1, "Cannot add images during submission")
     reply?(.failure(StorageError(description: "Response lost")))
-    precondition(!ui.saving && !ui.input.isEnabled && ui.images.count == 1 && ui.submit.title == "Retry")
+    precondition(!ui.saving && !ui.input.isEditable && ui.images.count == 1 && ui.submit.title == "Retry")
     precondition(!ui.pasteImages(board), "An uncertain submission stays immutable")
     ui.dismiss(); precondition(ui.images.count == 1 && ui.mediaSubmission != nil, "Closing preserves retry state")
     ui.create(); precondition(calls.last! == save, "Retry saves the exact same task and images without duplication")
@@ -557,7 +609,7 @@ func auditQuickIssueMedia() {
     precondition(!FileManager.default.fileExists(atPath: file), "Upload staging files are removed")
     precondition(calls.allSatisfy { $0.first != "undraft" && $0.first != "attachment" }, "No draft or partial upload steps")
 
-    ui.succeeded = false; ui.input.stringValue = "Fix screenshot"; ui.changed()
+    ui.succeeded = false; ui.input.string = "Fix screenshot"; ui.changed()
 
     board.clearContents(); board.setString("ordinary text", forType: .string)
     precondition(!ui.pasteImages(board), "Plain text keeps normal paste behavior")
@@ -595,11 +647,18 @@ func auditQuickIssueMedia() {
 
 func auditQuickIssueMediaIntegration() {
     precondition(ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"]?.hasPrefix("/tmp/") == true, "Use an isolated temporary issue store")
+    let initialize = Process()
+    initialize.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!)
+    initialize.arguments = ["project", "init", "--project", "Native media test", "--prs", "false", "--worktree", "false", "--drafts", "false", "--yes", "--json"]
+    initialize.currentDirectoryURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"]!).deletingLastPathComponent()
+    initialize.standardOutput = FileHandle.nullDevice
+    try! initialize.run(); initialize.waitUntilExit()
+    precondition(initialize.terminationStatus == 0, "Initialize only the isolated test project")
     let suite = "hey-boss-quick-integration"; let prefs = UserDefaults(suiteName: suite)!
     defer { prefs.removePersistentDomain(forName: suite) }
     let ui = NativeQuickIssue(present: false, preferences: prefs)
     ui.ready = true; ui.current = QuickIssueProject(id: "named:Native media test", name: "Native media test")
-    ui.projects = [ui.current!]; ui.input.stringValue = "Screenshot regression"; ui.changed()
+    ui.projects = [ui.current!]; ui.input.string = "Screenshot regression\n\nSteps:\n  - Paste two images\n  - Preserve paragraphs 🦀\n\n    code"; ui.changed()
     let board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
     let sample = NSImage(size: NSSize(width: 120, height: 80), flipped: false) { rect in NSColor.systemTeal.setFill(); rect.fill(); return true }
     board.writeObjects([sample]); precondition(ui.pasteImages(board)); precondition(ui.pasteImages(board))
@@ -620,6 +679,7 @@ func auditQuickIssueMediaIntegration() {
     let value = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]
     let issue = value["issue"] as! [String: Any]
     precondition(issue["draft"] as? Bool == false && issue["title"] as? String == "Screenshot regression")
+    precondition(issue["body"] as? String == "Steps:\n  - Paste two images\n  - Preserve paragraphs 🦀\n\n    code", "The real issue store preserves multiline details")
     result = nil
     ui.request(["attachment", "list", "--issue", "1", "--project", "Native media test", "--json"]) { result = $0 }; wait { result != nil }
     let listed = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]

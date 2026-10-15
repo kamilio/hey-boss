@@ -4016,7 +4016,7 @@ enum QuickIssueText {
         }
         return result
     }
-    static func parse(_ text: String, projects: [QuickIssueProject], current: QuickIssueProject?) throws -> (title: String, project: QuickIssueProject) {
+    static func parse(_ text: String, projects: [QuickIssueProject], current: QuickIssueProject?) throws -> (title: String, body: String, project: QuickIssueProject) {
         let chars = Array(text); var selected: QuickIssueProject?; var title = ""; var start = 0
         for mention in mentions(text) {
             guard mention.closed else { throw StorageError(description: "Close the quote around the project name.") }
@@ -4032,10 +4032,14 @@ enum QuickIssueText {
             selected = project; title += String(chars[start..<mention.start]); start = mention.end
         }
         title += String(chars[start...]); title = title.replacingOccurrences(of: "\\@", with: "@")
-        title = title.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        title = title.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lines = title.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        let body = lines.count > 1 ? String(lines[1]).trimmingCharacters(in: .newlines) : ""
+        title = (lines.first.map(String.init) ?? "").split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !title.isEmpty else { throw StorageError(description: "Enter an issue title.") }
         guard let project = selected ?? current else { throw StorageError(description: "Choose a project with @project.") }
-        return (title, project)
+        return (title, body, project)
     }
     static func suggestions(_ projects: [QuickIssueProject], query: String) -> [QuickIssueProject] {
         let q = fold(query)
@@ -4103,11 +4107,24 @@ struct QuickIssueRequestError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// Plain text with a lightweight placeholder; editing and undo remain native.
+final class QuickIssueEditor: NSTextView {
+    override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if string.isEmpty {
+            ("Issue title… @project to switch" as NSString).draw(at: NSPoint(x: 0, y: textContainerInset.height),
+                withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.placeholderTextColor])
+        }
+    }
+}
+
 /// AppKit-only Spotlight panel. All store access goes through the installed Rust
 /// CLI, so durable replicas and request-ID retries follow ordinary issue rules.
-final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     let window = QuickIssuePanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 142), styleMask: [.borderless], backing: .buffered, defer: false)
-    let input = NSTextField()
+    let input = QuickIssueEditor()
+    let inputScroll = NSScrollView()
     let context = NSTextField(labelWithString: "Loading projects…")
     let overflowNote = NSTextField(wrappingLabelWithString: "")
     let error = NSTextField(wrappingLabelWithString: "")
@@ -4124,7 +4141,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     let confirmation = NSTextField(labelWithString: "Issue created")
     let progress = NSProgressIndicator()
     let submitHint = NSTextField(labelWithString: "⌘↵")
-    let mediaHint = NSTextField(labelWithString: "⌘V to attach a screenshot")
+    let mediaHint = NSTextField(labelWithString: "↵ New line · ⌘↵ Create · ⌘V Attach image")
     let imageStrip = NSScrollView()
     let imageCanvas = NSView()
     var images: [QuickIssueImage] = []
@@ -4164,9 +4181,19 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         window.contentView = material
         canvas.frame = material.content.bounds; canvas.autoresizingMask = [.width, .height]; material.content.addSubview(canvas)
         icon.image = NSImage(systemSymbolName: "circle.dashed", accessibilityDescription: "Issue"); icon.contentTintColor = .controlAccentColor
-        input.isBordered = false; input.drawsBackground = false; input.focusRingType = .none
-        input.font = .systemFont(ofSize: 22); input.placeholderString = "Issue title… @project to switch"; input.delegate = self
-        input.setAccessibilityLabel("Issue title"); input.lineBreakMode = .byTruncatingTail
+        input.drawsBackground = false; input.font = .systemFont(ofSize: 22); input.delegate = self
+        input.textColor = .labelColor; input.insertionPointColor = .labelColor
+        input.isRichText = false; input.importsGraphics = false; input.allowsUndo = true
+        input.isAutomaticQuoteSubstitutionEnabled = false; input.isAutomaticDashSubstitutionEnabled = false
+        input.isHorizontallyResizable = false; input.isVerticallyResizable = true
+        input.minSize = .zero; input.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        input.textContainerInset = NSSize(width: 0, height: 3)
+        input.textContainer?.lineFragmentPadding = 0; input.textContainer?.widthTracksTextView = true
+        input.setAccessibilityLabel("Issue title and description")
+        input.setAccessibilityHelp("First line is the title. Enter adds a line; Command Enter creates the issue.")
+        inputScroll.documentView = input; inputScroll.drawsBackground = false
+        inputScroll.hasVerticalScroller = true; inputScroll.autohidesScrollers = true; inputScroll.scrollerStyle = .overlay
+        inputScroll.automaticallyAdjustsContentInsets = false
         closeButton.bezelStyle = .circular; closeButton.controlSize = .small; closeButton.imageScaling = .scaleProportionallyDown
         closeButton.target = self; closeButton.action = #selector(dismiss)
         closeButton.toolTip = "Close quick add (Esc)"
@@ -4194,14 +4221,14 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         mediaHint.font = .systemFont(ofSize: 11); mediaHint.textColor = .secondaryLabelColor
         imageStrip.documentView = imageCanvas; imageStrip.hasHorizontalScroller = true; imageStrip.drawsBackground = false
         imageStrip.setAccessibilityLabel("Attached images")
-        for view in [icon, input, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, mediaHint, imageStrip] { canvas.addSubview(view) }
+        for view in [icon, inputScroll, confirmation, closeButton, heading, picker, hint, error, overflowNote, footer, mediaHint, imageStrip] { canvas.addSubview(view) }
         for view in [progress, context, bottom, submitHint, submit] { footer.addSubview(view) }
         window.submitIssue = { [weak self] in self?.create() }
         window.pasteImage = { [weak self] in self?.pasteImages(.general) ?? false }
         window.cancel = { [weak self] in self?.dismiss() }
         window.toggleBottom = { [weak self] in guard let self, !self.saving, self.mediaSubmission == nil else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
         selectionObserver = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: nil, queue: .main) { [weak self] notice in
-            guard let self, let editor = notice.object as? NSTextView, editor === self.input.currentEditor() else { return }
+            guard let self, let editor = notice.object as? NSTextView, editor === self.input else { return }
             self.updatePicker()
         }
         layout()
@@ -4213,22 +4240,37 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     func layout() {
         let width = window.frame.width
         let expanded = !matches.isEmpty || mention != nil
-        let rows = min(matches.count, 5)
-        let listHeight = expanded ? CGFloat(rows) * 64 : 0
         let errorHeight: CGFloat = error.stringValue.isEmpty ? 0 : 56
         let overflowHeight: CGFloat = overflowNote.stringValue.isEmpty || saving || succeeded ? 0 : 36
         let mediaHeight: CGFloat = succeeded ? 0 : 24 + (images.isEmpty ? 0 : 100)
-        let height = 142 + (expanded ? listHeight + 68 : 0) + errorHeight + overflowHeight + mediaHeight
+        let bounds = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+        let available = (bounds?.height ?? 900) - 24
+        let chrome = 142 + (expanded ? 68 : 0) + errorHeight + overflowHeight + mediaHeight
+        let rows = min(matches.count, 5, max(1, Int((available - chrome - 96) / 64)))
+        let listHeight = expanded ? CGFloat(rows) * 64 : 0
+        let editorWidth = width - 118
+        input.setFrameSize(NSSize(width: editorWidth, height: input.frame.height))
+        input.textContainer?.containerSize = NSSize(width: editorWidth, height: .greatestFiniteMagnitude)
+        let manager = input.layoutManager!
+        manager.ensureLayout(for: input.textContainer!)
+        let textHeight = ceil(max(manager.usedRect(for: input.textContainer!).maxY, manager.extraLineFragmentRect.maxY) + 6)
+        let editorHeight = succeeded ? 34 : min(max(34, textHeight), min(240, max(34, available - chrome - listHeight + 34)))
+        let growth = editorHeight - 34
+        let height = chrome + listHeight + growth
         var frame = window.frame; frame.origin.y += frame.height - height; frame.size.height = height
+        if present, let bounds { frame.origin.y = max(bounds.minY + 12, min(frame.origin.y, bounds.maxY - height - 12)) }
         window.setFrame(frame, display: present)
         canvas.layoutSubtreeIfNeeded()
-        input.frame = NSRect(x: 60, y: height - 68, width: width - 118, height: 34)
-        confirmation.frame = input.frame
+        inputScroll.frame = NSRect(x: 60, y: height - 34 - editorHeight, width: editorWidth, height: editorHeight)
+        input.setFrameSize(NSSize(width: editorWidth, height: max(editorHeight, textHeight)))
+        if textHeight <= editorHeight { inputScroll.contentView.scroll(to: .zero) }
+        input.needsDisplay = true
+        confirmation.frame = NSRect(x: 60, y: height - 68, width: editorWidth, height: 34)
         icon.frame = NSRect(x: 24, y: height - 61, width: 24, height: 24)
         closeButton.frame = NSRect(x: width - 44, y: height - 60, width: 24, height: 24)
         heading.isHidden = !expanded; picker.isHidden = !expanded; hint.isHidden = !expanded
-        heading.frame = NSRect(x: 24, y: height - 102, width: width - 48, height: 18)
-        picker.frame = NSRect(x: 20, y: height - 110 - listHeight, width: width - 40, height: listHeight)
+        heading.frame = NSRect(x: 24, y: height - growth - 102, width: width - 48, height: 18)
+        picker.frame = NSRect(x: 20, y: height - growth - 110 - listHeight, width: width - 40, height: listHeight)
         table.tableColumns[0].width = width - 40
         hint.frame = NSRect(x: 24, y: 68 + errorHeight + overflowHeight + mediaHeight, width: width - 48, height: 18)
         let mediaY = 68 + errorHeight + overflowHeight
@@ -4277,16 +4319,16 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
     func updateEnabled() {
         let editable = !saving && !succeeded && mediaSubmission == nil
-        input.isEnabled = editable; bottom.isEnabled = editable; closeButton.isEnabled = !saving
+        input.isEditable = editable; bottom.isEnabled = editable; closeButton.isEnabled = !saving
         mediaHint.isHidden = succeeded
         for button in imageCanvas.subviews.compactMap({ $0 as? NSButton }) { button.isEnabled = editable }
-        input.isHidden = succeeded; confirmation.isHidden = !succeeded
+        input.isHidden = succeeded; inputScroll.isHidden = succeeded; confirmation.isHidden = !succeeded
         bottom.isHidden = succeeded; submit.isHidden = succeeded; submitHint.isHidden = succeeded
         submit.title = saving ? "Creating…" : mediaSubmission == nil ? "Create" : "Retry"
         icon.image = NSImage(systemSymbolName: succeeded ? "checkmark.circle.fill" : "circle.dashed", accessibilityDescription: succeeded ? "Issue created" : "Issue")
         icon.contentTintColor = succeeded ? .systemGreen : .controlAccentColor
         if saving || (!ready && error.stringValue.isEmpty) { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
-        submit.isEnabled = ready && !saving && !succeeded && !input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        submit.isEnabled = ready && !saving && !succeeded && !input.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     func fail(_ message: String) {
         error.stringValue = message
@@ -4298,7 +4340,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         overflowNote.stringValue = ""
         error.stringValue = ""; updateEnabled()
         if ready {
-            if let value = try? QuickIssueText.parse(input.stringValue, projects: projects, current: current) {
+            if let value = try? QuickIssueText.parse(input.string, projects: projects, current: current) {
                 context.stringValue = "Create in \(value.project.name)"
                 if value.title.utf8.count > 512 { overflowNote.stringValue = "Long title · Extra text will move to the description." }
             }
@@ -4306,18 +4348,19 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         }
         updatePicker()
     }
-    func controlTextDidChange(_ obj: Notification) { changed() }
+    func textDidChange(_ obj: Notification) { changed(); input.scrollRangeToVisible(input.selectedRange()) }
     func updatePicker() {
         matches = []; mention = nil
-        if ready && !saving, let editor = input.currentEditor() as? NSTextView, !editor.hasMarkedText(), editor.selectedRange().length == 0 {
-            let ns = input.stringValue as NSString
+        let editor = input
+        if ready && !saving && mediaSubmission == nil, !editor.hasMarkedText(), editor.selectedRange().length == 0 {
+            let ns = input.string as NSString
             let caret = ns.substring(to: min(editor.selectedRange().location, ns.length)).count
-            if let active = QuickIssueText.mentions(input.stringValue).first(where: {
-                let quote = Array(input.stringValue)[$0.start + 1..<$0.end].first
+            if let active = QuickIssueText.mentions(input.string).first(where: {
+                let quote = Array(input.string)[$0.start + 1..<$0.end].first
                 return caret > $0.start && caret <= $0.end && !((quote == "\"" || quote == "'") && $0.closed && caret == $0.end)
             }) {
                 mention = active
-                let chars = Array(input.stringValue)
+                let chars = Array(input.string)
                 var query = String(chars[(active.start + 1)..<min(caret, active.end)])
                 if query.first == "\"" || query.first == "'" { query.removeFirst() }
                 matches = QuickIssueText.suggestions(projects, query: query)
@@ -4341,15 +4384,15 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
     @objc func chooseProject() {
         guard let mention, matches.indices.contains(table.selectedRow), !saving else { return }
-        let project = matches[table.selectedRow]; let chars = Array(input.stringValue)
+        let project = matches[table.selectedRow]; let chars = Array(input.string)
         let suffix = String(chars[mention.end...]); let completion = QuickIssueText.completion(project, projects: projects)
         let space = suffix.isEmpty || suffix.first.map(QuickIssueText.token) == true ? " " : ""
         let prefix = String(chars[..<mention.start]) + completion + space
-        input.stringValue = prefix + suffix; window.makeFirstResponder(input)
-        (input.currentEditor() as? NSTextView)?.setSelectedRange(NSRange(location: prefix.utf16.count + (suffix.first?.isWhitespace == true ? 1 : 0), length: 0))
+        input.string = prefix + suffix; window.makeFirstResponder(input)
+        input.setSelectedRange(NSRange(location: prefix.utf16.count + (suffix.first?.isWhitespace == true ? 1 : 0), length: 0))
         changed()
     }
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy command: Selector) -> Bool {
+    func textView(_ textView: NSTextView, doCommandBy command: Selector) -> Bool {
         guard !textView.hasMarkedText() else { return false }
         if NSApp.currentEvent?.isARepeat == true && command == #selector(NSResponder.insertNewline(_:)) { return true }
         if command == #selector(NSResponder.cancelOperation(_:)) {
@@ -4360,7 +4403,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
             let row = (max(0, table.selectedRow) + delta + matches.count) % matches.count
             table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false); table.scrollRowToVisible(row); return true
         }
-        if command == #selector(NSResponder.insertNewline(_:)) { if !matches.isEmpty { chooseProject() } else { create() }; return true }
+        if command == #selector(NSResponder.insertNewline(_:)), !matches.isEmpty { chooseProject(); return true }
         if command == #selector(NSResponder.insertTab(_:)), !matches.isEmpty { chooseProject(); return true }
         return false
     }
@@ -4412,11 +4455,12 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
         if !saving { dismiss() }
     }
     @objc func create() {
-        guard ready, !saving, !succeeded, (input.currentEditor() as? NSTextView)?.hasMarkedText() != true else { return }
+        guard ready, !saving, !succeeded, !input.hasMarkedText() else { return }
         if mediaSubmission != nil { saveMedia(); return }
         do {
-            let parsed = try QuickIssueText.parse(input.stringValue, projects: projects, current: current)
+            let parsed = try QuickIssueText.parse(input.string, projects: projects, current: current)
             var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.name, "--title", parsed.title]
+            if !parsed.body.isEmpty { args += ["--body", parsed.body] }
             if bottom.state != .on { args.append("--at-top") }
             if !images.isEmpty {
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-quick-images-" + UUID().uuidString)
@@ -4478,7 +4522,7 @@ final class NativeQuickIssue: NSObject, NSTextFieldDelegate, NSTableViewDataSour
     }
     func complete(number: Int, project: QuickIssueProject) {
         current = project; preferences.set(project.name, forKey: "quickIssueProject")
-        pending = nil; input.stringValue = ""; bottom.state = .off; succeeded = true
+        pending = nil; input.string = ""; input.undoManager?.removeAllActions(); bottom.state = .off; succeeded = true
         context.stringValue = "Created #\(number) in \(project.name)"; updateEnabled(); layout(); window.makeFirstResponder(nil)
         NSAccessibility.post(element: confirmation, notification: .announcementRequested, userInfo: [.announcement: context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
         let sequence = generation

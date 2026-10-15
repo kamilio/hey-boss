@@ -14,7 +14,10 @@ a literal `@`. Unknown projects and conflicting destinations show an inline erro
 
 The first issue needs an explicit project. Later issues default to the last
 successfully used project on that Mac. The footer previews the destination.
-Press **Command+Enter** (including keypad Enter), **Enter**, or click **Create** to create an ordinary open, unassigned issue
+Press **Enter** to add a line. The editor grows as text wraps or new lines are added,
+then scrolls for longer drafts. The first line becomes the title; subsequent lines
+become the description, preserving paragraphs and indentation.
+Press **Command+Enter** (including keypad Enter), or click **Create** to create an ordinary open, unassigned issue
 as Boss, with no labels. A short native confirmation
 shows the issue number and destination with a green checkmark, then closes after
 1.8 seconds. Command+Enter submits the typed destination even while suggestions
@@ -56,7 +59,7 @@ Run the focused native regression audit with `HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY=1`
 after compiling `hey_boss_daemon.swift` and `test_hey_boss.swift` with
 `-parse-as-library -D HEY_BOSS_AUDIT`. Optionally set
 `HEY_BOSS_QUICK_ISSUE_SCREENSHOTS` to a disposable directory for light/dark renders
-of empty, loading, project-picker, validation-error, long-title, saving, and success
+of empty, loading, project-picker, validation-error, multiline, scrolling, long-title, saving, and success
 states, including an assertion that the outer corners are transparent.
 Window captures use macOS `screencapture` and need existing Screen Recording access;
 ordinary audits do not capture the screen. For interactive
