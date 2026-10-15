@@ -4,7 +4,8 @@ const {readFileSync} = require('node:fs');
 const {createServer} = require('node:http');
 const {resolve} = require('node:path');
 const {chromium, webkit} = require('playwright');
-const root = resolve('src/issues/web');
+const paired = process.env.BADGE_PAIRED === '1';
+const root = resolve(paired ? 'mobile/public/issue-web' : 'src/issues/web');
 const project = {id:'named:Badge QA',name:'Badge QA',open:7,closed:0,ready:0,blocked:0,deleted:0,unassigned:2,prs_enabled:true};
 const issues = [
   {title:'Recover the native stream after upstream closes',assignment:{kind:'agent',actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
@@ -14,6 +15,9 @@ const issues = [
   {title:'An unassigned issue keeps comments in the same column',assignment:{kind:'unassigned'}},
   {title:'Astra is resolving the PR conflicts',assignment:{kind:'github',waiting:false,actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
   {title:'Merge conflicts released the watcher for pickup',assignment:{kind:'github',waiting:false},assignee:null},
+  {title:'Draft with discussion keeps its actions aligned',draft:true,comment_count:2,assignment:{kind:'unassigned'}},
+  {title:'Draft without comments keeps its actions aligned',draft:true,comment_count:0,assignment:{kind:'unassigned'}},
+  {title:'Unassigned issue without comments keeps its actions aligned',comment_count:0,assignment:{kind:'unassigned'}},
 ].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',body_html:'<p>Inspect the current owner and PR status.</p>',comments:[],events:[],pull_requests:[],...i}));
 for (const number of [3,6,7]) {
   const issue=issues[number-1], url=`https://github.com/example/project/pull/${number}`;
@@ -39,20 +43,20 @@ const server=createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
   }
   try {
-    const name=req.url==='/'?'index.html':decodeURIComponent(req.url.split('?')[0]).slice(1);
+    const name=['/','/issues'].includes(req.url)?'index.html':decodeURIComponent(req.url.split('?')[0]).replace(/^\/(?:issue-web\/)?/,'');
     let text=readFileSync(resolve(root,name));
-    if(name.endsWith('.html')){
+    if(name.endsWith('.html') && !paired){
       let shell=readFileSync(root+'/app-shell.html','utf8');
       for(const [marker,file] of [['header-actions','issue-header-actions'],['profile','issue-profile'],['project-action','issue-project-action']]) shell=shell.replace('<!--'+marker+'-->',readFileSync(root+'/'+file+'.html','utf8'));
       text=String(text).replace('<!--app-shell-->',shell);
     }
-    if(name==='routes.js') text=String(text).replace('/* ROUTE_DEFINITIONS */ []',readFileSync(root+'/routes.json','utf8'));
+    if(name==='routes.js' && !paired) text=String(text).replace('/* ROUTE_DEFINITIONS */ []',readFileSync(root+'/routes.json','utf8'));
     res.setHeader('Content-Type',name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':name.endsWith('.png')?'image/png':'text/html');res.end(text);
   }catch{res.statusCode=404;res.end();}
 });
 (async()=>{
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
-  const base='http://127.0.0.1:'+server.address().port+'/#project=named%3ABadge+QA';
+  const base='http://127.0.0.1:'+server.address().port+(paired?'/issues':'/')+'#project=named%3ABadge+QA';
   try {
     for(const engine of [chromium,webkit]){
       const browser=await engine.launch({headless:true});
@@ -69,13 +73,35 @@ const server=createServer(async(req,res)=>{
           const alignment = await page.locator('.issue-row-end').evaluateAll(ends => ends.map(end => {
             const badge = end.querySelector('.assignment-badge')?.getBoundingClientRect();
             const comments = end.querySelector('.comment-count')?.getBoundingClientRect();
+            const actions = end.querySelector('.issue-list-actions').getBoundingClientRect();
             const row = end.closest('.issue-row').getBoundingClientRect();
-            return {badge:badge?.x, badgeRight:badge?.right, comments:comments?.x, commentsRight:comments?.right, rowRight:row.right};
+            return {badge:badge && badge.x-row.right, badgeRight:badge && badge.right-row.right, comments:comments && comments.x-row.right, commentsRight:comments && comments.right-row.right,
+              actions:actions.x-row.right, actionsRight:actions.right-row.right, actionsCenter:actions.y+actions.height/2,
+              badgeCenter:badge && badge.y+badge.height/2, commentsCenter:comments && comments.y+comments.height/2};
           }));
           const badges = alignment.filter(r => r.badge != null), comments = alignment.filter(r => r.comments != null);
           assert(Math.max(...badges.map(r=>r.badge))-Math.min(...badges.map(r=>r.badge))<1, 'Badge column aligns across empty, short and long counts');
           assert(Math.max(...comments.map(r=>r.comments))-Math.min(...comments.map(r=>r.comments))<1, 'Comments align even without an assignee');
           assert(badges.every(r=>r.commentsRight==null||r.commentsRight<=r.badge||r.badgeRight<=r.comments), 'Badge and comment controls do not overlap');
+          assert(Math.max(...alignment.map(r=>r.actions))-Math.min(...alignment.map(r=>r.actions))<1, 'Actions align for assigned, unassigned and draft rows, with and without comments');
+          assert(alignment.every(r=>(r.badgeRight==null||r.badgeRight<=r.actions)&&(r.commentsRight==null||r.commentsRight<=r.actions)), 'Actions consistently follow comments and assignment');
+          assert(alignment.every(r=>(r.badgeCenter==null||Math.abs(r.badgeCenter-r.actionsCenter)<1)&&(r.commentsCenter==null||Math.abs(r.commentsCenter-r.actionsCenter)<1)), 'All row controls stay on one line');
+          for (const scheme of ['light','dark']) {
+            await page.emulateMedia({colorScheme:scheme});
+            assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth), 'Mixed issue rows fit the viewport');
+            if(process.env.BADGE_SCREENSHOTS) await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-rows.png`,fullPage:true});
+          }
+          for (const number of [1,3,5,8,9,10]) {
+            const trigger=page.locator(`[data-list-actions="${number}"]`);
+            await trigger.click();
+            const menu=page.getByRole('menu',{name:`Actions for issue #${number}`});
+            await menu.waitFor({state:'visible'});
+            const bounds=await menu.boundingBox();
+            assert(bounds.x>=0&&bounds.x+bounds.width<=width, 'Every row menu fits the viewport');
+            if (number===8 || number===9) await menu.getByRole('menuitem',{name:'Mark ready',exact:true}).waitFor();
+            await page.keyboard.press('Escape');
+            assert(await trigger.evaluate(el=>el===document.activeElement), 'Menu dismissal restores row focus');
+          }
           for(const [number,owner] of [[1,'codex:astra'],[2,'human:boss'],[3,'watcher:github'],[4,'machine:box']]){
             await list();
             if(touch){
@@ -160,13 +186,15 @@ const server=createServer(async(req,res)=>{
           assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
           await list();
           for(const scheme of ['light','dark']){
+            await page.keyboard.press('Escape');
+            await page.mouse.move(0,0);
             await page.emulateMedia({colorScheme:scheme});
             const colors=await page.locator('.assignment-badge').evaluateAll(badges=>badges.map(b=>getComputedStyle(b).color));
             assert.notEqual(colors[0],colors[1], 'Workers have a distinct green color');
             assert.notEqual(colors[3],colors[1], 'Machines have a distinct orange color');
             assert.notEqual(colors[0],colors[3], 'Machine and worker colors differ');
-            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-aligned.png`});
-            if(touch)await badge(1).tap();else await badge(1).hover();
+            if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}-aligned.png`,fullPage:true});
+            await showOwner(1);
             await card(1).getByText('Working',{exact:true}).waitFor();
             const box=await card(1).boundingBox();assert(box&&box.x>=0&&box.y>=0&&box.x+box.width<=width);
             if(process.env.BADGE_SCREENSHOTS)await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-${scheme}.png`});
