@@ -48,6 +48,8 @@ pub enum Action {
     Sync {
         #[arg(long)]
         controller: String,
+        #[arg(long)]
+        continuous: bool,
     },
     /// Inspect local replication, including while the relay is unavailable.
     SyncStatus,

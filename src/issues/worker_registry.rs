@@ -1013,6 +1013,14 @@ pub(super) fn claim_lock(
     force: bool,
 ) -> Result<()> {
     crate::issues::fleet::check_claim(db, &p.id, n, &actor.machine, force)?;
+    if !force && crate::issues::allocations::enabled(db)? {
+        let valid: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM worker_runs r JOIN worker_allocations a ON a.id=r.id WHERE r.project_id=?1 AND r.issue_number=?2 AND r.actor_id=?3 AND r.finished_at IS NULL AND (a.launched IS NULL OR a.released<>0 OR NOT EXISTS(SELECT 1 FROM worker_allocation_winners w WHERE w.id=a.id)))",params![p.id,n,actor.id],|r|r.get(0))?;
+        if !valid {
+            return Err(Error::conflict(
+                "The machine reservation is still settling or another machine owns it",
+            ));
+        }
+    }
     let expired: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NULL AND claimed_at IS NULL AND reservation_expires<=?4)",params![p.id,n,actor.id,now()],|r|r.get(0))?;
     if expired {
         return Err(Error::conflict(
@@ -1067,8 +1075,14 @@ pub(super) fn reserve(
     worker_id: Option<&str>,
 ) -> Result<Option<Job>> {
     // Legacy updates can arrive after open; migrate only when one is present.
-    if store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL)", [], |r| r.get::<_, bool>(0))? {
-        let tx = store.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (legacy, distributed): (bool,bool) = store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_workers WHERE json_type(config,'$.upgrading') IS NOT NULL),role='peer' FROM fleet_meta WHERE id=1",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if distributed {
+        crate::issues::allocations::maintain(&store.db)?;
+    }
+    if legacy {
+        let tx = store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         migrate_runtime(&tx)?;
         tx.commit()?;
     }
@@ -1235,6 +1249,10 @@ pub(super) fn reserve(
                     "sort_order":sort_order,"issue_created_at":created_at,
                     "rule":"First eligible issue in queue order with a valid checkout. Drafts, claims, reservations, dependencies and retry holds are excluded; all required tags must match.",
                     "order_by":["sort_order","created_at","project_id","number"]}),
+            )?;
+            crate::issues::allocations::reconcile(
+                &tx,
+                &crate::issues::allocations::Clock::read()?,
             )?;
             tx.commit()?;
             return Ok(Some(job));

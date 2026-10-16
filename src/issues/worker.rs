@@ -1060,6 +1060,21 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
             retry_at = crate::environment::retry_at(&e);
             Error::new("infrastructure_blocked", e.to_string())
         })?;
+        if let Some(mut remaining) = store.worker_launch_wait(&job)? {
+            store.worker_event(
+                &job.id,
+                "Reserved for this machine; waiting for allocation synchronization",
+                None,
+            )?;
+            loop {
+                check_job(&store, &job, &stop)?;
+                thread::park_timeout(remaining.min(super::allocations::SYNC_INTERVAL));
+                match store.worker_launch_wait(&job)? {
+                    Some(wait) => remaining = wait,
+                    None => break,
+                }
+            }
+        }
         if job.config.provider == crate::agent_runtime::Provider::Codex {
             run_codex(path, &mut store, &mut job, &stop)
         } else {
@@ -2073,7 +2088,7 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         }
     }
     println!(
-        "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve → launch agent → manual claim → implement → finish",
+        "Pipeline: refresh issue order → scan visible projects → filter tags {} → {} eligible → reserve machine → settle → launch agent → manual claim → implement → finish",
         v["config"]["tags"], v["eligible"]
     );
     if let Some(runs) = v["runs"].as_array() {

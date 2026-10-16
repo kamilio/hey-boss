@@ -3,31 +3,11 @@ use super::*;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    io::BufReader,
+    io::{BufReader, Read},
+    os::fd::AsRawFd,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
-
-#[derive(Default)]
-struct Retries(BTreeMap<String, Instant>);
-
-impl Retries {
-    fn run(&mut self, host: &str, exchange: impl FnOnce() -> Result<bool>) -> Result<bool> {
-        let now = Instant::now();
-        self.0.retain(|_, deadline| *deadline > now);
-        if self.0.contains_key(host) {
-            return Ok(false);
-        }
-        let result = exchange();
-        if result.is_err() {
-            // An offline peer must not repeatedly hold the shared journal lock
-            // for the entire SSH timeout. A busy local lock is not a failure.
-            self.0
-                .insert(host.into(), Instant::now() + Duration::from_secs(60));
-        }
-        result
-    }
-}
 
 fn engine(ctx: &Context) -> Result<hey_boss_sync::Engine> {
     let path = ctx.path.with_extension("sync.db");
@@ -74,63 +54,157 @@ fn prepare(
     Ok(())
 }
 
-pub(in crate::fleet::native) fn serve(ctx: Context, controller: &str) -> Result<()> {
-    if controller.len() != 32 || !controller.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(replica::invalid("Invalid controller identity"));
-    }
+// Application preparation is serialized locally. Network I/O never holds this
+// lock: each peer has its own WAL connection and independent transport loop.
+fn prepared(
+    ctx: &Context,
+    db: &Connection,
+    journal: &mut hey_boss_sync::Engine,
+    controller: bool,
+) -> Result<()> {
     let Some(_lock) = ctx.lock("distributed-sync.lock", true)? else {
         return Err(replica::invalid("Sync is busy"));
     };
-    let db = ctx.db()?;
-    install(&db, &ctx.node)?;
-    db.execute(
-        "UPDATE distributed_meta SET controller=?1 WHERE id=1 AND (controller IS NULL OR active=0)",
-        [controller],
-    )?;
-    let mut engine = engine(&ctx)?;
-    prepare(&ctx, &db, &mut engine, false)?;
-    let mut reader = std::io::stdin().lock();
-    let mut writer = std::io::stdout().lock();
-    for _ in 0..8 {
-        hey_boss_sync::session::serve(&mut engine, &mut reader, &mut writer)?;
-    }
-    for _ in 0..8 {
-        if import(&db, &engine)? == 0 {
-            break;
+    crate::issues::allocations::maintain(db)?;
+    prepare(ctx, db, journal, controller)
+}
+
+// A silent client must not leave a server process and database connection alive
+// forever. This also bounds incomplete frames; EOF still shuts down cleanly.
+struct BoundedReader<R>(R);
+impl<R: Read + AsRawFd> Read for BoundedReader<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let timeout = Timing::from_exchange(Duration::ZERO).lease * 2;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let mut fd = libc::pollfd {
+                fd: self.0.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe {
+                libc::poll(
+                    &mut fd,
+                    1,
+                    remaining.as_millis().min(i32::MAX as u128) as i32,
+                )
+            };
+            if ready > 0 {
+                return self.0.read(bytes);
+            }
+            if ready == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Sync peer stopped responding",
+                ));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
+    }
+}
+
+pub(in crate::fleet::native) fn serve(
+    ctx: Context,
+    controller: &str,
+    continuous: bool,
+) -> Result<()> {
+    if controller.len() != 32 || !controller.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(replica::invalid("Invalid controller identity"));
+    }
+    let db = ctx.db()?;
+    {
+        let _lock = ctx.lock("distributed-sync.lock", true)?;
+        install(&db, &ctx.node)?;
+        db.execute("UPDATE distributed_meta SET controller=?1 WHERE id=1 AND (controller IS NULL OR active=0)",[controller])?;
+    }
+    let mut journal = engine(&ctx)?;
+    let input = unsafe { libc::dup(libc::STDIN_FILENO) };
+    if input < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    use std::os::fd::FromRawFd;
+    let mut reader = BoundedReader(unsafe { std::fs::File::from_raw_fd(input) });
+    let mut writer = std::io::stdout().lock();
+    if !continuous {
+        prepared(&ctx, &db, &mut journal, false)?;
+        for _ in 0..8 {
+            hey_boss_sync::session::serve(&mut journal, &mut reader, &mut writer)?;
+        }
+        prepared(&ctx, &db, &mut journal, false)?;
+        return Ok(());
+    }
+    while !ctx.stopped() {
+        let mut started = Instant::now();
+        let result = hey_boss_sync::session::serve_next(
+            &mut journal,
+            &mut reader,
+            &mut writer,
+            |journal| {
+                started = Instant::now();
+                prepared(&ctx, &db, journal, false)?;
+                Ok(crate::issues::allocations::presence(&db)?)
+            },
+        )?;
+        let Some(result) = result else {
+            break;
+        };
+        prepared(&ctx, &db, &mut journal, false)?;
+        crate::issues::allocations::receive_presence(&db, &result.presence, started.elapsed())?;
+        crate::issues::allocations::record_exchange(&db, controller, started.elapsed())?;
     }
     Ok(())
 }
 
-fn exchange(
-    ctx: &Context,
-    host: &str,
-    peer: Option<(&super::super::peer_sync::Peer, &str)>,
-) -> Result<bool> {
-    if !crate::health::remote::valid_host(host) {
-        return Err(replica::invalid("Invalid sync host"));
+use crate::issues::allocations::{SYNC_INTERVAL, Timing};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+#[derive(Clone, PartialEq, Eq)]
+struct Target {
+    host: String,
+    peer: Option<(super::super::peer_sync::Peer, String)>,
+    diagnostic: std::path::PathBuf,
+}
+fn cancelled(ctx: &Context, stop: &AtomicBool) -> bool {
+    ctx.stopped() || stop.load(Ordering::Acquire)
+}
+fn wait(ctx: &Context, stop: &AtomicBool, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while !cancelled(ctx, stop) && Instant::now() < deadline {
+        std::thread::sleep(
+            (SYNC_INTERVAL / 8).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
-    let Some(_lock) = ctx.lock("distributed-sync.lock", false)? else {
-        return Ok(false);
-    };
+}
+fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
     let db = ctx.db()?;
-    let mut engine = engine(ctx)?;
-    prepare(ctx, &db, &mut engine, peer.is_none())?;
-    let mut command = if let Some((peer, _)) = peer {
+    let mut journal = engine(ctx)?;
+    let controller = target
+        .peer
+        .as_ref()
+        .map(|(_, controller)| controller.as_str())
+        .unwrap_or(&ctx.node);
+    if controller.len() != 32
+        || !controller.bytes().all(|b| b.is_ascii_hexdigit())
+        || !crate::health::remote::valid_host(&target.host)
+    {
+        return Err(replica::invalid("Invalid sync destination"));
+    }
+    let mut command = if let Some((peer, _)) = &target.peer {
         super::super::peer_sync::ssh(ctx, peer)
     } else {
         let mut command = Command::new("ssh");
-        crate::ssh::reuse_connection(&mut command, &ctx.state, host);
+        crate::ssh::reuse_connection(&mut command, &ctx.state, &target.host);
         command
     };
-    let controller = peer.map(|(_, controller)| controller).unwrap_or(&ctx.node);
-    // The machine identity is validated by Context; it is a fixed hex string.
-    if controller.len() != 32 || !controller.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(replica::invalid("Invalid local machine identity"));
-    }
     let script = format!(
-        "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; exec hey-boss fleet sync --controller {}",
-        controller
+        "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; exec hey-boss fleet sync --continuous --controller {controller}"
     );
     let mut child = command
         .args([
@@ -138,14 +212,14 @@ fn exchange(
             "-o",
             "BatchMode=yes",
             "-o",
-            "ConnectTimeout=8",
+            &format!("ConnectTimeout={}", (SYNC_INTERVAL * 4).as_secs()),
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            "ServerAliveInterval=5",
+            &format!("ServerAliveInterval={}", SYNC_INTERVAL.as_secs()),
             "-o",
             "ServerAliveCountMax=2",
-            host,
+            &target.host,
             &script,
         ])
         .env("SFT_NO_BROWSER", "1")
@@ -156,116 +230,165 @@ fn exchange(
         .spawn()?;
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut writer = child.stdin.take().unwrap();
+    let progress = std::sync::Mutex::new(Some(Instant::now()));
+    let finished = AtomicBool::new(false);
     let result = std::thread::scope(|scope| {
-        let (done, finished) = std::sync::mpsc::channel();
         let pid = child.id();
+        let progress = &progress;
+        let finished = &finished;
         scope.spawn(move || {
-            let deadline = std::time::Instant::now() + Duration::from_secs(40);
-            loop {
-                match finished.recv_timeout(Duration::from_millis(100)) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(_) => {}
-                }
-                if ctx.stopped() || std::time::Instant::now() >= deadline {
-                    // Child remains unreaped until this watchdog joins, so its
-                    // PID cannot have been recycled for an unrelated process.
+            while !finished.load(Ordering::Acquire) {
+                let timed_out = progress.lock().unwrap().is_some_and(|start| {
+                    start.elapsed() >= Timing::from_exchange(Duration::ZERO).lease * 2
+                });
+                if cancelled(ctx, stop) || timed_out {
                     unsafe {
                         libc::kill(pid as i32, libc::SIGKILL);
                     }
                     break;
                 }
+                std::thread::sleep(SYNC_INTERVAL / 8);
             }
         });
         let result = (|| -> Result<()> {
-            for _ in 0..8 {
-                hey_boss_sync::session::connect(&mut engine, &mut reader, &mut writer)?;
+            while !cancelled(ctx, stop) {
+                let start = Instant::now();
+                *progress.lock().unwrap() = Some(start);
+                prepared(ctx, &db, &mut journal, target.peer.is_none())?;
+                let presence = crate::issues::allocations::presence(&db)?;
+                let result = hey_boss_sync::session::connect_present(
+                    &mut journal,
+                    &mut reader,
+                    &mut writer,
+                    presence,
+                )?;
+                prepared(ctx, &db, &mut journal, target.peer.is_none())?;
+                crate::issues::allocations::receive_presence(
+                    &db,
+                    &result.presence,
+                    start.elapsed(),
+                )?;
+                crate::issues::allocations::record_exchange(&db, &target.host, start.elapsed())?;
+                ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"connected","at":super::super::context::now(),"exchange_ms":start.elapsed().as_millis()}))?;
+                *progress.lock().unwrap() = None;
+                // Drain actual changes immediately. Idle peers send one tiny
+                // exchange per interval over the existing authenticated pipe.
+                if result.records == 0 {
+                    wait(ctx, stop, SYNC_INTERVAL.saturating_sub(start.elapsed()));
+                }
             }
             Ok(())
         })();
-        let _ = done.send(());
+        finished.store(true, Ordering::Release);
         result
     });
     drop(writer);
     drop(reader);
-    if result.is_err() {
-        let _ = child.kill();
-    }
-    let status = child.wait()?;
-    result?;
-    if !status.success() {
-        return Err(replica::invalid("SSH sync peer exited unsuccessfully"));
-    }
-    for _ in 0..8 {
-        if import(&db, &engine)? == 0 {
-            break;
-        }
-    }
-    Ok(true)
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
-/// Shadow capture and exchange leave legacy scheduling intact until cutover.
 pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
     std::thread::spawn(move || {
-        let mut retries = Retries::default();
+        let mut workers =
+            BTreeMap::<String, (Target, Arc<AtomicBool>, std::thread::JoinHandle<()>)>::new();
         while !ctx.stopped() {
             let result = (|| -> Result<()> {
+                let mut targets = BTreeMap::new();
                 if controller {
-                    if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
-                        let db = ctx.db()?;
-                        let mut engine = engine(&ctx)?;
-                        prepare(&ctx, &db, &mut engine, true)?;
-                    }
-                    let hosts = ctx.inventory()?;
-                    for machine in hosts {
-                        if let Some(host) = machine["host"].as_str().filter(|h| *h != "local") {
-                            match retries.run(host, || exchange(&ctx, host, None)) {
-                                Err(error) => {
-                                    ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"disconnected","error":error.to_string()}))?;
-                                }
-                                Ok(true) => {
-                                    ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"connected","at":super::super::context::now()}))?;
-                                }
-                                Ok(false) => {}
-                            }
+                    for machine in ctx.inventory()? {
+                        if let Some(host) = machine["host"].as_str().filter(|host| *host != "local")
+                        {
+                            targets.insert(
+                                host.to_owned(),
+                                Target {
+                                    host: host.into(),
+                                    peer: None,
+                                    diagnostic: ctx.state.join(format!(
+                                        "sync-{}.json",
+                                        hey_boss_sync::digest(host.as_bytes())
+                                    )),
+                                },
+                            );
                         }
                     }
-                } else if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
-                    let db = ctx.db()?;
-                    let mut engine = engine(&ctx)?;
-                    prepare(&ctx, &db, &mut engine, false)?;
-                }
-                // One initiator per pair keeps the graph acyclic and avoids two
-                // peers each holding their journal lock while dialing the other.
-                // The cached plan survives loss of the controller connection.
-                if !controller && let Some(settings) = super::super::peer_sync::cached(&ctx)? {
+                } else if let Some(settings) = super::super::peer_sync::cached(&ctx)? {
                     for peer in settings
                         .peers
                         .iter()
                         .filter(|peer| settings.enabled && settings.machine < peer.machine)
                     {
-                        let state = match retries.run(&peer.machine, || {
-                            exchange(&ctx, &peer.address, Some((peer, &settings.controller)))
-                        }) {
-                            Ok(false) => continue,
-                            Ok(true) => {
-                                json!({"state":"connected","at":super::super::context::now()})
-                            }
-                            Err(error) => {
-                                json!({"state":"disconnected","error":error.to_string(),"at":super::super::context::now()})
-                            }
-                        };
-                        ctx.atomic_json(
-                            &super::super::peer_sync::diagnostic_path(&ctx, &peer.machine),
-                            &state,
-                        )?;
+                        targets.insert(
+                            peer.machine.clone(),
+                            Target {
+                                host: peer.address.clone(),
+                                peer: Some((peer.clone(), settings.controller.clone())),
+                                diagnostic: super::super::peer_sync::diagnostic_path(
+                                    &ctx,
+                                    &peer.machine,
+                                ),
+                            },
+                        );
                     }
                 }
+                // Stop changed routes first, and reap them before replacing a connection.
+                // A slow peer's shutdown never blocks discovery of healthy peers.
+                let mut finished = Vec::new();
+                for (key, (target, stop, handle)) in &workers {
+                    if targets.get(key) != Some(target) {
+                        stop.store(true, Ordering::Release);
+                    }
+                    if handle.is_finished() {
+                        finished.push(key.clone());
+                    }
+                }
+                for key in finished {
+                    if let Some((_, _, handle)) = workers.remove(&key) {
+                        let _ = handle.join();
+                    }
+                }
+                for (key, target) in targets {
+                    if workers.contains_key(&key) {
+                        continue;
+                    }
+                    let saved_target = target.clone();
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let stopping = stop.clone();
+                    let ctx = ctx.clone();
+                    let handle = std::thread::spawn(move || {
+                        let mut backoff = SYNC_INTERVAL;
+                        while !cancelled(&ctx, &stopping) {
+                            let connected_at = Instant::now();
+                            if let Err(error) = connected(&ctx, &target, &stopping) {
+                                if connected_at.elapsed()
+                                    >= Timing::from_exchange(Duration::ZERO).lease
+                                {
+                                    backoff = SYNC_INTERVAL;
+                                }
+                                let _=ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"disconnected","error":error.to_string(),"at":super::super::context::now()}));
+                                wait(&ctx, &stopping, backoff);
+                                backoff =
+                                    (backoff * 2).min(Timing::from_exchange(Duration::ZERO).lease);
+                            }
+                        }
+                    });
+                    workers.insert(key, (saved_target, stop, handle));
+                }
+                // Capture and recovery continue with no reachable transport.
+                let db = ctx.db()?;
+                let mut journal = engine(&ctx)?;
+                prepared(&ctx, &db, &mut journal, controller)?;
                 Ok(())
             })();
             if let Err(error) = result {
                 eprintln!("Distributed sync: {error}");
             }
-            ctx.wait(Duration::from_secs(2));
+            ctx.wait(SYNC_INTERVAL);
+        }
+        for (_, (_, stop, handle)) in workers {
+            stop.store(true, Ordering::Release);
+            let _ = handle.join();
         }
     });
 }
@@ -331,41 +454,6 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_peer_waits_while_healthy_and_busy_peers_keep_syncing() {
-        let mut retries = Retries::default();
-        assert!(
-            retries
-                .run("offline", || Err(replica::invalid("Disconnected")))
-                .is_err()
-        );
-        assert!(
-            !retries
-                .run("offline", || panic!(
-                    "An unavailable peer must not consume another timeout immediately"
-                ))
-                .unwrap()
-        );
-        assert!(retries.run("healthy", || Ok(true)).unwrap());
-        assert!(!retries.run("busy", || Ok(false)).unwrap());
-        assert!(
-            retries.run("busy", || Ok(true)).unwrap(),
-            "A held sync lock is not a connection failure"
-        );
-        let deadline = *retries.0.get("offline").unwrap();
-        assert!(deadline > Instant::now());
-        assert!(deadline <= Instant::now() + Duration::from_secs(60));
-        retries
-            .0
-            .insert("offline".into(), Instant::now() - Duration::from_secs(1));
-        assert!(retries.run("offline", || Ok(true)).unwrap());
-        assert!(
-            retries.run("offline", || Ok(true)).unwrap(),
-            "Recovered peers resume normal synchronization"
-        );
-        assert!(!retries.0.contains_key("offline"));
-    }
-
-    #[test]
     fn peer_preparation_keeps_controller_and_baseline_ownership() {
         let root = crate::admin::Temporary::new().unwrap();
         let ctx = Context {
@@ -403,7 +491,7 @@ mod tests {
                 .unwrap(),
             "a".repeat(32)
         );
-        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs','worker_allocations')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(
             db.query_row("SELECT ready FROM distributed_members", [], |r| r
                 .get::<_, i64>(0))
@@ -411,7 +499,5 @@ mod tests {
             0
         );
         drop(journal);
-        let _held = ctx.lock("distributed-sync.lock", false).unwrap().unwrap();
-        assert!(!exchange(&ctx, "unused.invalid", None).unwrap());
     }
 }

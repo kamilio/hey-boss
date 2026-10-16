@@ -3097,3 +3097,47 @@ fn worker_worktree_choice_requires_project_permission() {
         worker.stop();
     }
 }
+
+#[test]
+fn distributed_worker_settles_machine_reservation_before_starting_and_claiming() {
+    let f = Fixture::new("distributed-settle");
+    fs::write(f.root.join("mode.txt"), "completed").unwrap();
+    f.setup(&[]);
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    // The actual worker will use this installation's stable machine identity.
+    db.execute(
+        "UPDATE fleet_meta SET role='peer',node=?1 WHERE id=1",
+        [hey_boss::issues::identity::machine().unwrap()],
+    )
+    .unwrap();
+    let settle: u64 = db
+        .query_row("SELECT settle_ms FROM worker_allocation_clock", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let start = Instant::now();
+    let mut worker = f.worker();
+    let reserved = f.wait(|s| s["runs"][0]["state"] == "reserved");
+    assert!(reserved["runs"][0]["claimed_at"].is_null());
+    assert!(
+        !f.root.join("protocol.jsonl").exists(),
+        "No provider process before settlement"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fleet_allocations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let finished = f.wait(|s| s["runs"][0]["finished_at"].is_number());
+    assert!(start.elapsed() >= Duration::from_millis(settle));
+    assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    assert_eq!(
+        db.query_row("SELECT released FROM worker_allocations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    worker.stop();
+}

@@ -165,7 +165,10 @@ fn run_inner(action: &super::Action) -> Result<()> {
         ctrlc::set_handler(move || stop.store(true, std::sync::atomic::Ordering::Release))?;
     }
     match action {
-        super::Action::Sync { controller } => distributed::serve(ctx, controller),
+        super::Action::Sync {
+            controller,
+            continuous,
+        } => distributed::serve(ctx, controller, *continuous),
         super::Action::SyncStatus => {
             println!(
                 "{}",

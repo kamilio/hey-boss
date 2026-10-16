@@ -56,9 +56,11 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         // Storage-only cooling/restoration must not overwrite a concurrent
         // requirements edit just because it has a later logical clock.
         "issues" if matches!(column, "archive_key" | "archived_comments") => "@storage",
-        "scheduled_jobs" | "scheduled_job_revisions" | "scheduled_job_runs" | "worker_runs" => {
-            "@row"
-        }
+        "scheduled_jobs"
+        | "scheduled_job_revisions"
+        | "scheduled_job_runs"
+        | "worker_runs"
+        | "worker_allocations" => "@row",
         _ => column,
     }
 }
@@ -92,6 +94,44 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         || fact.before.is_none() && fact.after.is_none()
     {
         return Err(replica::invalid("Invalid distributed revision"));
+    }
+    if fact.table == "worker_allocations" {
+        let row = fact
+            .after
+            .as_ref()
+            .ok_or_else(|| replica::invalid("Allocation history cannot be deleted"))?;
+        let owner = fact.origin.split(':').next().unwrap_or_default();
+        if row["machine"].as_str() != Some(owner)
+            || row["ticket"].as_i64().is_none_or(|v| v < 0)
+            || row["settle_ms"].as_i64().is_none_or(|v| v <= 0)
+            || row["lease_ms"].as_i64().is_none_or(|v| v <= 0)
+            || row["presence_after"].as_i64().is_none_or(|v| v < 0)
+            || !matches!(row["released"].as_i64(), Some(0 | 1))
+            || (!row["launched"].is_null() && row["launched"].as_i64().is_none_or(|v| v < 0))
+        {
+            return Err(replica::invalid("Invalid allocation owner or timing"));
+        }
+        if let Some(before) = &fact.before {
+            if [
+                "id",
+                "project_id",
+                "issue_number",
+                "machine",
+                "ticket",
+                "settle_ms",
+                "lease_ms",
+                "presence_after",
+            ]
+            .iter()
+            .any(|key| before[*key] != row[*key])
+                || (before["released"] == 1 && row["released"] != 1)
+                || (!before["launched"].is_null() && before["launched"] != row["launched"])
+            {
+                return Err(replica::invalid(
+                    "Allocation identity and launch order are immutable",
+                ));
+            }
+        }
     }
     let columns = capture::columns(db, &fact.table)?;
     for row in [&fact.before, &fact.after].into_iter().flatten() {
