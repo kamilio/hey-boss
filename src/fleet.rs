@@ -26,6 +26,10 @@ use status::status_text;
 pub fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
     native::auto_workers(apply, config_only)
 }
+/// Verify local worker executables and safely replace outdated running workers.
+pub fn rollout_workers(build: &str, apply: bool) -> std::io::Result<Value> {
+    native::rollout_workers(build, apply)
+}
 pub fn add_auto_worker(
     settings: &crate::issues::worker::Settings,
     id: Option<&str>,

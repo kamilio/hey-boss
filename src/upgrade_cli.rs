@@ -82,6 +82,8 @@ pub struct Options {
     binary: Option<PathBuf>,
     #[arg(long, hide = true)]
     observed_generation: Option<u64>,
+    #[arg(long, hide = true)]
+    reload_workers: Option<String>,
 }
 
 fn error(message: impl Into<String>) -> io::Error {
@@ -480,6 +482,75 @@ fn target_sync(host: &str, binary: &Path) -> io::Result<serde_json::Value> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
+fn target_workers(
+    host: &str,
+    binary: &Path,
+    build: &str,
+    check: bool,
+) -> io::Result<serde_json::Value> {
+    if build.len() != 16 || !build.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(error("Invalid worker rollout build"));
+    }
+    let mut command = if host == "local" {
+        let mut command = Command::new(binary);
+        command.args(["upgrade", "--reload-workers", build, "--json"]);
+        if check {
+            command.arg("--check");
+        }
+        command
+    } else {
+        let mut command = ssh(host)?;
+        command.arg(format!(
+            "\"$HOME/.local/bin/hey-boss\" upgrade --reload-workers {build} --json{}",
+            if check { " --check" } else { "" }
+        ));
+        command
+    };
+    // An incomplete handoff returns structured evidence with a failing exit code.
+    let result = command.output()?;
+    serde_json::from_slice(&result.stdout).map_err(|_| {
+        error(format!(
+            "Worker rollout failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ))
+    })
+}
+
+fn workers_error(value: &serde_json::Value, build: &str) -> Option<String> {
+    if value["ok"] == true
+        && value["build"] == build
+        && value["complete"] == true
+        && value["workers"].as_array().is_some_and(|workers| {
+            workers
+                .iter()
+                .all(|w| matches!(w["state"].as_str(), Some("current" | "inactive")))
+        })
+    {
+        return None;
+    }
+    let pending: Vec<_> = value["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| !matches!(w["state"].as_str(), Some("current" | "inactive")))
+        .map(|w| {
+            format!(
+                "{} ({})",
+                w["id"].as_str().unwrap_or("unknown"),
+                w["state"].as_str().unwrap_or("unknown")
+            )
+        })
+        .collect();
+    Some(format!(
+        "Running worker build is not verified{}",
+        if pending.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", pending.join(", "))
+        }
+    ))
+}
+
 fn sync_error(value: &serde_json::Value, distributed_required: bool) -> Option<String> {
     if !distributed_required && value["mode"] == "legacy" {
         return None;
@@ -640,7 +711,7 @@ fn apply(
         return Err(error("Received source does not match its provenance"));
     }
     let state = state()?;
-    ordered_install(&state, &source, observed, |previous_receipt| {
+    let installed = ordered_install(&state, &source, observed, |previous_receipt| {
         let previous = inspect_unlocked(binary, &state)?;
         if previous.build.as_deref() == Some(&source.build)
             && !force
@@ -671,7 +742,14 @@ fn apply(
         }
         install::publish(snapshot, binary, &built, &state, &receipt)?;
         inspect_unlocked(binary, &state)
-    })
+    })?;
+    // Release the installation lock before invoking the installed binary. This
+    // also covers remote snapshot guards and retries of an already installed build.
+    let workers = target_workers("local", binary, &source.build, false)?;
+    if let Some(problem) = workers_error(&workers, &source.build) {
+        return Err(error(problem));
+    }
+    Ok(installed)
 }
 
 #[derive(Serialize)]
@@ -684,6 +762,7 @@ struct Report {
     verified: Option<Installation>,
     final_installation: Option<Installation>,
     sync: Option<serde_json::Value>,
+    workers: Option<serde_json::Value>,
     error: Option<String>,
 }
 fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
@@ -721,6 +800,7 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             verified: None,
             final_installation: None,
             sync: None,
+            workers: None,
             error: None,
         };
         let result = (|| -> io::Result<()> {
@@ -780,9 +860,18 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
                 .into();
                 entry.verified = Some(installed);
             }
+            let workers = target_workers(&host, binary, &source.build, options.check)?;
+            let problem = workers_error(&workers, &source.build);
+            entry.workers = Some(workers);
+            if let Some(problem) = problem {
+                return Err(error(problem));
+            }
             Ok(())
         })();
         if let Err(e) = result {
+            if entry.verified.is_some() {
+                entry.status = "unhealthy".into();
+            }
             entry.error = Some(e.to_string());
         }
         if !options.json {
@@ -853,6 +942,18 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
+        if entry.error.is_none() {
+            match target_workers(&entry.host, binary, &source.build, true) {
+                Ok(workers) => {
+                    entry.error = workers_error(&workers, &source.build);
+                    entry.workers = Some(workers);
+                }
+                Err(error) => entry.error = Some(format!("Final worker verification: {error}")),
+            }
+            if entry.error.is_some() {
+                entry.status = "unhealthy".into();
+            }
+        }
     }
     if options.source.is_some() && !options.check && reports[0].error.is_none() {
         atomic_write(
@@ -891,6 +992,11 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
 }
 
 pub fn run(options: &Options) -> io::Result<()> {
+    if let Some(build) = &options.reload_workers {
+        let report = hey_boss::fleet::rollout_workers(build, !options.check)?;
+        println!("{report}");
+        std::process::exit(if report["complete"] == true { 0 } else { 1 });
+    }
     let binary = options
         .binary
         .clone()
@@ -921,6 +1027,19 @@ pub fn run(options: &Options) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rollout_requires_complete_runtime_evidence_even_when_files_match() {
+        use serde_json::json;
+        let mut value = json!({"ok":true,"build":"new","complete":true,"workers":[{"id":"busy","state":"outdated"}]});
+        assert!(workers_error(&value, "new").is_some());
+        value["workers"][0]["state"] = json!("current");
+        assert!(workers_error(&value, "new").is_none());
+        assert!(workers_error(&value, "other").is_some());
+        value["complete"] = json!(false);
+        assert!(workers_error(&value, "new").is_some());
+        assert!(workers_error(&json!({"ok":true,"build":"new","complete":true}), "new").is_some());
+    }
+
     #[test]
     fn matching_build_cannot_pass_rollout_with_shadow_or_stale_data() {
         use serde_json::json;
@@ -1262,6 +1381,7 @@ mod tests {
             apply_snapshot: None,
             binary: None,
             observed_generation: None,
+            reload_workers: None,
         }
     }
     fn fixture(root: &Path) {

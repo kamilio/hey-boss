@@ -1855,6 +1855,125 @@ fn offline_replica_launches_only_work_allocated_to_its_machine() {
     worker.stop();
 }
 #[test]
+fn rollout_replaces_busy_old_workers_and_verifies_the_replacement_without_restarting_twice() {
+    let f = Fixture::new("verified-worker-rollout");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&["--concurrency", "2"]);
+    let mut worker = f.worker();
+    let before = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
+    let id = before["worker_id"].as_str().unwrap();
+    let old_run = before["runs"][0]["id"].clone();
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    db.execute(
+        "UPDATE issue_worker_builds SET build='previous-build' WHERE worker_id=?1",
+        [id],
+    )
+    .unwrap();
+    // An older live registration must not disappear behind the dashboard's
+    // 100-row cap when newer inactive registrations exist.
+    for n in 0..105 {
+        db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) SELECT ?1,kind,json_set(config,'$.enabled',json('false')),1,updated_at+1 FROM issue_workers WHERE id=?2", [format!("inactive-{n}"), id.to_owned()]).unwrap();
+    }
+    fs::write(f.root.join("saved-work.txt"), "unfinished work").unwrap();
+    let rollout = |check: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        command
+            .current_dir(&f.root)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env("HEY_BOSS_FLEET_STATE", f.root.join("fleet"))
+            .env("HEY_BOSS_FLEET_DESIRED", f.root.join("fleet.yaml"))
+            .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
+            .env(
+                "HEY_BOSS_CODEX",
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
+            )
+            .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .args([
+                "upgrade",
+                "--reload-workers",
+                env!("HEY_BOSS_BUILD_ID"),
+                "--json",
+            ]);
+        if check {
+            command.arg("--check");
+        }
+        let output = command.output().unwrap();
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{error}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.success(), report)
+    };
+    let (ok, report) = rollout(true);
+    assert!(
+        !ok,
+        "Installed files must not hide an outdated running worker: {report}"
+    );
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["workers"].as_array().unwrap().len(), 106);
+    db.execute("DELETE FROM issue_workers WHERE id LIKE 'inactive-%'", [])
+        .unwrap();
+    assert_eq!(f.cli(&["worker", "status"])["runs"][0]["id"], old_run);
+    // A deployment must never undo a human pause, even with an active old agent.
+    db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('false')) WHERE id=?1",
+        [id],
+    )
+    .unwrap();
+    let (_, paused) = rollout(false);
+    assert_eq!(paused["complete"], false);
+    assert_eq!(f.cli(&["worker", "status"])["runs"][0]["id"], old_run);
+    db.execute(
+        "UPDATE issue_workers SET config=json_set(config,'$.enabled',json('true')) WHERE id=?1",
+        [id],
+    )
+    .unwrap();
+    let (ok, report) = rollout(false);
+    assert!(
+        ok,
+        "Busy worker did not finish its guarded handoff: {report}"
+    );
+    assert_eq!(report["complete"], true);
+    let after = f.wait(|s| s["runs"][0]["claimed_at"].is_number() && s["runs"][0]["id"] != old_run);
+    assert_eq!(after["worker_id"], id);
+    assert_eq!(after["config"], before["config"]);
+    assert_ne!(after["workers"][0]["pid"], before["workers"][0]["pid"]);
+    assert_eq!(after["workers"][0]["build"], env!("HEY_BOSS_BUILD_ID"));
+    let stopped: i64 = db
+        .query_row(
+            "SELECT count(*) FROM worker_runs WHERE id=?1 AND finished_at IS NOT NULL",
+            [old_run.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stopped, 1,
+        "Replacement must wait for the old attempt to stop"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("saved-work.txt")).unwrap(),
+        "unfinished work"
+    );
+    assert!(rollout(false).0);
+    assert_eq!(
+        f.cli(&["worker", "status"])["workers"][0]["pid"],
+        after["workers"][0]["pid"]
+    );
+    // Stop the detached replacement as well as the original process handle.
+    db.execute(
+        "UPDATE issue_workers SET stop_requested=1 WHERE id=?1",
+        [id],
+    )
+    .unwrap();
+    f.wait(|s| s["active"] == 0);
+    worker.stop();
+}
+
+#[test]
 fn emergency_cli_update_drains_active_sessions_then_restores_same_worker() {
     cli_update_idle_handoff(true);
 }
