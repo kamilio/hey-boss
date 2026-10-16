@@ -1585,7 +1585,7 @@ fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
         assert_eq!(again["runs"][0]["state"], "infrastructure_blocked");
         assert_eq!(again["runs"][0]["session_id"], session);
         assert_eq!(again["runs"][0]["retry_count"], 2);
-        fs::write(f.root.join("mode.txt"), "completed").unwrap();
+        fs::write(f.root.join("mode.txt"), "restored-claim").unwrap();
         db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
         let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
         assert_eq!(recovered["runs"][0]["session_id"], session);
