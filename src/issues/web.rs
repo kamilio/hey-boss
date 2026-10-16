@@ -142,7 +142,19 @@ fn initial_project(resolved: &Value, explicit: bool) -> Result<Project> {
     Ok(detected)
 }
 
+fn foreground_requests() -> std::io::Result<()> {
+    // Legacy launchd registrations can throttle this process, including its
+    // shared SQLite owner. HTTP/Unix sockets do not lift that policy as XPC
+    // activity would. Clear it before starting any request-serving threads.
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn serve(config: Config) -> Result<()> {
+    foreground_requests()?;
     if config
         .allow_public_ip
         .is_some_and(|ip| lan::parse_public_ip(&ip.to_string()).is_none())
@@ -1208,6 +1220,34 @@ fn json_response(value: Value) -> Result<(u16, &'static str, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::validate_mobile_origin;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inherited_background_policy_is_cleared_for_http_and_database_requests() {
+        if std::env::var_os("HEY_BOSS_WEB_POLICY_TEST_CHILD").is_some() {
+            assert_eq!(
+                unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) },
+                0
+            );
+            assert_eq!(
+                unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) },
+                1
+            );
+            super::foreground_requests().unwrap();
+            assert_eq!(
+                unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) },
+                0
+            );
+            return;
+        }
+        // Process policy is global; isolate it from concurrent tests. Setting
+        // it before exec does not reproduce launchd's post-exec throttling.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "issues::web::tests::inherited_background_policy_is_cleared_for_http_and_database_requests", "--nocapture"])
+            .env("HEY_BOSS_WEB_POLICY_TEST_CHILD", "1")
+            .status().unwrap();
+        assert!(status.success());
+    }
 
     #[test]
     fn mobile_origins_are_private_https_origins_without_url_components() {
