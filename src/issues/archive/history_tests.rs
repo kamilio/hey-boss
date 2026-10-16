@@ -1390,3 +1390,56 @@ fn a_reserved_archive_path_is_protected_before_its_first_publication() {
     assert!(backup_store(&f.db, &archive).is_err());
     assert!(!archive.exists());
 }
+
+#[test]
+fn newer_archive_covers_history_only_when_content_and_references_are_retained() {
+    for change in ["none", "event_alias", "comment", "reference", "progress"] {
+        let f = Fixture::new();
+        f.archive();
+        let old: String =
+            f.db.query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        restore_issue(&f.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+        f.db.execute(
+            "UPDATE issues SET title='Newer snapshot' WHERE number=1",
+            [],
+        )
+        .unwrap();
+        match change {
+            "event_alias" => {
+                f.db.execute("UPDATE events SET id=105 WHERE id=5", [])
+                    .unwrap();
+            }
+            "comment" => {
+                f.db.execute("UPDATE comments SET body='Changed finding' WHERE id=1", [])
+                    .unwrap();
+            }
+            "reference" => {
+                f.db.execute(
+                    "UPDATE events SET data=json_set(data,'$.comment_id',2) WHERE id=4",
+                    [],
+                )
+                .unwrap();
+            }
+            "progress" => {
+                f.db.execute("DELETE FROM issue_status_updates WHERE id='s1'", [])
+                    .unwrap();
+            }
+            _ => {}
+        }
+        assert!(archive_issue(&f.db, "named:Archive", 1, GRACE_MS * 3 + 200).unwrap());
+        let new: String =
+            f.db.query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_ne!(old, new);
+        assert_eq!(
+            history::covered_by(&f.db, &old, &new, "named:Archive", 1).unwrap(),
+            matches!(change, "none" | "event_alias"),
+            "{change}"
+        );
+    }
+}

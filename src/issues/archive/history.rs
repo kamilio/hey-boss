@@ -965,3 +965,61 @@ fn restore_row(db: &HotConnection, table: &str, saved: &RestoreRow) -> Result<()
     }
     Ok(())
 }
+
+/// Retire obsolete storage only after its history is proven redundant. The
+/// immutable source remains intact. Comment IDs and references stay exact;
+/// events may have different local IDs but must match in every other field.
+pub(crate) fn covered_by(
+    db: &HotConnection,
+    key: &str,
+    replacement: &str,
+    project: &str,
+    number: i64,
+) -> Result<bool> {
+    if key == replacement {
+        return Ok(false);
+    }
+    let archive = Archive::read(&archive_path(db)?)?;
+    verify_copy(&archive, key, project, number)?;
+    verify_copy(&archive, replacement, project, number)?;
+    let normalize = |kind: &str, record: &str| -> Result<Value> {
+        let mut row: Value = serde_json::from_str(record)?;
+        if kind == "events" {
+            row.as_object_mut().unwrap().remove("id");
+            if let Some(data) = row["data"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            {
+                row["data"] = data;
+            }
+        }
+        Ok(row)
+    };
+    let mut statement = archive
+        .db
+        .prepare("SELECT kind,text_id,created_at,record FROM issue_history WHERE archive_key=?1")?;
+    let mut rows = statement.query([key])?;
+    while let Some(row) = rows.next()? {
+        let kind: String = row.get(0)?;
+        let id: String = row.get(1)?;
+        if kind == "agents" {
+            if !archive.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_history WHERE archive_key=?1 AND kind='agents' AND text_id=?2)",params![replacement,id],|r|r.get::<_,bool>(0))? {return Ok(false)}
+            continue;
+        }
+        let expected = normalize(&kind, &row.get::<_, String>(3)?)?;
+        let mut candidates=archive.db.prepare("SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 AND created_at=?3 AND (?2='events' OR text_id=?4)")?;
+        let mut candidates =
+            candidates.query(params![replacement, kind, row.get::<_, i64>(2)?, id])?;
+        let mut found = false;
+        while let Some(candidate) = candidates.next()? {
+            if normalize(&kind, &candidate.get::<_, String>(0)?)? == expected {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
