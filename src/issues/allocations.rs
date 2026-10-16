@@ -59,25 +59,30 @@ impl Clock {
         } else {
             #[cfg(target_os = "macos")]
             let boot = {
-                let mut value = std::mem::MaybeUninit::<libc::timeval>::uninit();
-                let mut len = std::mem::size_of::<libc::timeval>();
+                // Unlike kern.boottime, this does not change when the wall clock
+                // is corrected. Every process on the same boot reads the same ID.
+                let mut value = [0_u8; 64];
+                let mut len = value.len();
                 if unsafe {
                     libc::sysctlbyname(
-                        c"kern.boottime".as_ptr(),
+                        c"kern.bootsessionuuid".as_ptr(),
                         value.as_mut_ptr().cast(),
                         &mut len,
                         std::ptr::null_mut(),
                         0,
                     )
                 } != 0
+                    || len == 0
+                    || len > value.len()
                 {
                     return Err(Error::new(
                         "allocation_clock",
                         "Cannot identify this system boot",
                     ));
                 }
-                let value = unsafe { value.assume_init() };
-                format!("{}:{}", value.tv_sec, value.tv_usec)
+                String::from_utf8_lossy(&value[..len])
+                    .trim_end_matches('\0')
+                    .to_owned()
             };
             #[cfg(not(target_os = "macos"))]
             let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
