@@ -160,6 +160,9 @@ pub(super) fn remember(db: &Connection, manifest: &Manifest) -> Result<()> {
 pub(super) fn project(db: &Connection, desired: &mut Value) -> Result<bool> {
     let project = desired["project_id"].as_str().unwrap();
     let number = desired["number"].as_i64().unwrap();
+    if let Some(reason) = db.query_row("SELECT reason FROM distributed_archive_failures WHERE project_id=?1 AND number=?2 LIMIT 1", params![project,number], |r|r.get::<_,String>(0)).optional()? {
+        return Err(replica::invalid(&format!("Retained archive needs repair: {reason}")));
+    }
     let current: Option<Option<String>> = db
         .query_row(
             "SELECT archive_key FROM issues WHERE project_id=?1 AND number=?2",
@@ -285,7 +288,13 @@ pub(super) fn receive(
     engine: &hey_boss_sync::Engine,
     manifest: &Manifest,
 ) -> Result<()> {
-    if transfer::Catalog::new(db)?.contains(&manifest.key, &manifest.project, manifest.number)? {
+    let catalog = transfer::Catalog::new(db)?;
+    if catalog.contains(&manifest.key, &manifest.project, manifest.number)? {
+        remember_pages(db, manifest)?;
+        return Ok(());
+    }
+    if catalog.has_copy(&manifest.key, &manifest.project, manifest.number)? {
+        transfer::map_local_history(db, &manifest.key, &manifest.project, manifest.number)?;
         remember_pages(db, manifest)?;
         return Ok(());
     }
@@ -308,6 +317,76 @@ pub(super) fn receive(
     drop(download);
     transfer::map_local_history(db, &manifest.key, &manifest.project, manifest.number)?;
     remember_pages(db, manifest)?;
+    Ok(())
+}
+
+// A bad historical identity must not stop delivery of unrelated task facts.
+// Keep the immutable manifest, block only its issue, and retry outside the hot
+// writer. SQL/transport failures still propagate rather than becoming conflicts.
+pub(super) fn receive_or_retain(
+    db: &Connection,
+    engine: &hey_boss_sync::Engine,
+    manifest: &Manifest,
+) -> Result<()> {
+    let now = crate::issues::worker::now();
+    let attempted: Option<i64> = db
+        .query_row(
+            "SELECT attempted_at FROM distributed_archive_failures WHERE key=?1",
+            [&manifest.key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if attempted.is_some_and(|at| at > now - 30_000 && at <= now) {
+        return Ok(());
+    }
+    let entity = json!({"key":manifest.key,"project_id":manifest.project,"number":manifest.number})
+        .to_string();
+    match receive(db, engine, manifest) {
+        Ok(()) => {
+            if attempted.is_none() {
+                return Ok(());
+            }
+            let tx = db.unchecked_transaction()?;
+            let removed = tx.execute(
+                "DELETE FROM distributed_archive_failures WHERE key=?1",
+                [&manifest.key],
+            )?;
+            tx.execute(
+                "DELETE FROM distributed_rejections WHERE table_name='archive' AND entity=?1",
+                [entity],
+            )?;
+            if removed > 0 {
+                tx.execute(
+                    "INSERT OR IGNORE INTO distributed_dirty VALUES('issues',?1)",
+                    [json!({"project_id":manifest.project,"number":manifest.number}).to_string()],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        }
+        Err(error)
+            if error
+                .downcast_ref::<crate::issues::Error>()
+                .is_some_and(|e| {
+                    matches!(e.code.as_str(), "archive_conflict" | "archive_unavailable")
+                }) =>
+        {
+            let tx = db.unchecked_transaction()?;
+            tx.execute("INSERT INTO distributed_archive_failures VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(key) DO UPDATE SET reason=excluded.reason,attempted_at=excluded.attempted_at",params![manifest.key,manifest.project,manifest.number,serde_json::to_string(manifest)?,error.to_string(),now])?;
+            tx.execute("INSERT INTO distributed_rejections VALUES('archive',?1,?2) ON CONFLICT(table_name,entity) DO UPDATE SET reason=excluded.reason",params![entity,error.to_string()])?;
+            tx.commit()?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn retry_failed(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<()> {
+    let now = crate::issues::worker::now();
+    let manifest: Option<String> = db.query_row("SELECT manifest FROM distributed_archive_failures WHERE attempted_at<=?1 OR attempted_at>?2 ORDER BY attempted_at,key LIMIT 1",params![now-30_000,now],|r|r.get(0)).optional()?;
+    if let Some(manifest) = manifest {
+        receive_or_retain(db, engine, &serde_json::from_str(&manifest)?)?;
+    }
     Ok(())
 }
 
