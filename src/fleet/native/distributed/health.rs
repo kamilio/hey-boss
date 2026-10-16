@@ -43,10 +43,17 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
         || sample["baseline_remaining"].as_u64().unwrap_or(0) > 0
         || sample["pending_archives"].as_u64().unwrap_or(0) > 0
         || sample["projected"] != sample["journal_head"]
+        || exchange["incoming_drained"] == false
+        || exchange["outgoing_pending"].as_u64().unwrap_or(0) > 0
+        || exchange["journal_head"]
+            .as_u64()
+            .is_some_and(|head| head > sample["projected"].as_u64().unwrap_or(0))
     {
         "catching_up"
     } else if age(exchange).is_none_or(|age| age > FRESH_MS) {
         "disconnected"
+    } else if exchange["incoming_drained"] != true {
+        "unknown"
     } else {
         "healthy"
     };
@@ -54,6 +61,11 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
     result["age_ms"] = json!(age(sample));
     result["last_exchange"] = exchange.get("at").cloned().unwrap_or(Value::Null);
     result["exchange_age_ms"] = json!(age(exchange));
+    result["pending_peers"] = exchange.get("pending_peers").cloned().unwrap_or(json!([]));
+    result["outgoing_pending"] = exchange
+        .get("outgoing_pending")
+        .cloned()
+        .unwrap_or(Value::Null);
     result["message"] = json!(match state {
         "healthy" => "Changes are applied and sync is responding",
         "shadow" => "Sync migration is not active; received changes are not visible",
@@ -85,14 +97,61 @@ pub(in crate::fleet::native) fn observed(machine: &Value, at: f64) -> Value {
 
 pub(in crate::fleet::native) fn cached(ctx: &Context) -> Result<Value> {
     let clock = Clock::read()?;
-    Ok(classify(
-        &ctx.read_json(&ctx.state.join("distributed-health.json"), Value::Null)
-            .unwrap_or(Value::Null),
-        &ctx.read_json(&ctx.state.join("distributed-exchange.json"), Value::Null)
-            .unwrap_or(Value::Null),
+    let sample = ctx
+        .read_json(&ctx.state.join("distributed-health.json"), Value::Null)
+        .unwrap_or(Value::Null);
+    let mut peers = Vec::new();
+    let directory = ctx.state.join("distributed-peers");
+    if directory.exists() {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|ext| ext == "json") {
+                peers.push(
+                    ctx.read_json(&entry.path(), Value::Null)
+                        .unwrap_or(Value::Null),
+                );
+            }
+        }
+    }
+    let exchange = aggregate(
+        &peers,
         &clock.boot,
         clock.tick,
-    ))
+        sample["journal_head"].as_i64().unwrap_or(0),
+    );
+    Ok(classify(&sample, &exchange, &clock.boot, clock.tick))
+}
+
+fn aggregate(peers: &[Value], boot: &str, tick: i64, local_head: i64) -> Value {
+    let peers = peers
+        .iter()
+        .filter(|p| p["boot"] == boot && p["tick"].as_i64().is_some_and(|t| t <= tick))
+        .collect::<Vec<_>>();
+    // A responding peer cannot refresh the freshness of a different route.
+    let Some(oldest) = peers.iter().min_by_key(|p| p["tick"].as_i64()) else {
+        return Value::Null;
+    };
+    let mut result = (*oldest).clone();
+    let mut pending = Vec::new();
+    let mut outgoing = 0_i64;
+    let mut head = local_head;
+    let mut drained = true;
+    for peer in peers {
+        let peer_head = peer["journal_head"].as_i64().unwrap_or(0);
+        let sent = peer_head.saturating_sub(peer["outgoing_pending"].as_i64().unwrap_or(0));
+        let remaining = local_head.max(peer_head).saturating_sub(sent);
+        outgoing = outgoing.saturating_add(remaining);
+        head = head.max(peer_head);
+        drained &= peer["incoming_drained"] == true;
+        if remaining > 0 || peer["incoming_drained"] != true {
+            pending.push(peer["peer"].clone());
+        }
+    }
+    result["incoming_drained"] = json!(drained);
+    result["outgoing_pending"] = json!(outgoing);
+    result["journal_head"] = json!(head);
+    result["pending_peers"] = json!(pending);
+    result
 }
 
 pub(super) fn prepared(
@@ -109,8 +168,15 @@ pub(super) fn failed(ctx: &Context, error: &str) {
     let _ = save(ctx, "distributed-health.json", json!({"error":error}));
 }
 
-pub(super) fn exchanged(ctx: &Context) -> Result<()> {
-    save(ctx, "distributed-exchange.json", json!({}))
+pub(super) fn peer_exchanged(
+    ctx: &Context,
+    exchange: &hey_boss_sync::session::Exchange,
+) -> Result<()> {
+    save(
+        ctx,
+        &format!("distributed-peers/{}.json", exchange.peer),
+        json!({"peer":exchange.peer,"incoming_drained":exchange.incoming_drained,"outgoing_pending":exchange.outgoing_pending,"journal_head":exchange.journal_head}),
+    )
 }
 
 fn save(ctx: &Context, name: &str, mut value: Value) -> Result<()> {
@@ -128,8 +194,55 @@ mod tests {
         json!({"boot":"boot","tick":100,"active":1,"pending_local":0,"pending_projection":0,"conflicts":0,"baseline_remaining":0,"pending_archives":0,"projected":7,"journal_head":7})
     }
     #[test]
+    fn transport_backlog_and_new_receipts_prevent_false_health() {
+        let s = sample();
+        let mut exchange = json!({"boot":"boot","tick":100,"at":1,"incoming_drained":false,"outgoing_pending":0,"journal_head":7});
+        assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "catching_up");
+        exchange["incoming_drained"] = json!(true);
+        exchange["outgoing_pending"] = json!(2);
+        assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "catching_up");
+        exchange["outgoing_pending"] = json!(0);
+        exchange["journal_head"] = json!(8);
+        assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "catching_up");
+        exchange["journal_head"] = json!(7);
+        assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "healthy");
+    }
+    #[test]
+    fn a_healthy_peer_does_not_hide_another_peers_backlog() {
+        let mut peers = vec![
+            json!({"boot":"boot","tick":100,"peer":"behind","incoming_drained":false,"outgoing_pending":0,"journal_head":7}),
+            json!({"boot":"boot","tick":101,"peer":"ready","incoming_drained":true,"outgoing_pending":0,"journal_head":7}),
+        ];
+        let exchange = aggregate(&peers, "boot", 102, 7);
+        assert_eq!(
+            classify(&sample(), &exchange, "boot", 102)["state"],
+            "catching_up"
+        );
+        assert_eq!(exchange["pending_peers"], json!(["behind"]));
+        peers[0]["incoming_drained"] = json!(true);
+        assert_eq!(
+            classify(&sample(), &aggregate(&peers, "boot", 102, 7), "boot", 102)["state"],
+            "healthy"
+        );
+        assert_eq!(aggregate(&peers, "boot", 102, 8)["outgoing_pending"], 2);
+        assert!(aggregate(&peers, "next-boot", 102, 7).is_null());
+        peers[0]["tick"] = json!(0);
+        peers[1]["tick"] = json!(31_000);
+        let mut fresh = sample();
+        fresh["tick"] = json!(31_000);
+        assert_eq!(
+            classify(
+                &fresh,
+                &aggregate(&peers, "boot", 31_001, 7),
+                "boot",
+                31_001
+            )["state"],
+            "disconnected"
+        );
+    }
+    #[test]
     fn connection_alone_cannot_hide_shadow_mode_or_unapplied_data() {
-        let exchange = json!({"boot":"boot","tick":100,"at":1});
+        let exchange = json!({"boot":"boot","tick":100,"at":1,"incoming_drained":true});
         let mut s = sample();
         assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "healthy");
         s["active"] = json!(0);
@@ -217,7 +330,12 @@ mod tests {
         db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE distributed_baseline SET complete=1; INSERT INTO distributed_archive_history(key,project_id,number) VALUES('cold','p',1);").unwrap();
         let engine = hey_boss_sync::Engine::open(&ctx.path.with_extension("sync.db")).unwrap();
         prepared(&ctx, &db, &engine).unwrap();
-        exchanged(&ctx).unwrap();
+        save(
+            &ctx,
+            "distributed-peers/test.json",
+            json!({"incoming_drained":true,"outgoing_pending":0,"journal_head":0}),
+        )
+        .unwrap();
         assert_eq!(cached(&ctx).unwrap()["state"], "healthy");
     }
 }
