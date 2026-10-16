@@ -225,7 +225,7 @@ pub(crate) struct Job {
     #[serde(default)]
     pub worker_id: String,
     #[serde(default)]
-    pub resume_session: Option<String>,
+    pub retry: bool,
     pub project: Project,
     pub issue: Value,
     pub comments: Vec<Value>,
@@ -1328,7 +1328,7 @@ pub(crate) fn preview(
         session_ref: None,
         id: String::new(),
         worker_id: String::new(),
-        resume_session: None,
+        retry: false,
         project: project.clone(),
         issue,
         comments: vec![],
@@ -1405,7 +1405,7 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
                     && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs),
             ),
         ),
-        ("resume", section("resume", job.resume_session.is_some())),
+        ("resume", section("resume", job.retry)),
     ];
     let values: Vec<_> = values
         .iter()
@@ -1553,22 +1553,9 @@ fn run_thread(
     stop: &AtomicBool,
 ) -> Result<(String, String)> {
     c.send(json!({"method":"initialized","params":{}}))?;
-    let (method, params) = if let Some(session) = &job.resume_session {
-        store.worker_event(&job.id, &format!("Resuming Codex session {session}"), None)?;
-        (
-            "thread/resume",
-            // Codex retains the full history; the worker only needs the session
-            // metadata. Large rollouts otherwise exceed the transport limit.
-            json!({"threadId":session,"cwd":job.config.cwd,"excludeTurns":true}),
-        )
-    } else {
-        (
-            "thread/start",
-            json!({"cwd":job.config.cwd,"ephemeral":false}),
-        )
-    };
+    let params = json!({"cwd":job.config.cwd,"ephemeral":false});
     let result = c.rpc(
-        method,
+        "thread/start",
         if yolo(&job.issue) {
             crate::codex_permissions::yolo_thread(params)
         } else {
@@ -1582,16 +1569,6 @@ fn run_thread(
         .as_str()
         .ok_or_else(|| Error::new("worker_error", "Codex did not return a session ID"))?
         .to_owned();
-    if job
-        .resume_session
-        .as_ref()
-        .is_some_and(|saved| saved != &session)
-    {
-        return Err(Error::new(
-            "worker_error",
-            "Codex resumed a different session than the saved issue session",
-        ));
-    }
     c.session = Some(session.clone());
     store.worker_attach(job, &session)?;
     store.worker_event(&job.id, &format!("Codex session {session}"), None)?;

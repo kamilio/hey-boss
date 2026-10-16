@@ -833,13 +833,13 @@ fn unfinished_unassigned_issues_are_reserved_again_after_retry_delay() {
     }
 }
 #[test]
-fn yolo_applies_to_new_and_resumed_attempts_and_can_be_revoked() {
+fn yolo_applies_to_fresh_attempts_and_can_be_revoked() {
     let f = Fixture::new("yolo-policy");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
     let db = rusqlite::Connection::open(&f.db).unwrap();
     let mut session = Value::Null;
-    for (index, enabled) in [true, true, false].into_iter().enumerate() {
+    for enabled in [true, true, false] {
         // Seed Boss-authorized state; no agent or CLI can grant this label.
         db.execute(
             "UPDATE issues SET labels=?1",
@@ -850,10 +850,8 @@ fn yolo_applies_to_new_and_resumed_attempts_and_can_be_revoked() {
         let status = f.wait(|s| {
             s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number()
         });
-        if index == 0 {
-            session = status["runs"][0]["session_id"].clone();
-        }
-        assert_eq!(status["runs"][0]["session_id"], session);
+        assert_ne!(status["runs"][0]["session_id"], session);
+        session = status["runs"][0]["session_id"].clone();
         worker.stop();
         let protocol = f.transcript();
         let thread = protocol
@@ -861,14 +859,7 @@ fn yolo_applies_to_new_and_resumed_attempts_and_can_be_revoked() {
             .rev()
             .find(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
             .unwrap();
-        assert_eq!(
-            thread["method"],
-            if index == 0 {
-                "thread/start"
-            } else {
-                "thread/resume"
-            }
-        );
+        assert_eq!(thread["method"], "thread/start");
         assert_eq!(
             thread["params"]["approvalPolicy"],
             if enabled { "never" } else { "on-request" }
@@ -911,10 +902,13 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
     f.cli(&["unassign", "1"]);
     let resumed =
         f.wait(|s| s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number());
-    assert_eq!(resumed["runs"][0]["session_id"], session);
+    assert_ne!(resumed["runs"][0]["session_id"], session);
     assert_eq!(
         f.cli(&["view", "1"])["issue"]["assignee"],
-        format!("codex:{}", session.as_str().unwrap())
+        format!(
+            "codex:{}",
+            resumed["runs"][0]["session_id"].as_str().unwrap()
+        )
     );
     let protocol = f.transcript();
     assert_eq!(
@@ -922,13 +916,22 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
             .iter()
             .filter(|v| v["method"] == "thread/start")
             .count(),
-        1
+        2
     );
-    let resume = protocol
-        .iter()
-        .find(|v| v["method"] == "thread/resume")
-        .unwrap();
-    assert_eq!(resume["params"]["threadId"], session);
+    assert!(!protocol.iter().any(|v| v["method"] == "thread/resume"));
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    let checkout = |id: &Value| -> String {
+        db.query_row(
+            "SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs WHERE id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        checkout(&first["runs"][0]["id"]),
+        checkout(&resumed["runs"][0]["id"])
+    );
     for thread in protocol
         .iter()
         .filter(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
@@ -956,7 +959,7 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
 }
 
 #[test]
-fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
+fn timed_out_unassigned_work_starts_fresh_and_claims_again() {
     let f = Fixture::new("timeout-resume");
     fs::write(f.root.join("mode.txt"), "delay-unclaimed").unwrap();
     f.setup(&["--claim-timeout", "5"]);
@@ -976,54 +979,51 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
         s["runs"][0]["claimed_at"].is_number()
             && f.cli(&["view", "1"])["issue"]["agent_launch_count"] == 2
     });
-    assert_eq!(resumed["runs"][0]["session_id"], session);
+    assert_ne!(resumed["runs"][0]["session_id"], session);
     assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 2);
     assert_eq!(
         f.cli(&["view", "1"])["issue"]["assignee"],
-        format!("codex:{}", session.as_str().unwrap())
+        format!(
+            "codex:{}",
+            resumed["runs"][0]["session_id"].as_str().unwrap()
+        )
     );
     replacement.stop();
 }
 
 #[test]
-fn unrecoverable_saved_sessions_start_fresh_without_losing_history() {
+fn every_retry_starts_fresh_without_losing_history() {
     use std::os::unix::fs::PermissionsExt;
-    for (name, state, summary, fresh) in [
+    for (name, state, summary) in [
         (
             "missing-rollout",
             "failed",
             "Codex thread/resume: \"no rollout found for thread id saved-session\"",
-            true,
         ),
         (
             "locked-rollout",
             "failed",
             "Codex thread/resume: \"locked by another writer\"",
-            false,
         ),
         (
             "schema-recovery",
             "failed",
             "Codex turn/start: \"failed to submit turn input: ActiveTurnOutputSchemaMismatch\"",
-            true,
         ),
         (
             "schema-other-method",
             "failed",
             "Codex turn/steer: ActiveTurnOutputSchemaMismatch",
-            false,
         ),
         (
             "schema-report",
             "blocked",
             "Codex turn/start: ActiveTurnOutputSchemaMismatch",
-            false,
         ),
         (
             "schema-other-failure",
             "failed",
             "Codex turn/start: locked by another writer",
-            false,
         ),
     ] {
         let f = Fixture::new(name);
@@ -1048,7 +1048,6 @@ fn unrecoverable_saved_sessions_start_fresh_without_losing_history() {
             "Existing implementation stays intact",
         )
         .unwrap();
-        fs::write(f.root.join("fresh.txt"), fresh.to_string()).unwrap();
         let script = f.root.join("codex.sh");
         fs::write(&script, r#"#!/usr/bin/env node
 const fs = require('node:fs');
@@ -1065,7 +1064,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         send({id:request.id,result:{thread:{id:session,turns:[]}}});
     }
     if (request.method === 'turn/start') {
-        if (fs.readFileSync('fresh.txt','utf8') === 'true' && session !== 'fresh-session') {
+        if (session !== 'fresh-session') {
             send({id:request.id,error:{code:-32600,message:'failed to submit turn input: ActiveTurnOutputSchemaMismatch'}});
             return;
         }
@@ -1084,28 +1083,13 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         let finished =
             f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["finished_at"].is_number());
         assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
-        assert_eq!(
-            finished["runs"][0]["session_id"],
-            if fresh {
-                "fresh-session"
-            } else {
-                "saved-session"
-            },
-            "{name}"
-        );
+        assert_eq!(finished["runs"][0]["session_id"], "fresh-session", "{name}");
         let protocol = f.transcript();
         let thread = protocol
             .iter()
             .find(|v| matches!(v["method"].as_str(), Some("thread/start" | "thread/resume")))
             .unwrap();
-        assert_eq!(
-            thread["method"],
-            if fresh {
-                "thread/start"
-            } else {
-                "thread/resume"
-            }
-        );
+        assert_eq!(thread["method"], "thread/start");
         let turn = protocol
             .iter()
             .find(|v| v["method"] == "turn/start")
@@ -1167,7 +1151,7 @@ fn a_completed_session_is_not_resumed_when_the_issue_is_reopened() {
 }
 
 #[test]
-fn github_events_start_fresh_but_retries_of_delivered_work_can_resume() {
+fn github_events_and_retries_of_delivered_work_start_fresh() {
     for delivered in [false, true] {
         let f = Fixture::new(if delivered {
             "watch-retry"
@@ -1200,7 +1184,7 @@ fn github_events_start_fresh_but_retries_of_delivered_work_can_resume() {
             f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["claimed_at"].is_number());
         let resumed = active["runs"][0]["session_id"] == "saved-session";
         worker.stop();
-        assert_eq!(resumed, delivered, "{active}");
+        assert!(!resumed, "{active}");
         let protocol = f.transcript();
         let turn = protocol
             .iter()
@@ -1275,55 +1259,7 @@ fn saved_sessions_are_not_reused_on_another_machine_or_checkout() {
 }
 
 #[test]
-fn large_saved_sessions_resume_without_loading_history_into_the_worker() {
-    use std::os::unix::fs::PermissionsExt;
-    let f = Fixture::new("large-resume");
-    f.setup(&[]);
-    let db = rusqlite::Connection::open(&f.db).unwrap();
-    let machine: String = db
-        .query_row(
-            "SELECT json_extract(metadata,'$.machine') FROM agents LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let job = serde_json::json!({"config":{"cwd":f.root.canonicalize().unwrap()}});
-    db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,session_id,retry_allowed) VALUES('previous',(SELECT id FROM projects LIMIT 1),1,?1,'old-agent','cancelled',1,'old-start',?2,0,0,1,'saved-session',1)", rusqlite::params![job.to_string(), machine]).unwrap();
-    let script = f.root.join("codex.sh");
-    fs::write(&script, r#"#!/bin/sh
-while IFS= read -r message; do
-    printf '%s\n' "$message" >> protocol.jsonl
-    case "$message" in
-        *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{}}' ;;
-        *'"method":"thread/resume"'*)
-            case "$message" in
-                *'"excludeTurns":true'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"saved-session","turns":[]}}}' ;;
-                *)
-                    printf '%s' '{"id":2,"result":{"thread":{"id":"saved-session","turns":[{"text":"'
-                    head -c 9000000 /dev/zero | tr '\000' x
-                    printf '%s\n' '"}]}}}' ;;
-            esac ;;
-        *'"method":"turn/start"'*)
-            "$HEY_BOSS_TEST_CLI" issue --project 'Worker fixture' --agent codex:saved-session claim 1 --json >/dev/null || exit 1
-            "$HEY_BOSS_TEST_CLI" issue --project 'Worker fixture' --agent codex:saved-session close 1 --json >/dev/null || exit 1
-            printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn"}}}'
-            printf '%s\n' '{"method":"item/completed","params":{"threadId":"saved-session","item":{"type":"agentMessage","text":"{\"status\":\"completed\",\"summary\":\"Resumed without transferring history\"}"}}}'
-            printf '%s\n' '{"method":"turn/completed","params":{"threadId":"saved-session","turn":{"id":"turn","status":"completed"}}}' ;;
-    esac
-done
-"#).unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut worker = f.worker();
-    let finished =
-        f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["finished_at"].is_number());
-    assert_eq!(finished["runs"][0]["state"], "completed", "{finished}");
-    assert_eq!(finished["runs"][0]["session_id"], "saved-session");
-    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
-    worker.stop();
-}
-
-#[test]
-fn a_resume_error_preserves_the_saved_session_for_retry() {
+fn unavailable_old_sessions_do_not_prevent_fresh_retries() {
     let f = Fixture::new("resume-error");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
@@ -1333,14 +1269,12 @@ fn a_resume_error_preserves_the_saved_session_for_retry() {
     worker.stop();
     fs::write(f.root.join("mode.txt"), "resume-unavailable").unwrap();
     let mut replacement = f.worker();
-    let failed =
-        f.wait(|s| s["runs"][0]["state"] == "failed" && s["runs"][0]["finished_at"].is_number());
-    assert_eq!(failed["runs"][0]["session_id"], session);
+    let completed = f.wait(|s| s["runs"][0]["state"] == "completed");
+    assert_ne!(completed["runs"][0]["session_id"], session);
     assert!(
-        failed["runs"][0]["summary"]
-            .as_str()
-            .unwrap()
-            .contains("locked by another writer")
+        !f.transcript()
+            .iter()
+            .any(|v| v["method"] == "thread/resume")
     );
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     assert_eq!(
@@ -1348,7 +1282,7 @@ fn a_resume_error_preserves_the_saved_session_for_retry() {
             .iter()
             .filter(|v| v["method"] == "thread/start")
             .count(),
-        1
+        2
     );
     replacement.stop();
 }
@@ -1553,7 +1487,7 @@ fn a_waiting_retry_does_not_hold_capacity_needed_by_another_issue() {
 }
 
 #[test]
-fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
+fn infrastructure_outages_retry_with_fresh_sessions_after_recovery() {
     for mode in [
         "approval-outage-summary",
         "approval-outage-tool",
@@ -1583,17 +1517,17 @@ fn infrastructure_outages_retry_automatically_and_resume_after_recovery() {
             s["runs"][0]["id"] != first["runs"][0]["id"] && s["runs"][0]["finished_at"].is_number()
         });
         assert_eq!(again["runs"][0]["state"], "infrastructure_blocked");
-        assert_eq!(again["runs"][0]["session_id"], session);
+        assert_ne!(again["runs"][0]["session_id"], session);
         assert_eq!(again["runs"][0]["retry_count"], 2);
-        fs::write(f.root.join("mode.txt"), "restored-claim").unwrap();
+        fs::write(f.root.join("mode.txt"), "fresh-claim").unwrap();
         db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
         let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
-        assert_eq!(recovered["runs"][0]["session_id"], session);
+        assert_ne!(recovered["runs"][0]["session_id"], session);
         assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
         assert!(
-            f.transcript()
+            !f.transcript()
                 .iter()
-                .any(|r| r["method"] == "thread/resume" && r["params"]["threadId"] == session)
+                .any(|r| r["method"] == "thread/resume")
         );
         assert!(f.transcript().iter().any(|r| {
             r["method"] == "turn/start"
@@ -1653,11 +1587,9 @@ fn outage_backoff_and_continuation_survive_restarts_beyond_five_attempts() {
         assert_eq!(run["retry_count"], count);
         let delay = run["retry_at"].as_i64().unwrap() - run["finished_at"].as_i64().unwrap();
         assert_eq!(delay, (30_000_i64 << (count - 1)).min(300_000));
-        if count == 1 {
-            session = run["session_id"].clone();
-            assert!(session.is_string());
-        }
-        assert_eq!(run["session_id"], session);
+        assert_ne!(run["session_id"], session);
+        session = run["session_id"].clone();
+        assert!(session.is_string());
         assert_eq!(result["active"], 0);
         let issue = f.cli(&["view", "1"]);
         assert_eq!(issue["issue"]["state"], "open");
@@ -1670,13 +1602,13 @@ fn outage_backoff_and_continuation_survive_restarts_beyond_five_attempts() {
     db.execute("UPDATE worker_runs SET retry_at=0", []).unwrap();
     let mut worker = f.worker();
     let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
-    assert_eq!(recovered["runs"][0]["session_id"], session);
+    assert_ne!(recovered["runs"][0]["session_id"], session);
     assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
     worker.stop();
 }
 
 #[test]
-fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
+fn manual_reopen_during_database_and_proxy_outages_starts_fresh() {
     for mode in ["database-outage-tool", "proxy-outage-rpc"] {
         let f = Fixture::new(&format!("manual-reopen-{mode}"));
         fs::write(f.root.join("mode.txt"), mode).unwrap();
@@ -1693,7 +1625,7 @@ fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
             s["runs"][0]["id"] != first["runs"][0]["id"] && s["runs"][0]["finished_at"].is_number()
         });
         assert_eq!(repeated["runs"][0]["state"], "infrastructure_blocked");
-        assert_eq!(repeated["runs"][0]["session_id"], session);
+        assert_ne!(repeated["runs"][0]["session_id"], session);
         assert_eq!(repeated["runs"][0]["retry_count"], 1);
         assert!(repeated["runs"][0]["retry_at"].is_number());
         assert!(repeated["runs"][0]["summary"].as_str().unwrap().contains(
@@ -1706,7 +1638,7 @@ fn manual_reopen_during_database_and_proxy_outages_preserves_session() {
         fs::write(f.root.join("mode.txt"), "completed").unwrap();
         f.cli(&["reopen", "1"]);
         let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
-        assert_eq!(recovered["runs"][0]["session_id"], session);
+        assert_ne!(recovered["runs"][0]["session_id"], session);
         assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
         worker.stop();
     }
@@ -2094,7 +2026,7 @@ fn approval_blocks_without_auto_approving() {
     w.stop();
 }
 #[test]
-fn worker_restart_restores_claim_before_resumed_session_continues() {
+fn worker_restart_requires_the_fresh_session_to_claim() {
     let f = Fixture::new("restart-restores-claim");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
@@ -2106,11 +2038,11 @@ fn worker_restart_restores_claim_before_resumed_session_continues() {
     assert_eq!(stopped["runs"][0]["state"], "cancelled");
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
 
-    // This fixture checks ownership before doing any work and never reclaims.
-    fs::write(f.root.join("mode.txt"), "restored-claim").unwrap();
+    // The fresh session sees an unassigned issue and claims with its own identity.
+    fs::write(f.root.join("mode.txt"), "fresh-claim").unwrap();
     let mut replacement = f.worker();
     let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
-    assert_eq!(recovered["runs"][0]["session_id"], session);
+    assert_ne!(recovered["runs"][0]["session_id"], session);
     assert!(recovered["runs"][0]["claimed_at"].is_number());
     assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
     replacement.stop();
@@ -2156,7 +2088,7 @@ fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     assert_eq!(s["runs"][0]["goal"]["status"], "paused");
 }
 #[test]
-fn orphan_recovery_stops_process_and_preserves_session() {
+fn orphan_recovery_stops_old_process_and_starts_fresh() {
     let f = Fixture::new("delay-orphan");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
     f.setup(&[]);
@@ -2177,8 +2109,7 @@ fn orphan_recovery_stops_process_and_preserves_session() {
             .unwrap()
             .iter()
             .any(|w| w["pid"] == replacement.0.id() && w["active"] == 1)
-            && f.cli(&["view", "1"])["issue"]["assignee"]
-                == format!("codex:{}", session.as_str().unwrap())
+            && f.cli(&["view", "1"])["issue"]["assignee"].is_string()
     });
     let db = rusqlite::Connection::open(&f.db).unwrap();
     let old_state: String = db
@@ -2190,7 +2121,7 @@ fn orphan_recovery_stops_process_and_preserves_session() {
         .unwrap();
     assert_eq!(old_state, "failed");
     let active_session: String = db.query_row("SELECT session_id FROM worker_runs WHERE owner_pid=?1 AND claimed_at IS NOT NULL AND finished_at IS NULL", [replacement.0.id()], |r| r.get(0)).unwrap();
-    assert_eq!(active_session, session.as_str().unwrap());
+    assert_ne!(active_session, session.as_str().unwrap());
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     replacement.stop();
 }
@@ -2331,8 +2262,10 @@ fn disconnected_mac_does_not_block_issue_completion_pickup_or_worker_stop_and_up
     use std::io::{Read, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     let f = Fixture::new("offline-updates");
+    let notifications = f.root.join("notifications");
+    fs::create_dir(&notifications).unwrap();
     let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
-        .current_dir(&f.root)
+        .current_dir(&notifications)
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env_remove("HEY_BOSS_ISSUE_HOST")
         .env_remove("HEY_BOSS_ISSUE_PROJECT")
@@ -2956,7 +2889,7 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         f.cli(&["comment", "1", "--body", "Preserved history"]);
         let db = rusqlite::Connection::open(&f.db).unwrap();
         db.busy_timeout(Duration::from_secs(10)).unwrap();
-        db.execute_batch("DROP INDEX issue_list_summary; ALTER TABLE issues DROP COLUMN draft;")
+        db.execute_batch("DROP INDEX issue_list_summary; DROP INDEX issue_dependency_metadata; ALTER TABLE issues DROP COLUMN draft;")
             .unwrap();
         if version == 10 {
             db.execute_batch(

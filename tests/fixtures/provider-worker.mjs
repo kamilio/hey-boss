@@ -2,9 +2,10 @@
 import {readFileSync,writeFileSync,appendFileSync,existsSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {createInterface} from 'node:readline';
+import {randomUUID} from 'node:crypto';
 const provider=process.env.HEY_BOSS_FIXTURE_PROVIDER;
 appendFileSync('launches.jsonl',JSON.stringify(process.argv.slice(2))+'\n');
-const session='12345678-1234-1234-1234-123456789abc';
+const session=randomUUID();
 const file=process.cwd()+'/session.jsonl';
 if(provider==='pi')writeFileSync(file,JSON.stringify({type:'session',id:session})+'\n');
 const send=v=>process.stdout.write(JSON.stringify(v)+'\n');

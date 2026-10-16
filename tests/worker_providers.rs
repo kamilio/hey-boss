@@ -140,12 +140,10 @@ fn claude_and_pi_workers_claim_steer_save_history_and_complete() {
             serde_json::from_str(&f.wait("SELECT job FROM worker_runs LIMIT 1")).unwrap();
         assert_eq!(job["session_ref"]["provider"], provider);
         assert_eq!(job["actor"]["kind"], provider);
-        assert_eq!(
-            job["actor"]["session_id"],
-            "12345678-1234-1234-1234-123456789abc"
-        );
+        let session = job["actor"]["session_id"].as_str().unwrap();
+        assert_eq!(job["session_ref"]["id"], session);
         let transcript = fs::read_to_string(f.root.join(format!(
-            "issues.db.agent-sessions/{provider}-12345678-1234-1234-1234-123456789abc.jsonl"
+            "issues.db.agent-sessions/{provider}-{session}.jsonl"
         )))
         .unwrap();
         assert!(transcript.contains("STEER") && transcript.contains("Provider worker verified"));
@@ -208,10 +206,12 @@ fn claude_and_pi_goals_continue_in_the_same_session() {
 }
 
 #[test]
-fn provider_workers_stop_and_resume_only_matching_saved_sessions() {
+fn provider_workers_always_start_fresh_after_stopping() {
     for (provider, next) in [("claude", "claude"), ("pi", "pi"), ("claude", "pi")] {
         let mut f = Fixture::new(provider, false);
         f.wait("SELECT id FROM worker_runs WHERE claimed_at IS NOT NULL");
+        let previous_session =
+            f.wait("SELECT session_id FROM worker_runs WHERE claimed_at IS NOT NULL");
         let mut child = f.child.take().unwrap();
         unsafe {
             libc::kill(child.id() as i32, libc::SIGTERM);
@@ -239,16 +239,14 @@ fn provider_workers_stop_and_resume_only_matching_saved_sessions() {
             "SELECT job FROM worker_runs WHERE claimed_at IS NOT NULL AND finished_at IS NULL",
         ))
         .unwrap();
-        assert_eq!(job["resume_session"].is_string(), provider == next);
+        assert!(job["resume_session"].is_null());
+        assert_ne!(job["actor"]["session_id"], previous_session);
         if provider == next {
             assert_eq!(job["session_ref"]["provider"], next);
         }
         let launches = fs::read_to_string(f.root.join("launches.jsonl")).unwrap();
         let args: Vec<String> = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
-        assert_eq!(
-            args.iter().any(|v| v == "--resume" || v == "--session"),
-            provider == next
-        );
+        assert!(!args.iter().any(|v| v == "--resume" || v == "--session"));
         fs::write(f.root.join("finish"), "").unwrap();
         assert_eq!(
             f.wait("SELECT state FROM worker_runs WHERE state='completed'"),

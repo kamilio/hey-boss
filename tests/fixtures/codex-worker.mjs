@@ -56,8 +56,8 @@ for await (const line of createInterface({input: process.stdin})) {
         assert.equal(process.env.HEY_BOSS_ISSUE_PROJECT, 'named:Worker fixture');
         issue = cli(['issue', '--json', '--agent', 'codex:' + session, 'view', match[1]]).issue;
         assert.equal(issue.number, Number(match[1]));
-        if (mode === 'restored-claim') assert.equal(issue.assignee, 'codex:' + session);
-        else cli(['issue', '--json', '--agent', 'codex:' + session, 'claim', match[1]]);
+        if (mode === 'fresh-claim') assert.equal(issue.assignee, null);
+        cli(['issue', '--json', '--agent', 'codex:' + session, 'claim', match[1]]);
       }
       assert.equal(params.threadId, session);
       assert.deepEqual(params.outputSchema.required, ['status', 'summary']);
@@ -118,7 +118,7 @@ for await (const line of createInterface({input: process.stdin})) {
     send({method: 'turn/completed', params: {threadId: session, turn: {id: turn, status: 'completed'}}});
     continue;
   }
-  const status = ['restored-claim', 'unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered', 'database-outage-recovered', 'proxy-outage-recovered','transient-error-recovered'].includes(mode) ? 'completed' : mode;
+  const status = ['fresh-claim', 'resume-unavailable', 'unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered', 'database-outage-recovered', 'proxy-outage-recovered','transient-error-recovered'].includes(mode) ? 'completed' : mode;
   const workerArgs = existsSync('worker-args.json') ? JSON.parse(readFileSync('worker-args.json', 'utf8')) : [];
   const artifact = issue?.labels.some(label => ['task:plan', 'task:research'].includes(label));
   if (status === 'completed' && issue && !mode.startsWith('partial') && (!workerArgs.includes('--prs') || artifact)) {

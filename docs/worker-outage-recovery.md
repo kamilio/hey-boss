@@ -9,11 +9,12 @@ request ID. No scheduler starts before startup succeeds, and disconnected
 companions retain the normal allocation and reservation checks.
 
 Database transport disconnects and model-proxy recovery-budget exhaustion are
-infrastructure failures. An unfinished attempt retains its session, checkout,
-history, and the specific outage explanation. It releases its claim and worker
+infrastructure failures. An unfinished attempt retains its conversation history,
+checkout, and the specific outage explanation. Every retry starts a fresh agent
+session and reuses unfinished local checkout work. It releases its claim and worker
 slot, then retries after a persisted exponential delay: 30, 60, 120, 240, then
 300 seconds. There is no five-attempt cutoff. An explicit reopen permits an
-immediate resumed attempt and resets the delay; if the service is still down,
+immediate fresh attempt and resets the delay; if the service is still down,
 the new attempt reports that outage and schedules another retry.
 
 A database disconnect does not authorize replaying an unknown mutation. Worker
@@ -21,7 +22,7 @@ finalization first saves the result durably, then reconciles the run's committed
 state on a fresh connection. The transaction checks whether the run already
 finished before applying a handoff. A lost reply after COMMIT therefore produces
 one handoff, while a rolled-back transaction can safely finish after recovery.
-Resumed-agent instructions require a read/reconciliation or the original
+Retry instructions require a read/reconciliation or the original
 deduplication request ID before repeating an uncertain write.
 
 Policy denials and requests for human approval remain distinct from service
