@@ -3,11 +3,30 @@ use crate::{Batch, Engine, Result, invalid, wire};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
+/// Replaceable liveness evidence, deliberately outside the immutable fact log.
+/// Relays forward the remaining lifetime, never restart it. The origin's durable
+/// sequence makes a replay harmless even after a process or machine restart.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Presence {
+    pub machine: String,
+    pub sequence: i64,
+    pub attempts: Vec<String>,
+    pub remaining_ms: i64,
+}
+
+pub struct Exchange {
+    pub records: usize,
+    pub presence: Vec<Presence>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Hello {
     protocol: u32,
     replica: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    presence: Vec<Presence>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +45,7 @@ fn hello(engine: &Engine) -> Hello {
     Hello {
         protocol: 1,
         replica: engine.id().into(),
+        presence: Vec::new(),
     }
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
@@ -45,12 +65,29 @@ fn required<T: serde::de::DeserializeOwned>(reader: &mut impl Read) -> Result<T>
 }
 
 pub fn serve(engine: &mut Engine, reader: &mut impl Read, writer: &mut impl Write) -> Result<()> {
-    let peer: Hello = required(reader)?;
+    serve_next(engine, reader, writer, |_| Ok(Vec::new()))?
+        .ok_or_else(|| invalid("SSH synchronization ended before handshake"))?;
+    Ok(())
+}
+
+/// Wait without holding a database transaction, then prepare current facts only
+/// after the request arrives. EOF between exchanges is a clean shutdown.
+pub fn serve_next(
+    engine: &mut Engine,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    prepare: impl FnOnce(&mut Engine) -> Result<Vec<Presence>>,
+) -> Result<Option<Exchange>> {
+    let Some(peer): Option<Hello> = wire::receive(reader)? else {
+        return Ok(None);
+    };
     validate(engine, &peer)?;
+    let mut greeting = hello(engine);
+    greeting.presence = prepare(engine)?;
     wire::send(
         writer,
         &Welcome {
-            hello: hello(engine),
+            hello: greeting,
             received: engine.received(&peer.replica)?,
         },
     )?;
@@ -61,6 +98,7 @@ pub fn serve(engine: &mut Engine, reader: &mut impl Read, writer: &mut impl Writ
     // Validate the requested cursor before committing any incoming mutation.
     let batch = engine.batch(turn.received)?;
     let through = batch.through;
+    let records = batch.records.len() + turn.batch.records.len();
     engine.ingest(&turn.batch)?;
     wire::send(
         writer,
@@ -74,15 +112,30 @@ pub fn serve(engine: &mut Engine, reader: &mut impl Read, writer: &mut impl Writ
         return Err(invalid("SSH peer acknowledged a different batch"));
     }
     engine.acknowledge(&peer.replica, acknowledged)?;
-    Ok(())
+    Ok(Some(Exchange {
+        records,
+        presence: peer.presence,
+    }))
 }
 
 pub fn connect(engine: &mut Engine, reader: &mut impl Read, writer: &mut impl Write) -> Result<()> {
-    wire::send(writer, &hello(engine))?;
+    connect_present(engine, reader, writer, Vec::new())?;
+    Ok(())
+}
+pub fn connect_present(
+    engine: &mut Engine,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    presence: Vec<Presence>,
+) -> Result<Exchange> {
+    let mut greeting = hello(engine);
+    greeting.presence = presence;
+    wire::send(writer, &greeting)?;
     let peer: Welcome = required(reader)?;
     validate(engine, &peer.hello)?;
     let sent = engine.batch(peer.received)?;
     let through = sent.through;
+    let sent_count = sent.records.len();
     wire::send(
         writer,
         &Turn {
@@ -97,13 +150,81 @@ pub fn connect(engine: &mut Engine, reader: &mut impl Read, writer: &mut impl Wr
     engine.ingest(&turn.batch)?;
     engine.acknowledge(&peer.hello.replica, turn.received)?;
     wire::send(writer, &engine.received(&peer.hello.replica)?)?;
-    Ok(())
+    Ok(Exchange {
+        records: sent_count + turn.batch.records.len(),
+        presence: peer.hello.presence,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn persistent_stream_refreshes_presence_without_growing_the_fact_log() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        a.put("reservation-a").unwrap();
+        b.put("reservation-b").unwrap();
+        let (mut left, mut right) = UnixStream::pair().unwrap();
+        for socket in [&left, &right] {
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+        }
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for n in 1..=10 {
+                    let result =
+                        serve_next(&mut b, &mut right.try_clone().unwrap(), &mut right, |_| {
+                            Ok(vec![Presence {
+                                machine: "b".into(),
+                                sequence: n,
+                                attempts: vec!["b1".into()],
+                                remaining_ms: 100,
+                            }])
+                        })
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(result.presence[0].sequence, n);
+                }
+                assert!(
+                    serve_next(
+                        &mut b,
+                        &mut right.try_clone().unwrap(),
+                        &mut right,
+                        |_| panic!("EOF must not prepare or write")
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+            });
+            for n in 1..=10 {
+                let result = connect_present(
+                    &mut a,
+                    &mut left.try_clone().unwrap(),
+                    &mut left,
+                    vec![Presence {
+                        machine: "a".into(),
+                        sequence: n,
+                        attempts: vec!["a1".into()],
+                        remaining_ms: 100,
+                    }],
+                )
+                .unwrap();
+                assert_eq!(result.presence[0].sequence, n);
+                if n > 2 {
+                    assert_eq!(result.records, 0);
+                }
+            }
+            drop(left);
+            server.join().unwrap();
+        });
+        assert_eq!(a.head().unwrap(), 2);
+        assert_eq!(b.head().unwrap(), 2);
+    }
 
     fn exchange(a: &mut Engine, b: &mut Engine) {
         let (mut left, mut right) = UnixStream::pair().unwrap();
