@@ -1393,7 +1393,15 @@ fn a_reserved_archive_path_is_protected_before_its_first_publication() {
 
 #[test]
 fn newer_archive_covers_history_only_when_content_and_references_are_retained() {
-    for change in ["none", "event_alias", "comment", "reference", "progress"] {
+    for change in [
+        "none",
+        "event_alias",
+        "comment_alias",
+        "comment",
+        "reference",
+        "progress",
+        "progress_alias",
+    ] {
         let f = Fixture::new();
         f.archive();
         let old: String =
@@ -1411,6 +1419,16 @@ fn newer_archive_covers_history_only_when_content_and_references_are_retained() 
             "event_alias" => {
                 f.db.execute("UPDATE events SET id=105 WHERE id=5", [])
                     .unwrap();
+            }
+            "comment_alias" => {
+                f.db.execute_batch("UPDATE comments SET id=101 WHERE id=1; UPDATE events SET data=json_set(data,'$.comment_id',101) WHERE json_extract(data,'$.comment_id')=1;").unwrap();
+            }
+            "progress_alias" => {
+                f.db.execute(
+                    "UPDATE issue_status_updates SET id='replacement-status' WHERE id='s1'",
+                    [],
+                )
+                .unwrap();
             }
             "comment" => {
                 f.db.execute("UPDATE comments SET body='Changed finding' WHERE id=1", [])
@@ -1438,7 +1456,7 @@ fn newer_archive_covers_history_only_when_content_and_references_are_retained() 
         assert_ne!(old, new);
         assert_eq!(
             history::covered_by(&f.db, &old, &new, "named:Archive", 1).unwrap(),
-            matches!(change, "none" | "event_alias"),
+            matches!(change, "none" | "event_alias" | "comment_alias"),
             "{change}"
         );
     }
