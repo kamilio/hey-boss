@@ -56,9 +56,19 @@ updating application views.
 Rollout is additive: install capture, backfill, synchronize in shadow mode, verify
 coverage, then switch scheduling and disable legacy mutation replication in a
 short cutover. Preserve active workers, pending changes and conflict history.
+Rollout verifies active data sync on every destination, including matching builds.
+Health expires after 30 seconds without local preparation or a completed exchange;
+an open companion connection cannot hide shadow mode, pending data or rejections.
+Restricted peer SSH keys run the same continuous protocol as controller links.
 An older peer cannot enter the distributed protocol. Reverting a binary must not
 discard facts accepted since cutover. Restores must not silently rewind a peer's
 delivery identity.
+
+`fleet sync-reconcile` previews retained legacy conflicts; `--apply` recovers
+missing progress history and records proven obsolete intent without deleting
+original payloads. Archived history and deletion tombstones are checked first.
+The verified main YAML takes precedence over rejected offline worker controls.
+Ambiguous content stays unresolved and visible in the fleet attention banner.
 
 Required validation: main unavailable; two disconnected machines picking up the
 same task; reconnect in both orders; process restart after local commit and after
