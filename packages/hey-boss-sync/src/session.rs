@@ -1,7 +1,10 @@
 //! One bounded exchange over an authenticated byte stream (SSH stdio).
 use crate::{Batch, Engine, Result, invalid, wire};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    time::{Duration, Instant},
+};
 
 /// Replaceable liveness evidence, deliberately outside the immutable fact log.
 /// Relays forward the remaining lifetime, never restart it. The origin's durable
@@ -18,6 +21,15 @@ pub struct Presence {
 pub struct Exchange {
     pub records: usize,
     pub presence: Vec<Presence>,
+    /// Conservative age covering both directions, without comparing wall clocks.
+    pub presence_age: Duration,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Acknowledgment {
+    Timed { received: i64, elapsed_ms: u64 },
+    Legacy(i64),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -82,6 +94,7 @@ pub fn serve_next(
         return Ok(None);
     };
     validate(engine, &peer)?;
+    let started = Instant::now();
     let mut greeting = hello(engine);
     greeting.presence = prepare(engine)?;
     wire::send(
@@ -107,7 +120,14 @@ pub fn serve_next(
             batch,
         },
     )?;
-    let acknowledged: i64 = required(reader)?;
+    let acknowledgment: Acknowledgment = required(reader)?;
+    let (acknowledged, peer_elapsed) = match acknowledgment {
+        Acknowledgment::Timed {
+            received,
+            elapsed_ms,
+        } => (received, Duration::from_millis(elapsed_ms)),
+        Acknowledgment::Legacy(received) => (received, Duration::ZERO),
+    };
     if acknowledged != through {
         return Err(invalid("SSH peer acknowledged a different batch"));
     }
@@ -115,6 +135,7 @@ pub fn serve_next(
     Ok(Some(Exchange {
         records,
         presence: peer.presence,
+        presence_age: peer_elapsed.saturating_add(started.elapsed()),
     }))
 }
 
@@ -128,6 +149,8 @@ pub fn connect_present(
     writer: &mut impl Write,
     presence: Vec<Presence>,
 ) -> Result<Exchange> {
+    let started = Instant::now();
+    let timed = !presence.is_empty();
     let mut greeting = hello(engine);
     greeting.presence = presence;
     wire::send(writer, &greeting)?;
@@ -149,10 +172,20 @@ pub fn connect_present(
     }
     engine.ingest(&turn.batch)?;
     engine.acknowledge(&peer.hello.replica, turn.received)?;
-    wire::send(writer, &engine.received(&peer.hello.replica)?)?;
+    let received = engine.received(&peer.hello.replica)?;
+    let acknowledgment = if timed {
+        Acknowledgment::Timed {
+            received,
+            elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        }
+    } else {
+        Acknowledgment::Legacy(received)
+    };
+    wire::send(writer, &acknowledgment)?;
     Ok(Exchange {
         records: sent_count + turn.batch.records.len(),
         presence: peer.hello.presence,
+        presence_age: started.elapsed(),
     })
 }
 
@@ -224,6 +257,45 @@ mod tests {
         });
         assert_eq!(a.head().unwrap(), 2);
         assert_eq!(b.head().unwrap(), 2);
+    }
+
+    #[test]
+    fn delayed_initial_message_is_included_in_received_presence_age() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        let (mut left, mut right) = UnixStream::pair().unwrap();
+        let delay = Duration::from_millis(30);
+        std::thread::scope(|scope| {
+            let client = scope.spawn(|| {
+                connect_present(
+                    &mut a,
+                    &mut left.try_clone().unwrap(),
+                    &mut left,
+                    vec![Presence {
+                        machine: "a".into(),
+                        sequence: 1,
+                        attempts: vec!["run".into()],
+                        remaining_ms: 100,
+                    }],
+                )
+            });
+            // Read the greeting before delaying delivery to serve_next. This
+            // makes the delay causally follow the sender's presence capture.
+            let greeting: Hello = required(&mut right).unwrap();
+            std::thread::sleep(delay);
+            let mut frame = Vec::new();
+            wire::send(&mut frame, &greeting).unwrap();
+            let mut reader = std::io::Cursor::new(frame).chain(right.try_clone().unwrap());
+            let result = serve_next(&mut b, &mut reader, &mut right, |_| Ok(Vec::new()))
+                .unwrap()
+                .unwrap();
+            assert!(
+                result.presence_age >= delay,
+                "Receiver must deduct delay before it read Hello"
+            );
+            client.join().unwrap().unwrap();
+        });
     }
 
     fn exchange(a: &mut Engine, b: &mut Engine) {
