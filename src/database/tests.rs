@@ -118,6 +118,20 @@ pub(crate) fn pause_before_writer(
     )
 }
 
+pub(crate) fn pause_before_batch(
+    path: &Path,
+    sql: &'static str,
+    entered: mpsc::Sender<()>,
+    release: mpsc::Receiver<()>,
+) -> (Connection, std::thread::JoinHandle<()>) {
+    pause_before_command(
+        path,
+        entered,
+        release,
+        move |command| matches!(command, Command::Batch { sql: batch } if batch == sql),
+    )
+}
+
 /// Hold a real service read at a deterministic point inside its transaction.
 pub(crate) fn pause_before_query(
     path: &Path,

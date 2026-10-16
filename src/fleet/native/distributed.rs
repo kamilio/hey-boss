@@ -131,6 +131,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             ));
         }
         identity::upgrade_shadow(db)?;
+        activation::protect_role(db)?;
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
@@ -148,6 +149,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
     }
     capture::install(&tx)?;
     resources::initialize(&tx)?;
+    activation::protect_role(&tx)?;
     tx.commit()?;
     Ok(())
 }

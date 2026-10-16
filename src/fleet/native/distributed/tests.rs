@@ -288,6 +288,99 @@ fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn companion_setup_waiting_for_cutover_cannot_restore_legacy_role() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let f = Fixture::new();
+    let db = f.db();
+    let node = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let controller = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    seed(&db);
+    replica::install_capture(&db, "agent", node).unwrap();
+    install(&db, node).unwrap();
+    db.execute("UPDATE distributed_meta SET controller=?1", [controller])
+        .unwrap();
+    let ctx = f.context(node);
+    activation::enroll(&ctx, node, 1).unwrap();
+    activation::enroll(&ctx, controller, 0).unwrap();
+    db.execute(
+        "UPDATE distributed_members SET ready=1 WHERE node=?1",
+        [controller],
+    )
+    .unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&ctx.path.with_extension("sync.db")).unwrap();
+    while !baseline(&db, &mut engine, true).unwrap() {}
+    capture_all(&db, &mut engine);
+    drop(engine);
+    let mut owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
+    let (entered, waiting) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let (setup, transport) =
+        crate::database::tests::pause_before_batch(&ctx.path, "BEGIN DEFERRED", entered, resume);
+    let setup =
+        std::thread::spawn(move || replica::install_capture(&setup, "agent", node).unwrap());
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    activation::activate(&ctx).unwrap();
+    release.send(()).unwrap();
+    setup.join().unwrap();
+    transport.join().unwrap();
+    owner.stop();
+    assert_eq!(
+        db.query_row("SELECT role FROM fleet_meta", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "peer"
+    );
+    // An older process can still send the stale update after a binary upgrade.
+    db.execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT role FROM fleet_meta", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "peer"
+    );
+    let before: i64 = db
+        .query_row("SELECT count(*) FROM fleet_outbox", [], |r| r.get(0))
+        .unwrap();
+    db.execute(
+        "UPDATE issues SET title='Offline edit' WHERE project_id='p' AND number=1",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fleet_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn installing_capture_repairs_previously_activated_legacy_role() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "peer").unwrap();
+    db.execute_batch(
+        "DROP TRIGGER IF EXISTS distributed_peer_role;
+        UPDATE distributed_meta SET active=1;
+        UPDATE fleet_meta SET role='agent';",
+    )
+    .unwrap();
+    install(&db, "peer").unwrap();
+    assert_eq!(
+        db.query_row("SELECT role FROM fleet_meta", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "peer"
+    );
+    db.execute("UPDATE fleet_meta SET role='controller' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT role FROM fleet_meta", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "peer"
+    );
+}
+
+#[test]
 fn preflight_accepts_missing_controller_history_without_changing_the_source() {
     use serde_json::json;
     let f = Fixture::new();

@@ -344,16 +344,18 @@ pub(super) fn ensure_metadata(db: &Connection) -> Result<()> {
     Ok(())
 }
 pub(super) fn install_capture(db: &Connection, role: &str, node: &str) -> Result<()> {
-    let distributed: bool =
-        db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
-            r.get(0)
-        })?;
-    let role = if distributed { "peer" } else { role };
     let tx = if db.is_autocommit() {
         Some(db.unchecked_transaction()?)
     } else {
         None
     };
+    // Read authority only after acquiring the service writer. A queued setup
+    // must observe any cutover that committed while it was waiting.
+    let distributed: bool =
+        db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get(0)
+        })?;
+    let role = if distributed { "peer" } else { role };
     db.execute(
         "UPDATE fleet_meta SET role=?,node=? WHERE id=1",
         [role, node],

@@ -39,6 +39,36 @@ pub(in crate::fleet::native) fn enroll(ctx: &Context, node: &str, slot: u16) -> 
     Ok(())
 }
 
+pub(super) fn protect_role(db: &Connection) -> Result<()> {
+    let needed: bool = db.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_peer_role')
+        OR (d.active=1 AND f.role<>'peer') FROM distributed_meta d JOIN fleet_meta f USING(id) WHERE d.id=1",
+        [], |r| r.get(0),
+    )?;
+    if !needed {
+        return Ok(());
+    }
+    let tx = if db.is_autocommit() {
+        Some(db.unchecked_transaction()?)
+    } else {
+        None
+    };
+    // Old running binaries can still issue a stale role update. Enforce this
+    // invariant in SQLite and repair replicas affected before the guard existed.
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS distributed_peer_role
+        AFTER UPDATE OF role ON fleet_meta
+        WHEN NEW.role<>'peer' AND (SELECT active FROM distributed_meta WHERE id=1)=1
+        BEGIN UPDATE fleet_meta SET role='peer' WHERE id=NEW.id; END;
+        UPDATE fleet_meta SET role='peer' WHERE id=1 AND role<>'peer'
+        AND (SELECT active FROM distributed_meta WHERE id=1)=1;",
+    )?;
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 pub(in crate::fleet::native) fn activate(ctx: &Context) -> Result<()> {
     let Some(_lock) = ctx.lock("distributed-sync.lock", true)? else {
         return Err(replica::invalid("Sync is busy"));
