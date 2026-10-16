@@ -2985,6 +2985,7 @@ mod tests {
     #[test]
     fn captured_infrastructure_outages_release_claims_and_retry() {
         let summaries = [
+            "Codex reported a terminal error: unexpected status 401 Unauthorized: Your IP is not authorized to make this request. hey-proxy: this request reached the upstream over IPv4 from 192.0.2.1. Allow that address on the upstream project., url: http://127.0.0.1:8080/v1/responses, auth error: 401",
             "Database service disconnected; write outcome may be unknown; mutations are never automatically replayed.",
             "HTTP 504 from local hey-proxy: internal recovery time budget exhausted before a response could be forwarded.",
             "Automatic approval review itself cannot access configured wisp-alpha (404); this is service failure, not an unsafe-action verdict. Final review sweep/check confirmation and cleanup remain pending. Preserve worktree and logs for continuation.",

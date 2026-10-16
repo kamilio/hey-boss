@@ -31,6 +31,15 @@ pub(super) fn unavailable(text: &str) -> Option<&'static str> {
         return Some(DATABASE_GUIDANCE);
     }
     let lower = text.to_ascii_lowercase();
+    // A terminal model access failure is an infrastructure outage, not an
+    // implementation attempt. Preserve the denial while backing off retries.
+    if lower.starts_with("codex reported a terminal error:")
+        && lower.contains("401 unauthorized")
+        && lower.contains("your ip is not authorized to make this request")
+        && lower.contains("hey-proxy:")
+    {
+        return Some(PROXY_GUIDANCE);
+    }
     if (lower.contains("hey-proxy") || lower.contains("model proxy"))
         && lower.contains("recovery")
         && lower.contains("budget")
@@ -141,6 +150,7 @@ mod tests {
     #[test]
     fn database_and_proxy_transport_failures_are_not_implementation_failures() {
         for text in [
+            "Codex reported a terminal error: unexpected status 401 Unauthorized: Your IP is not authorized to make this request. hey-proxy: this request reached the upstream over IPv4 from 192.0.2.1.",
             "Database service disconnected; write outcome may be unknown; mutations are never automatically replayed.",
             "Database service transport failed: Broken pipe (os error 32). Write outcome may be unknown; mutations are never automatically replayed.",
             "Database transaction lost its connection; its outcome cannot be replayed automatically",
@@ -161,6 +171,9 @@ mod tests {
             );
         }
         for text in [
+            "Your IP is not authorized to make this request",
+            "HTTP 401 Unauthorized from the application under test",
+            "cargo test failed: expected Codex reported a terminal error: 401 Unauthorized: Your IP is not authorized to make this request. hey-proxy:",
             "HTTP 504 from application under test",
             "Broken pipe during unit test",
             "Database constraint failed: UNIQUE constraint",
