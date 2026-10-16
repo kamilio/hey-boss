@@ -15,6 +15,22 @@ pub(super) struct Manifest {
 /// Export at most four MiB per cycle, outside the application writer. History
 /// can be arbitrarily long without making task edits wait for its transfer.
 pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Result<()> {
+    let mut remaining = 8;
+    while remaining > 0 {
+        let used = prepare_archive(db, engine, remaining)?;
+        if used == 0 {
+            break;
+        }
+        remaining -= used;
+    }
+    Ok(())
+}
+
+fn prepare_archive(
+    db: &Connection,
+    engine: &mut hey_boss_sync::Engine,
+    budget: usize,
+) -> Result<usize> {
     let candidates = replica::rows(
         db,
         "SELECT archive_key AS key,project_id,number FROM issues WHERE archive_key IS NOT NULL AND NOT EXISTS(SELECT 1 FROM distributed_archives a WHERE a.key=issues.archive_key AND a.complete=1) LIMIT 1",
@@ -26,7 +42,7 @@ pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Re
         replica::rows(db,"SELECT json_extract(j.value,'$.archive_key') AS key,json_extract(j.value,'$.project_id') AS project_id,json_extract(j.value,'$.number') AS number FROM distributed_outbox o,json_each(json_array(json(o.before_json),json(o.after_json))) j WHERE o.clock>(SELECT exported FROM distributed_meta WHERE id=1) AND o.table_name='issues' AND json_extract(j.value,'$.archive_key') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM distributed_archives a WHERE a.key=json_extract(j.value,'$.archive_key') AND a.complete=1) LIMIT 1",&[])?.into_iter().next()
     };
     let Some(candidate) = candidate else {
-        return Ok(());
+        return Ok(0);
     };
     let key = candidate["key"].as_str().unwrap();
     let project = candidate["project_id"].as_str().unwrap();
@@ -42,7 +58,7 @@ pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Re
     )?;
     let mut pages: Vec<String> = serde_json::from_str(&pages)?;
     let mut cursor: Value = serde_json::from_str(&cursor)?;
-    for _ in 0..8 {
+    for page_index in 0..budget {
         let mut page = transfer::export_page(db, key, project, number, &cursor)?;
         // Hot rows and relayed archives must retain the same legacy creation
         // identity even when their machine-local numeric IDs differ.
@@ -76,10 +92,10 @@ pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Re
             ],
         )?;
         if page["done"] == true {
-            break;
+            return Ok(page_index + 1);
         }
     }
-    Ok(())
+    Ok(budget)
 }
 
 pub(super) fn capture(db: &Connection, fact: &mut Revision) -> Result<bool> {
