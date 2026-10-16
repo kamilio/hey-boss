@@ -913,6 +913,97 @@ fn imported_archives_preserve_local_history_ids_and_resolved_comment_links() {
     );
 }
 
+#[test]
+fn imported_archive_coalesces_proven_aliases_without_discarding_raw_history() {
+    for differs in [false, true] {
+        let source = Fixture::new();
+        source.db.execute_batch("UPDATE fleet_meta SET node='controller'; INSERT INTO events(id,project_id,issue_number,actor,action,created_at,data) SELECT 1005,project_id,issue_number,actor,action,created_at,data FROM events WHERE id=5; INSERT INTO fleet_row_ids VALUES('alias','events',55,1005);").unwrap();
+        if differs {
+            source
+                .db
+                .execute(
+                    "UPDATE events SET data='{\"different\":true}' WHERE id=1005",
+                    [],
+                )
+                .unwrap();
+        }
+        source.archive();
+        let key: String = source
+            .db
+            .query_row("SELECT archive_key FROM issues WHERE number=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let mut target = Fixture::new();
+        target.db.execute_batch("UPDATE fleet_meta SET node='companion',role='agent'; INSERT INTO fleet_row_ids SELECT 'controller','events',id,id FROM events; INSERT INTO fleet_row_ids SELECT 'controller','comments',id,id FROM comments; INSERT INTO fleet_row_ids VALUES('alias','events',55,5);").unwrap();
+        let mut incoming = transfer::Download::new(&target.db, &key, "named:Archive", 1).unwrap();
+        assert!(
+            incoming
+                .receive(
+                    &transfer::export_page(&source.db, &key, "named:Archive", 1, &Value::Null)
+                        .unwrap()
+                )
+                .unwrap()
+        );
+        drop(incoming);
+        // Exercise migration from the existing uniqueness constraint as well.
+        Archive::open(&archive_path(&target.db).unwrap()).unwrap().db.execute_batch("DROP INDEX issue_origin_local; CREATE UNIQUE INDEX issue_origin_local ON issue_origins(archive_key,kind,local_id) WHERE local_id IS NOT NULL;").unwrap();
+        let mapped = transfer::map_local_history(&target.db, &key, "named:Archive", 1);
+        if differs {
+            assert!(
+                mapped
+                    .unwrap_err()
+                    .to_string()
+                    .contains("different content")
+            );
+            assert!(
+                !transfer::Catalog::new(&target.db)
+                    .unwrap()
+                    .contains(&key, "named:Archive", 1)
+                    .unwrap()
+            );
+        } else {
+            mapped.unwrap();
+            transfer::map_local_history(&target.db, &key, "named:Archive", 1).unwrap();
+            target
+                .db
+                .execute(
+                    "UPDATE issues SET archive_key=?1,archive_cleanup=1,body='' WHERE number=1",
+                    [&key],
+                )
+                .unwrap();
+            while cleanup_history(&target.db).unwrap() > 0 {}
+            let history = history_connection(&target.db, "named:Archive", 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                history
+                    .query_row(
+                        "SELECT count(*) FROM events WHERE action='closed'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                Archive::read(&archive_path(&target.db).unwrap())
+                    .unwrap()
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM issue_history WHERE archive_key=?1 AND kind='events'",
+                        [&key],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                6
+            );
+            restore_issue(&target.db, "named:Archive", 1, GRACE_MS + 101).unwrap();
+            assert_eq!(target.read(json!({"action":"history","number":1,"limit":100,"offset":0}))["events"].as_array().unwrap().iter().filter(|r|r["action"]=="closed").count(),1);
+        }
+    }
+}
+
 fn imported_reference_collision(alias: bool) -> (Fixture, String) {
     let source = Fixture::new();
     source
