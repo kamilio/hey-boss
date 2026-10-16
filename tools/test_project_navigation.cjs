@@ -27,3 +27,14 @@ console.log('Project navigation follows feature flags, defaults and project swit
 context.ui.ProjectPicker.prototype.update.call({},[{id:'identity',artifacts_enabled:false,mindmaps_enabled:false}],{id:'identity',name:'Identity only'});
 assert.equal(nodes.get('#nav-artifacts').hidden,true,'identity-only pages use project settings');
 assert.equal(nodes.get('#nav-mindmaps').hidden,true,'identity-only mindmap keeps settings');
+
+context.location.hash = '';
+let savedProject;
+context.localStorage.getItem = () => JSON.stringify(savedProject);
+for (savedProject of ['local:machine:/Users/kjopek', 'local:machine:/home/kjopek', 'local:machine:/root']) {
+  assert.equal(context.ui.projectId('github.com/example/real'), 'github.com/example/real', 'ignore a previously auto-saved home directory');
+}
+savedProject = 'github.com/example/chosen';
+assert.equal(context.ui.projectId('github.com/example/real'), savedProject, 'keep a real saved project');
+context.location.hash = '#project=github.com/example/link';
+assert.equal(context.ui.projectId('github.com/example/real'), 'github.com/example/link', 'explicit links win');

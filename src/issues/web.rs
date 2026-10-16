@@ -117,6 +117,31 @@ impl App {
     }
 }
 
+// launchd starts in $HOME; that directory must not displace registered work.
+fn initial_project(resolved: &Value, explicit: bool) -> Result<Project> {
+    let detected: Project = serde_json::from_value(resolved["project"].clone())?;
+    if !explicit && identity::is_home_project(&detected) {
+        // Projects are already ordered by recent activity. Reuse the startup
+        // response instead of adding a database read to bootstrap or requests.
+        if let Some(project) = resolved["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["hidden_at"].is_null())
+            .filter_map(|p| {
+                Some(Project {
+                    id: p["id"].as_str()?.into(),
+                    name: p["name"].as_str()?.into(),
+                })
+            })
+            .find(|p| !identity::is_home_project(p))
+        {
+            return Ok(project);
+        }
+    }
+    Ok(detected)
+}
+
 pub fn serve(config: Config) -> Result<()> {
     if config
         .allow_public_ip
@@ -205,6 +230,7 @@ pub fn serve(config: Config) -> Result<()> {
         mobile_origin,
         lan: lan::Guard::start(config.allow_public_ip),
     };
+    let explicit_project = config.project.is_some();
     let resolved = app.execute(
         config.project,
         Operation::Projects {
@@ -212,7 +238,7 @@ pub fn serve(config: Config) -> Result<()> {
         },
         None,
     )?;
-    app.project = serde_json::from_value(resolved["project"].clone())?;
+    app.project = initial_project(&resolved, explicit_project)?;
     let base_url = local_url
         .map(str::to_owned)
         .unwrap_or_else(|| format!("http://{}/", app.authority));
