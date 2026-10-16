@@ -243,6 +243,12 @@ impl<R: Read + AsRawFd> Read for BoundedReader<R> {
     }
 }
 
+fn executable_id(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 pub(in crate::fleet::native) fn serve(
     ctx: Context,
     controller: &str,
@@ -250,6 +256,12 @@ pub(in crate::fleet::native) fn serve(
 ) -> Result<()> {
     if controller.len() != 32 || !controller.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(replica::invalid("Invalid controller identity"));
+    }
+    let installed = executable_id(&ctx.binary)?;
+    // An install can race process startup. Thereafter, an atomic replacement
+    // ends this session; the peer reconnects and executes the installed build.
+    if ctx.build()? != Context::running_build() {
+        return Ok(());
     }
     let db = ctx.db()?;
     install(&db, &ctx.node)?;
@@ -285,7 +297,7 @@ pub(in crate::fleet::native) fn serve(
         return Ok(());
     }
     let application = Application::start(&ctx, false, controller);
-    while !ctx.stopped() {
+    while !ctx.stopped() && executable_id(&ctx.binary)? == installed {
         let mut started = Instant::now();
         let result =
             hey_boss_sync::session::serve_next(&mut journal, &mut reader, &mut writer, |_| {
@@ -534,6 +546,18 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_atomic_install_invalidates_a_persistent_sync_session() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let binary = root.0.join("hey-boss");
+        let replacement = root.0.join("replacement");
+        std::fs::write(&binary, "old executable").unwrap();
+        let running = executable_id(&binary).unwrap();
+        assert_eq!(executable_id(&binary).unwrap(), running);
+        std::fs::write(&replacement, "new executable").unwrap();
+        std::fs::rename(&replacement, &binary).unwrap();
+        assert_ne!(executable_id(&binary).unwrap(), running);
+    }
     #[test]
     fn application_contention_cannot_stop_durable_network_catchup() {
         let root = crate::admin::Temporary::new().unwrap();
