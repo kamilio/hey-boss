@@ -2094,6 +2094,29 @@ fn approval_blocks_without_auto_approving() {
     w.stop();
 }
 #[test]
+fn worker_restart_restores_claim_before_resumed_session_continues() {
+    let f = Fixture::new("restart-restores-claim");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    let mut worker = f.worker();
+    let running = f.wait(|s| s["runs"][0]["state"] == "running");
+    let session = running["runs"][0]["session_id"].clone();
+    worker.stop();
+    let stopped = f.cli(&["worker", "status"]);
+    assert_eq!(stopped["runs"][0]["state"], "cancelled");
+    assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
+
+    // This fixture checks ownership before doing any work and never reclaims.
+    fs::write(f.root.join("mode.txt"), "restored-claim").unwrap();
+    let mut replacement = f.worker();
+    let recovered = f.wait(|s| s["runs"][0]["state"] == "completed");
+    assert_eq!(recovered["runs"][0]["session_id"], session);
+    assert!(recovered["runs"][0]["claimed_at"].is_number());
+    assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "closed");
+    replacement.stop();
+}
+
+#[test]
 fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     let f = Fixture::new("delay");
     f.setup(&[
