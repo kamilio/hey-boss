@@ -70,19 +70,20 @@ fn restart_desktop(binary: &Path) -> io::Result<()> {
         binary,
         &home()?.join("Library/LaunchAgents/local.hey-boss-fleet-controller.plist"),
     )?;
-    reload_desktop_registration(
+    reload_registration(
         Path::new("/bin/launchctl"),
         &home()?.join("Library/LaunchAgents/local.hey-boss.plist"),
+        "local.hey-boss",
     )?;
     Ok(())
 }
-fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Result<()> {
+fn reload_registration(launchctl: &Path, registration: &Path, label: &str) -> io::Result<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     // An atomically replaced ad-hoc signed app needs a fresh launch registration.
     // kickstart retains launchd's old constraints and can reject the new bundle.
     // The job may already be unloaded after a failed upgrade; still bootstrap it.
     let _ = Command::new(launchctl)
-        .args(["bootout", &format!("{domain}/local.hey-boss")])
+        .args(["bootout", &format!("{domain}/{label}")])
         .output();
     let mut last = None;
     for delay in [0, 100, 200, 400, 800, 1000, 2000, 2000, 2000] {
@@ -104,7 +105,7 @@ fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Res
     }
     let failure = last.unwrap();
     Err(error(format!(
-        "Desktop service reload failed ({}): {}",
+        "Service registration reload failed ({}): {}",
         failure.status,
         String::from_utf8_lossy(&failure.stderr)
     )))
@@ -112,12 +113,10 @@ fn reload_desktop_registration(launchctl: &Path, registration: &Path) -> io::Res
 fn restart_companion() -> io::Result<()> {
     restart_companion_processes();
     if cfg!(target_os = "macos") {
-        output(
-            Command::new("/bin/launchctl")
-                .args(["kickstart", "-k"])
-                .arg(format!("gui/{}/local.hey-boss-broker", unsafe {
-                    libc::getuid()
-                })),
+        reload_registration(
+            Path::new("/bin/launchctl"),
+            &home()?.join("Library/LaunchAgents/local.hey-boss-broker.plist"),
+            "local.hey-boss-broker",
         )?;
     } else if Command::new("systemctl")
         .args([
@@ -513,20 +512,21 @@ mod tests {
         }
     }
     #[test]
-    fn desktop_bundle_replacement_reloads_registration_and_propagates_bootstrap_errors() {
-        for failure in ["none", "temporary", "permanent"] {
-            let temp = Temp::new().unwrap();
-            let launchctl = temp.0.join("launchctl test");
-            let registration = launchctl.with_extension("plist");
-            fs::write(&registration, "existing registration").unwrap();
-            let domain = format!("gui/{}", unsafe { libc::getuid() });
-            script(
-                &launchctl,
-                &format!(
-                    r#"
+    fn macos_binary_replacement_reloads_registration_and_propagates_bootstrap_errors() {
+        for label in ["local.hey-boss", "local.hey-boss-broker"] {
+            for failure in ["none", "temporary", "permanent"] {
+                let temp = Temp::new().unwrap();
+                let launchctl = temp.0.join("launchctl test");
+                let registration = launchctl.with_extension("plist");
+                fs::write(&registration, "existing registration").unwrap();
+                let domain = format!("gui/{}", unsafe { libc::getuid() });
+                script(
+                    &launchctl,
+                    &format!(
+                        r#"
 case "$1" in
   bootout)
-    test "$#" = 2 && test "$2" = '{domain}/local.hey-boss' || exit 19
+    test "$#" = 2 && test "$2" = '{domain}/{label}' || exit 19
     echo bootout >> "$0.calls"
     exit 113;;
   bootstrap)
@@ -538,27 +538,28 @@ case "$1" in
   *) echo obsolete-kickstart >&2; exit 21;;
 esac
 "#
-                ),
-            );
-            let result = reload_desktop_registration(&launchctl, &registration);
-            if failure == "permanent" {
-                assert!(result.unwrap_err().to_string().contains("denied"));
-            } else {
-                result.unwrap();
-            }
-            let calls = fs::read_to_string(launchctl.with_extension("calls")).unwrap();
-            assert_eq!(
-                calls,
-                if failure == "temporary" {
-                    "bootout\nbootstrap\nbootstrap\n"
+                    ),
+                );
+                let result = reload_registration(&launchctl, &registration, label);
+                if failure == "permanent" {
+                    assert!(result.unwrap_err().to_string().contains("denied"));
                 } else {
-                    "bootout\nbootstrap\n"
+                    result.unwrap();
                 }
-            );
-            assert_eq!(
-                fs::read_to_string(&registration).unwrap(),
-                "existing registration"
-            );
+                let calls = fs::read_to_string(launchctl.with_extension("calls")).unwrap();
+                assert_eq!(
+                    calls,
+                    if failure == "temporary" {
+                        "bootout\nbootstrap\nbootstrap\n"
+                    } else {
+                        "bootout\nbootstrap\n"
+                    }
+                );
+                assert_eq!(
+                    fs::read_to_string(&registration).unwrap(),
+                    "existing registration"
+                );
+            }
         }
     }
 
