@@ -48,7 +48,14 @@ fn prepare(
             break;
         }
     }
-    if baseline(db, engine, controller)? && controller {
+    if baseline(db, engine, controller)?
+        && controller
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM distributed_members WHERE node=?1 AND ready=0)",
+            [&ctx.node],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
         db.execute(
             "UPDATE distributed_members SET ready=1 WHERE node=?1 AND ready=0",
             [&ctx.node],
@@ -61,7 +68,9 @@ fn prepare(
     }
     // The immutable journal is durable before exported advances. Keep only a
     // bounded application outbox rather than retaining a second full history.
-    db.execute("DELETE FROM distributed_outbox WHERE clock IN (SELECT clock FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1) ORDER BY clock LIMIT 1000)", [])?;
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1))", [], |r| r.get::<_, bool>(0))? {
+        db.execute("DELETE FROM distributed_outbox WHERE clock IN (SELECT clock FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1) ORDER BY clock LIMIT 1000)", [])?;
+    }
     Ok(())
 }
 
@@ -265,6 +274,63 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 mod tests {
     use super::*;
     #[test]
+    fn idle_preparation_does_not_wait_for_the_application_writer() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.json"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "a".repeat(32),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let db = crate::issues::Store::open(&ctx.path)
+            .unwrap()
+            .into_database();
+        install(&db, &ctx.node).unwrap();
+        db.execute(
+            "INSERT INTO distributed_members(node,slot,ready) VALUES(?1,0,1)",
+            [&ctx.node],
+        )
+        .unwrap();
+        let mut journal = engine(&ctx).unwrap();
+        for _ in 0..32 {
+            prepare(&ctx, &db, &mut journal, true).unwrap();
+        }
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+        prepare(&ctx, &db, &mut journal, true).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(db);
+
+        let mut owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
+        let writer = Connection::connect(&ctx.path).unwrap();
+        let idle = Connection::connect(&ctx.path).unwrap();
+        let transaction = writer.unchecked_transaction().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let sync = std::thread::spawn(move || {
+            sent.send(prepare(&ctx, &idle, &mut journal, true).map_err(|e| e.to_string()))
+                .unwrap();
+        });
+        let completed = received.recv_timeout(Duration::from_secs(2));
+        // Always release before asserting so a failed regression can join cleanly.
+        transaction.rollback().unwrap();
+        sync.join().unwrap();
+        owner.stop();
+        assert!(
+            completed.is_ok(),
+            "Idle sync queued behind an unrelated application edit"
+        );
+        completed.unwrap().unwrap();
+    }
+
+    #[test]
     fn unavailable_peer_waits_while_healthy_and_busy_peers_keep_syncing() {
         let mut retries = Retries::default();
         assert!(
@@ -311,7 +377,9 @@ mod tests {
             node: "b".repeat(32),
             stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        let db = crate::issues::Store::open(&ctx.path).unwrap().into_database();
+        let db = crate::issues::Store::open(&ctx.path)
+            .unwrap()
+            .into_database();
         db.execute("UPDATE fleet_meta SET role='agent',node=?1", [&ctx.node])
             .unwrap();
         install(&db, &ctx.node).unwrap();

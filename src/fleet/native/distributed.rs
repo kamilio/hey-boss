@@ -157,6 +157,12 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
 /// The application writer stays held until the immutable record and checkpoint
 /// are durable. A crash between the two commits repeats the same content hash.
 pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Result<usize> {
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock>(SELECT exported FROM distributed_meta WHERE id=1))",
+        [], |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(0);
+    }
     let tx = db.unchecked_transaction()?;
     let origin: String =
         tx.query_row("SELECT origin FROM distributed_meta WHERE id=1", [], |r| {
@@ -215,15 +221,24 @@ pub(super) fn baseline(
     controller: bool,
 ) -> Result<bool> {
     use serde_json::json;
+    let tables: Vec<_> = capture::TABLES
+        .iter()
+        .filter(|table| controller || matches!(**table, "worker_runs" | "scheduled_job_runs"))
+        .copied()
+        .collect();
+    let complete: usize = db.query_row(
+        "SELECT count(*) FROM distributed_baseline WHERE complete=1 AND table_name IN (SELECT value FROM json_each(?1))",
+        [serde_json::to_string(&tables)?], |r| r.get(0),
+    )?;
+    if complete == tables.len() {
+        return Ok(true);
+    }
     let tx = db.unchecked_transaction()?;
     let origin: String =
         tx.query_row("SELECT origin FROM distributed_meta WHERE id=1", [], |r| {
             r.get(0)
         })?;
-    for table in capture::TABLES
-        .iter()
-        .filter(|table| controller || matches!(**table, "worker_runs" | "scheduled_job_runs"))
-    {
+    for table in &tables {
         tx.execute(
             "INSERT OR IGNORE INTO distributed_baseline(table_name) VALUES(?1)",
             [table],
@@ -311,6 +326,14 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
         |r| r.get(0),
     )?;
     let facts = engine.pending(after)?;
+    if facts.is_empty()
+        && !db.query_row(
+            "SELECT active=1 AND EXISTS(SELECT 1 FROM distributed_dirty) FROM distributed_meta WHERE id=1",
+            [], |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(0);
+    }
     for (_, _, payload) in &facts {
         if let Some(fact) = archives::revision(payload)?
             && let Some(archive) = &fact.archive
