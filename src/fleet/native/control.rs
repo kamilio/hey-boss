@@ -659,13 +659,10 @@ fn set_intent(saved: &mut Value, id: &Value, intent: &str, local_change: bool) {
             worker["intent"] = json!(intent);
             if local_change {
                 worker["local_revision"] = json!(crate::issues::worker::now());
-            } else {
-                // A supervisor signal already changed the authoritative config.
-                // Echoing it as a new offline edit creates false conflicts and
-                // can send a restart's temporary stop back to the supervisor.
-                worker.as_object_mut().unwrap().remove("local_revision");
-                worker.as_object_mut().unwrap().remove("base_revision");
             }
+            // A supervisor signal already changed the authoritative intent.
+            // Do not manufacture an offline edit, but retain any genuine
+            // pending settings and their revision for acknowledgment.
         }
     }
 }
@@ -864,13 +861,21 @@ mod tests {
 
     #[test]
     fn supervisor_signals_do_not_echo_as_offline_configuration_edits() {
-        let mut saved = json!({"workers":[{"id":"worker","intent":"running","local_revision":1,"base_revision":"old"}]});
+        let mut saved = json!({"workers":[{"id":"worker","intent":"running"}]});
         set_intent(&mut saved, &json!("worker"), "stop", false);
         assert_eq!(saved["workers"][0]["intent"], "stop");
         assert!(saved["workers"][0].get("local_revision").is_none());
         assert!(saved["workers"][0].get("base_revision").is_none());
         set_intent(&mut saved, &json!("worker"), "running", false);
         assert!(saved["workers"][0].get("local_revision").is_none());
+    }
+    #[test]
+    fn supervisor_signals_preserve_preexisting_offline_settings() {
+        let mut saved = json!({"workers":[{"id":"worker","intent":"running","config":{"concurrency":7},"local_revision":1,"base_revision":"old"}]});
+        set_intent(&mut saved, &json!("worker"), "stop", false);
+        assert_eq!(saved["workers"][0]["local_revision"], 1);
+        assert_eq!(saved["workers"][0]["base_revision"], "old");
+        assert_eq!(saved["workers"][0]["config"]["concurrency"], 7);
     }
     #[test]
     fn restart_intent_survives_supervisor_reconciliation() {
