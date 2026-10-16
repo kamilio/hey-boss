@@ -121,12 +121,31 @@ fn preflight_existing_store_without_changing_the_source() {
     db.execute_batch(SCHEMA).unwrap();
     capture::install(&db).unwrap();
     let ctx = f.context(&node);
-    activation::enroll(&ctx, &node, 0).unwrap();
+    let controller: String = db
+        .query_row(
+            "SELECT controller FROM distributed_meta WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let is_controller = controller == node;
+    let slot: u16 = db
+        .query_row(
+            "SELECT coalesce((SELECT slot FROM distributed_members WHERE node=?1),0)",
+            [&node],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        is_controller || slot != 0,
+        "Peer rehearsal requires its existing enrollment"
+    );
+    activation::enroll(&ctx, &node, slot).unwrap();
     let mut engine = hey_boss_sync::Engine::open(&ctx.path.with_extension("sync.db")).unwrap();
     let start = std::time::Instant::now();
     for page in 0..100_000 {
         archives::prepare(&db, &mut engine).unwrap();
-        let done = baseline(&db, &mut engine, true).unwrap();
+        let done = baseline(&db, &mut engine, is_controller).unwrap();
         capture_all(&db, &mut engine);
         if page % 100 == 0 {
             eprintln!(
@@ -140,11 +159,13 @@ fn preflight_existing_store_without_changing_the_source() {
         }
         assert!(page < 99_999, "Preflight did not converge");
     }
-    db.execute(
-        "UPDATE distributed_members SET ready=1 WHERE node=?1",
-        [&node],
-    )
-    .unwrap();
+    if is_controller {
+        db.execute(
+            "UPDATE distributed_members SET ready=1 WHERE node=?1",
+            [&node],
+        )
+        .unwrap();
+    }
     capture_all(&db, &mut engine);
     drop(engine);
     let probe = db.unchecked_transaction().unwrap();
@@ -722,7 +743,7 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
     let mut edited = original.clone();
     edited["body"] = json!("New");
     let create = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "seed".into(),
         clock: 0,
         table: "issues".into(),
@@ -732,7 +753,7 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
         archive: None,
     };
     let done = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "a".into(),
         clock: 5,
         table: "issues".into(),
@@ -742,7 +763,7 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
         archive: None,
     };
     let edit = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "b".into(),
         clock: 2,
         table: "issues".into(),
@@ -776,7 +797,7 @@ fn cutover_rebuilds_a_large_outline_once_across_projection_pages() {
     seed(&db);
     let tx = db.unchecked_transaction().unwrap();
     for n in 0..260 {
-        projection::reduce(&tx,&Revision {protocol:1,origin:"a".into(),clock:n+1,table:"mindmap_nodes".into(),before:None,
+        projection::reduce(&tx,&Revision {protocol:PROTOCOL,origin:"a".into(),clock:n+1,table:"mindmap_nodes".into(),before:None,
             after:Some(json!({"id":format!("node-{n:03}"),"project_id":"p","alias":null,"parent_id":null,"position":n,"kind":"markdown","title":"Node","body":"","reference":null,"reference_project":null,"created_at":1,"updated_at":1})),resource:None,archive:None}).unwrap();
     }
     tx.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';
@@ -861,7 +882,7 @@ fn paged_cold_history_resumes_after_restart_and_keeps_deletions() {
     db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
         .unwrap();
     let mut deleted = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "b".into(),
         clock: 20,
         table: "comments".into(),
@@ -942,7 +963,7 @@ fn cold_history_before_images_supply_birth_without_reviving_deleted_comments() {
     let mut after = before.clone();
     after["body"] = json!("Edited offline");
     let edit = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "b".into(),
         clock: 5,
         table: "comments".into(),
@@ -952,7 +973,7 @@ fn cold_history_before_images_supply_birth_without_reviving_deleted_comments() {
         archive: None,
     };
     let deleted = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "c".into(),
         clock: 6,
         table: "comments".into(),
@@ -989,7 +1010,7 @@ fn storage_transitions_cannot_overwrite_concurrent_requirements() {
     let mut edited = original.clone();
     edited["body"] = json!("New requirements");
     let fact = |origin: &str, clock, before, after| Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: origin.into(),
         clock,
         table: "issues".into(),
@@ -1071,7 +1092,7 @@ fn archived_headers_replay_without_hydration_and_accept_merged_requirement_chang
     projection::reduce(
         &tx,
         &Revision {
-            protocol: 1,
+            protocol: PROTOCOL,
             origin: "offline".into(),
             clock: 1,
             table: "issues".into(),
@@ -1212,6 +1233,335 @@ fn archived_inputs_remain_readable_after_relay_and_hot_history_cleanup() {
 }
 
 #[test]
+fn shadow_identity_upgrade_preserves_application_data_and_rebuilds_derived_state() {
+    let f = Fixture::new();
+    let db = f.db();
+    seed(&db);
+    install(&db, "a").unwrap();
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('distributed_meta') WHERE name='format')", [], |r| r.get::<_,bool>(0)).unwrap() {
+        db.execute_batch("ALTER TABLE distributed_meta DROP COLUMN format;").unwrap();
+    }
+    db.execute_batch(
+        "INSERT INTO distributed_members VALUES('a',0,1);
+        INSERT INTO distributed_members VALUES('b',1,0);
+        INSERT INTO distributed_aliases VALUES('comments','wrong:1',1);
+        INSERT INTO distributed_baseline VALUES('issues',1,1);
+        INSERT INTO distributed_fields VALUES('issues','{}','@alive',1,'a','true');
+        INSERT INTO distributed_dirty VALUES('issues','{}');
+        INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,pid)
+            VALUES('preserved-run','p',1,'{}','human:test','running',1,'test','a',1,1,12345);
+        UPDATE issues SET body='Keep current work';
+        UPDATE distributed_meta SET exported=1,projected=99;",
+    )
+    .unwrap();
+    let pending: i64 = db
+        .query_row(
+            "SELECT count(*) FROM distributed_outbox WHERE table_name!='distributed_members'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(pending > 0);
+    install(&db, "a").unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT state,pid,finished_at FROM worker_runs WHERE id='preserved-run'",
+            [],
+            |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<i64>>(2)?
+            ))
+        )
+        .unwrap(),
+        ("running".into(), 12345, None)
+    );
+    assert_eq!(
+        db.query_row("SELECT body FROM issues WHERE number=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Keep current work"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        pending
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM distributed_members WHERE ready=0",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT slot FROM distributed_members WHERE node='b'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_fields", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_aliases", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_baseline", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT exported+projected FROM distributed_meta", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute("UPDATE issues SET body='Capture still works'", [])
+        .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        pending + 1
+    );
+    install(&db, "a").unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        pending + 1
+    );
+}
+
+#[test]
+fn shadow_identity_upgrade_distinguishes_controller_log_from_pending_peer_edits() {
+    for (origin, expected) in [("a", 0), ("b", 123)] {
+        let f = Fixture::new();
+        let db = f.db();
+        install(&db, origin).unwrap();
+        db.execute_batch("UPDATE distributed_meta SET controller='a';
+            ALTER TABLE distributed_meta DROP COLUMN format;
+            INSERT INTO fleet_outbox(seq,table_name,after_json,created_at) VALUES(123,'issues','{}',1);").unwrap();
+        install(&db, origin).unwrap();
+        assert_eq!(
+            db.query_row("SELECT legacy_cutoff FROM distributed_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn shadow_identity_upgrade_refuses_to_reset_an_active_store() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('distributed_meta') WHERE name='format')", [], |r| r.get::<_,bool>(0)).unwrap() {
+        db.execute_batch("ALTER TABLE distributed_meta DROP COLUMN format;").unwrap();
+    }
+    db.execute_batch("UPDATE distributed_meta SET active=1; INSERT INTO distributed_aliases VALUES('comments','keep:1',1);").unwrap();
+    assert!(install(&db, "a").is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_aliases", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn shadow_identity_upgrade_ignores_obsolete_payloads_and_rejects_future_formats() {
+    assert!(
+        archives::revision(r#"{"protocol":1,"kind":"archive_page","page":{}}"#)
+            .unwrap()
+            .is_none()
+    );
+    assert!(archives::revision(r#"{"protocol":1,"origin":"old","clock":1,"table":"comments","before":null,"after":{"id":"wrong:1"}}"#).unwrap().is_none());
+    assert!(archives::revision(r#"{"protocol":3,"kind":"archive_page","page":{}}"#).is_err());
+}
+
+#[test]
+fn obsolete_shadow_journal_history_stays_retained_without_reappearing() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    seed(&db);
+    install(&db, "a").unwrap();
+    db.execute_batch("INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(7,'p',1,'human:test','One comment',1);
+        INSERT INTO fleet_row_ids VALUES('b','comments',17,7);
+        INSERT INTO distributed_aliases VALUES('comments','a:7',7);
+        ALTER TABLE distributed_meta DROP COLUMN format;").unwrap();
+    let path = f.0.join("issues.sync.db");
+    let mut engine = hey_boss_sync::Engine::open(&path).unwrap();
+    let mut row = replica::rows(&db, "SELECT * FROM comments", &[])
+        .unwrap()
+        .remove(0);
+    row["id"] = json!("wrong:7");
+    let obsolete = serde_json::to_string(&Revision {
+        protocol: 1,
+        origin: "old".into(),
+        clock: 999,
+        table: "comments".into(),
+        before: None,
+        after: Some(row),
+        resource: None,
+        archive: None,
+    })
+    .unwrap();
+    let retained = engine.put(&obsolete).unwrap();
+    install(&db, "a").unwrap();
+    while !baseline(&db, &mut engine, true).unwrap() {}
+    capture_all(&db, &mut engine);
+    db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
+    materialize::drain(&db).unwrap();
+    assert_eq!(
+        replica::rows(&db, "SELECT id,body FROM comments", &[]).unwrap(),
+        vec![json!({"id":7,"body":"One comment"})]
+    );
+    assert_eq!(identity::canonical(&db, "comments", 7).unwrap(), "b:17");
+    assert_eq!(engine.payload(&retained).unwrap(), Some(obsolete.clone()));
+    drop(engine);
+    let mut engine = hey_boss_sync::Engine::open(&path).unwrap();
+    capture_all(&db, &mut engine);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.payload(&retained).unwrap(), Some(obsolete));
+}
+
+#[test]
+fn received_history_reuses_existing_legacy_rows_after_shadow_upgrade() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    seed(&db);
+    install(&db, "c").unwrap();
+    db.execute_batch("UPDATE distributed_meta SET controller='a';
+        INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(27,'p',1,'human:test','One comment',1);
+        INSERT INTO events(id,project_id,issue_number,actor,action,data,created_at) VALUES(28,'p',1,'human:test','commented','{\"comment_id\":27}',1);
+        INSERT INTO fleet_row_ids VALUES('b','comments',17,27);
+        INSERT INTO fleet_row_ids VALUES('b','events',18,28);
+        INSERT INTO distributed_aliases VALUES('comments','c:27',27);
+        ALTER TABLE distributed_meta DROP COLUMN format;").unwrap();
+    install(&db, "c").unwrap();
+    for (table, entity) in [("comments", "b:17"), ("events", "b:18")] {
+        let mut row = replica::rows(&db, &format!("SELECT * FROM {table}"), &[])
+            .unwrap()
+            .remove(0);
+        row["id"] = json!(entity);
+        if table == "events" {
+            row["data"] = json!(json!({"comment_id":"b:17"}).to_string());
+        }
+        projection::reduce(
+            &db,
+            &Revision {
+                protocol: PROTOCOL,
+                origin: "a:baseline".into(),
+                clock: 0,
+                table: table.into(),
+                before: None,
+                after: Some(row),
+                resource: None,
+                archive: None,
+            },
+        )
+        .unwrap();
+    }
+    db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';")
+        .unwrap();
+    materialize::drain(&db).unwrap();
+    assert_eq!(
+        replica::rows(&db, "SELECT id,body FROM comments", &[]).unwrap(),
+        vec![json!({"id":27,"body":"One comment"})]
+    );
+    assert_eq!(
+        replica::rows(
+            &db,
+            "SELECT id,json_extract(data,'$.comment_id') AS comment_id FROM events",
+            &[]
+        )
+        .unwrap(),
+        vec![json!({"id":28,"comment_id":27})]
+    );
+}
+
+#[test]
+fn forwarded_legacy_history_keeps_its_creation_identity_during_shadow_capture() {
+    use serde_json::json;
+    for (machine, comment, event) in [("a", 7, 8), ("b", 17, 18), ("c", 27, 28)] {
+        let f = Fixture::new();
+        let db = f.db();
+        db.execute("UPDATE fleet_meta SET node=?1", [machine])
+            .unwrap();
+        seed(&db);
+        install(&db, machine).unwrap();
+        db.execute("UPDATE distributed_meta SET controller='a'", [])
+            .unwrap();
+        db.execute("INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(?1,'p',1,'human:test','One original comment',1)", [comment]).unwrap();
+        db.execute("INSERT INTO events(id,project_id,issue_number,actor,action,data,created_at) VALUES(?1,'p',1,'human:test','commented',?2,1)", rusqlite::params![event,json!({"comment_id":comment}).to_string()]).unwrap();
+        if machine != "b" {
+            db.execute(
+                "INSERT INTO fleet_row_ids VALUES('b','comments',17,?1)",
+                [comment],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO fleet_row_ids VALUES('b','events',18,?1)",
+                [event],
+            )
+            .unwrap();
+        }
+        for (table, id, expected) in [("comments", comment, "b:17"), ("events", event, "b:18")] {
+            let mut fact = Revision {
+                protocol: PROTOCOL,
+                origin: machine.into(),
+                clock: 1,
+                table: table.into(),
+                before: None,
+                after: Some(
+                    replica::rows(
+                        &db,
+                        &format!("SELECT * FROM {table} WHERE id=?1"),
+                        &[json!(id)],
+                    )
+                    .unwrap()
+                    .remove(0),
+                ),
+                resource: None,
+                archive: None,
+            };
+            identity::normalize(&db, &mut fact).unwrap();
+            let row = fact.after.unwrap();
+            assert_eq!(row["id"], expected, "{machine} {table}");
+            if table == "events" {
+                assert_eq!(
+                    serde_json::from_str::<Value>(row["data"].as_str().unwrap()).unwrap()["comment_id"],
+                    "b:17"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn legacy_companion_comment_keeps_identity_across_hot_sync_archive_and_restore() {
     let source = Fixture::new();
     let a = source.db();
@@ -1278,7 +1628,7 @@ fn outline_cycles_and_alias_conflicts_converge_without_discarding_nodes() {
     install(&b, "b").unwrap();
     seed(&b);
     let node = |id: &str, parent: &str| Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: id.into(),
         clock: 1,
         table: "mindmap_nodes".into(),
@@ -1442,7 +1792,7 @@ fn subtask_received_before_its_parent_is_retried_when_the_task_arrives() {
     install(&db, "a").unwrap();
     seed(&db);
     let edge = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "a".into(),
         clock: 1,
         table: "issue_subtasks".into(),
@@ -1472,7 +1822,7 @@ fn subtask_received_before_its_parent_is_retried_when_the_task_arrives() {
     projection::reduce(
         &db,
         &Revision {
-            protocol: 1,
+            protocol: PROTOCOL,
             origin: "b".into(),
             clock: 2,
             table: "issues".into(),
@@ -1518,7 +1868,7 @@ fn concurrent_dependency_edges_converge_to_an_acyclic_graph() {
             .unwrap();
     }
     let edge = |origin: &str, parent, child| Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: origin.into(),
         clock: 1,
         table: "issue_subtasks".into(),
@@ -1564,7 +1914,7 @@ fn field_merges_converge_without_losing_independent_edits_or_reviving_deletions(
     let renamed = json!({"id":"p","name":"Renamed","hidden_at":null});
     let hidden = json!({"id":"p","name":"Initial","hidden_at":100});
     let fact = |origin: &str, clock, before, after| Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: origin.into(),
         clock,
         table: "projects".into(),

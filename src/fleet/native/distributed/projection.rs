@@ -85,7 +85,7 @@ fn fields(table: &str, row: &Value) -> Result<BTreeMap<String, Value>> {
 }
 
 pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
-    if fact.protocol != 1
+    if fact.protocol != PROTOCOL
         || fact.clock < 0
         || fact.origin.is_empty()
         || fact.origin.len() > 128
@@ -231,7 +231,7 @@ pub(super) fn seed_history(db: &Connection, table: &str, row: &Value, source: &s
     reduce(
         db,
         &Revision {
-            protocol: 1,
+            protocol: PROTOCOL,
             // Synthetic baselines sort below enrolled machine baselines.
             origin: format!(
                 "!{source}:{}",
