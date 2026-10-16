@@ -2,10 +2,32 @@ use super::super::context::Context;
 use super::*;
 use serde_json::json;
 use std::{
+    collections::BTreeMap,
     io::BufReader,
     process::{Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[derive(Default)]
+struct Retries(BTreeMap<String, Instant>);
+
+impl Retries {
+    fn run(&mut self, host: &str, exchange: impl FnOnce() -> Result<bool>) -> Result<bool> {
+        let now = Instant::now();
+        self.0.retain(|_, deadline| *deadline > now);
+        if self.0.contains_key(host) {
+            return Ok(false);
+        }
+        let result = exchange();
+        if result.is_err() {
+            // An offline peer must not repeatedly hold the shared journal lock
+            // for the entire SSH timeout. A busy local lock is not a failure.
+            self.0
+                .insert(host.into(), Instant::now() + Duration::from_secs(60));
+        }
+        result
+    }
+}
 
 fn engine(ctx: &Context) -> Result<hey_boss_sync::Engine> {
     let path = ctx.path.with_extension("sync.db");
@@ -175,6 +197,7 @@ fn exchange(
 /// Shadow capture and exchange leave legacy scheduling intact until cutover.
 pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
     std::thread::spawn(move || {
+        let mut retries = Retries::default();
         while !ctx.stopped() {
             let result = (|| -> Result<()> {
                 if controller {
@@ -186,7 +209,7 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                     let hosts = ctx.inventory()?;
                     for machine in hosts {
                         if let Some(host) = machine["host"].as_str().filter(|h| *h != "local") {
-                            match exchange(&ctx, host, None) {
+                            match retries.run(host, || exchange(&ctx, host, None)) {
                                 Err(error) => {
                                     ctx.atomic_json(&ctx.state.join(format!("sync-{}.json",hey_boss_sync::digest(host.as_bytes()))),&json!({"host":host,"state":"disconnected","error":error.to_string()}))?;
                                 }
@@ -211,11 +234,9 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                         .iter()
                         .filter(|peer| settings.enabled && settings.machine < peer.machine)
                     {
-                        let state = match exchange(
-                            &ctx,
-                            &peer.address,
-                            Some((peer, &settings.controller)),
-                        ) {
+                        let state = match retries.run(&peer.machine, || {
+                            exchange(&ctx, &peer.address, Some((peer, &settings.controller)))
+                        }) {
                             Ok(false) => continue,
                             Ok(true) => {
                                 json!({"state":"connected","at":super::super::context::now()})
@@ -243,6 +264,41 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unavailable_peer_waits_while_healthy_and_busy_peers_keep_syncing() {
+        let mut retries = Retries::default();
+        assert!(
+            retries
+                .run("offline", || Err(replica::invalid("Disconnected")))
+                .is_err()
+        );
+        assert!(
+            !retries
+                .run("offline", || panic!(
+                    "An unavailable peer must not consume another timeout immediately"
+                ))
+                .unwrap()
+        );
+        assert!(retries.run("healthy", || Ok(true)).unwrap());
+        assert!(!retries.run("busy", || Ok(false)).unwrap());
+        assert!(
+            retries.run("busy", || Ok(true)).unwrap(),
+            "A held sync lock is not a connection failure"
+        );
+        let deadline = *retries.0.get("offline").unwrap();
+        assert!(deadline > Instant::now());
+        assert!(deadline <= Instant::now() + Duration::from_secs(60));
+        retries
+            .0
+            .insert("offline".into(), Instant::now() - Duration::from_secs(1));
+        assert!(retries.run("offline", || Ok(true)).unwrap());
+        assert!(
+            retries.run("offline", || Ok(true)).unwrap(),
+            "Recovered peers resume normal synchronization"
+        );
+        assert!(!retries.0.contains_key("offline"));
+    }
+
     #[test]
     fn peer_preparation_keeps_controller_and_baseline_ownership() {
         let root = crate::admin::Temporary::new().unwrap();
