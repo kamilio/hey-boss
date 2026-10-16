@@ -23,6 +23,12 @@ elapsed time instead of restarting its lifetime. Replayed presence cannot renew
 an expired reservation. Dead worker processes release their reservations; a lost
 machine expires at its peers. Restart never revives a previous boot's timers.
 
+Presence may arrive before reservation facts in a backlog. New launches wait
+until every announced attempt has its reservation, or a newer presence retires
+that attempt. A timer or expired heartbeat cannot establish that a missing
+reservation is safe to ignore. Sync health reports this hold and locally running
+losing attempts; rollout verification waits for ownership to converge.
+
 The UI presents agents and machine reservations uniformly, including elapsed
 time and overlapping-agent counts. The web server's location does not define a
 special category of work.
