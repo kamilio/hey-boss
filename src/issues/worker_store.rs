@@ -456,12 +456,12 @@ impl Store {
         tx.execute("INSERT INTO agents VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",params![actor.id,serde_json::to_string(&actor)?,now()])?;
         job.actor = actor;
         tx.execute("UPDATE worker_runs SET actor_id=?2,session_id=?3,state='awaiting_model',reservation_expires=?5+900000,job=?4,updated_at=?5 WHERE id=?1",params![job.id,job.actor.id,session,serde_json::to_string(job)?,now()])?;
-        // A service outage releases the claim but retains the same session.
+        // An unfinished attempt releases the claim but retains the same session.
         // Restore its prior ownership before continuing its work; otherwise a
         // productive resumed session can expire while still awaiting a claim.
         if job.resume_session.as_deref() == Some(session)
             && tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 AND id<>?4 AND finished_at IS NOT NULL AND claimed_at IS NOT NULL AND state='infrastructure_blocked')",
+                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 AND id<>?4 AND finished_at IS NOT NULL AND claimed_at IS NOT NULL)",
                 params![job.project.id,job.number(),session,job.id],
                 |r| r.get::<_,bool>(0),
             )?
@@ -934,13 +934,19 @@ mod tests {
 
     #[test]
     fn resuming_an_interrupted_claim_restores_ownership_without_reclaiming_new_sessions() {
-        for (previously_claimed, resumed, expected) in [
-            (true, "handoff", true),
-            (false, "handoff", false),
-            (true, "new-session", false),
+        for (previous_state, previously_claimed, resumed, expected) in [
+            ("infrastructure_blocked", true, "handoff", true),
+            ("cancelled", true, "handoff", true),
+            ("interrupted", true, "handoff", true),
+            ("blocked", true, "handoff", true),
+            ("failed", true, "handoff", true),
+            ("infrastructure_blocked", false, "handoff", false),
+            ("cancelled", false, "handoff", false),
+            ("infrastructure_blocked", true, "new-session", false),
+            ("cancelled", true, "new-session", false),
         ] {
             let mut f = HandoffFixture::new(false);
-            f.store.db.execute("UPDATE worker_runs SET session_id='handoff',finished_at=1,state='infrastructure_blocked',claimed_at=?1", [previously_claimed.then_some(0)]).unwrap();
+            f.store.db.execute("UPDATE worker_runs SET session_id='handoff',finished_at=1,state=?2,claimed_at=?1", params![previously_claimed.then_some(0),previous_state]).unwrap();
             f.store
                 .db
                 .execute("UPDATE issues SET assignee=NULL", [])
@@ -952,7 +958,7 @@ mod tests {
             assert_eq!(
                 f.issue().assignee.is_some(),
                 expected,
-                "claimed={previously_claimed}, session={resumed}"
+                "state={previous_state}, claimed={previously_claimed}, session={resumed}"
             );
             assert_eq!(
                 f.state(),
