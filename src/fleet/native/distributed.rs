@@ -21,6 +21,8 @@ use crate::database::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const PROTOCOL: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Revision {
@@ -40,7 +42,8 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS distributed_meta(
  id INTEGER PRIMARY KEY CHECK(id=1),origin TEXT NOT NULL,clock INTEGER NOT NULL DEFAULT 0,
  exported INTEGER NOT NULL DEFAULT 0,projected INTEGER NOT NULL DEFAULT 0,
- active INTEGER NOT NULL DEFAULT 0,slot INTEGER,controller TEXT,legacy_cutoff INTEGER NOT NULL DEFAULT 0);
+ active INTEGER NOT NULL DEFAULT 0,slot INTEGER,controller TEXT,legacy_cutoff INTEGER NOT NULL DEFAULT 0,
+ format INTEGER NOT NULL DEFAULT 2);
 CREATE TABLE IF NOT EXISTS distributed_outbox(
  clock INTEGER PRIMARY KEY,table_name TEXT NOT NULL,before_json TEXT,after_json TEXT);
 CREATE TABLE IF NOT EXISTS distributed_baseline(
@@ -127,6 +130,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
                 "Replica identity changed; enroll restored data as a new replica",
             ));
         }
+        identity::upgrade_shadow(db)?;
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
@@ -165,7 +169,7 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
     let mut count = 0;
     for row in rows {
         let mut fact = Revision {
-            protocol: 1,
+            protocol: PROTOCOL,
             origin: origin.clone(),
             clock: row["clock"].as_i64().unwrap(),
             table: row["table_name"].as_str().unwrap().into(),
@@ -254,7 +258,7 @@ pub(super) fn baseline(
                 .as_i64()
                 .unwrap();
             let mut fact = Revision {
-                protocol: 1,
+                protocol: PROTOCOL,
                 origin: origin.clone(),
                 clock: 0,
                 table: (*table).into(),

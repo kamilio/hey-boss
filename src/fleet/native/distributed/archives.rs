@@ -44,9 +44,8 @@ pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Re
     let mut cursor: Value = serde_json::from_str(&cursor)?;
     for _ in 0..8 {
         let mut page = transfer::export_page(db, key, project, number, &cursor)?;
-        // Legacy archives remember the creating companion, whereas the hot
-        // migration uses the controller's IDs. Publish the same canonical
-        // identity for both representations, including relayed archives.
+        // Hot rows and relayed archives must retain the same legacy creation
+        // identity even when their machine-local numeric IDs differ.
         for chunk in page["chunks"].as_array_mut().unwrap() {
             let kind = chunk["kind"].as_str().unwrap();
             if !matches!(kind, "comments" | "events") {
@@ -63,8 +62,8 @@ pub(super) fn prepare(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Re
                 .ok_or_else(|| replica::invalid("Invalid archive history identity"))?;
             chunk["identity"] = json!({"origin":origin,"id":id.parse::<i64>()?});
         }
-        let id =
-            engine.put(&json!({"protocol":1,"kind":"archive_page","page":page}).to_string())?;
+        let id = engine
+            .put(&json!({"protocol":PROTOCOL,"kind":"archive_page","page":page}).to_string())?;
         pages.push(id);
         cursor = page["next"].clone();
         db.execute(
@@ -239,7 +238,7 @@ pub(super) fn restore_row(
             |r| r.get::<_, bool>(0),
         )?;
     let mut fact = Revision {
-        protocol: 1,
+        protocol: PROTOCOL,
         origin: "archive".into(),
         clock: 0,
         table: table.into(),
@@ -282,7 +281,7 @@ pub(super) fn receive(
             .payload(id)?
             .ok_or_else(|| replica::invalid("Archived input is still pending"))?;
         let value: Value = serde_json::from_str(&payload)?;
-        if value["protocol"] != 1 || value["kind"] != "archive_page" {
+        if value["protocol"] != PROTOCOL || value["kind"] != "archive_page" {
             return Err(replica::invalid("Invalid archive page reference"));
         }
         complete = download.receive(&value["page"])?;
@@ -304,8 +303,15 @@ fn remember_pages(db: &Connection, manifest: &Manifest) -> Result<()> {
 
 pub(super) fn revision(payload: &str) -> Result<Option<Revision>> {
     let header: Value = serde_json::from_str(payload)?;
+    if header["protocol"] == 1 {
+        // Retained for recovery, but superseded by the version-two baseline.
+        return Ok(None);
+    }
+    if header["protocol"] != PROTOCOL {
+        return Err(replica::invalid("Unsupported distributed protocol"));
+    }
     if header["kind"] == "archive_page" {
-        if header["protocol"] != 1 || !header["page"].is_object() {
+        if !header["page"].is_object() {
             return Err(replica::invalid("Unsupported archive protocol"));
         }
         return Ok(None);
