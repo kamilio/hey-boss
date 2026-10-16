@@ -46,6 +46,9 @@ struct Fields {
     /// Run once on every known fleet machine; unavailable machines wait.
     #[arg(long, conflicts_with = "machines")]
     all_machines: bool,
+    /// Run independently on each --machine, rather than in fallback order.
+    #[arg(long, requires = "machines", conflicts_with = "all_machines")]
+    each_machine: bool,
 }
 impl Fields {
     fn definition(&self) -> Definition {
@@ -57,6 +60,7 @@ impl Fields {
             model: self.model.clone(),
             machines: self.machines.clone(),
             all_machines: self.all_machines,
+            each_machine: self.each_machine,
         }
     }
 }
@@ -427,7 +431,11 @@ fn print_job(job: &Value) {
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
-                .join(" → ")
+                .join(if d["each_machine"] == true {
+                    ", "
+                } else {
+                    " → "
+                })
         );
     }
     if let Some(next) = job["next_at"]

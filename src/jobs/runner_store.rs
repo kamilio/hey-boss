@@ -297,7 +297,7 @@ impl Store {
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let run = get_run(&tx, id)?;
         if run.parent_run_id.is_some()
-            || !run.snapshot.definition.all_machines
+            || !run.snapshot.definition.fans_out()
             || run.state != "pending"
         {
             return Ok(());
@@ -331,7 +331,7 @@ impl Store {
         authority(&self.db)?;
         let tx =
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        let roots=tx.query_collect("SELECT id FROM scheduled_job_runs WHERE parent_run_id IS NULL AND state IN('pending','running') AND json_extract(snapshot,'$.definition.all_machines')=1",[],|r|r.get::<_,String>(0))?;
+        let roots=tx.query_collect("SELECT id FROM scheduled_job_runs WHERE parent_run_id IS NULL AND state IN('pending','running') AND (json_extract(snapshot,'$.definition.all_machines')=1 OR json_extract(snapshot,'$.definition.each_machine')=1)",[],|r|r.get::<_,String>(0))?;
         for id in roots {
             let children = tx.query_collect(
                 &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE parent_run_id=?1"),

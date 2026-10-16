@@ -22,14 +22,25 @@ pub struct Definition {
     pub machines: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_machines: bool,
+    /// Run independently on every node in machines instead of falling back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub each_machine: bool,
 }
 impl Definition {
+    pub(crate) fn fans_out(&self) -> bool {
+        self.all_machines || self.each_machine
+    }
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
         identifier(&self.model, "logical model", 256)?;
         if self.all_machines && !self.machines.is_empty() {
             return Err(Error::invalid(
                 "All machines cannot be combined with an ordered machine list",
+            ));
+        }
+        if self.each_machine && (self.all_machines || self.machines.is_empty()) {
+            return Err(Error::invalid(
+                "Each machine requires a nonempty machine list and cannot be combined with all machines",
             ));
         }
         let mut seen = std::collections::HashSet::new();
