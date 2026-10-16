@@ -160,6 +160,17 @@ pub(super) fn remember(db: &Connection, manifest: &Manifest) -> Result<()> {
 pub(super) fn project(db: &Connection, desired: &mut Value) -> Result<bool> {
     let project = desired["project_id"].as_str().unwrap();
     let number = desired["number"].as_i64().unwrap();
+    if let Some(key) = desired["archive_key"].as_str() {
+        if db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM distributed_archive_supersessions WHERE key=?1)",
+            [key],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(replica::invalid(
+                "A superseded archive cannot replace the verified current history",
+            ));
+        }
+    }
     if let Some(reason) = db.query_row("SELECT reason FROM distributed_archive_failures WHERE project_id=?1 AND number=?2 LIMIT 1", params![project,number], |r|r.get::<_,String>(0)).optional()? {
         return Err(replica::invalid(&format!("Retained archive needs repair: {reason}")));
     }
@@ -329,6 +340,13 @@ pub(super) fn receive_or_retain(
     manifest: &Manifest,
 ) -> Result<()> {
     let now = crate::issues::worker::now();
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM distributed_archive_supersessions WHERE key=?1)",
+        [&manifest.key],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
     let attempted: Option<i64> = db
         .query_row(
             "SELECT attempted_at FROM distributed_archive_failures WHERE key=?1",
@@ -385,7 +403,46 @@ pub(super) fn retry_failed(db: &Connection, engine: &hey_boss_sync::Engine) -> R
     let now = crate::issues::worker::now();
     let manifest: Option<String> = db.query_row("SELECT manifest FROM distributed_archive_failures WHERE attempted_at<=?1 OR attempted_at>?2 ORDER BY attempted_at,key LIMIT 1",params![now-30_000,now],|r|r.get(0)).optional()?;
     if let Some(manifest) = manifest {
-        receive_or_retain(db, engine, &serde_json::from_str(&manifest)?)?;
+        let manifest: Manifest = serde_json::from_str(&manifest)?;
+        let issue = json!({"project_id":manifest.project,"number":manifest.number});
+        let desired = projection::row(db, "issues", &issue)?;
+        let replacement = desired.as_ref().and_then(|r| r["archive_key"].as_str());
+        if let Some(replacement) = replacement.filter(|k| *k != manifest.key) {
+            if transfer::Catalog::new(db)?.contains(
+                replacement,
+                &manifest.project,
+                manifest.number,
+            )? && matches!(
+                crate::issues::archive::covered_by(
+                    db,
+                    &manifest.key,
+                    replacement,
+                    &manifest.project,
+                    manifest.number
+                ),
+                Ok(true)
+            ) {
+                let tx = db.unchecked_transaction()?;
+                tx.execute("INSERT OR REPLACE INTO distributed_archive_supersessions VALUES(?1,?2,?3,?4,?5)",params![manifest.key,replacement,manifest.project,manifest.number,now])?;
+                tx.execute(
+                    "DELETE FROM distributed_archive_failures WHERE key=?1",
+                    [&manifest.key],
+                )?;
+                tx.execute("DELETE FROM distributed_rejections WHERE table_name='archive' AND entity=?1",[json!({"key":manifest.key,"project_id":manifest.project,"number":manifest.number}).to_string()])?;
+                tx.execute(
+                    "UPDATE distributed_archive_history SET complete=1 WHERE key=?1",
+                    [&manifest.key],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO distributed_dirty VALUES('issues',?1)",
+                    [issue.to_string()],
+                )?;
+                remember_pages(&tx, &manifest)?;
+                tx.commit()?;
+                return Ok(());
+            }
+        }
+        receive_or_retain(db, engine, &manifest)?;
     }
     Ok(())
 }

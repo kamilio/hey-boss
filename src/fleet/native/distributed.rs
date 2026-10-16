@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS distributed_archive_history(key TEXT PRIMARY KEY,proj
 CREATE INDEX IF NOT EXISTS distributed_archive_history_pending ON distributed_archive_history(project_id,number,key) WHERE complete=0;
 CREATE TABLE IF NOT EXISTS distributed_archive_failures(key TEXT PRIMARY KEY,project_id TEXT NOT NULL,number INTEGER NOT NULL,manifest TEXT NOT NULL,reason TEXT NOT NULL,attempted_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS distributed_archive_failure_scope ON distributed_archive_failures(project_id,number);
+CREATE TABLE IF NOT EXISTS distributed_archive_supersessions(key TEXT PRIMARY KEY,replacement TEXT NOT NULL,project_id TEXT NOT NULL,number INTEGER NOT NULL,verified_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS distributed_history_edits(project_id TEXT NOT NULL,number INTEGER NOT NULL,PRIMARY KEY(project_id,number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS distributed_members(node TEXT PRIMARY KEY,slot INTEGER NOT NULL UNIQUE,ready INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS distributed_attempts(
@@ -137,7 +138,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         }
         identity::upgrade_shadow(db)?;
         if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_supersessions')",
             [],
             |r| r.get::<_, bool>(0),
         )? {
