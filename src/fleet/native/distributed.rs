@@ -11,6 +11,7 @@ mod local;
 pub(super) use local::request as local_request;
 mod materialize;
 mod projection;
+pub(super) mod reconcile;
 mod resources;
 mod transport;
 pub(super) use transport::{serve, start};

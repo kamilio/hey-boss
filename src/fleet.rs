@@ -53,6 +53,11 @@ pub enum Action {
     },
     /// Inspect local replication, including while the relay is unavailable.
     SyncStatus,
+    /// Recover retained legacy history and report edits that need review.
+    SyncReconcile {
+        #[arg(long)]
+        apply: bool,
+    },
     #[command(hide = true)]
     SyncEnroll { node: String, slot: u16 },
     #[command(hide = true)]

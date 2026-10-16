@@ -178,6 +178,10 @@ fn run_inner(action: &super::Action) -> Result<()> {
         }
         super::Action::SyncEnroll { node, slot } => distributed::enroll(&ctx, node, *slot),
         super::Action::SyncActivate => distributed::activate(&ctx),
+        super::Action::SyncReconcile { apply } => {
+            println!("{}", distributed::reconcile::run(&ctx, *apply)?);
+            Ok(())
+        }
         super::Action::Setup { source } => {
             if let Some(source) = source {
                 save_upgrade_source(&ctx, source)?;
