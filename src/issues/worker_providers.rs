@@ -37,24 +37,12 @@ pub(super) fn run(
     // Stable owned identity exists before the provider can execute a tool;
     // Claude's native session ID arrives only after its first user message.
     store.worker_prepare_provider(job)?;
-    let resume = match (&job.resume_session, &job.session_ref) {
-        (None, _) => None,
-        (Some(id), Some(reference)) if reference.provider == provider && &reference.id == id => {
-            Some(reference.clone())
-        }
-        _ => {
-            return Err(Error::new(
-                "blocked",
-                "The saved provider session reference is missing or mismatched; no fresh session was started",
-            ));
-        }
-    };
     let agent = AgentSession::launch(Launch {
         model: None,
         provider,
         binary: None,
         cwd: job.config.cwd.clone().into(),
-        resume,
+        resume: None,
         env: BTreeMap::from([
             ("HEY_BOSS_ISSUE_DB".into(), path.as_os_str().into()),
             (
