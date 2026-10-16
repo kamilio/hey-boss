@@ -420,6 +420,41 @@ fn public_status(status: Value, monitoring: bool) -> Value {
     evidence::bounded(status)
 }
 
+fn remote_attempts(
+    db: &Connection,
+    project: &str,
+    numbers: &[i64],
+) -> Result<std::collections::BTreeMap<i64, Vec<Value>>> {
+    let mut attempts = std::collections::BTreeMap::<i64, Vec<Value>>::new();
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_attempts' AND type='table')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(attempts);
+    }
+    // Remote work is observed separately from local ownership. Waiting for a
+    // model or a claim is not working, and replicated local runs are duplicates.
+    let rows = db.query_collect(
+        "SELECT d.issue_number,d.id,d.machine,json_extract(d.payload,'$.actor_id'),coalesce(json_extract(a.metadata,'$.host'),d.machine),d.started_at
+         FROM distributed_attempts d LEFT JOIN agents a ON a.id=json_extract(d.payload,'$.actor_id')
+         WHERE d.project_id=?1 AND d.issue_number IN (SELECT value FROM json_each(?2))
+           AND d.state='running' AND d.finished_at IS NULL
+           AND NOT EXISTS(SELECT 1 FROM worker_runs w WHERE w.id=d.id)
+         ORDER BY d.started_at DESC,d.id DESC",
+        params![project, serde_json::to_string(numbers)?],
+        |r| Ok::<_, rusqlite::Error>((r.get::<_, i64>(0)?, json!({
+            "id":r.get::<_,String>(1)?,"machine":r.get::<_,String>(2)?,
+            "actor":r.get::<_,Option<String>>(3)?,"host":r.get::<_,String>(4)?,
+            "started_at":r.get::<_,i64>(5)?
+        }))),
+    )?;
+    for (number, attempt) in rows {
+        attempts.entry(number).or_default().push(attempt);
+    }
+    Ok(attempts)
+}
+
 pub(super) fn enrich_result(
     db: &Connection,
     project: &str,
@@ -442,12 +477,19 @@ pub(super) fn enrich_result(
     }
     let metadata = metadata(db, project, &numbers)?;
     let machines = machines(db, actor)?;
+    let remote = remote_attempts(db, project, &numbers)?;
     for issue in result["issues"].as_array_mut().into_iter().flatten() {
         if let Some(meta) = issue["number"]
             .as_i64()
             .and_then(|number| metadata.get(&number))
         {
             attach(issue, meta, &machines);
+            issue["remote_attempts"] = json!(
+                remote
+                    .get(&issue["number"].as_i64().unwrap())
+                    .cloned()
+                    .unwrap_or_default()
+            );
         }
     }
     if let Some(issue) = result.get_mut("issue")
@@ -455,6 +497,7 @@ pub(super) fn enrich_result(
         && let Some(meta) = metadata.get(&number)
     {
         attach(issue, meta, &machines);
+        issue["remote_attempts"] = json!(remote.get(&number).cloned().unwrap_or_default());
         let (_, status) = saved(db, project, number)?;
         if meta.target.as_deref() == Some("github")
             || status.get("event").is_some()
@@ -1146,6 +1189,40 @@ mod tests {
         store: Store,
         request: Request,
         root: std::path::PathBuf,
+    }
+    #[test]
+    fn remote_work_is_visible_without_becoming_a_local_claim() {
+        let mut f = Fixture::new();
+        f.store.db.execute_batch("CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT,project_id TEXT,issue_number INTEGER,state TEXT,started_at INTEGER,finished_at INTEGER,summary TEXT,payload TEXT);
+            INSERT INTO agents VALUES('codex:remote','{\"machine\":\"remote\",\"host\":\"devbox\"}',0);
+            INSERT INTO distributed_attempts VALUES
+            ('working','remote','named:test',1,'running',2,NULL,'','{\"actor_id\":\"codex:remote\"}'),
+            ('waiting','remote','named:test',1,'awaiting_model',3,NULL,'','{\"actor_id\":\"codex:waiting\"}'),
+            ('finished','remote','named:test',1,'running',4,5,'','{\"actor_id\":\"codex:finished\"}'),
+            ('other','remote','other-project',1,'running',6,NULL,'','{\"actor_id\":\"codex:other\"}');").unwrap();
+        let mut list = json!({"issues":[{"number":1,"state":"open","assignee":null}]});
+        enrich_result(&f.store.db, "named:test", &mut list, None).unwrap();
+        let issue = &list["issues"][0];
+        assert_eq!(issue["remote_attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(issue["remote_attempts"][0]["actor"], "codex:remote");
+        assert_eq!(issue["remote_attempts"][0]["host"], "devbox");
+        assert!(issue["assignee"].is_null());
+        assert_eq!(issue["assignment"]["kind"], "unassigned");
+        assert!(
+            get_issue(&f.store.db, "named:test", 1, false)
+                .unwrap()
+                .assignee
+                .is_none()
+        );
+        f.store
+            .db
+            .execute(
+                "UPDATE distributed_attempts SET finished_at=7 WHERE id='working'",
+                [],
+            )
+            .unwrap();
+        let detail = f.call(json!({"action":"view","number":1})).unwrap();
+        assert_eq!(detail["issue"]["remote_attempts"], json!([]));
     }
     impl Fixture {
         fn new() -> Self {
