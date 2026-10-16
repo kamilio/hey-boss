@@ -105,6 +105,7 @@ fn plist(user: &str, home: &str, binary: &str, origin: Option<&str>) -> String {
 <key>UserName</key><string>{user}</string>
 <key>ProgramArguments</key><array><string>{binary}</string><string>issue</string><string>web</string><string>--json</string>{origin}</array>
 <key>WorkingDirectory</key><string>{home}</string>
+<key>ProcessType</key><string>Interactive</string>
 <key>EnvironmentVariables</key><dict>
 <key>HOME</key><string>{home}</string>
 <key>PATH</key><string>{home}/.local/bin:{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
@@ -371,6 +372,7 @@ mod tests {
             Some("https://mac.example.ts.net"),
         );
         assert!(definition.contains("<key>UserName</key><string>test-user</string>"));
+        assert!(definition.contains("<key>ProcessType</key><string>Interactive</string>"));
         assert!(definition.contains("<key>SockNodeName</key><string>127.0.0.1</string>"));
         assert!(definition.contains("<key>SockServiceName</key><string>80</string>"));
         assert!(definition.contains("<key>SockFamily</key><string>IPv4</string>"));
