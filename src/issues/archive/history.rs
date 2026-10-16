@@ -14,7 +14,7 @@ CREATE INDEX history_number ON issue_history(archive_key,kind,id);
 CREATE INDEX history_timeline ON issue_history(archive_key,kind,created_at DESC,id DESC);
 CREATE INDEX history_actions ON issue_history(archive_key,kind,action,id DESC);
 CREATE TABLE issue_origins(archive_key TEXT NOT NULL,kind TEXT NOT NULL,source_id INTEGER NOT NULL,origin TEXT NOT NULL,origin_id INTEGER NOT NULL,local_id INTEGER,PRIMARY KEY(archive_key,kind,source_id)) WITHOUT ROWID;
-CREATE UNIQUE INDEX issue_origin_local ON issue_origins(archive_key,kind,local_id) WHERE local_id IS NOT NULL;
+CREATE INDEX issue_origin_local ON issue_origins(archive_key,kind,local_id) WHERE local_id IS NOT NULL;
 CREATE INDEX history_comment_resolution ON issue_history(archive_key,json_extract(json_extract(record,'$.data'),'$.comment_id'),created_at DESC,id DESC) WHERE kind='events' AND action IN ('comment_resolved','comment_unresolved');
 CREATE INDEX history_comment_models ON issue_history(archive_key,json_extract(json_extract(record,'$.data'),'$.comment_id'),id DESC) WHERE kind='events' AND action='commented';
 ";
@@ -25,6 +25,14 @@ pub(super) fn initialize(db: &Connection) -> Result<()> {
         [],
         |r| r.get::<_, bool>(0),
     )? {
+        // Legacy forwarding can retain two creation aliases for one append.
+        // Keep both immutable source rows; mapping validates their content
+        // before allowing them to share a local identity.
+        if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_origin_local' AND sql LIKE 'CREATE UNIQUE INDEX%')",[],|r|r.get::<_,bool>(0))? {
+            let tx=db.unchecked_transaction()?;
+            tx.execute_batch("DROP INDEX IF EXISTS issue_origin_local; CREATE INDEX issue_origin_local ON issue_origins(archive_key,kind,local_id) WHERE local_id IS NOT NULL;")?;
+            tx.commit()?;
+        }
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
@@ -402,8 +410,8 @@ pub(crate) fn history_connection(
     let quoted: String = archive
         .db
         .query_row("SELECT quote(?1)", [project], |r| r.get(0))?;
-    archive.db.execute_batch(&format!("CREATE TEMP VIEW comments AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author,json_extract(h.record,'$.body') AS body,h.created_at FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id WHERE h.archive_key='{key}' AND h.kind='comments' AND archive_record(h.record,h.record_hash) IS NOT NULL;
-        CREATE TEMP VIEW events AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author AS actor,h.action,h.created_at,CASE WHEN c.local_id IS NULL THEN json_extract(h.record,'$.data') ELSE json_set(json_extract(h.record,'$.data'),'$.comment_id',c.local_id) END AS data FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id LEFT JOIN issue_origins c ON c.archive_key=h.archive_key AND c.kind='comments' AND c.source_id=json_extract(json_extract(h.record,'$.data'),'$.comment_id') WHERE h.archive_key='{key}' AND h.kind='events' AND archive_record(h.record,h.record_hash) IS NOT NULL;
+    archive.db.execute_batch(&format!("CREATE TEMP VIEW comments AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author,json_extract(h.record,'$.body') AS body,h.created_at FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id WHERE h.archive_key='{key}' AND h.kind='comments' AND archive_record(h.record,h.record_hash) IS NOT NULL AND NOT EXISTS(SELECT 1 FROM issue_origins duplicate WHERE duplicate.archive_key=h.archive_key AND duplicate.kind=h.kind AND duplicate.local_id=o.local_id AND duplicate.source_id<h.id);
+        CREATE TEMP VIEW events AS SELECT coalesce(o.local_id,h.id) AS id,{quoted} AS project_id,{number} AS issue_number,h.author AS actor,h.action,h.created_at,CASE WHEN c.local_id IS NULL THEN json_extract(h.record,'$.data') ELSE json_set(json_extract(h.record,'$.data'),'$.comment_id',c.local_id) END AS data FROM issue_history h LEFT JOIN issue_origins o ON o.archive_key=h.archive_key AND o.kind=h.kind AND o.source_id=h.id LEFT JOIN issue_origins c ON c.archive_key=h.archive_key AND c.kind='comments' AND c.source_id=json_extract(json_extract(h.record,'$.data'),'$.comment_id') WHERE h.archive_key='{key}' AND h.kind='events' AND archive_record(h.record,h.record_hash) IS NOT NULL AND NOT EXISTS(SELECT 1 FROM issue_origins duplicate WHERE duplicate.archive_key=h.archive_key AND duplicate.kind=h.kind AND duplicate.local_id=o.local_id AND duplicate.source_id<h.id);
         CREATE TEMP VIEW issue_status_updates AS SELECT text_id AS id,{quoted} AS project_id,{number} AS issue_number,author,json_extract(record,'$.level') AS level,json_extract(record,'$.comment') AS comment,created_at FROM issue_history WHERE archive_key='{key}' AND kind='issue_status_updates' AND archive_record(record,record_hash) IS NOT NULL;
         CREATE TEMP TABLE agents(id TEXT PRIMARY KEY,metadata TEXT);
         INSERT INTO agents SELECT text_id,json_extract(archive_record(record,record_hash),'$.metadata') FROM issue_history WHERE archive_key='{key}' AND kind='agents';"))?;
@@ -439,7 +447,12 @@ fn mapped_history_ready(archive: &Archive, key: &str) -> Result<()> {
     Ok(())
 }
 
-fn local_record(archive: &Archive, key: &str, table: &str, mut row: Value) -> Result<Value> {
+pub(super) fn local_record(
+    archive: &Archive,
+    key: &str,
+    table: &str,
+    mut row: Value,
+) -> Result<Value> {
     if !matches!(table, "comments" | "events") {
         return Ok(row);
     }
@@ -475,7 +488,7 @@ fn local_record(archive: &Archive, key: &str, table: &str, mut row: Value) -> Re
     Ok(row)
 }
 
-fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
+pub(super) fn same_record(table: &str, expected: &Value, actual: &Value) -> bool {
     expected.as_object().is_some_and(|fields| {
         fields.iter().all(|(field, value)| {
             if table == "events" && field == "data" {

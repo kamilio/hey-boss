@@ -541,6 +541,39 @@ pub(crate) fn map_local_history(
         let tx = archive.db.unchecked_transaction()?;
         for (kind, source_id, id) in mapped {
             tx.execute("UPDATE issue_origins SET local_id=?4 WHERE archive_key=?1 AND kind=?2 AND source_id=?3",params![key,kind,source_id,id])?;
+            let duplicate:Option<i64>=tx.query_row("SELECT source_id FROM issue_origins WHERE archive_key=?1 AND kind=?2 AND local_id=?3 AND source_id<>?4 ORDER BY source_id LIMIT 1",params![key,kind,id,source_id],|r|r.get(0)).optional()?;
+            let Some(duplicate) = duplicate else { continue };
+            // Compare with one already validated representative. Ordinary
+            // unique identities never read their potentially large payload.
+            let copies=tx.prepare("SELECT record,record_hash FROM issue_history WHERE archive_key=?1 AND kind=?2 AND text_id IN (?3,?4)")?.query_map(params![key,kind,source_id.to_string(),duplicate.to_string()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if copies.len() != 2 {
+                return Err(unavailable("Archived identity payload is missing"));
+            }
+            if copies.len() > 1 {
+                let mut canonical = None;
+                for (record, digest) in copies {
+                    if format!("{:x}", Sha256::digest(record.as_bytes())) != digest {
+                        return Err(unavailable("Archived history integrity check failed"));
+                    }
+                    let record = history::local_record(
+                        &archive,
+                        key,
+                        &kind,
+                        serde_json::from_str(&record)?,
+                    )?;
+                    if let Some(previous) = &canonical {
+                        if !history::same_record(&kind, previous, &record)
+                            || !history::same_record(&kind, &record, previous)
+                        {
+                            return Err(unavailable(
+                                "Archive identity aliases have different content",
+                            ));
+                        }
+                    } else {
+                        canonical = Some(record);
+                    }
+                }
+            }
         }
         tx.commit()?;
     }
