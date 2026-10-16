@@ -62,8 +62,8 @@ fn prepared(
     journal: &mut hey_boss_sync::Engine,
     controller: bool,
 ) -> Result<()> {
-    let Some(_lock) = ctx.lock("distributed-sync.lock", true)? else {
-        return Err(replica::invalid("Sync is busy"));
+    let Some(_lock) = ctx.lock("distributed-sync.lock", false)? else {
+        return Ok(());
     };
     crate::issues::allocations::maintain(db)?;
     let result =
@@ -72,6 +72,137 @@ fn prepared(
         health::failed(ctx, &error.to_string());
     }
     result
+}
+
+struct PresenceSnapshot {
+    pulses: Vec<hey_boss_sync::session::Presence>,
+    captured: Instant,
+    age: Duration,
+}
+impl PresenceSnapshot {
+    fn current(&self) -> Vec<hey_boss_sync::session::Presence> {
+        let age = self
+            .age
+            .saturating_add(self.captured.elapsed())
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        self.pulses
+            .iter()
+            .filter_map(|pulse| {
+                let mut pulse = pulse.clone();
+                pulse.remaining_ms = pulse.remaining_ms.saturating_sub(age);
+                (pulse.remaining_ms > 0).then_some(pulse)
+            })
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ApplicationState {
+    outgoing: Option<PresenceSnapshot>,
+    incoming: Option<PresenceSnapshot>,
+}
+
+// Only replaceable presence is queued in memory. Facts are acknowledged by the
+// independent durable journal. A slow application writer cannot stall SSH.
+struct Application {
+    state: Arc<std::sync::Mutex<ApplicationState>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Application {
+    fn start(ctx: &Context, controller: bool, peer: &str) -> Self {
+        let state = Arc::new(std::sync::Mutex::new(ApplicationState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (shared, stopping, ctx, peer) =
+            (state.clone(), stop.clone(), ctx.clone(), peer.to_owned());
+        let thread = std::thread::spawn(move || {
+            let run = || -> Result<()> {
+                let db = ctx.db()?;
+                let mut journal = engine(&ctx)?;
+                while !cancelled(&ctx, &stopping) {
+                    let received = shared.lock().unwrap().incoming.take();
+                    if let Some(received) = received {
+                        crate::issues::allocations::receive_presence(
+                            &db,
+                            &received.pulses,
+                            received.age.saturating_add(received.captured.elapsed()),
+                        )?;
+                        crate::issues::allocations::record_exchange(&db, &peer, received.age)?;
+                    }
+                    // This connection's presence must progress even when a
+                    // different connection is preparing the same application.
+                    let captured = Instant::now();
+                    let pulses = crate::issues::allocations::presence(&db)?;
+                    shared.lock().unwrap().outgoing = Some(PresenceSnapshot {
+                        pulses,
+                        captured,
+                        age: Duration::ZERO,
+                    });
+                    if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
+                        crate::issues::allocations::maintain(&db)?;
+                        prepare(&ctx, &db, &mut journal, controller)?;
+                        health::prepared(&ctx, &db, &journal)?;
+                        // Timestamp before the query so query latency never
+                        // grants extra lifetime to a cached pulse.
+                        let captured = Instant::now();
+                        let pulses = crate::issues::allocations::presence(&db)?;
+                        shared.lock().unwrap().outgoing = Some(PresenceSnapshot {
+                            pulses,
+                            captured,
+                            age: Duration::ZERO,
+                        });
+                    }
+                    wait(&ctx, &stopping, SYNC_INTERVAL);
+                }
+                Ok(())
+            };
+            if let Err(error) = run() {
+                health::failed(&ctx, &error.to_string());
+            }
+        });
+        Self {
+            state,
+            stop,
+            thread: Some(thread),
+        }
+    }
+    fn presence(&self) -> Vec<hey_boss_sync::session::Presence> {
+        self.state
+            .lock()
+            .unwrap()
+            .outgoing
+            .as_ref()
+            .map(PresenceSnapshot::current)
+            .unwrap_or_default()
+    }
+    fn check(&self) -> Result<()> {
+        if self
+            .thread
+            .as_ref()
+            .is_none_or(|thread| thread.is_finished())
+        {
+            return Err(replica::invalid(
+                "Sync application processing stopped; reconnecting",
+            ));
+        }
+        Ok(())
+    }
+    fn received(&self, pulses: Vec<hey_boss_sync::session::Presence>, age: Duration) {
+        self.state.lock().unwrap().incoming = Some(PresenceSnapshot {
+            pulses,
+            captured: Instant::now(),
+            age,
+        });
+    }
+}
+impl Drop for Application {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 // A silent client must not leave a server process and database connection alive
@@ -121,6 +252,12 @@ pub(in crate::fleet::native) fn serve(
         return Err(replica::invalid("Invalid controller identity"));
     }
     let db = ctx.db()?;
+    install(&db, &ctx.node)?;
+    if db.query_row(
+        "SELECT controller=?1 FROM distributed_meta WHERE id=1",
+        [controller],
+        |r| r.get::<_, Option<bool>>(0),
+    )? != Some(true)
     {
         let _lock = ctx.lock("distributed-sync.lock", true)?;
         install(&db, &ctx.node)?;
@@ -137,35 +274,30 @@ pub(in crate::fleet::native) fn serve(
     if !continuous {
         prepared(&ctx, &db, &mut journal, false)?;
         for _ in 0..8 {
-            hey_boss_sync::session::serve(&mut journal, &mut reader, &mut writer)?;
+            let result =
+                hey_boss_sync::session::serve_next(&mut journal, &mut reader, &mut writer, |_| {
+                    Ok(Vec::new())
+                })?
+                .ok_or_else(|| replica::invalid("SSH synchronization ended before handshake"))?;
+            health::peer_exchanged(&ctx, &result)?;
         }
         prepared(&ctx, &db, &mut journal, false)?;
-        health::exchanged(&ctx)?;
         return Ok(());
     }
+    let application = Application::start(&ctx, false, controller);
     while !ctx.stopped() {
         let mut started = Instant::now();
-        let result = hey_boss_sync::session::serve_next(
-            &mut journal,
-            &mut reader,
-            &mut writer,
-            |journal| {
+        let result =
+            hey_boss_sync::session::serve_next(&mut journal, &mut reader, &mut writer, |_| {
                 started = Instant::now();
-                prepared(&ctx, &db, journal, false)?;
-                Ok(crate::issues::allocations::presence(&db)?)
-            },
-        )?;
+                application.check()?;
+                Ok(application.presence())
+            })?;
         let Some(result) = result else {
             break;
         };
-        prepared(&ctx, &db, &mut journal, false)?;
-        crate::issues::allocations::receive_presence(
-            &db,
-            &result.presence,
-            result.presence_age.max(started.elapsed()),
-        )?;
-        crate::issues::allocations::record_exchange(&db, controller, started.elapsed())?;
-        health::exchanged(&ctx)?;
+        health::peer_exchanged(&ctx, &result)?;
+        application.received(result.presence, result.presence_age.max(started.elapsed()));
     }
     Ok(())
 }
@@ -194,7 +326,6 @@ fn wait(ctx: &Context, stop: &AtomicBool, duration: Duration) {
     }
 }
 fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
-    let db = ctx.db()?;
     let mut journal = engine(ctx)?;
     let controller = target
         .peer
@@ -243,6 +374,7 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
     let mut writer = child.stdin.take().unwrap();
     let progress = std::sync::Mutex::new(Some(Instant::now()));
     let finished = AtomicBool::new(false);
+    let application = Application::start(ctx, target.peer.is_none(), &target.host);
     let result = std::thread::scope(|scope| {
         let pid = child.id();
         let progress = &progress;
@@ -263,24 +395,18 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
         });
         let result = (|| -> Result<()> {
             while !cancelled(ctx, stop) {
+                application.check()?;
                 let start = Instant::now();
                 *progress.lock().unwrap() = Some(start);
-                prepared(ctx, &db, &mut journal, target.peer.is_none())?;
-                let presence = crate::issues::allocations::presence(&db)?;
+                let presence = application.presence();
                 let result = hey_boss_sync::session::connect_present(
                     &mut journal,
                     &mut reader,
                     &mut writer,
                     presence,
                 )?;
-                prepared(ctx, &db, &mut journal, target.peer.is_none())?;
-                crate::issues::allocations::receive_presence(
-                    &db,
-                    &result.presence,
-                    start.elapsed(),
-                )?;
-                crate::issues::allocations::record_exchange(&db, &target.host, start.elapsed())?;
-                health::exchanged(ctx)?;
+                health::peer_exchanged(ctx, &result)?;
+                application.received(result.presence, result.presence_age.max(start.elapsed()));
                 ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"connected","at":super::super::context::now(),"exchange_ms":start.elapsed().as_millis()}))?;
                 *progress.lock().unwrap() = None;
                 // Drain actual changes immediately. Idle peers send one tiny
@@ -408,6 +534,78 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_contention_cannot_stop_durable_network_catchup() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.json"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "a".repeat(32),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let db = crate::issues::Store::open(&ctx.path)
+            .unwrap()
+            .into_database();
+        install(&db, &ctx.node).unwrap();
+        drop(db);
+        let lock = ctx.lock("distributed-sync.lock", true).unwrap().unwrap();
+        let application = Application::start(&ctx, false, "peer");
+        let mut local = engine(&ctx).unwrap();
+        let mut peer = hey_boss_sync::Engine::open(&root.0.join("peer.db")).unwrap();
+        for n in 0..400 {
+            peer.put(&format!("offline-{n}")).unwrap();
+        }
+        let (mut a, mut b) = std::os::unix::net::UnixStream::pair().unwrap();
+        for socket in [&a, &b] {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+        }
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for _ in 0..5 {
+                    hey_boss_sync::session::serve(&mut peer, &mut b.try_clone().unwrap(), &mut b)
+                        .unwrap();
+                }
+            });
+            for _ in 0..5 {
+                let result = hey_boss_sync::session::connect_present(
+                    &mut local,
+                    &mut a.try_clone().unwrap(),
+                    &mut a,
+                    application.presence(),
+                )
+                .unwrap();
+                application.received(result.presence, result.presence_age);
+            }
+            server.join().unwrap();
+        });
+        assert_eq!(local.head().unwrap(), 400);
+        drop(application);
+        drop(lock);
+    }
+
+    #[test]
+    fn queued_presence_keeps_aging_without_database_access() {
+        let pulse = hey_boss_sync::session::Presence {
+            machine: "peer".into(),
+            sequence: 1,
+            attempts: vec!["attempt".into()],
+            remaining_ms: 100,
+        };
+        let snapshot = PresenceSnapshot {
+            pulses: vec![pulse],
+            captured: Instant::now() - Duration::from_millis(60),
+            age: Duration::from_millis(50),
+        };
+        assert!(
+            snapshot.current().is_empty(),
+            "Queued presence must not renew expired claims"
+        );
+    }
     #[test]
     fn idle_preparation_does_not_wait_for_the_application_writer() {
         let root = crate::admin::Temporary::new().unwrap();
