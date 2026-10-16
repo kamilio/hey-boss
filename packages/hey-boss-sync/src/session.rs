@@ -20,6 +20,12 @@ pub struct Presence {
 
 pub struct Exchange {
     pub records: usize,
+    pub peer: String,
+    /// An empty incoming page proves the sender had no more facts at capture.
+    /// A partial page alone cannot prove this: byte limits also bound pages.
+    pub incoming_drained: bool,
+    pub outgoing_pending: i64,
+    pub journal_head: i64,
     pub presence: Vec<Presence>,
     /// Conservative age covering both directions, without comparing wall clocks.
     pub presence_age: Duration,
@@ -132,8 +138,13 @@ pub fn serve_next(
         return Err(invalid("SSH peer acknowledged a different batch"));
     }
     engine.acknowledge(&peer.replica, acknowledged)?;
+    let journal_head = engine.head()?;
     Ok(Some(Exchange {
         records,
+        peer: peer.replica,
+        incoming_drained: turn.batch.records.is_empty(),
+        outgoing_pending: journal_head.saturating_sub(acknowledged),
+        journal_head,
         presence: peer.presence,
         presence_age: peer_elapsed.saturating_add(started.elapsed()),
     }))
@@ -182,8 +193,13 @@ pub fn connect_present(
         Acknowledgment::Legacy(received)
     };
     wire::send(writer, &acknowledgment)?;
+    let journal_head = engine.head()?;
     Ok(Exchange {
         records: sent_count + turn.batch.records.len(),
+        peer: peer.hello.replica,
+        incoming_drained: turn.batch.records.is_empty(),
+        outgoing_pending: journal_head.saturating_sub(turn.received),
+        journal_head,
         presence: peer.hello.presence,
         presence_age: started.elapsed(),
     })
@@ -309,6 +325,40 @@ mod tests {
             let server = scope.spawn(|| serve(b, &mut right.try_clone().unwrap(), &mut right));
             connect(a, &mut left.try_clone().unwrap(), &mut left).unwrap();
             server.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn an_applied_page_does_not_prove_the_peer_is_drained() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        for n in 0..300 {
+            b.put(&format!("record-{n}")).unwrap();
+        }
+        let peer = b.id().to_owned();
+        let (mut left, mut right) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for _ in 0..5 {
+                    serve(&mut b, &mut right.try_clone().unwrap(), &mut right).unwrap();
+                }
+            });
+            for n in 0..5 {
+                let result = connect_present(
+                    &mut a,
+                    &mut left.try_clone().unwrap(),
+                    &mut left,
+                    Vec::new(),
+                )
+                .unwrap();
+                assert_eq!(result.peer, peer);
+                assert_eq!(result.incoming_drained, n >= 3);
+                if n == 0 {
+                    assert_eq!(result.outgoing_pending, 128);
+                }
+            }
+            server.join().unwrap();
         });
     }
 
