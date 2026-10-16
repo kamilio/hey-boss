@@ -18,6 +18,7 @@ const issues = [
   {title:'Draft with discussion keeps its actions aligned',draft:true,comment_count:2,assignment:{kind:'unassigned'}},
   {title:'Draft without comments keeps its actions aligned',draft:true,comment_count:0,assignment:{kind:'unassigned'}},
   {title:'Unassigned issue without comments keeps its actions aligned',comment_count:0,assignment:{kind:'unassigned'}},
+  {title:'An agent on another machine shows elapsed time',comment_count:0,assignment:{kind:'machine',machine:'box',machine_name:'Devbox'},remote_attempts:[{actor:'codex:astra',machine:'box',host:'Devbox',state:'running'},{actor:'codex:other',machine:'other',host:'Other',state:'running'}]},
 ].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',body_html:'<p>Inspect the current owner and PR status.</p>',comments:[],events:[],pull_requests:[],...i}));
 for (const number of [3,6,7]) {
   const issue=issues[number-1], url=`https://github.com/example/project/pull/${number}`;
@@ -38,7 +39,7 @@ const server=createServer(async(req,res)=>{
     requests.push(op);
     let result={...common,tasks:[],notices:[],attachments:[],unread:0,comments:[],events:[],entries:[],next_before:null};
     if(op.action==='view') result={...result,issue:issues.find(i=>i.number===op.number),comments:[],events:[]};
-    else if(op.action==='list') result={...result,issues:issues.filter(i=>(!op.unassigned||!i.assignee)&&(!op.assignee||i.assignee===op.assignee||'machine:'+i.assignment.machine===op.assignee)&&(!op.label||i.labels.includes(op.label))),order_version:1};
+    else if(op.action==='list') result={...result,issues:issues.filter(i=>(!op.unassigned||!i.assignee)&&(!op.assignee||i.assignee===op.assignee||i.remote_attempts?.some(r=>r.actor===op.assignee)||'machine:'+i.assignment.machine===op.assignee)&&(!op.label||i.labels.includes(op.label))),order_version:1};
     else if(op.action==='assign') {res.statusCode=409;result={ok:false,error:{message:'Assignment changed; refresh before assigning'}};}
     res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;
   }
@@ -124,6 +125,7 @@ const server=createServer(async(req,res)=>{
           await card(1).waitFor({state:'visible'});
           assert.match(await card(1).innerText(),/Codex · gpt-6-astra/);
           assert.match(await card(1).innerText(),/Devbox/);
+          assert.doesNotMatch(await card(1).innerText(),/remote attempt|Last reported/i);
           await card(1).getByText('Working',{exact:true}).waitFor();
           assert.match(await card(1).locator('.assignment-runtime').innerText(),/2m 0[5-9]s/);
           const initialTime=await card(1).locator('.assignment-runtime').innerText();
@@ -176,6 +178,13 @@ const server=createServer(async(req,res)=>{
             await page.getByText('Assignment changed; refresh before assigning',{exact:true}).waitFor();
             assert.equal(await page.locator('#issue-assignment').inputValue(),selection,'Failed changes restore actual owner');
           }
+          await list();
+          await showOwner(11);
+          await card(11).getByText('Working',{exact:true}).waitFor();
+          assert.match(await card(11).innerText(),/2 agents working on this task/);
+          assert.doesNotMatch(await card(11).innerText(),/remote attempt|Last reported/i);
+          const replicatedTime=await card(11).locator('.assignment-runtime').innerText();
+          await page.waitForFunction(text=>document.querySelector('#assignment-card-11 .assignment-runtime').textContent!==text,replicatedTime);
           await list();
           await page.locator('[data-issue-number="1"] .list-label-filter').click();
           await page.waitForFunction(()=>model.route.label==='needs-boss');

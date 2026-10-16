@@ -72,8 +72,11 @@ test('remote task work appears without inventing a local ownership filter', () =
   const issue={number:7,state:'open',assignee:null,assignment:{kind:'unassigned'},remote_attempts:[{id:'run',actor:'codex:remote',machine:'remote',host:'Devbox <2>',started_at:12}]};
   const html=context.render(issue);
   assert.match(html,/data-assignment-kind="agent"/);
-  assert.match(html,/Last reported working on Devbox &lt;2&gt;/);
+  assert.match(html,/Devbox &lt;2&gt;/);
   assert.match(html,/agent=codex%3Aremote/);
+  assert.match(html,/class="assignment-activity"/);
+  assert.match(html,/data-assignment-agent="codex:remote"/);
+  assert.match(html,/Elapsed time/);
   assert.doesNotMatch(html,/Filter by|<2>/);
   assert.equal(context.render({...issue,state:'closed'}),'');
   const local=context.render({...issue,assignee:'codex:local',assignment:{kind:'agent',actor:'codex:local'}});
