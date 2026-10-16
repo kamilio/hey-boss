@@ -418,3 +418,27 @@ fn forwarded_headers_cannot_turn_a_proxy_into_a_local_client() {
         );
     }
 }
+
+#[test]
+fn home_service_defaults_to_a_visible_real_project_without_overriding_explicit_choices() {
+    let home = json!({"id":"local:machine:/Users/kjopek", "name":"kjopek"});
+    let resolved = json!({"project":home,"projects":[
+        {"id":"local:other:/home/other", "name":"other", "hidden_at":null},
+        {"id":"github.com/example/hidden", "name":"hidden", "hidden_at":1},
+        {"id":"github.com/example/recent", "name":"recent", "hidden_at":null},
+        {"id":"github.com/example/older", "name":"older", "hidden_at":null}
+    ]});
+    assert_eq!(
+        initial_project(&resolved, false).unwrap().id,
+        "github.com/example/recent"
+    );
+    assert_eq!(
+        initial_project(&resolved, true).unwrap().id,
+        home["id"].as_str().unwrap()
+    );
+    let real = json!({"project":{"id":"github.com/example/checkout", "name":"checkout"},"projects":resolved["projects"]});
+    assert_eq!(
+        initial_project(&real, false).unwrap().id,
+        "github.com/example/checkout"
+    );
+}

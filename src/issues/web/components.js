@@ -186,7 +186,9 @@ function date(at) {
     if (explicit) return explicit;
     try {
       const saved = JSON.parse(localStorage.getItem("hey-boss-issues-project"));
-      if (typeof saved === "string" && saved) return saved;
+      // Older home-launched services persisted a home directory as a project.
+      const home = /^local:[^:]+:(?:\/Users\/[^/]+|\/home\/[^/]+|\/root)\/?$/;
+      if (typeof saved === "string" && saved && !home.test(saved)) return saved;
     } catch {}
     return fallback;
   }
