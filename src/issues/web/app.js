@@ -409,7 +409,7 @@ function traceLinkForOrigin(origin, number, fallbackActor) {
 }
 function listAssignment(issue) {
   let a = IssueAssignments.owner(issue);
-  const remote = issue.state === 'open' && !issue.deleted_at && ['unassigned', 'machine'].includes(a.kind) ? issue.remote_attempts?.[0] : null;
+  const remote = issue.state === 'open' && !issue.deleted_at && ['unassigned', 'machine'].includes(a.kind) ? issue.remote_attempts?.find(run => run.machine === a.machine) || issue.remote_attempts?.[0] : null;
   if (remote) a = {kind:'agent', actor:remote.actor, machine:remote.machine, machine_name:remote.host};
   const watching = IssueAssignments.current(issue).kind === 'github';
   const actor = a.actor || issue.assignee;
@@ -420,7 +420,7 @@ function listAssignment(issue) {
     : actor && !actor.startsWith('human:') && !actor.startsWith('job:') && actor !== 'watcher:github'
       ? '/agents/session#' + new URLSearchParams({project:model.project.id, issue:issue.number, agent:actor}) : null;
   if (historical && !trace) return '';
-  const description = remote ? {label:actorName(remote.actor), detail:'Last reported working on ' + (remote.host || remote.machine) + (issue.remote_attempts.length > 1 ? ` · ${issue.remote_attempts.length} remote attempts` : '') + '. Activity reflects the last sync.'}
+  const description = remote ? {label:actorName(remote.actor), detail:(remote.host || remote.machine) + (issue.remote_attempts.length > 1 ? ` · ${issue.remote_attempts.length} agents working on this task` : '')}
     : historical ? {label:'Agent conversation', detail:'Last recorded work on this issue.'}
     : IssueAssignments.describe(issue, {actorName, bossName:model.boss.name});
   const owner = a.kind === 'github' ? 'watcher:github' : a.kind === 'machine' ? 'machine:' + a.machine : a.kind === 'unassigned' ? 'unassigned' : actor || 'human:boss';
@@ -432,8 +432,8 @@ function listAssignment(issue) {
   const badge = '<span class="assignment-avatar" data-assignment-icon="' + symbol + '">' + icon(symbol) + '</span>';
   const trigger = historical || remote ? '<button type="button" ' + attrs + ' aria-label="' + esc(remote ? description.detail : 'Agent conversation details') + '">' + badge + '</button>'
     : '<a ' + attrs + ' href="' + esc(href) + '" aria-label="Filter by ' + esc(description.label) + '; show assignment details">' + badge + '</a>';
-  const activity = !historical && !remote && trace ? '<span class="assignment-activity" data-assignment-agent="' + esc(actor) + '" data-assignment-issue="' + issue.number + '"><span class="assignment-activity-status">Loading activity…</span><span class="assignment-runtime-label">Elapsed time</span><span class="assignment-runtime">—</span><span class="assignment-started">Checking this attempt</span></span>' : '';
-  return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><span class="assignment-card-heading"><span class="assignment-card-avatar">' + icon(symbol) + '</span><span><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(activity ? a.machine_name || a.machine || 'Agent session' : description.detail) + '</span></span></span>' + activity
+  const activity = !historical && trace ? '<span class="assignment-activity" data-assignment-agent="' + esc(actor) + '" data-assignment-issue="' + issue.number + '"><span class="assignment-activity-status">Loading activity…</span><span class="assignment-runtime-label">Elapsed time</span><span class="assignment-runtime">—</span><span class="assignment-started">Checking this attempt</span></span>' : '';
+  return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><span class="assignment-card-heading"><span class="assignment-card-avatar">' + icon(symbol) + '</span><span><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(activity && !remote ? a.machine_name || a.machine || 'Agent session' : description.detail) + '</span></span></span>' + activity
     + (trace ? '<a class="assignment-card-action assignment-card-primary" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
     + (historical || remote ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
     + (watching ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')

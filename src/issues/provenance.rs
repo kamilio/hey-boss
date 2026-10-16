@@ -113,6 +113,22 @@ pub(crate) fn assigned_run(
     number: i64,
     agent: &str,
 ) -> Result<Option<Value>> {
+    // The web server observes runs on every worker machine. A replicated run is
+    // sufficient provenance even though its claim is not a local session claim.
+    if has_table(db, "distributed_attempts") {
+        let remote=db.query_row("SELECT d.id,d.machine,d.state,d.started_at,d.finished_at,json_extract(d.payload,'$.session_id'),i.title,p.name,a.metadata
+            FROM distributed_attempts d JOIN issues i ON i.project_id=d.project_id AND i.number=d.issue_number
+            JOIN projects p ON p.id=d.project_id JOIN agents a ON a.id=?3
+            WHERE d.project_id=?1 AND d.issue_number=?2 AND json_extract(d.payload,'$.actor_id')=?3 AND i.deleted_at IS NULL AND p.hidden_at IS NULL
+            ORDER BY d.started_at DESC,d.id DESC LIMIT 1",params![project,number,agent],|r|{
+            let metadata:String=r.get(8)?;
+            let actor:Value=serde_json::from_str(&metadata).map_err(|e|rusqlite::Error::FromSqlConversionFailure(8,rusqlite::types::Type::Text,Box::new(e)))?;
+            Ok(json!({"id":r.get::<_,String>(0)?,"machine":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"started_at":r.get::<_,i64>(3)?,"finished_at":r.get::<_,Option<i64>>(4)?,"session_id":r.get::<_,Option<String>>(5)?,"title":r.get::<_,String>(6)?,"project_name":r.get::<_,String>(7)?,"project_id":project,"number":number,"actor_id":agent,"host":actor["host"],"model":actor["model"]}))
+        }).optional()?;
+        if remote.is_some() {
+            return Ok(remote);
+        }
+    }
     let mut saved = db.query_row("SELECT i.title,p.name,a.metadata FROM issues i JOIN projects p ON p.id=i.project_id JOIN agents a ON a.id=i.assignee WHERE i.project_id=?1 AND i.number=?2 AND i.assignee=?3 AND i.deleted_at IS NULL AND p.hidden_at IS NULL", params![project,number,agent], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()?;
     if saved.is_none() {
         let mut linked = false;
@@ -250,6 +266,37 @@ pub(super) fn capture(db: &Connection, actor: &Actor, now: i64) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replicated_assignment_resolves_exact_actor_and_visible_issue() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let db = crate::issues::Store::open(&root.0.join("issues.db"))
+            .unwrap()
+            .into_database();
+        db.execute_batch(r#"CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT,project_id TEXT,issue_number INTEGER,state TEXT,started_at INTEGER,finished_at INTEGER,summary TEXT,payload TEXT);
+            INSERT INTO projects(id,name,next_number) VALUES('p','Project',3);
+            INSERT INTO agents VALUES('human:test','{}',0);
+            INSERT INTO agents VALUES('codex:a','{"host":"devbox","model":"model-a"}',0);
+            INSERT INTO agents VALUES('codex:b','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',1,'Task','','open','human:test',1,1,1,'[]');"#).unwrap();
+        for (id, actor, started) in [("a", "codex:a", 10), ("b", "codex:b", 20)] {
+            db.execute("INSERT INTO distributed_attempts VALUES(?1,'machine-id','p',1,'running',?2,NULL,'',?3)",params![id,started,json!({"actor_id":actor,"session_id":id}).to_string()]).unwrap();
+        }
+        let run = assigned_run(&db, "p", 1, "codex:a").unwrap().unwrap();
+        assert_eq!(run["id"], "a");
+        assert_eq!(run["started_at"], 10);
+        assert_eq!(run["machine"], "machine-id");
+        assert!(assigned_run(&db, "p", 2, "codex:a").unwrap().is_none());
+        assert!(
+            assigned_run(&db, "p", 1, "codex:unrelated")
+                .unwrap()
+                .is_none()
+        );
+        db.execute("UPDATE issues SET deleted_at=1", []).unwrap();
+        assert!(assigned_run(&db, "p", 1, "codex:a").unwrap().is_none());
+        db.execute("UPDATE issues SET deleted_at=NULL", []).unwrap();
+        db.execute("UPDATE projects SET hidden_at=1", []).unwrap();
+        assert!(assigned_run(&db, "p", 1, "codex:a").unwrap().is_none());
+    }
     #[test]
     fn assignment_resolves_standalone_session_without_recent_runs() {
         let db = Connection::open_in_memory().unwrap();

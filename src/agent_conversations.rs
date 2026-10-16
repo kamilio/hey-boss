@@ -262,7 +262,12 @@ fn assignment_entry(
         .and_then(|ms| {
             ms.iter().find(|m| {
                 (local && m["host"] == "local")
-                    || (!local && (m["host"] == run["host"] || m["hostname"] == run["host"]))
+                    || (!local
+                        && (m["node"]
+                            .as_str()
+                            .is_some_and(|node| run["machine"] == node)
+                            || m["host"] == run["host"]
+                            || m["hostname"] == run["host"]))
             })
         })
         .ok_or_else(|| Error::invalid("The assignment's device is no longer available"))?;
