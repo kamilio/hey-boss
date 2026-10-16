@@ -698,6 +698,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             model: "gpt-6-astra".into(),
             machines: Vec::new(),
             all_machines: false,
+            each_machine: false,
         },
         markdown: include_str!("../../../jobs/fixtures/original.md").into(),
         enabled: true,

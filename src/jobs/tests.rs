@@ -56,6 +56,7 @@ fn definition() -> Definition {
         model: "gpt-6-astra".into(),
         machines: Vec::new(),
         all_machines: false,
+        each_machine: false,
     }
 }
 fn request(op: JobOperation) -> Request {
@@ -1430,5 +1431,24 @@ fn machine_targets_are_optional_ordered_and_validated() {
         value["machines"] = machines;
         let d: Definition = serde_json::from_value(value).unwrap();
         assert!(d.validate().is_err());
+    }
+}
+
+#[test]
+fn selected_machine_mode_requires_an_explicit_nonempty_subset() {
+    let legacy = serde_json::to_value(definition()).unwrap();
+    assert!(legacy.get("each_machine").is_none());
+    for (machines, all, valid) in [
+        (json!([]), false, false),
+        (json!(["a", "b"]), false, true),
+        (json!(["a"]), true, false),
+        (json!(["a", "a"]), false, false),
+    ] {
+        let mut value = legacy.clone();
+        value["each_machine"] = json!(true);
+        value["machines"] = machines;
+        value["all_machines"] = json!(all);
+        let definition: Definition = serde_json::from_value(value).unwrap();
+        assert_eq!(definition.validate().is_ok(), valid);
     }
 }

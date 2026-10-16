@@ -521,16 +521,20 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         }
     }
     for run in store.active_job_runs()? {
-        if run.snapshot.definition.all_machines && run.parent_run_id.is_none() {
-            let nodes = machines
-                .iter()
-                .filter_map(|m| m["node"].as_str().map(str::to_owned))
-                .collect::<Vec<_>>();
+        if run.snapshot.definition.fans_out() && run.parent_run_id.is_none() {
+            let nodes = if run.snapshot.definition.each_machine {
+                run.snapshot.definition.machines.clone()
+            } else {
+                machines
+                    .iter()
+                    .filter_map(|m| m["node"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            };
             store.expand_job_machines(&run.id, &nodes)?;
         }
     }
     for run in store.active_job_runs()? {
-        if run.snapshot.definition.all_machines && run.parent_run_id.is_none() {
+        if run.snapshot.definition.fans_out() && run.parent_run_id.is_none() {
             continue;
         }
         if let Some((node, generation, revoking)) = store.job_owner(&run.id)? {
