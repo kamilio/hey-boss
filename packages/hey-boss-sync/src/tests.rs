@@ -6,6 +6,77 @@ fn opens_persistent_replication_storage() {
 }
 
 #[test]
+fn batch_clock_lookup_is_bounded_by_page_size() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    unsafe extern "C" fn budget(context: *mut std::ffi::c_void) -> i32 {
+        let steps = unsafe { &*context.cast::<AtomicUsize>() };
+        i32::from(steps.fetch_add(1000, Ordering::Relaxed) >= 200_000)
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut engine = super::Engine::open(&root.path().join("a.db")).unwrap();
+    let tx = engine.db.transaction().unwrap();
+    for n in 0..2048 {
+        let payload = format!("retained fact {n}");
+        tx.execute(
+            "INSERT INTO records VALUES(?1,?2)",
+            rusqlite::params![super::digest(payload.as_bytes()), payload],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let steps = AtomicUsize::new(0);
+    // Count SQLite VM work, including the virtual table's nested statements;
+    // a wall-clock assertion would depend on the machine running the test.
+    unsafe {
+        rusqlite::ffi::sqlite3_progress_handler(
+            engine.db.handle(),
+            1000,
+            Some(budget),
+            (&steps as *const AtomicUsize).cast_mut().cast(),
+        );
+    }
+    let batch = engine.batch(1920);
+    unsafe {
+        rusqlite::ffi::sqlite3_progress_handler(engine.db.handle(), 0, None, std::ptr::null_mut());
+    }
+    let batch = batch.expect("a page must not scan all retained clocks for each record");
+    assert_eq!(batch.records.len(), 128);
+    assert_eq!(batch.through, 2048);
+}
+
+#[test]
+fn batch_clocks_match_public_changes_after_local_remote_and_duplicate_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("a.db");
+    let mut a = super::Engine::open(&path).unwrap();
+    let mut b = super::Engine::open(&root.path().join("b.db")).unwrap();
+    a.put("local").unwrap();
+    a.put("shared").unwrap();
+    b.put("remote").unwrap();
+    b.put("shared").unwrap();
+    a.ingest(&b.batch(0).unwrap()).unwrap();
+    a.ingest(&b.batch(0).unwrap()).unwrap();
+    drop(a);
+    let a = super::Engine::open(&path).unwrap();
+    let batch = a.batch(0).unwrap();
+    assert_eq!(batch.records.len(), 3);
+    for record in batch.records {
+        let expected: (Vec<u8>, i64, i64, String) = a.db.query_row(
+            "SELECT site_id,db_version,seq,ts FROM crsql_changes WHERE \"table\"='records' AND pk=crsql_pack_columns(?1) AND cid='payload'",
+            [&record.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(
+            (
+                record.site,
+                record.version,
+                record.sequence,
+                record.timestamp
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
 fn disconnected_attempts_survive_restart_and_relay_without_main() {
     let root = tempfile::tempdir().unwrap();
     let a_path = root.path().join("a.db");

@@ -170,7 +170,10 @@ impl Engine {
         let mut records = Vec::new();
         {
             let mut rows = tx.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 ORDER BY d.position LIMIT 128")?;
-            let mut clock = tx.prepare("SELECT site_id,db_version,seq,ts FROM crsql_changes WHERE \"table\"='records' AND pk=crsql_pack_columns(?1) AND cid='payload'")?;
+            // The pinned extension cannot push a primary-key constraint into
+            // crsql_changes: that lookup scans retained history for every fact.
+            // Its backing clock tables provide the same metadata by indexed key.
+            let mut clock = tx.prepare("SELECT s.site_id,c.db_version,c.seq,c.ts FROM records__crsql_pks p JOIN records__crsql_clock c ON c.key=p.__crsql_key AND c.col_name='payload' JOIN crsql_site_id s ON s.ordinal=c.site_id WHERE p.id=?1")?;
             let mut bytes = 0;
             for row in rows.query_map([after], |r| {
                 Ok((
