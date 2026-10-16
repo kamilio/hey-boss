@@ -959,7 +959,12 @@ pub fn process_identity(pid: u32) -> Option<String> {
 #[cfg(not(target_os = "macos"))]
 pub fn process_identity(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    // Unreaped processes retain their PID and birth time but cannot own work.
+    if matches!(fields.clone().next()?, "Z" | "X" | "x") {
+        return None;
+    }
+    let start = fields.nth(19)?;
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
     Some(format!("{}:{start}", boot.trim()))
 }
@@ -1424,6 +1429,28 @@ mod tests {
             git: None,
         }
     }
+    #[test]
+    fn exited_unreaped_process_has_no_live_identity() {
+        assert!(process_identity(std::process::id()).is_some());
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                status.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        let identity = process_identity(child.id());
+        child.wait().unwrap();
+        assert_eq!(waited, 0);
+        assert!(
+            identity.is_none(),
+            "Exited process still owns work: {identity:?}"
+        );
+    }
+
     #[test]
     fn current_turn_worktrees_remain_distinct_under_shared_desktop_pid() {
         let mut first = agent();
