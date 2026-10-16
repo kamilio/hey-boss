@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 pub(crate) const INDEXES: &str = concat!(
     "CREATE INDEX IF NOT EXISTS fleet_row_local ON fleet_row_ids(table_name,local_id);",
+    "CREATE INDEX IF NOT EXISTS fleet_conflicts_pending ON fleet_conflicts(created_at DESC,id DESC) WHERE resolved=0;",
     "CREATE INDEX IF NOT EXISTS fleet_outbox_retention ON fleet_outbox(seq DESC,coalesce(length(CAST(before_json AS BLOB)),0)+coalesce(length(CAST(after_json AS BLOB)),0));"
 );
 

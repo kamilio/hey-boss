@@ -1454,7 +1454,7 @@ impl Store {
             tx.commit()?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_row_local','fleet_outbox_retention') AND type='index'", [], |r|r.get::<_,i64>(0))? < 2 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_row_local','fleet_outbox_retention','fleet_conflicts_pending') AND type='index'", [], |r|r.get::<_,i64>(0))? < 3 {
             db.execute_batch(super::fleet::INDEXES)?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs' AND type='table')", [], |r|r.get::<_,bool>(0))? {
@@ -3983,6 +3983,50 @@ mod contention_tests {
             work[1].1 <= work[0].1 + 100,
             "Excluded commit history increased query work: {work:?}"
         );
+    }
+
+    #[test]
+    fn fleet_conflict_pages_use_ordered_index_after_upgrade() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-conflict-index-{}",
+            super::super::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let store = Store::open(&path).unwrap();
+        store.db.execute_batch("DROP INDEX IF EXISTS fleet_conflicts_pending;
+            WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<1000)
+            INSERT INTO fleet_conflicts(id,node,seq,table_name,data,reason,created_at,resolved)
+            SELECT printf('%04d',id),'peer',id,'issues',hex(zeroblob(1024)),'Conflict',id,id%2 FROM n;").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for query in [
+            "SELECT id,node,seq,table_name,reason,created_at FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC LIMIT 100",
+            "SELECT id,node,seq,table_name,data,reason,created_at,resolved FROM fleet_conflicts WHERE resolved=0 ORDER BY created_at DESC,id DESC LIMIT 20 OFFSET 100",
+            "SELECT count(*) FROM fleet_conflicts WHERE resolved=0",
+        ] {
+            let plan = store
+                .db
+                .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+                .join("\n");
+            assert!(plan.contains("fleet_conflicts_pending"), "{plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        }
+        let (count, newest): (i64, i64) = store
+            .db
+            .query_row(
+                "SELECT count(*),max(created_at) FROM fleet_conflicts WHERE resolved=0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((count, newest), (500, 1000));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
