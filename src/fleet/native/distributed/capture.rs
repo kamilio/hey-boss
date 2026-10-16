@@ -1,7 +1,7 @@
 use super::*;
 
 // Deliberate allowlist: credentials, worker control, local paths/configuration,
-// request receipts and the old authority's allocations are never shared state.
+// request receipts and the derived allocation projection are never shared state.
 pub(super) const TABLES: &[&str] = &[
     "projects",
     "agents",
@@ -28,6 +28,7 @@ pub(super) const TABLES: &[&str] = &[
     "scheduled_job_revisions",
     "scheduled_job_runs",
     "worker_runs",
+    "worker_allocations",
     "distributed_members",
 ];
 

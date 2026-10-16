@@ -1,9 +1,31 @@
 # Distributed execution over SSH
 
 Every enrolled machine durably accepts local task changes and schedules local
-work without contacting another machine. Overlapping attempts are allowed.
-Only the machine owning a process may operate that process. A received remote
-attempt never replaces, cancels, or resumes a local attempt.
+work without contacting another machine. Each pickup first publishes a machine
+reservation, waits for it to settle, then publishes launch intent before starting
+the agent. The agent claims the task afterward. Every replica chooses the same
+winner: launched work before pending work, then causal ticket order, machine and
+attempt ID. Concurrent launches have a stable tie-break; wall-clock timestamps
+cannot establish which disconnected machine physically launched first.
+
+A partition may allow overlapping agents. After synchronization, the losing
+machine stops its own agent through normal cancellation, preserving saved work.
+No imported fact directly controls another machine's process. Scheduling uses
+the same rules regardless of connectivity; there is no central permission gate.
+
+Sync exchanges run independently over persistent SSH connections. The shared
+exchange interval is two seconds. Settling allows two traversals of a two-hop
+relay, including measured exchange duration; expiry allows three such settling
+windows without renewal. Timers use local boot-aware monotonic clocks. Each
+machine publishes a durable increasing presence sequence with its live run IDs.
+Presence is replaceable, outside the immutable history, and relays subtract
+elapsed time instead of restarting its lifetime. Replayed presence cannot renew
+an expired reservation. Dead worker processes release their reservations; a lost
+machine expires at its peers. Restart never revives a previous boot's timers.
+
+The UI presents agents and machine reservations uniformly, including elapsed
+time and overlapping-agent counts. The web server's location does not define a
+special category of work.
 
 The existing main-to-devbox SSH connections carry synchronization. Main forwards
 facts from all origins and supplies the UI; it grants no permission to work.

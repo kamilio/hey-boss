@@ -16,27 +16,15 @@ fn where_key(key: &Value) -> Result<(String, Vec<Value>)> {
 }
 
 fn issue_overlay(db: &Connection, row: &mut Value) -> Result<()> {
-    // Only this machine can operate its active processes. Canonical lifecycle
-    // changes stay retained in the reducer until its local attempt finishes.
+    // Keep the local claim while work is active, but allow terminal task changes
+    // through. The owning worker observes cancellation through its normal checks.
     let current=replica::rows(db,"SELECT state,assignee,closed_by,closed_at,deleted_at,draft,manual_blocked,blockers,version,body,archive_key,archived_comments FROM issues WHERE project_id=?1 AND number=?2",
         &[row["project_id"].clone(),row["number"].clone()])?.into_iter().next();
     if let Some(ref current) = current {
         let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",params![row["project_id"].as_str(),row["number"].as_i64()],|r|r.get(0))?;
-        if active {
-            for name in [
-                "state",
-                "assignee",
-                "closed_by",
-                "closed_at",
-                "deleted_at",
-                "draft",
-                "manual_blocked",
-                "blockers",
-            ] {
-                row[name] = current[name].clone();
-            }
+        if active && row["state"] == "open" && row["deleted_at"].is_null() {
+            row["assignee"] = current["assignee"].clone();
         } else if row["state"] == "open" && foreign_assignment(db, row)? {
-            // Remote assignment is an observation, never a local reservation.
             row["assignee"] = Value::Null;
         }
         row["version"] = current["version"].clone();
@@ -65,7 +53,8 @@ fn foreign_assignment(db: &Connection, row: &Value) -> Result<bool> {
     if actor.starts_with("human:") {
         return Ok(false);
     }
-    Ok(!db.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 AND json_extract(metadata,'$.machine')=(SELECT node FROM fleet_meta WHERE id=1))",[actor],|r|r.get::<_,bool>(0))?)
+    let finished:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND actor_id=?3 AND finished_at IS NULL)",params![row["project_id"].as_str(),row["number"].as_i64(),actor],|r|r.get(0))?;
+    Ok(finished || !db.query_row("SELECT EXISTS(SELECT 1 FROM agents WHERE id=?1 AND json_extract(metadata,'$.machine')=(SELECT node FROM fleet_meta WHERE id=1))",[actor],|r|r.get::<_,bool>(0))?)
 }
 
 fn local_references(db: &Connection, table: &str, row: &mut Value) -> Result<()> {
@@ -139,6 +128,15 @@ pub(super) fn write(
         db.execute("INSERT INTO distributed_attempts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET state=excluded.state,finished_at=excluded.finished_at,summary=excluded.summary,payload=excluded.payload",
             params![row["id"].as_str(),row["machine"].as_str(),row["project_id"].as_str(),row["issue_number"].as_i64(),row["state"].as_str(),row["started_at"].as_i64(),row["finished_at"].as_i64(),row["summary"].as_str(),row.to_string()])?;
         return Ok(());
+    }
+    if table == "worker_allocations" {
+        db.execute(
+            "UPDATE worker_allocation_clock SET clock=max(clock,?1,?2) WHERE id=1",
+            params![
+                row["ticket"].as_i64(),
+                row["launched"].as_i64().unwrap_or(0)
+            ],
+        )?;
     }
     if table == "scheduled_job_runs" {
         db.execute("INSERT INTO distributed_job_attempts(id,project_id,job_id,created_at,scheduled_at,state,payload) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,payload=excluded.payload",params![row["id"].as_str(),row["project_id"].as_str(),row["job_id"].as_str(),row["created_at"].as_i64(),row["scheduled_at"].as_i64(),row["state"].as_str(),row.to_string()])?;
@@ -283,7 +281,9 @@ pub(super) fn write(
 }
 
 pub(super) fn apply(db: &Connection) -> Result<usize> {
-    apply_page(db, &mut DependencyGraphs::new(), capture::TABLES)
+    let count = apply_page(db, &mut DependencyGraphs::new(), capture::TABLES)?;
+    crate::issues::allocations::reconcile(db, &crate::issues::allocations::Clock::read()?)?;
+    Ok(count)
 }
 
 type DependencyGraphs =

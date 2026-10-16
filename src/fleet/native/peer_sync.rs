@@ -13,7 +13,7 @@ const IDENTITY: &str = "peer-sync-identity.json";
 const BEGIN: &str = "# BEGIN HEY-BOSS PEER SYNC";
 const END: &str = "# END HEY-BOSS PEER SYNC";
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Identity {
     node: String,
@@ -22,7 +22,7 @@ pub(super) struct Identity {
     host_keys: Vec<String>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Peer {
     pub machine: String,
@@ -30,7 +30,7 @@ pub(super) struct Peer {
     pub identity: Identity,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Settings {
     pub controller: String,

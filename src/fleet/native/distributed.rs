@@ -132,6 +132,12 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             ));
         }
         identity::upgrade_shadow(db)?;
+        // Additive protocol data needs capture on already-enrolled replicas too.
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT')", [], |r|r.get::<_,bool>(0))? {
+            let tx=db.unchecked_transaction()?;
+            capture::install(&tx)?;
+            tx.commit()?;
+        }
         activation::protect_role(db)?;
         return Ok(());
     }
@@ -224,7 +230,13 @@ pub(super) fn baseline(
     use serde_json::json;
     let tables: Vec<_> = capture::TABLES
         .iter()
-        .filter(|table| controller || matches!(**table, "worker_runs" | "scheduled_job_runs"))
+        .filter(|table| {
+            controller
+                || matches!(
+                    **table,
+                    "worker_runs" | "scheduled_job_runs" | "worker_allocations"
+                )
+        })
         .copied()
         .collect();
     let complete: usize = db.query_row(
@@ -257,10 +269,15 @@ pub(super) fn baseline(
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(",");
+        let ownership = if *table == "worker_allocations" {
+            " AND machine=(SELECT origin FROM distributed_meta WHERE id=1)"
+        } else {
+            ""
+        };
         let rows = replica::rows(
             &tx,
             &format!(
-                "SELECT rowid AS __cursor,{columns} FROM {table} WHERE rowid>?1 ORDER BY rowid LIMIT 64"
+                "SELECT rowid AS __cursor,{columns} FROM {table} WHERE rowid>?1{ownership} ORDER BY rowid LIMIT 64"
             ),
             &[json!(after)],
         )?;

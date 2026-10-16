@@ -481,6 +481,9 @@ impl Store {
         Ok(self.db.query_row("SELECT state<>'awaiting_model' AND claimed_at IS NULL AND reservation_expires IS NOT NULL AND reservation_expires<=?2 FROM worker_runs INDEXED BY worker_control_status WHERE id=?1",params![job.id,now()],|r|r.get(0))?)
     }
     pub(crate) fn worker_cancelled(&self, job: &Job) -> Result<bool> {
+        if !crate::issues::allocations::owns(&self.db, &job.id, &job.project.id, job.number())? {
+            return Ok(true);
+        }
         // Deadline checks have their own terminal states. Rechecking time here
         // can turn a deadline crossed between queries into a cancellation.
         // SQLite otherwise prefers unique keys that require reading overflow
@@ -509,6 +512,9 @@ impl Store {
         // Only an ownership handoff needs full requirements and event history.
         let issue = get_issue(&self.db, &job.project.id, job.number(), true)?;
         Ok(!own_pr_handoff(&self.db, job, &issue)?)
+    }
+    pub(crate) fn worker_launch_wait(&self, job: &Job) -> Result<Option<Duration>> {
+        crate::issues::allocations::launch(&self.db, &job.id)
     }
     pub(crate) fn worker_event(
         &mut self,
@@ -574,15 +580,17 @@ impl Store {
             return Ok(());
         }
         let issue = get_issue(&tx, &job.project.id, job.number(), true)?;
-        let own = issue.assignee.as_deref() == Some(&job.actor.id);
+        let allocated =
+            crate::issues::allocations::owns(&tx, &job.id, &job.project.id, job.number())?;
+        let own = allocated && issue.assignee.as_deref() == Some(&job.actor.id);
         let watching = assignments::is_watching(&tx, &job.project.id, job.number())?;
         let own_closed = issue.state == "closed"
             && issue.closed_by.as_deref() == Some(&job.actor.id)
             && issue.deleted_at.is_none();
-        let handed_off = own_pr_handoff(&tx, job, &issue)?;
-        let mut state = state;
+        let handed_off = allocated && own_pr_handoff(&tx, job, &issue)?;
+        let mut state = if allocated { state } else { "cancelled" };
         let mut summary: String = summary.chars().take(16_000).collect();
-        let approval_hold = summary.starts_with("Codex needs input or approval:");
+        let approval_hold = allocated && summary.starts_with("Codex needs input or approval:");
         // A captured outage earlier in the turn must not relabel a later
         // permission request or promise an automatic retry for that request.
         if approval_hold {
@@ -706,7 +714,9 @@ impl Store {
                 now(),
             )?;
         }
-        super::super::blockers::reconcile(&tx, &job.project.id, Some(&job.actor.id), now())?;
+        if allocated {
+            super::super::blockers::reconcile(&tx, &job.project.id, Some(&job.actor.id), now())?;
+        }
         let finished = now();
         let retrying = !matches!(state, "completed" | "cancelled" | "interrupted")
             && !approval_hold
@@ -932,6 +942,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn distributed_claim_waits_for_launch_and_losing_worker_cancels_locally() {
+        use crate::issues::allocations::{self, Clock, Timing};
+        let mut f = HandoffFixture::new(false);
+        let db = &f.store.db;
+        db.execute("UPDATE fleet_meta SET role='peer',node='unit'", [])
+            .unwrap();
+        let timing = Timing::from_exchange(Duration::ZERO);
+        db.execute("INSERT INTO worker_allocations(id,project_id,issue_number,machine,ticket,settle_ms,lease_ms) VALUES(?1,?2,1,'unit',1,?3,?4)",params![f.job.id,f.job.project.id,timing.settle.as_millis() as i64,timing.lease.as_millis() as i64]).unwrap();
+        allocations::reconcile(db, &Clock::read().unwrap()).unwrap();
+        assert!(
+            super::super::registry::claim_lock(db, &f.job.project, 1, &f.job.actor, false).is_err()
+        );
+        assert!(f.store.worker_launch_wait(&f.job).unwrap().is_some());
+        db.execute("UPDATE worker_allocation_observations SET ready_tick=0", [])
+            .unwrap();
+        assert!(f.store.worker_launch_wait(&f.job).unwrap().is_none());
+        super::super::registry::claim_lock(db, &f.job.project, 1, &f.job.actor, false).unwrap();
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        db.execute("UPDATE issues SET assignment_target='machine:other'", [])
+            .unwrap();
+        assert!(
+            f.store.worker_cancelled(&f.job).unwrap(),
+            "An explicit destination takes effect during settlement or execution"
+        );
+        db.execute("UPDATE issues SET assignment_target=NULL", [])
+            .unwrap();
+        db.execute("INSERT INTO worker_allocations(id,project_id,issue_number,machine,ticket,launched,settle_ms,lease_ms) VALUES('other',?1,1,'other',0,0,?2,?3)",params![f.job.project.id,timing.settle.as_millis() as i64,timing.lease.as_millis() as i64]).unwrap();
+        allocations::reconcile(db, &Clock::read().unwrap()).unwrap();
+        assert!(f.store.worker_cancelled(&f.job).unwrap());
+        assert!(
+            super::super::registry::claim_lock(db, &f.job.project, 1, &f.job.actor, false).is_err()
+        );
+        assert_eq!(
+            f.state(),
+            "running",
+            "Replication does not directly rewrite the process; its owner cancels it"
+        );
+        let before = f.issue();
+        f.store
+            .worker_finish(&f.job, "cancelled", "Another machine won")
+            .unwrap();
+        assert_eq!(f.state(), "cancelled");
+        assert_eq!(
+            f.issue().version,
+            before.version,
+            "A loser must not publish an issue lifecycle edit"
+        );
+        assert_eq!(f.issue().assignee, before.assignee);
+    }
     #[test]
     fn resuming_an_interrupted_claim_restores_ownership_without_reclaiming_new_sessions() {
         for (previous_state, previously_claimed, resumed, expected) in [

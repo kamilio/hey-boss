@@ -288,6 +288,43 @@ fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn distributed_reservations_precede_agent_claims() {
+    use rusqlite::OptionalExtension;
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    a.execute("UPDATE fleet_meta SET node='a',role='peer'", [])
+        .unwrap();
+    a.execute("UPDATE distributed_meta SET active=1", [])
+        .unwrap();
+    seed(&a);
+    a.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('attempt-a','p',1,'{}','a','reserved',100,'synthetic','a',2,2)", []).unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    b.execute("UPDATE fleet_meta SET node='b',role='peer'", [])
+        .unwrap();
+    b.execute("UPDATE distributed_meta SET active=1", [])
+        .unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row(
+            "SELECT node FROM fleet_allocations WHERE project_id='p' AND issue_number=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .optional()
+        .unwrap(),
+        Some("a".into()),
+        "An unclaimed remote reservation must already exclude pickup"
+    );
+}
+
+#[test]
 fn companion_setup_waiting_for_cutover_cannot_restore_legacy_role() {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -970,7 +1007,7 @@ fn remote_dependencies_release_waiting_tasks_without_stealing_local_claims() {
 }
 
 #[test]
-fn remote_completion_preserves_both_attempts_and_never_cancels_local_execution() {
+fn remote_completion_preserves_history_and_reaches_the_owning_worker() {
     use serde_json::json;
     let fa = Fixture::new();
     let a = fa.db();
@@ -1011,8 +1048,8 @@ fn remote_completion_preserves_both_attempts_and_never_cancels_local_execution()
     transfer(&ea, &mut eb);
     capture_all(&b, &mut eb);
     let issue = replica::current_row(&b, "issues", &json!({"project_id":"p","number":1})).unwrap();
-    assert_eq!(issue["state"], "open");
-    assert_eq!(issue["assignee"], "b");
+    assert_eq!(issue["state"], "closed");
+    assert!(issue["assignee"].is_null());
     assert_eq!(
         b.query_row(
             "SELECT stop_requested FROM worker_runs WHERE id='b'",
@@ -2422,4 +2459,86 @@ fn upgrading_job_history_view_refreshes_machine_metadata_capture() {
     let trigger:String=db.query_row("SELECT sql FROM sqlite_master WHERE name='distributed_capture_scheduled_job_runs_INSERT'",[],|r|r.get(0)).unwrap();
     assert!(trigger.contains("parent_run_id"));
     assert!(trigger.contains("target_machine"));
+}
+
+#[test]
+fn partitioned_launches_converge_and_only_the_losing_owner_cancels() {
+    use crate::issues::allocations::{self, Clock};
+    for both_launch in [false, true] {
+        for reverse in [false, true] {
+            let fa = Fixture::new();
+            let a = fa.db();
+            install(&a, "a").unwrap();
+            let fb = Fixture::new();
+            let b = fb.db();
+            install(&b, "b").unwrap();
+            let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+            let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+            for (db, node) in [(&a, "a"), (&b, "b")] {
+                db.execute("UPDATE fleet_meta SET node=?1,role='peer'", [node])
+                    .unwrap();
+                db.execute("UPDATE distributed_meta SET active=1", [])
+                    .unwrap();
+            }
+            seed(&a);
+            capture_all(&a, &mut ea);
+            transfer(&ea, &mut eb);
+            capture_all(&b, &mut eb);
+            for (db, node) in [(&a, "a"), (&b, "b")] {
+                db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES(?1,'p',1,'{}',?1,'reserved',?2,?3,?1,2,2)",rusqlite::params![node,std::process::id(),crate::agents::process_identity(std::process::id()).unwrap()]).unwrap();
+                allocations::maintain(db).unwrap();
+                assert!(allocations::launch(db, node).unwrap().is_some());
+                db.execute("UPDATE worker_allocation_observations SET ready_tick=0", [])
+                    .unwrap();
+            }
+            allocations::launch(&a, "a").unwrap();
+            if both_launch {
+                allocations::launch(&b, "b").unwrap();
+            }
+            capture_all(&a, &mut ea);
+            capture_all(&b, &mut eb);
+            for _ in 0..2 {
+                if reverse {
+                    transfer(&eb, &mut ea);
+                    capture_all(&a, &mut ea);
+                }
+                transfer(&ea, &mut eb);
+                capture_all(&b, &mut eb);
+                transfer(&eb, &mut ea);
+                capture_all(&a, &mut ea);
+            }
+            for db in [&a, &b] {
+                allocations::reconcile(db, &Clock::read().unwrap()).unwrap();
+                assert!(allocations::owns(db, "a", "p", 1).unwrap());
+                assert!(!allocations::owns(db, "b", "p", 1).unwrap());
+                assert_eq!(
+                    db.query_row("SELECT node FROM fleet_allocations", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "a"
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM worker_runs", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    1,
+                    "Never import executable process ownership"
+                );
+            }
+            assert_eq!(allocations::launch(&b, "b").unwrap_err().code, "cancelled");
+            b.execute("UPDATE worker_runs SET finished_at=3,state='cancelled'", [])
+                .unwrap();
+            capture_all(&b, &mut eb);
+            transfer(&eb, &mut ea);
+            capture_all(&a, &mut ea);
+            assert!(allocations::owns(&a, "a", "p", 1).unwrap());
+            assert_eq!(
+                a.query_row("SELECT count(*) FROM distributed_attempts", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                2,
+                "Keep both histories"
+            );
+        }
+    }
 }
