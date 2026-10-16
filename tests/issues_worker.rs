@@ -986,9 +986,21 @@ fn timed_out_unassigned_work_resumes_the_saved_session_and_claims_again() {
 }
 
 #[test]
-fn incompatible_startup_schema_uses_a_fresh_session_without_losing_history() {
+fn unrecoverable_saved_sessions_start_fresh_without_losing_history() {
     use std::os::unix::fs::PermissionsExt;
     for (name, state, summary, fresh) in [
+        (
+            "missing-rollout",
+            "failed",
+            "Codex thread/resume: \"no rollout found for thread id saved-session\"",
+            true,
+        ),
+        (
+            "locked-rollout",
+            "failed",
+            "Codex thread/resume: \"locked by another writer\"",
+            false,
+        ),
         (
             "schema-recovery",
             "failed",

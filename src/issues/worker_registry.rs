@@ -1163,9 +1163,9 @@ pub(super) fn reserve(
             let mut issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
             // Thread rollouts and unfinished checkout edits belong to this host
             // and directory. A completed latest attempt starts fresh when reopened.
-            // A rejected startup schema cannot be recovered by resuming the same
-            // session again. Its server has stopped before worker_finish; retain
-            // its history and checkout, but let the next attempt start fresh.
+            // A rejected startup schema or confirmed missing rollout cannot be
+            // recovered by resuming the same session. Keep its history and
+            // checkout, but start fresh; temporary resume errors still retry it.
             let resume_session: Option<String> = tx.query_row(
                 "SELECT coalesce(session_id,json_extract(job,'$.resume_session')) FROM worker_runs
                  WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
@@ -1173,6 +1173,7 @@ pub(super) fn reserve(
                  AND state!='completed' AND json_extract(job,'$.config.cwd')=?4
                  AND coalesce(json_extract(job,'$.config.provider'),'codex')=?5
                  AND NOT (state='failed' AND summary LIKE 'Codex turn/start:%ActiveTurnOutputSchemaMismatch%')
+                 AND NOT (state='failed' AND summary LIKE 'Codex thread/resume: \"no rollout found for thread id %\"')
                  AND NOT EXISTS(SELECT 1 FROM issues i JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number
                    WHERE i.project_id=?1 AND i.number=?2 AND i.assignment_target='github' AND json_type(w.status,'$.event')='text'
                    AND NOT EXISTS(SELECT 1 FROM agent_steering s WHERE s.request_id='github:'||worker_runs.id||':'||json_extract(w.status,'$.event') AND s.state='delivered'))",
