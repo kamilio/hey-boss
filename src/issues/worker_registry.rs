@@ -1175,44 +1175,26 @@ pub(super) fn reserve(
                 model: None,
             };
             let mut issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
-            // Thread rollouts and unfinished checkout edits belong to this host
-            // and directory. A completed latest attempt starts fresh when reopened.
-            // A rejected startup schema or confirmed missing rollout cannot be
-            // recovered by resuming the same session. Keep its history and
-            // checkout, but start fresh; temporary resume errors still retry it.
-            let resume_session: Option<String> = tx.query_row(
-                "SELECT coalesce(session_id,json_extract(job,'$.resume_session')) FROM worker_runs
+            // Every attempt gets a new agent session. Reuse only unfinished
+            // local checkout work; another machine or directory gets its own
+            // branch. Some(None) preserves pre-migration checkout names.
+            let previous_checkout: Option<Option<String>> = tx.query_row(
+                "SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs
                  WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
                   ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
-                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4
-                 AND coalesce(json_extract(job,'$.config.provider'),'codex')=?5
-                 AND NOT (state='failed' AND summary LIKE 'Codex turn/start:%ActiveTurnOutputSchemaMismatch%')
-                 AND NOT (state='failed' AND summary LIKE 'Codex thread/resume: \"no rollout found for thread id %\"')
-                 AND NOT EXISTS(SELECT 1 FROM issues i JOIN issue_github_watches w ON w.project_id=i.project_id AND w.issue_number=i.number
-                   WHERE i.project_id=?1 AND i.number=?2 AND i.assignment_target='github' AND json_type(w.status,'$.event')='text'
-                   AND NOT EXISTS(SELECT 1 FROM agent_steering s WHERE s.request_id='github:'||worker_runs.id||':'||json_extract(w.status,'$.event') AND s.state='delivered'))",
-                params![project.id, number, machine, config.cwd, config.provider.name()], |r| r.get::<_, Option<String>>(0),
-            ).optional()?.flatten();
-            let session_ref = if let Some(session) = &resume_session {
-                tx.query_row("SELECT json_extract(job,'$.session_ref') FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 AND machine=?4 ORDER BY started_at DESC LIMIT 1", params![project.id, number, session, machine], |r| r.get::<_, Option<String>>(0)).optional()?.flatten().map(|s| serde_json::from_str(&s)).transpose()?
-            } else {
-                None
-            };
-            // Preserve the checkout of a resumed or pre-migration session.
-            // Fresh attempts on different machines must never share a branch.
-            let worktree_attempt = if let Some(session) = &resume_session {
-                tx.query_row("SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND session_id=?3 AND machine=?4 ORDER BY started_at DESC LIMIT 1",params![project.id,number,session,machine],|r|r.get::<_,Option<String>>(0)).optional()?.flatten()
-            } else {
-                Some(id.clone())
-            };
+                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
+                params![project.id, number, machine, config.cwd], |r| r.get(0),
+            ).optional()?;
+            let retry = previous_checkout.is_some();
+            let worktree_attempt = previous_checkout.unwrap_or_else(|| Some(id.clone()));
             if let Some(attempt) = worktree_attempt {
                 issue["_worktree_attempt"] = json!(attempt);
             }
             let job = Job {
-                session_ref,
+                session_ref: None,
                 id: id.clone(),
                 worker_id: worker_id.clone(),
-                resume_session,
+                retry,
                 project: project.clone(),
                 issue,
                 comments: vec![],
@@ -1222,7 +1204,7 @@ pub(super) fn reserve(
                 owner_start: owner_start.clone(),
                 machine: machine.into(),
             };
-            tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires,session_id) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11,?12)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000,job.resume_session])?;
+            tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000])?;
             let (sort_order, created_at): (i64, i64) = tx.query_row(
                 "SELECT sort_order,created_at FROM issues WHERE project_id=?1 AND number=?2",
                 params![project.id, number],

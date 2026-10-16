@@ -812,7 +812,7 @@ fn reviewed_handoff_managed_attempt_acknowledges_only_its_snapshot() {
             session_ref: None,
             id: "review-run".into(),
             worker_id: String::new(),
-            resume_session: None,
+            retry: false,
             project: f.request.project.clone(),
             issue: serde_json::to_value(get_issue(&f.store.db, "named:test", 1, false).unwrap())
                 .unwrap(),
