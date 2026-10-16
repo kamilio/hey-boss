@@ -25,6 +25,8 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
         "pending_archives",
         "projected",
         "journal_head",
+        "pending_reservations",
+        "conflicting_attempts",
     ]
     .iter()
     .all(|key| sample[*key].as_u64().is_some());
@@ -42,6 +44,8 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
         || sample["pending_projection"].as_u64().unwrap_or(0) > 0
         || sample["baseline_remaining"].as_u64().unwrap_or(0) > 0
         || sample["pending_archives"].as_u64().unwrap_or(0) > 0
+        || sample["pending_reservations"].as_u64().unwrap_or(0) > 0
+        || sample["conflicting_attempts"].as_u64().unwrap_or(0) > 0
         || sample["projected"] != sample["journal_head"]
         || exchange["incoming_drained"] == false
         || exchange["outgoing_pending"].as_u64().unwrap_or(0) > 0
@@ -70,6 +74,10 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
         "healthy" => "Changes are applied and sync is responding",
         "shadow" => "Sync migration is not active; received changes are not visible",
         "rejected" => "Some received changes could not be applied",
+        "catching_up" if sample["pending_reservations"].as_u64().unwrap_or(0) > 0 =>
+            "Worker reservations are still synchronizing; new agents are waiting",
+        "catching_up" if sample["conflicting_attempts"].as_u64().unwrap_or(0) > 0 =>
+            "Workers are stopping attempts owned by another machine",
         "catching_up" => "Changes are waiting to be applied or sent",
         "disconnected" => "No recent completed sync exchange; local work is retained",
         "error" => "Sync could not prepare or apply changes",
@@ -161,6 +169,8 @@ pub(super) fn prepared(
 ) -> Result<()> {
     let mut sample=replica::rows(db,"SELECT active,exported,projected,(SELECT count(*) FROM distributed_outbox WHERE clock>m.exported) AS pending_local,(SELECT count(*) FROM distributed_dirty) AS pending_projection,(SELECT count(*) FROM distributed_rejections) AS conflicts,(SELECT count(*) FROM distributed_baseline WHERE complete=0) AS baseline_remaining,(SELECT count(*) FROM distributed_archives WHERE complete=0) AS pending_archives FROM distributed_meta m WHERE id=1",&[])?.remove(0);
     sample["journal_head"] = json!(engine.head()?);
+    sample["pending_reservations"] = json!(crate::issues::allocations::pending_reservations(db)?);
+    sample["conflicting_attempts"] = json!(crate::issues::allocations::conflicting_attempts(db)?);
     save(ctx, "distributed-health.json", sample)
 }
 
@@ -191,7 +201,7 @@ fn save(ctx: &Context, name: &str, mut value: Value) -> Result<()> {
 mod tests {
     use super::*;
     fn sample() -> Value {
-        json!({"boot":"boot","tick":100,"active":1,"pending_local":0,"pending_projection":0,"conflicts":0,"baseline_remaining":0,"pending_archives":0,"projected":7,"journal_head":7})
+        json!({"boot":"boot","tick":100,"active":1,"pending_local":0,"pending_projection":0,"conflicts":0,"baseline_remaining":0,"pending_archives":0,"projected":7,"journal_head":7,"pending_reservations":0,"conflicting_attempts":0})
     }
     #[test]
     fn transport_backlog_and_new_receipts_prevent_false_health() {
@@ -245,6 +255,11 @@ mod tests {
         let exchange = json!({"boot":"boot","tick":100,"at":1,"incoming_drained":true});
         let mut s = sample();
         assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "healthy");
+        for key in ["pending_reservations", "conflicting_attempts"] {
+            s[key] = json!(1);
+            assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "catching_up");
+            s[key] = json!(0);
+        }
         s["active"] = json!(0);
         assert_eq!(classify(&s, &exchange, "boot", 101)["state"], "shadow");
         s["active"] = json!(1);

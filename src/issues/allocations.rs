@@ -294,6 +294,20 @@ pub(crate) fn owns(db: &Connection, id: &str, project: &str, number: i64) -> Res
     Ok(db.query_row("SELECT (NOT EXISTS(SELECT 1 FROM worker_allocations WHERE id=?1) OR EXISTS(SELECT 1 FROM worker_allocation_winners WHERE project_id=?2 AND issue_number=?3 AND id=?1)) AND NOT EXISTS(SELECT 1 FROM issues i JOIN worker_allocations a ON a.id=?1 WHERE i.project_id=?2 AND i.number=?3 AND i.assignment_target LIKE 'machine:%' AND i.assignment_target<>'machine:'||a.machine)", params![id,project,number], |r| r.get(0))?)
 }
 
+/// Presence travels ahead of the durable journal. Until every announced attempt
+/// has its reservation, the replica cannot know which tasks are already owned.
+/// Expiring a heartbeat cannot prove those missing facts do not matter; only a
+/// newer presence list or delivery of the reservation clears this hold.
+pub(crate) fn pending_reservations(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT count(*) FROM worker_allocation_presence p,json_each(p.attempts) attempt
+        WHERE NOT EXISTS(SELECT 1 FROM worker_allocations a WHERE a.id=attempt.value AND a.machine=p.machine)",[],|r|r.get(0))?)
+}
+
+pub(crate) fn conflicting_attempts(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT count(*) FROM worker_runs r JOIN worker_allocation_winners w ON w.project_id=r.project_id AND w.issue_number=r.issue_number
+        WHERE r.finished_at IS NULL AND r.state<>'reserved' AND r.machine=(SELECT node FROM fleet_meta WHERE id=1) AND r.id<>w.id",[],|r|r.get(0))?)
+}
+
 /// Atomically recheck the settled winner and publish launch intent before any
 /// provider process can execute work. Concurrent launches converge by the same
 /// Lamport ticket and stable identity order on every replica.
@@ -318,6 +332,10 @@ pub(crate) fn launch(db: &Connection, id: &str) -> Result<Option<Duration>> {
             "cancelled",
             "Another machine owns this task; saved work is retained",
         ));
+    }
+    if pending_reservations(&tx)? > 0 {
+        tx.commit()?;
+        return Ok(Some(SYNC_INTERVAL));
     }
     if launched.is_none() && ready > clock.tick {
         tx.commit()?;
@@ -530,6 +548,79 @@ mod tests {
             "Released attempts require a fresh reservation, even if a PID is reused"
         );
     }
+    #[test]
+    fn launch_waits_for_reservations_announced_ahead_of_the_replication_journal() {
+        let (_root, db) = fixture();
+        reserve(&db, "a", "local", 2, None);
+        let now = Clock::read().unwrap();
+        reconcile(&db, &now).unwrap();
+        db.execute("UPDATE worker_allocation_observations SET ready_tick=0", [])
+            .unwrap();
+        // Presence bypasses historical journal pages. It proves another machine
+        // has an attempt, but we do not yet know which issue it owns.
+        db.execute(
+            "INSERT INTO worker_allocation_presence VALUES('other',1,'[\"b\"]',?1,?2,60000)",
+            params![now.boot, now.tick],
+        )
+        .unwrap();
+        assert!(
+            launch(&db, "a").unwrap().is_some(),
+            "A timer cannot prove ownership while announced reservations are missing"
+        );
+        let launched: Option<i64> = db
+            .query_row(
+                "SELECT launched FROM worker_allocations WHERE id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(launched, None);
+        db.execute(
+            "UPDATE worker_allocation_presence SET remaining_ms=0,seen_tick=0",
+            [],
+        )
+        .unwrap();
+        assert!(
+            launch(&db, "a").unwrap().is_some(),
+            "An expired heartbeat cannot make missing ownership facts safe to ignore"
+        );
+        db.execute(
+            "UPDATE worker_allocation_presence SET remaining_ms=60000,seen_tick=?1",
+            [Clock::read().unwrap().tick],
+        )
+        .unwrap();
+        reserve(&db, "b", "other", 1, None);
+        assert_eq!(launch(&db, "a").unwrap_err().code, "cancelled");
+    }
+
+    #[test]
+    fn a_new_presence_that_retires_an_unknown_attempt_unblocks_pickup() {
+        let (_root, db) = fixture();
+        reserve(&db, "a", "local", 1, None);
+        let clock = Clock::read().unwrap();
+        reconcile(&db, &clock).unwrap();
+        db.execute("UPDATE worker_allocation_observations SET ready_tick=0", [])
+            .unwrap();
+        db.execute(
+            "INSERT INTO worker_allocation_presence VALUES('other',1,'[\"missing\"]',?1,?2,60000)",
+            params![clock.boot, clock.tick],
+        )
+        .unwrap();
+        assert!(launch(&db, "a").unwrap().is_some());
+        receive_presence(
+            &db,
+            &[hey_boss_sync::session::Presence {
+                machine: "other".into(),
+                sequence: 2,
+                attempts: vec![],
+                remaining_ms: 60000,
+            }],
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(launch(&db, "a").unwrap().is_none());
+    }
+
     #[test]
     fn settling_uses_local_monotonic_time_and_rechecks_ownership() {
         let (_root, db) = fixture();
