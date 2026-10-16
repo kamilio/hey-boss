@@ -33,6 +33,82 @@ impl Drop for Fixture {
     }
 }
 
+type EventHistory = std::collections::BTreeMap<String, Value>;
+
+fn event_history(db: &Connection) -> EventHistory {
+    // Old peer-only rows can need creation aliases; avoid one durable commit
+    // per row while collecting the private rehearsal's history snapshot.
+    let snapshot = db.unchecked_transaction().unwrap();
+    let mut history = EventHistory::new();
+    for row in replica::rows(&snapshot, "SELECT * FROM events", &[]).unwrap() {
+        let mut fact = Revision {
+            protocol: PROTOCOL,
+            origin: String::new(),
+            clock: 0,
+            table: "events".into(),
+            before: None,
+            after: Some(row),
+            resource: None,
+            archive: None,
+        };
+        identity::normalize(&snapshot, &mut fact).unwrap();
+        let row = fact.after.unwrap();
+        let id = row["id"].as_str().unwrap().to_owned();
+        assert!(
+            history.insert(id, row).is_none(),
+            "Duplicate event identity"
+        );
+    }
+    snapshot.commit().unwrap();
+    history
+}
+
+fn expected_event_history(db: &Connection) -> EventHistory {
+    // Peers can legitimately gain controller history missing from their legacy
+    // copy. Retain local history and reconcile each known canonical event.
+    let mut history = event_history(db);
+    for saved in replica::rows(
+        db,
+        "SELECT entity FROM distributed_fields WHERE table_name='events' AND field='@alive'",
+        &[],
+    )
+    .unwrap()
+    {
+        let key: Value = serde_json::from_str(saved["entity"].as_str().unwrap()).unwrap();
+        let id = key["id"].as_str().unwrap().to_owned();
+        match projection::row(db, "events", &key).unwrap() {
+            Some(row) => {
+                history.insert(id, row);
+            }
+            None => {
+                history.remove(&id);
+            }
+        }
+    }
+    history
+}
+
+fn assert_event_history(db: &Connection, expected: &EventHistory) {
+    let actual = event_history(db);
+    let changed: Vec<_> = expected
+        .iter()
+        .filter(|(id, row)| actual.get(*id) != Some(*row))
+        .take(5)
+        .map(|(id, _)| id)
+        .collect();
+    let unexpected: Vec<_> = actual
+        .keys()
+        .filter(|id| !expected.contains_key(*id))
+        .take(5)
+        .collect();
+    assert!(
+        changed.is_empty() && unexpected.is_empty(),
+        "Event history differs: expected {}, actual {}; missing/changed {changed:?}; unexpected {unexpected:?}",
+        expected.len(),
+        actual.len()
+    );
+}
+
 #[test]
 #[ignore = "Preflight an explicitly supplied database using a private local backup"]
 fn preflight_existing_store_without_changing_the_source() {
@@ -168,6 +244,7 @@ fn preflight_existing_store_without_changing_the_source() {
     }
     capture_all(&db, &mut engine);
     drop(engine);
+    let expected_events = expected_event_history(&db);
     let probe = db.unchecked_transaction().unwrap();
     probe
         .execute("UPDATE distributed_meta SET active=1", [])
@@ -191,7 +268,8 @@ fn preflight_existing_store_without_changing_the_source() {
         count("comments"),
         count("events"),
     ];
-    assert_eq!(before, after);
+    assert_eq!(&before[..3], &after[..3]);
+    assert_event_history(&db, &expected_events);
     eprintln!(
         "Preflight passed in {:?}; projects/tasks/comments/events: {after:?}",
         start.elapsed()
@@ -207,6 +285,79 @@ fn seed(db: &Connection) {
 fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
     while export(db, engine).unwrap() > 0 {}
     while import(db, engine).unwrap() > 0 {}
+}
+
+#[test]
+fn preflight_accepts_missing_controller_history_without_changing_the_source() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    let node = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let controller = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    seed(&db);
+    db.execute("UPDATE fleet_meta SET node=?1,role='agent'", [node])
+        .unwrap();
+    db.execute("DELETE FROM fleet_outbox", []).unwrap();
+    install(&db, node).unwrap();
+    db.execute("UPDATE distributed_meta SET controller=?1", [controller])
+        .unwrap();
+    let ctx = f.context(node);
+    activation::enroll(&ctx, node, 1).unwrap();
+    activation::enroll(&ctx, controller, 0).unwrap();
+    db.execute(
+        "UPDATE distributed_members SET ready=1 WHERE node=?1",
+        [controller],
+    )
+    .unwrap();
+    db.execute_batch(
+        "INSERT INTO events(id,project_id,issue_number,actor,action,data,created_at)
+        VALUES(7,'p',1,'human:test','opened','{}',1);",
+    )
+    .unwrap();
+    let original = replica::rows(&db, "SELECT * FROM events", &[]).unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&ctx.path.with_extension("sync.db")).unwrap();
+    while !baseline(&db, &mut engine, true).unwrap() {}
+    engine
+        .put(
+            &serde_json::to_string(&Revision {
+                protocol: PROTOCOL,
+                origin: controller.into(),
+                clock: 1,
+                table: "events".into(),
+                before: None,
+                after: Some(
+                    json!({"id":format!("{controller}:8"),"project_id":"p","issue_number":1,
+            "actor":"human:test","action":"blocked","data":"{}","created_at":2}),
+                ),
+                resource: None,
+                archive: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    capture_all(&db, &mut engine);
+    drop(engine);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["fleet::native::distributed::tests::preflight_existing_store_without_changing_the_source",
+            "--exact", "--ignored", "--nocapture"])
+        .env("HEY_BOSS_SYNC_PREFLIGHT_DB", &ctx.path)
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        replica::rows(&db, "SELECT * FROM events", &[]).unwrap(),
+        original
+    );
+    assert_eq!(
+        db.query_row("SELECT active FROM distributed_meta", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 fn transfer(from: &hey_boss_sync::Engine, to: &mut hey_boss_sync::Engine) {
     loop {
