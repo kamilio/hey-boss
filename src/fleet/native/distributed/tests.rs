@@ -219,6 +219,94 @@ fn transfer(from: &hey_boss_sync::Engine, to: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn archive_preparation_shares_one_page_budget_across_small_archives() {
+    let f = Fixture::new();
+    let db = f.db();
+    db.execute("UPDATE fleet_meta SET node='a'", []).unwrap();
+    seed(&db);
+    db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(2) UNION ALL SELECT x+1 FROM n WHERE x<12)
+        INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
+        SELECT 'p',x,'Small task '||x,'Requirements '||x,'open','human:test',1,1,1,'[]' FROM n;
+        UPDATE issues SET state='closed',closed_by='human:test',closed_at=2;").unwrap();
+    for number in 1..=12 {
+        assert!(crate::issues::archive::archive_issue(&db, "p", number, 10_000_000_000).unwrap());
+    }
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    let complete = || {
+        db.query_row(
+            "SELECT count(*) FROM distributed_archives WHERE complete=1",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    archives::prepare(&db, &mut engine).unwrap();
+    assert_eq!(
+        complete(),
+        8,
+        "Small archives should share the existing eight-page allowance"
+    );
+    assert_eq!(
+        engine.head().unwrap(),
+        8,
+        "One cycle must stay within its page budget"
+    );
+    drop(engine);
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    archives::prepare(&db, &mut engine).unwrap();
+    assert_eq!(complete(), 12);
+    assert_eq!(engine.head().unwrap(), 12);
+    archives::prepare(&db, &mut engine).unwrap();
+    assert_eq!(
+        engine.head().unwrap(),
+        12,
+        "Completed archives must not be exported again"
+    );
+}
+
+#[test]
+fn archive_preparation_keeps_large_archives_bounded_and_resumable() {
+    let f = Fixture::new();
+    let db = f.db();
+    db.execute("UPDATE fleet_meta SET node='a'", []).unwrap();
+    seed(&db);
+    db.execute(
+        "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200)
+        INSERT INTO comments(id,project_id,issue_number,author,body,created_at)
+        SELECT x,'p',1,'human:test',?1,1 FROM n",
+        ["x".repeat(4096)],
+    )
+    .unwrap();
+    db.execute_batch("UPDATE issues SET state='closed',closed_by='human:test',closed_at=2;")
+        .unwrap();
+    assert!(crate::issues::archive::archive_issue(&db, "p", 1, 10_000_000_000).unwrap());
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    archives::prepare(&db, &mut engine).unwrap();
+    assert_eq!(engine.head().unwrap(), 8);
+    assert_eq!(
+        db.query_row("SELECT complete FROM distributed_archives", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(engine);
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    archives::prepare(&db, &mut engine).unwrap();
+    assert_eq!(engine.head().unwrap(), 16);
+    assert_eq!(
+        db.query_row(
+            "SELECT json_array_length(pages) FROM distributed_archives",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        16
+    );
+}
+
+#[test]
 fn baseline_bounds_large_documents_without_skipping_rows() {
     let f = Fixture::new();
     let db = f.db();
