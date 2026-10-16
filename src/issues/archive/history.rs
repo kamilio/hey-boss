@@ -967,8 +967,8 @@ fn restore_row(db: &HotConnection, table: &str, saved: &RestoreRow) -> Result<()
 }
 
 /// Retire obsolete storage only after its history is proven redundant. The
-/// immutable source remains intact. Comment IDs and references stay exact;
-/// events may have different local IDs but must match in every other field.
+/// immutable source remains intact. Machine-local append IDs may differ, but
+/// comment content and every referenced comment must match in full.
 pub(crate) fn covered_by(
     db: &HotConnection,
     key: &str,
@@ -982,14 +982,29 @@ pub(crate) fn covered_by(
     let archive = Archive::read(&archive_path(db)?)?;
     verify_copy(&archive, key, project, number)?;
     verify_copy(&archive, replacement, project, number)?;
-    let normalize = |kind: &str, record: &str| -> Result<Value> {
+    let normalize = |archive_key: &str, kind: &str, record: &str| -> Result<Value> {
         let mut row: Value = serde_json::from_str(record)?;
-        if kind == "events" {
+        if matches!(kind, "comments" | "events") {
             row.as_object_mut().unwrap().remove("id");
-            if let Some(data) = row["data"]
+        }
+        if kind == "events" {
+            if let Some(mut data) = row["data"]
                 .as_str()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
             {
+                if let Some(id) = data["comment_id"].as_i64() {
+                    let comment: Option<String> = archive.db.query_row("SELECT record FROM issue_history WHERE archive_key=?1 AND kind='comments' AND text_id=?2",params![archive_key,id.to_string()],|r|r.get(0)).optional()?;
+                    let mut comment: Value =
+                        serde_json::from_str(&comment.ok_or_else(|| {
+                            unavailable("Archived comment reference is missing")
+                        })?)?;
+                    comment.as_object_mut().unwrap().remove("id");
+                    data["comment_id"] = json!({"archive_comment":format!("{:x}",Sha256::digest(comment.to_string().as_bytes()))});
+                    data.as_object_mut().unwrap().remove("comment_origin");
+                    data.as_object_mut().unwrap().remove("comment_origin_id");
+                } else if !data["comment_id"].is_null() {
+                    return Err(unavailable("Invalid archived comment reference"));
+                }
                 row["data"] = data;
             }
         }
@@ -1006,13 +1021,13 @@ pub(crate) fn covered_by(
             if !archive.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_history WHERE archive_key=?1 AND kind='agents' AND text_id=?2)",params![replacement,id],|r|r.get::<_,bool>(0))? {return Ok(false)}
             continue;
         }
-        let expected = normalize(&kind, &row.get::<_, String>(3)?)?;
-        let mut candidates=archive.db.prepare("SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 AND created_at=?3 AND (?2='events' OR text_id=?4)")?;
+        let expected = normalize(key, &kind, &row.get::<_, String>(3)?)?;
+        let mut candidates=archive.db.prepare("SELECT record FROM issue_history WHERE archive_key=?1 AND kind=?2 AND created_at=?3 AND (?2 IN ('comments','events') OR text_id=?4)")?;
         let mut candidates =
             candidates.query(params![replacement, kind, row.get::<_, i64>(2)?, id])?;
         let mut found = false;
         while let Some(candidate) = candidates.next()? {
-            if normalize(&kind, &candidate.get::<_, String>(0)?)? == expected {
+            if normalize(replacement, &kind, &candidate.get::<_, String>(0)?)? == expected {
                 found = true;
                 break;
             }
