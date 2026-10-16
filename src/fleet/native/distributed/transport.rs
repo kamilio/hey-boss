@@ -153,7 +153,11 @@ pub(in crate::fleet::native) fn serve(
             break;
         };
         prepared(&ctx, &db, &mut journal, false)?;
-        crate::issues::allocations::receive_presence(&db, &result.presence, started.elapsed())?;
+        crate::issues::allocations::receive_presence(
+            &db,
+            &result.presence,
+            result.presence_age.max(started.elapsed()),
+        )?;
         crate::issues::allocations::record_exchange(&db, controller, started.elapsed())?;
     }
     Ok(())
