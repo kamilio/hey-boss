@@ -769,10 +769,16 @@ mindmap label columns without overwriting existing values. A failed migration
 keeps the installed CLI and services in place and reports the store and cause;
 resolve that cause and retry rather than deleting the store. Committed schema
 changes are retained if a later installation step fails, so recovery must use a
-build that supports the migrated schema. The existing state, issue databases, and running workers are
+build that supports the migrated schema. Existing state and issue databases are
 preserved. The desktop daemon and managed companion brokers restart after an
-upgrade. Updated workers keep picking up issues and load the new CLI when naturally
-idle, retaining the same ID and settings. Emergency draining is explicit: create
+upgrade. Rollouts also verify every running worker and use durable guarded
+restarts for outdated workers, retaining IDs, settings, and unfinished checkouts.
+Replacements start only after the previous owned processes stop. Paused workers
+are never resumed; paused old agents still finishing work keep rollout incomplete.
+`--check` observes worker versions without restarting them. Retrying a rollout
+continues the same restart. Matching installed files alone cannot mean success.
+Outside a rollout, workers load replacement binaries when naturally idle.
+Emergency draining is explicit: create
 an empty `issues.db.drain-for-update` file beside the machine's issue database
 before or after replacing the CLI. Only workers awaiting a CLI update stop pickup;
 active agents finish normally. The dashboard labels this **Emergency update drain**.

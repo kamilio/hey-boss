@@ -426,6 +426,16 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
         "SELECT * FROM fleet_signals WHERE id=?",
         &[message["id"].clone()],
     )?;
+    // Upgrade selection happened before taking this control lock. Respect a
+    // pause or a completed natural reload that won the race with that snapshot.
+    if old.is_empty()
+        && let Some(build) = message["upgrade_build"].as_str()
+    {
+        let worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
+        if worker["config"]["enabled"] != true || worker["build"] == build {
+            return Ok(json!({"id":message["id"],"state":"deferred","worker":message["worker"]}));
+        }
+    }
     if let Some(old) = old.first() {
         if old["worker"] != message["worker"] || old["signal"] != message["signal"] {
             return Err(invalid("Signal ID already has a different payload"));

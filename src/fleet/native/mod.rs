@@ -28,6 +28,11 @@ mod watch_delta;
 #[cfg(test)]
 mod watcher_tests;
 mod worker_history;
+mod worker_rollout;
+
+pub(super) fn rollout_workers(build: &str, apply: bool) -> std::io::Result<Value> {
+    worker_rollout::run(build, apply).map_err(std::io::Error::other)
+}
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub(super) use authority::metadata;
