@@ -2542,3 +2542,128 @@ fn partitioned_launches_converge_and_only_the_losing_owner_cancels() {
         }
     }
 }
+
+#[test]
+fn conflicting_archive_does_not_block_other_tasks_and_retries_after_repair() {
+    use serde_json::json;
+    let source = Fixture::new();
+    let a = source.db();
+    a.execute("UPDATE fleet_meta SET node='a'", []).unwrap();
+    seed(&a);
+    a.execute_batch("INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(1,'p',1,'human:test','Archived finding',1); UPDATE issues SET state='closed',closed_by='human:test',closed_at=2;").unwrap();
+    assert!(crate::issues::archive::archive_issue(&a, "p", 1, 10_000_000_000).unwrap());
+    while crate::issues::archive::cleanup_history(&a).unwrap() > 0 {}
+    install(&a, "a").unwrap();
+    let target = Fixture::new();
+    let b = target.db();
+    seed(&b);
+    b.execute_batch("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',2,'Another task','Unrelated work','open','human:test',1,1,1,'[]'); INSERT INTO comments(id,project_id,issue_number,author,body,created_at) VALUES(99,'p',2,'human:test','Keep this unrelated comment',1); INSERT INTO fleet_row_ids VALUES('a','comments',1,99); UPDATE fleet_meta SET node='b',role='peer';").unwrap();
+    install(&b, "b").unwrap();
+    b.execute("UPDATE distributed_meta SET active=1,controller='a'", [])
+        .unwrap();
+    b.execute("DROP TABLE distributed_archive_failures", [])
+        .unwrap();
+    install(&b, "b").unwrap(); // Additive migration on an enrolled database.
+    let mut ea = hey_boss_sync::Engine::open(&source.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&target.0.join("sync.db")).unwrap();
+    for _ in 0..100 {
+        archives::prepare(&a, &mut ea).unwrap();
+        if baseline(&a, &mut ea, true).unwrap() {
+            break;
+        }
+    }
+    let mut task =
+        replica::current_row(&b, "issues", &json!({"project_id":"p","number":2})).unwrap();
+    task["title"] = json!("Unrelated task update arrived");
+    let columns = capture::columns(&b, "issues").unwrap();
+    task.as_object_mut()
+        .unwrap()
+        .retain(|column, _| columns.contains(column));
+    ea.put(
+        &serde_json::to_string(&Revision {
+            protocol: PROTOCOL,
+            origin: "a".into(),
+            clock: 100,
+            table: "issues".into(),
+            before: None,
+            after: Some(task),
+            archive: None,
+            resource: None,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    transfer(&ea, &mut eb);
+    for _ in 0..20 {
+        import(&b, &eb).unwrap();
+    }
+    assert_eq!(
+        b.query_row("SELECT projected FROM distributed_meta", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        eb.head().unwrap()
+    );
+    assert_eq!(
+        b.query_row("SELECT title FROM issues WHERE number=2", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Unrelated task update arrived"
+    );
+    assert_eq!(
+        b.query_row("SELECT body FROM comments WHERE id=99", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Keep this unrelated comment"
+    );
+    assert_eq!(
+        b.query_row(
+            "SELECT count(*) FROM distributed_archive_failures",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert!(
+        b.query_row("SELECT count(*) FROM distributed_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap()
+            > 0
+    );
+    drop(b);
+    let b = target.db(); // Retained repair state survives an owner restart.
+    b.execute_batch("DELETE FROM fleet_row_ids WHERE origin='a' AND table_name='comments'; DELETE FROM distributed_aliases WHERE table_name='comments' AND entity='a:1'; UPDATE distributed_archive_failures SET attempted_at=0;").unwrap();
+    for _ in 0..20 {
+        import(&b, &eb).unwrap();
+    }
+    assert_eq!(
+        b.query_row(
+            "SELECT count(*) FROM distributed_archive_failures",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM distributed_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        b.query_row(
+            "SELECT count(*) FROM comments WHERE issue_number=1 AND body='Archived finding'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        b.query_row("SELECT body FROM comments WHERE id=99", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Keep this unrelated comment"
+    );
+}

@@ -50,6 +50,13 @@ impl Catalog {
         };
         Ok(archive.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_copies WHERE key=?1 AND project_id=?2 AND number=?3) AND NOT EXISTS(SELECT 1 FROM issue_origins WHERE archive_key=?1 AND local_id IS NULL)",params![key,project,number],|r|r.get(0))?)
     }
+    pub(crate) fn has_copy(&self, key: &str, project: &str, number: i64) -> Result<bool> {
+        validate_key(key)?;
+        let Some(archive) = &self.archive else {
+            return Ok(false);
+        };
+        Ok(archive.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_copies WHERE key=?1 AND project_id=?2 AND number=?3)",params![key,project,number],|r|r.get(0))?)
+    }
 }
 
 fn valid_kind(kind: &str) -> bool {

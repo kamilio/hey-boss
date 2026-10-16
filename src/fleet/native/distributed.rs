@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS distributed_rejections(
 CREATE TABLE IF NOT EXISTS distributed_archives(key TEXT PRIMARY KEY,pages TEXT NOT NULL,cursor TEXT NOT NULL,complete INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS distributed_archive_history(key TEXT PRIMARY KEY,project_id TEXT NOT NULL,number INTEGER NOT NULL,cursor_kind TEXT NOT NULL DEFAULT '',cursor_id TEXT NOT NULL DEFAULT '',complete INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS distributed_archive_history_pending ON distributed_archive_history(project_id,number,key) WHERE complete=0;
+CREATE TABLE IF NOT EXISTS distributed_archive_failures(key TEXT PRIMARY KEY,project_id TEXT NOT NULL,number INTEGER NOT NULL,manifest TEXT NOT NULL,reason TEXT NOT NULL,attempted_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS distributed_archive_failure_scope ON distributed_archive_failures(project_id,number);
 CREATE TABLE IF NOT EXISTS distributed_history_edits(project_id TEXT NOT NULL,number INTEGER NOT NULL,PRIMARY KEY(project_id,number)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS distributed_members(node TEXT PRIMARY KEY,slot INTEGER NOT NULL UNIQUE,ready INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS distributed_attempts(
@@ -134,6 +136,15 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             ));
         }
         identity::upgrade_shadow(db)?;
+        if !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            let tx = db.unchecked_transaction()?;
+            tx.execute_batch(SCHEMA)?;
+            tx.commit()?;
+        }
         // Additive protocol data needs capture on already-enrolled replicas too.
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT')", [], |r|r.get::<_,bool>(0))? {
             let tx=db.unchecked_transaction()?;
@@ -340,6 +351,7 @@ pub(super) fn baseline(
 }
 
 pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<usize> {
+    archives::retry_failed(db, engine)?;
     let after: i64 = db.query_row(
         "SELECT projected FROM distributed_meta WHERE id=1",
         [],
@@ -358,7 +370,7 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
         if let Some(fact) = archives::revision(payload)?
             && let Some(archive) = &fact.archive
         {
-            archives::receive(db, engine, archive)?;
+            archives::receive_or_retain(db, engine, archive)?;
         }
     }
     let tx = db.unchecked_transaction()?;
