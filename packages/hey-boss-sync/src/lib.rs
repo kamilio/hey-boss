@@ -62,28 +62,40 @@ impl Engine {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
-        let db = Connection::open(path)?;
+        // SQLite's first WAL-mode transition can fail immediately when two
+        // connections initialize a new file together, before busy_timeout can
+        // help. Serialize openers across processes; ordinary reads and writes
+        // never hold this lock.
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".open.lock");
+        let initialization = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(lock_path)?;
+        initialization.lock()?;
+        let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(10))?;
-        extension::load(&db, parent)?;
-        let mut engine = Self {
-            db,
-            id: String::new(),
-        };
-        engine.db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS records(id TEXT NOT NULL PRIMARY KEY,payload TEXT NOT NULL DEFAULT '');
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        // Extension initialization and CRR registration read before writing.
+        // Reserve the writer first, so a concurrent opener or ingest cannot
+        // invalidate that read snapshot and cause SQLITE_BUSY_SNAPSHOT.
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        extension::load(&tx, parent)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS records(id TEXT NOT NULL PRIMARY KEY,payload TEXT NOT NULL DEFAULT '');
             CREATE TABLE IF NOT EXISTS delivery(position INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS receipts(replica TEXT PRIMARY KEY,position INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS sent(replica TEXT PRIMARY KEY,position INTEGER NOT NULL);
             CREATE TRIGGER IF NOT EXISTS record_delivery AFTER INSERT ON records BEGIN
                 INSERT OR IGNORE INTO delivery(id) VALUES(NEW.id);
             END;")?;
-        engine
-            .db
-            .query_row("SELECT crsql_as_crr('records')", [], |_| Ok(()))?;
-        engine.id = engine
-            .db
-            .query_row("SELECT lower(hex(crsql_site_id()))", [], |r| r.get(0))?;
-        Ok(engine)
+        tx.query_row("SELECT crsql_as_crr('records')", [], |_| Ok(()))?;
+        let id = tx.query_row("SELECT lower(hex(crsql_site_id()))", [], |r| r.get(0))?;
+        tx.commit()?;
+        Ok(Self { db, id })
     }
 
     pub fn id(&self) -> &str {

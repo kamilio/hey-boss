@@ -6,6 +6,31 @@ fn opens_persistent_replication_storage() {
 }
 
 #[test]
+fn simultaneous_connections_initialize_and_append_without_losing_facts() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("replica.db");
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for peer in 0..8 {
+            let (path, start) = (&path, &start);
+            workers.push(scope.spawn(move || {
+                start.wait();
+                for round in 0..8 {
+                    let mut engine = super::Engine::open(path)?;
+                    engine.put(&format!("peer-{peer}-round-{round}"))?;
+                }
+                super::Result::Ok(())
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+    });
+    assert_eq!(super::Engine::open(&path).unwrap().head().unwrap(), 64);
+}
+
+#[test]
 fn batch_clock_lookup_is_bounded_by_page_size() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     unsafe extern "C" fn budget(context: *mut std::ffi::c_void) -> i32 {
