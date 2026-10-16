@@ -177,7 +177,16 @@ function jobConversation(entry,data,now=Date.now()) {
   const machine=(data.machines||[]).find(m=>m.node===entry.run.machine||m.host===entry.machine.host);
   return {...entry,machine:machine||entry.machine,online:!!machine&&machine.state==='connected'&&now/1000-(machine.heartbeat||0)<=15};
 }
-if (typeof module !== 'undefined') module.exports = {fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
+function syncProblem(machine, now=Date.now()) {
+  if(machine.peer_sync_error)return 'Peer sync: '+machine.peer_sync_error;
+  const sample=machine.sync;
+  const local=['supervisor','controller'].includes(machine.role);
+  if(!sample || !local && (!machine.sync_observed_at || now/1000-machine.sync_observed_at>30))return 'Data sync is not verified';
+  if(sample.state!=='healthy')return sample.message||'Data sync needs attention';
+  if(machine.conflicts>0)return machine.conflicts+' saved offline edits need review';
+  return null;
+}
+if (typeof module !== 'undefined') module.exports = {syncProblem, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -387,11 +396,14 @@ if (typeof document !== 'undefined') (() => {
   }
   function renderFleetAttention(data,devices){
     const previous=$('fleet-attention').querySelector('details');
-    const problems=devices.filter(d=>!d.online||d.machine.configuration_error);
-    if(!problems.length&&!data.configuration?.error){$('fleet-attention').replaceChildren();return;}
-    const health=element('details','fleet-health');health.open=!!previous?.open;
-    health.append(element('summary','',data.configuration?.error?'Configuration file needs attention':problems.length+' '+(problems.length===1?'machine needs':'machines need')+' attention'));
-    health.append(element('p','',data.configuration?.error||problems.map(d=>(d.machine.hostname||d.machine.host)+': '+(!d.online?'offline; activity is last known':'new settings have not applied')).join(' · ')));
+    const problems=devices.filter(d=>!d.online||d.machine.configuration_error||syncProblem(d.machine));
+    const retained=data.conflicts?.length||0;
+    if(!problems.length&&!data.configuration?.error&&!retained){$('fleet-attention').replaceChildren();return;}
+    const health=element('details','fleet-health');health.open=previous?previous.open:true;
+    health.append(element('summary','',data.configuration?.error?'Configuration file needs attention':problems.length?problems.length+' '+(problems.length===1?'machine needs':'machines need')+' attention':'Saved offline edits need review'));
+    const notes=problems.map(d=>(d.machine.hostname||d.machine.host)+': '+(!d.online?'offline; activity is last known':d.machine.configuration_error?'new settings have not applied':syncProblem(d.machine)));
+    if(retained)notes.push(retained+' retained edits on the main machine need review');
+    health.append(element('p','',data.configuration?.error||notes.join(' · ')));
     $('fleet-attention').replaceChildren(health);
   }
 

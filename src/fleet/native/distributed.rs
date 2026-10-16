@@ -5,6 +5,7 @@ mod archives;
 mod capture;
 pub(super) use activation::{activate, enroll, status};
 mod graph;
+pub(super) mod health;
 mod identity;
 mod local;
 pub(super) use local::request as local_request;

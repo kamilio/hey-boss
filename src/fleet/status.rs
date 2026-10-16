@@ -69,11 +69,18 @@ pub(super) fn status_text(v: &Value) -> String {
             text(&m["applied_revision"]),
             text(&m["desired_revision"])
         );
+        let _ = writeln!(
+            out,
+            "  Data sync: {} · {}",
+            text(&m["sync"]["state"]),
+            text(&m["sync"]["message"])
+        );
         for key in [
             "error",
             "deployment_error",
             "configuration_error",
             "utility_error",
+            "peer_sync_error",
         ] {
             if !m[key].is_null() {
                 let _ = writeln!(out, "  {key}: {}", text(&m[key]));

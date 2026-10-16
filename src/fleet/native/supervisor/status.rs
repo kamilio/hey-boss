@@ -43,6 +43,8 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
             "deployment_error",
             "configuration_error",
             "utility_error",
+            "peer_sync_error",
+            "sync_observed_at",
             "desired_revision",
             "applied_revision",
             "retry_deploy_at",
@@ -51,6 +53,8 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
     if result["role"] == "agent" {
         result["role"] = json!("companion");
     }
+    result["sync"] = super::super::distributed::health::observed(value, now());
+    result["peer_sync"] = value.get("peer_sync").cloned().unwrap_or(Value::Null);
     result["jobs"] = value.get("jobs").cloned().unwrap_or(Value::Null);
     result["worker_count"] = json!(workers.map(Vec::len));
     result["workers_omitted"] = json!(workers.map(|w| w.len().saturating_sub(20)));
@@ -99,6 +103,14 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn summary_exposes_data_health_even_with_a_live_connection() {
+        let value = json!({"state":"connected","sync_observed_at":now(),"sync":{"state":"shadow","pending_projection":212000},"peer_sync_error":"route unavailable"});
+        let summary = machine(&value, None);
+        assert_eq!(summary["sync"]["state"], "shadow");
+        assert_eq!(summary["sync"]["pending_projection"], 212000);
+        assert_eq!(summary["peer_sync_error"], "route unavailable");
+    }
     #[test]
     fn summary_preserves_jobs_separately_from_task_capacity() {
         let workers = vec![
@@ -171,6 +183,7 @@ impl Supervisor {
             result["records"] = json!(records);
         }
         tx.commit()?;
+        let local_sync = super::super::distributed::health::cached(&self.ctx)?;
         let state = self.state.lock().unwrap();
         let total = 1 + state
             .machines
@@ -215,7 +228,7 @@ impl Supervisor {
         if matches!(view, "summary" | "machines") {
             // Supervisor changes are already authoritative. Its outbox is a
             // replication journal, not a queue awaiting supervisor acceptance.
-            let local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"conflicts":conflicts,"build":state.build,"jobs":state.machines.get("local").map(|m| &m["jobs"])});
+            let local = json!({"sync":local_sync,"last_sync":local_sync["last_exchange"],"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"conflicts":conflicts,"build":state.build,"jobs":state.machines.get("local").map(|m| &m["jobs"])});
             let machines: Vec<_> = std::iter::once((&local, Some(&state.local)))
                 .chain(
                     state

@@ -311,7 +311,7 @@ pub(super) fn apply(ctx: &Context, value: &Value) -> Result<Value> {
         None
     };
     let command = format!(
-        "exec {} fleet sync --controller {}",
+        "exec {} fleet sync --controller {} --continuous",
         shell_quote(&ctx.binary.to_string_lossy()),
         settings.controller
     );
@@ -426,6 +426,10 @@ mod tests {
         assert!(keys.starts_with("ssh-ed25519 USER user-access\n"));
         assert!(keys.contains("restrict,command=\"exec '"));
         assert!(keys.contains(&format!("fleet sync --controller {}", "c".repeat(32))));
+        assert!(
+            keys.contains(" --continuous"),
+            "Restricted peer keys must keep the continuous exchange open"
+        );
         assert_eq!(cached(&ctx).unwrap().unwrap().controller, "c".repeat(32));
         assert_eq!(
             cached(&ctx).unwrap().unwrap().peers[0].address,
