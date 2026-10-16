@@ -252,6 +252,28 @@ fn needs_no_daemon_database_or_installation_setup() {
 }
 
 #[test]
+fn git_shortcuts_stay_local_when_fleet_sockets_exist() {
+    for (alias, action) in [("gcn", "commit"), ("gpn", "push")] {
+        let fixture = Fixture::new();
+        let fleet = fixture.root.join("home/fleet");
+        fs::create_dir_all(&fleet).unwrap();
+        // A disconnected peer still has socket paths. Neither may be consulted.
+        for socket in ["fleet.sock", "fleet-authority.sock"] {
+            fs::write(fleet.join(socket), "disconnected").unwrap();
+        }
+        assert_success(
+            &fixture
+                .command(alias)
+                .args(["--", "local argument"])
+                .output()
+                .unwrap(),
+        );
+        fixture.assert_args(action, &["--", "local argument"]);
+        assert!(!fixture.root.join("home/issues.db").exists());
+    }
+}
+
+#[test]
 fn missing_git_uses_normal_main_error_handling() {
     let fixture = Fixture::new();
     fs::remove_file(fixture.root.join("bin/git")).unwrap();

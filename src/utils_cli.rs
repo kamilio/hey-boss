@@ -18,10 +18,12 @@ pub fn configured() -> Option<std::io::Result<()>> {
     if name.starts_with('-') || matches!(name, "help" | "list") {
         return None;
     }
-    let builtin = matches!(
-        name,
-        "gcn" | "gpn" | "copy" | "paste" | "pbcopy" | "pbpaste"
-    );
+    // Git shortcuts always execute in the caller's checkout, without fleet
+    // resolution or a configured utility overriding their local destination.
+    if matches!(name, "gcn" | "gpn") {
+        return None;
+    }
+    let builtin = matches!(name, "copy" | "paste" | "pbcopy" | "pbpaste");
     // Preserve installation-free built-ins when there is no fleet connection.
     let socket = match hey_boss::fleet::socket_path() {
         Ok(socket) => socket,

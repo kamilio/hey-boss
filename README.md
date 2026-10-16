@@ -22,7 +22,7 @@ revokes the managed access when the affected machines next receive configuration
 Initial distributed activation must still finish before relying on offline work.
 `hey-boss fleet sync-status` includes direct peer connection status.
 
-`hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged without a daemon.
+`hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged. Both always run locally in the caller's checkout, without fleet lookup or a daemon, including on companion machines.
 Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
 
 `hey-boss utils list` lists built-ins and configured utilities, sorted one per line.
@@ -684,8 +684,10 @@ shows scheduled retries and retains the failure reason in conversation history.
 Successful delivery requires a completed agent turn and an authoritative issue
 closure or attached fix PR. Posting text alone cannot mark a failed run successful.
 
-The saved Codex session, checkout and issue history remain available. Before
-repeating a database write with an unknown outcome, the resumed agent must read
+Every worker attempt starts a fresh Codex, Claude, or Pi session. Retries reuse
+unfinished worktrees on the same machine and checkout; old conversations and
+issue history remain available. Before repeating a database write with an unknown
+outcome, the new agent must read
 current state or reuse its original deduplication request ID. Worker results are
 saved locally before finalization; reconnection reconciles the atomic transaction,
 so a lost commit reply cannot duplicate a handoff. Explicit approval decisions,
@@ -703,7 +705,7 @@ project with `--project` or initialize it. Empty legacy folders stay out of the 
 
 Boss can add **YOLO** in **Assign tags** in the issue web UI. The
 amber YOLO label marks an issue whose next worker attempt runs without a sandbox
-or approval prompts, including a resumed Codex session. Selecting the tag enables
+or approval prompts. Selecting the tag enables
 it directly; it stays enabled until Boss removes the tag. Changes affect
 the next attempt, not an agent already running. Ordinary CLI labels, agent edits,
 and batch triage cannot grant or change YOLO. Removing the tag restores the normal
