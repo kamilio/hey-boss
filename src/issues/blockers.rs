@@ -22,7 +22,7 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%' AND instr(sql,'''blockers'',')=0)",
         [], |r| r.get(0),
     )?;
-    let indexed: bool = db.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='index' AND name IN ('issue_dependency_sources','issue_active_graph')", [], |r|r.get(0))?;
+    let indexed: bool = db.query_row("SELECT count(*)=3 FROM sqlite_master WHERE type='index' AND (name IN ('issue_active_graph','issue_dependency_metadata') OR (name='issue_dependency_sources' AND instr(sql,'number,blockers')>0))", [], |r|r.get(0))?;
     let notices: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dependency_comment_resets')",
         [],
@@ -44,8 +44,12 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
             ALTER TABLE issues ADD COLUMN blockers TEXT NOT NULL DEFAULT '[]';",
         )?;
     }
-    tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_dependency_sources ON issues(project_id,number) WHERE deleted_at IS NULL AND blockers<>'[]';
+    tx.execute_batch("DROP INDEX IF EXISTS issue_dependency_sources;
+        CREATE INDEX issue_dependency_sources ON issues(project_id,number,blockers) WHERE deleted_at IS NULL AND blockers<>'[]';
         CREATE INDEX IF NOT EXISTS issue_active_graph ON issues(project_id,number,state,deleted_at) WHERE state<>'closed' AND deleted_at IS NULL;")?;
+    // Dependency expansion and status need headers at arbitrary issue numbers.
+    // The primary key lookup reads body overflow pages before reaching them.
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_dependency_metadata ON issues(project_id,number,blockers,deleted_at,title,state,manual_blocked,created_by,draft,assignee,version,sort_order);")?;
     // Existing capture triggers have a fixed column list. Replace them in
     // this transaction before normalization writes enter the sync journal.
     let triggers = tx.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'fleet_capture_issues_%'")?
@@ -90,7 +94,7 @@ impl Graph {
     }
 
     fn load_active(db: &Connection, project: &str) -> Result<Self> {
-        let numbers = db.query_collect("SELECT number FROM issues WHERE project_id=?1 AND state<>'closed' AND deleted_at IS NULL", [project], |r| -> rusqlite::Result<i64> { r.get(0) })?;
+        let numbers = db.query_collect("SELECT number FROM issues INDEXED BY issue_active_graph WHERE project_id=?1 AND state<>'closed' AND deleted_at IS NULL", [project], |r| -> rusqlite::Result<i64> { r.get(0) })?;
         Self::load_for(db, project, &numbers)
     }
 
@@ -101,14 +105,14 @@ impl Graph {
             "WITH RECURSIVE requested(number) AS (SELECT value FROM json_each(?2)),
             roots(number) AS (
                 SELECT number FROM requested
-                UNION SELECT i.number FROM issues i CROSS JOIN json_each(i.blockers) b
+                UNION SELECT i.number FROM issues i INDEXED BY issue_dependency_sources CROSS JOIN json_each(i.blockers) b
                     WHERE i.project_id=?1 AND i.deleted_at IS NULL AND i.blockers<>'[]'
                         AND b.value IN (SELECT number FROM requested)
                 UNION SELECT parent_number FROM issue_subtasks WHERE project_id=?1
                     AND child_number IN (SELECT number FROM requested)
             ), reachable(number) AS (
                 SELECT number FROM roots
-                UNION SELECT b.value FROM reachable r CROSS JOIN issues i
+                UNION SELECT b.value FROM reachable r CROSS JOIN issues i INDEXED BY issue_dependency_metadata
                     ON i.project_id=?1 AND i.number=r.number CROSS JOIN json_each(i.blockers) b
                 UNION SELECT s.child_number FROM reachable r CROSS JOIN issue_subtasks s
                     ON s.project_id=?1 AND s.parent_number=r.number
@@ -132,11 +136,14 @@ impl Graph {
         };
         let (source, filter) = if selected.is_some() {
             (
-                "json_each(?2) selected CROSS JOIN issues",
+                "json_each(?2) selected CROSS JOIN issues INDEXED BY issue_dependency_metadata",
                 "AND number=selected.value",
             )
         } else {
-            ("issues", "AND ?2 IS NULL")
+            (
+                "issues INDEXED BY issue_dependency_metadata",
+                "AND ?2 IS NULL",
+            )
         };
         let mut stmt = db.prepare(&format!("SELECT number,title,state,deleted_at,manual_blocked,blockers,created_by,draft,assignee,EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=issues.project_id AND r.issue_number=issues.number AND r.finished_at IS NULL),version,EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1) FROM {source} WHERE project_id=?1 {filter} ORDER BY sort_order,number"))?;
         for row in stmt.query_map(params![project,selected], |r| Ok((r.get::<_,i64>(0)?, json!({"number":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"deleted_at":r.get::<_,Option<i64>>(3)?,"manual_blocked":r.get::<_,bool>(4)?,"created_by":r.get::<_,String>(6)?,"draft":r.get::<_,bool>(7)?,"assignee":r.get::<_,Option<String>>(8)?,"reserved":r.get::<_,bool>(9)?,"version":r.get::<_,i64>(10)?}), r.get::<_,String>(5)?, r.get::<_,bool>(11)?)))? {
@@ -159,7 +166,7 @@ impl Graph {
         } else {
             ("issue_subtasks r", "AND ?2 IS NULL")
         };
-        let mut stmt = db.prepare(&format!("SELECT r.parent_number,r.child_number FROM {source} JOIN issues i ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 {filter} ORDER BY i.sort_order,i.number"))?;
+        let mut stmt = db.prepare(&format!("SELECT r.parent_number,r.child_number FROM {source} CROSS JOIN issues i INDEXED BY issue_dependency_metadata ON i.project_id=r.project_id AND i.number=r.child_number WHERE r.project_id=?1 {filter} ORDER BY i.sort_order,i.number"))?;
         for row in stmt.query_map(params![project, selected], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
         })? {
@@ -836,6 +843,69 @@ pub(super) fn enrich(db: &Connection, project: &str, result: &mut Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_views_do_not_read_issue_body_pages() {
+        let root = std::env::temp_dir().join(format!(
+            "hb-dependency-body-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        let path = root.join("issues.db");
+        let db = crate::issues::Store::open(&path).unwrap().into_database();
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:test','test',20);
+            INSERT INTO agents VALUES('human:test','{}',0);
+            WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<16)
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order,blockers)
+            SELECT 'named:test',x,'Task','','open','human:test',0,0,1,'[]',x,CASE WHEN x=16 THEN '[]' ELSE '['||(x+1)||']' END FROM n;").unwrap();
+        db.execute_batch("DROP INDEX issue_dependency_metadata; DROP INDEX issue_dependency_sources;
+            CREATE INDEX issue_dependency_sources ON issues(project_id,number) WHERE deleted_at IS NULL AND blockers<>'[]';").unwrap();
+        drop(db);
+        let db = crate::issues::Store::open(&path).unwrap().into_database();
+        let read_pages = || {
+            db.execute_batch("PRAGMA cache_size=-64; PRAGMA shrink_memory")
+                .unwrap();
+            let mut pages = 0;
+            let mut high = 0;
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        1
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            let graph = Graph::load_for(&db, "named:test", &[1]).unwrap();
+            assert_eq!(graph.issues.len(), 16);
+            assert_eq!(graph.links[&1], vec![2]);
+            unsafe {
+                assert_eq!(
+                    rusqlite::ffi::sqlite3_db_status(
+                        db.handle(),
+                        rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                        &mut pages,
+                        &mut high,
+                        0
+                    ),
+                    rusqlite::ffi::SQLITE_OK
+                );
+            }
+            pages
+        };
+        let small = read_pages();
+        db.execute("UPDATE issues SET body=?1", ["x".repeat(1024 * 1024)])
+            .unwrap();
+        let large = read_pages();
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            large <= small + 4,
+            "Dependency view read body pages: {small} -> {large}"
+        );
+    }
 
     #[test]
     fn scoped_dependency_graph_matches_full_history_for_cycles_and_deleted_ancestors() {
