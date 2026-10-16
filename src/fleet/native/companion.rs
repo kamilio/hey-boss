@@ -576,6 +576,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                 let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":changes,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
                 let mut heartbeat = heartbeat;
                 heartbeat["distributed_active"] = json!(distributed_active);
+                heartbeat["sync"] = super::distributed::health::cached(&ctx)?;
                 heartbeat["peer_sync"] = super::peer_sync::status(&ctx)?;
                 heartbeat["utility_error"] = utility_error;
                 // The peer can send its next ping as soon as it receives this reply.

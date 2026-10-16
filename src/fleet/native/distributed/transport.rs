@@ -66,7 +66,12 @@ fn prepared(
         return Err(replica::invalid("Sync is busy"));
     };
     crate::issues::allocations::maintain(db)?;
-    prepare(ctx, db, journal, controller)
+    let result =
+        prepare(ctx, db, journal, controller).and_then(|()| health::prepared(ctx, db, journal));
+    if let Err(error) = &result {
+        health::failed(ctx, &error.to_string());
+    }
+    result
 }
 
 // A silent client must not leave a server process and database connection alive
@@ -135,6 +140,7 @@ pub(in crate::fleet::native) fn serve(
             hey_boss_sync::session::serve(&mut journal, &mut reader, &mut writer)?;
         }
         prepared(&ctx, &db, &mut journal, false)?;
+        health::exchanged(&ctx)?;
         return Ok(());
     }
     while !ctx.stopped() {
@@ -159,6 +165,7 @@ pub(in crate::fleet::native) fn serve(
             result.presence_age.max(started.elapsed()),
         )?;
         crate::issues::allocations::record_exchange(&db, controller, started.elapsed())?;
+        health::exchanged(&ctx)?;
     }
     Ok(())
 }
@@ -273,6 +280,7 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
                     start.elapsed(),
                 )?;
                 crate::issues::allocations::record_exchange(&db, &target.host, start.elapsed())?;
+                health::exchanged(ctx)?;
                 ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"connected","at":super::super::context::now(),"exchange_ms":start.elapsed().as_millis()}))?;
                 *progress.lock().unwrap() = None;
                 // Drain actual changes immediately. Idle peers send one tiny

@@ -153,3 +153,10 @@ assert.equal(jobConversation(jobEntry,{machines:[]},100000).online,false,'Missin
 const ordinary={...jobEntry,run:{kind:'worker'}};
 assert.equal(jobConversation(ordinary,{machines:[jobMachine]},100000),ordinary,'Ordinary and Chief entries retain their lifecycle handling');
 console.log('Worker-independent job conversation liveness checks passed');
+const {syncProblem}=require('../src/issues/web/fleet.js');
+const connectedSync={state:'connected',heartbeat:now/1000,sync_observed_at:now/1000,sync:{state:'healthy',message:'Applied'}};
+assert.equal(syncProblem(connectedSync,now),null);
+assert.match(syncProblem({...connectedSync,sync:{state:'shadow',message:'Migration inactive'}},now),/Migration inactive/);
+assert.match(syncProblem({...connectedSync,sync:undefined},now),/not verified/);
+assert.match(syncProblem({...connectedSync,sync_observed_at:now/1000-31},now),/not verified/);
+assert.match(syncProblem({...connectedSync,peer_sync_error:'No SSH route'},now),/No SSH route/);

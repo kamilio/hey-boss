@@ -194,8 +194,11 @@ impl Supervisor {
             },
             &[],
         )?;
+        let local_sync = super::distributed::health::cached(&self.ctx)?;
         let state = self.state.lock().unwrap();
         let mut local = json!({"host":"local","hostname":crate::issues::identity::host(),"node":self.ctx.node,"role":"supervisor","state":"connected","heartbeat":state.local_updated,"pending":0,"build":state.build});
+        local["sync"] = local_sync;
+        local["last_sync"] = local["sync"]["last_exchange"].clone();
         local["jobs"] = state
             .machines
             .get("local")
@@ -242,6 +245,7 @@ impl Supervisor {
             if machine["role"] == "agent" {
                 machine["role"] = json!("companion");
             }
+            machine["sync"] = super::distributed::health::observed(&machine, now());
             machines.push(machine);
         }
         let mut result = json!({"ok":true,"supervisor":self.ctx.node,"controller":self.ctx.node,"epoch":state.epoch,"sequence":state.sequence,"desired_build":state.desired_build});
@@ -1107,6 +1111,9 @@ impl Supervisor {
         )?;
         let mut projects = super::projects::desired(&self.ctx, host)?;
         let mut revision = super::projects::revision(&self.ctx.node, &workers, &projects);
+        // Publishing connected permits utility requests immediately. Their
+        // replies must already bypass a blocked synchronization handler.
+        peer.set(node.to_owned()).unwrap();
         self.update(host,json!({"utils_v1":hello["capabilities"]["utils_v1"],"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
         self.event(host, "connected", "Companion connected");
         let github = if hello["capabilities"]["github_reads_v1"] == true {
@@ -1120,7 +1127,6 @@ impl Supervisor {
             &mut *input.lock().unwrap(),
             json!({"kind":"configure","worker_history_v1":incremental_history,"project_retries":self.machine(host)["project_retries"],"declarative":configuration::is_yaml(&self.ctx.desired),"capabilities":authority::capabilities(),"build":Context::running_build(),"controller":self.ctx.node,"revision":revision,"workers":workers,"projects":projects,"configuration_receipts":control::configuration_receipts(&hello["local_config"])}),
         )?;
-        peer.set(node.to_owned()).unwrap();
         let mut peer_sync_revision = Value::Null;
         let mut last_ping = Instant::now() - Duration::from_secs(5);
         let mut sent_jobs = std::collections::BTreeSet::new();
@@ -1295,7 +1301,7 @@ impl Supervisor {
                             hello["capabilities"]["pull_gzip_chunks"] == true,
                         )?;
                     }
-                    self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":now(),"peer_sync":message["peer_sync"]}))?;
+                    self.update(host,json!({"workers":message["workers"],"chief_ownership":message["chief_ownership"],"pending":message["pending"],"conflicts":message["conflicts"],"applied_revision":message["revision"],"last_sync":message["sync"]["last_exchange"],"sync":message["sync"],"sync_observed_at":now(),"peer_sync":message["peer_sync"]}))?;
                     self.reconcile_chief_ownership()?;
                     let active = message["workers"]
                         .as_array()

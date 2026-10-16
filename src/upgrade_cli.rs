@@ -471,6 +471,37 @@ fn target_inspect(host: &str, binary: &Path) -> io::Result<Installation> {
         }
     }
 }
+fn target_sync(host: &str, binary: &Path) -> io::Result<serde_json::Value> {
+    let bytes = if host == "local" {
+        output(Command::new(binary).args(["fleet", "sync-status"]))?
+    } else {
+        output(ssh(host)?.arg("\"$HOME/.local/bin/hey-boss\" fleet sync-status"))?
+    };
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
+fn sync_error(value: &serde_json::Value, distributed_required: bool) -> Option<String> {
+    if !distributed_required && value["mode"] == "legacy" {
+        return None;
+    }
+    if value["active"] != 1 || value["mode"] != "distributed" {
+        return Some("Distributed sync migration is not active; installation alone is not a completed rollout".into());
+    }
+    if value["pending_projection"].as_u64() != Some(0)
+        || value["conflicts"].as_u64() != Some(0)
+        || value["pending_local"].as_u64() != Some(0)
+        || value["health"]["state"] != "healthy"
+    {
+        return Some(format!(
+            "Data sync is not verified: {}",
+            value["health"]["message"]
+                .as_str()
+                .unwrap_or("missing health evidence, unapplied changes, or rejected changes")
+        ));
+    }
+    None
+}
+
 fn bootstrap_script() -> String {
     // Only the staged guard runs here. The installer builds release artifacts
     // after taking its lock and validating provenance and generation ordering.
@@ -652,6 +683,7 @@ struct Report {
     before: Option<Installation>,
     verified: Option<Installation>,
     final_installation: Option<Installation>,
+    sync: Option<serde_json::Value>,
     error: Option<String>,
 }
 fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
@@ -671,6 +703,10 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             }
         }
     }
+    let distributed_required = target_sync("local", binary)?
+        .get("active")
+        .and_then(serde_json::Value::as_i64)
+        == Some(1);
     // Observe all destinations before any builds: a queued dev snapshot must not
     // become authorized by observing an intervening install after a long compile.
     let observations: Vec<_> = hosts.iter().map(|h| target_inspect(h, binary)).collect();
@@ -684,6 +720,7 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             before: None,
             verified: None,
             final_installation: None,
+            sync: None,
             error: None,
         };
         let result = (|| -> io::Result<()> {
@@ -786,6 +823,37 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             }
         }
     }
+    // Build provenance cannot prove that received data is being applied. Verify
+    // every destination after the fleet is installed, including unchanged builds.
+    for entry in &mut reports {
+        if entry.error.is_some() {
+            continue;
+        }
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(if options.check { 0 } else { 60 });
+        loop {
+            let failure = match target_sync(&entry.host, binary) {
+                Ok(value) => {
+                    let problem = sync_error(&value, distributed_required);
+                    entry.sync = Some(value);
+                    problem
+                }
+                Err(error) => Some(format!("Sync verification failed: {error}")),
+            };
+            if failure.is_none() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                entry.status = "unhealthy".into();
+                entry.error = failure;
+                if !options.json {
+                    println!("{}: {}", entry.host, entry.error.as_deref().unwrap());
+                }
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
     if options.source.is_some() && !options.check && reports[0].error.is_none() {
         atomic_write(
             &state()?.join("upgrade-source"),
@@ -853,6 +921,21 @@ pub fn run(options: &Options) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matching_build_cannot_pass_rollout_with_shadow_or_stale_data() {
+        use serde_json::json;
+        assert!(sync_error(&json!({"mode":"shadow","active":0}), true).is_some());
+        assert!(sync_error(&json!({"mode":"legacy"}), true).is_some());
+        assert!(sync_error(&json!({"mode":"legacy"}), false).is_none());
+        let mut value = json!({"mode":"distributed","active":1,"pending_projection":0,"conflicts":0,"pending_local":0,"health":{"state":"healthy"}});
+        assert!(sync_error(&value, true).is_none());
+        value["health"]["state"] = json!("unknown");
+        assert!(sync_error(&value, true).is_some());
+        value["health"]["state"] = json!("healthy");
+        value["pending_projection"] = json!(1);
+        assert!(sync_error(&value, true).is_some());
+    }
+
     use super::*;
 
     fn installation(source: Source, generation: u64) -> Installation {

@@ -159,6 +159,7 @@ pub(in crate::fleet::native) fn status(ctx: &Context) -> Result<Value> {
     } else {
         "shadow"
     });
+    status["health"] = health::cached(ctx)?;
     status["peer_sync"] = super::super::peer_sync::status(ctx)?;
     status["members"] = json!(replica::rows(
         &db,

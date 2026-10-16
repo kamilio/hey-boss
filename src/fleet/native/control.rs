@@ -572,6 +572,7 @@ fn apply_signal_locked(
         } else {
             "running"
         },
+        role == "controller",
     );
     ctx.atomic_json(&config_path, &saved)?;
     if matches!(action, "stop" | "restart") && !already_started {
@@ -640,6 +641,7 @@ fn apply_signal_locked(
         } else {
             action
         },
+        role == "controller",
     );
     ctx.atomic_json(&config_path, &saved)?;
     let result =
@@ -651,11 +653,19 @@ fn apply_signal_locked(
     )?;
     Ok(result)
 }
-fn set_intent(saved: &mut Value, id: &Value, intent: &str) {
+fn set_intent(saved: &mut Value, id: &Value, intent: &str, local_change: bool) {
     for worker in saved["workers"].as_array_mut().into_iter().flatten() {
         if &worker["id"] == id {
             worker["intent"] = json!(intent);
-            worker["local_revision"] = json!(crate::issues::worker::now());
+            if local_change {
+                worker["local_revision"] = json!(crate::issues::worker::now());
+            } else {
+                // A supervisor signal already changed the authoritative config.
+                // Echoing it as a new offline edit creates false conflicts and
+                // can send a restart's temporary stop back to the supervisor.
+                worker.as_object_mut().unwrap().remove("local_revision");
+                worker.as_object_mut().unwrap().remove("base_revision");
+            }
         }
     }
 }
@@ -853,9 +863,19 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_signals_do_not_echo_as_offline_configuration_edits() {
+        let mut saved = json!({"workers":[{"id":"worker","intent":"running","local_revision":1,"base_revision":"old"}]});
+        set_intent(&mut saved, &json!("worker"), "stop", false);
+        assert_eq!(saved["workers"][0]["intent"], "stop");
+        assert!(saved["workers"][0].get("local_revision").is_none());
+        assert!(saved["workers"][0].get("base_revision").is_none());
+        set_intent(&mut saved, &json!("worker"), "running", false);
+        assert!(saved["workers"][0].get("local_revision").is_none());
+    }
+    #[test]
     fn restart_intent_survives_supervisor_reconciliation() {
         let mut main = json!({"workers":[{"id":"worker","intent":"stop"}]});
-        set_intent(&mut main, &json!("worker"), "running");
+        set_intent(&mut main, &json!("worker"), "running", true);
         let mut desired =
             json!({"machines":{"local":{"workers":[{"id":"worker","intent":"stop"}]}}});
         // This is the supervisor's durable import boundary: without a local
