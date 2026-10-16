@@ -2021,6 +2021,87 @@ fn outline_cycles_and_alias_conflicts_converge_without_discarding_nodes() {
 }
 
 #[test]
+fn independent_task_creation_does_not_reproject_the_project_history() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    let mut template = replica::rows(&db, "SELECT * FROM issues WHERE number=1", &[])
+        .unwrap()
+        .remove(0);
+    let columns = capture::columns(&db, "issues").unwrap();
+    template
+        .as_object_mut()
+        .unwrap()
+        .retain(|name, _| columns.contains(name));
+    let tx = db.unchecked_transaction().unwrap();
+    let mut fact = Revision {
+        protocol: PROTOCOL,
+        origin: "a".into(),
+        clock: 1,
+        table: "issues".into(),
+        before: None,
+        after: Some(template),
+        resource: None,
+        archive: None,
+    };
+    for number in 1..=256 {
+        fact.after.as_mut().unwrap()["number"] = json!(number);
+        projection::reduce(&tx, &fact).unwrap();
+    }
+    tx.execute("DELETE FROM distributed_dirty", []).unwrap();
+    fact.after.as_mut().unwrap()["number"] = json!(257);
+    projection::reduce(&tx, &fact).unwrap();
+    let dirty = || {
+        tx.query_row(
+            "SELECT count(*) FROM distributed_dirty WHERE table_name='issues'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        dirty(),
+        1,
+        "Creating an independent task must not rewrite the project history"
+    );
+
+    // A dependency edit can affect cycle resolution, but independent tasks
+    // cannot acquire or lose edges. Keep both sides of a cycle eligible.
+    for (number, blockers) in [(1, "[2]"), (2, "[1]")] {
+        tx.execute("DELETE FROM distributed_dirty", []).unwrap();
+        fact.clock += 1;
+        fact.after.as_mut().unwrap()["number"] = json!(number);
+        fact.after.as_mut().unwrap()["blockers"] = json!("[]");
+        fact.before = fact.after.clone();
+        fact.after.as_mut().unwrap()["blockers"] = json!(blockers);
+        projection::reduce(&tx, &fact).unwrap();
+        assert_eq!(dirty(), number);
+    }
+    let graph = graph::blockers(&tx, "p").unwrap();
+    assert_eq!(graph[&1], vec![2]);
+    assert_eq!(graph[&2], Vec::<i64>::new());
+    tx.execute("DELETE FROM distributed_dirty", []).unwrap();
+    fact.clock += 1;
+    fact.before = Some(
+        projection::row(&tx, "issues", &json!({"project_id":"p", "number":1}))
+            .unwrap()
+            .unwrap(),
+    );
+    fact.after = fact.before.clone();
+    fact.after.as_mut().unwrap()["blockers"] = json!("[]");
+    projection::reduce(&tx, &fact).unwrap();
+    assert_eq!(
+        dirty(),
+        2,
+        "Removing an edge must reconsider the previously rejected cycle edge"
+    );
+    assert_eq!(graph::blockers(&tx, "p").unwrap()[&2], vec![1]);
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn dependency_projection_does_not_load_large_requirement_bodies() {
     let f = Fixture::new();
     let db = f.db();

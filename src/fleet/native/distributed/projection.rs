@@ -208,12 +208,25 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
             db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='issue_subtasks' AND field='@alive' AND json_extract(entity,'$.project_id')=?1", [row["project_id"].as_str()])?;
         }
     }
-    if fact.table == "issues"
-        && fact.before.as_ref().map(|r| &r["blockers"])
-            != fact.after.as_ref().map(|r| &r["blockers"])
+    if changed
+        && fact.table == "issues"
+        && fact
+            .before
+            .as_ref()
+            .and_then(|r| r["blockers"].as_str())
+            .unwrap_or("[]")
+            != fact
+                .after
+                .as_ref()
+                .and_then(|r| r["blockers"].as_str())
+                .unwrap_or("[]")
     {
         let row = fact.after.as_ref().or(fact.before.as_ref()).unwrap();
-        db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='issues' AND field='@alive' AND json_extract(entity,'$.project_id')=?1",[row["project_id"].as_str()])?;
+        // Cycle resolution can change other proposed edges. Independent tasks
+        // have no edges to reconsider; creating one must not replay the entire
+        // project, including its archived history. The changed row is already
+        // dirty above, even when it just lost its last edge.
+        db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='issues' AND field='@lifecycle' AND json_extract(entity,'$.project_id')=?1 AND json_array_length(json_extract(value,'$.blockers'))>0",[row["project_id"].as_str()])?;
     }
     if fact.table == "worker_runs"
         && let Some(row) = &fact.after
