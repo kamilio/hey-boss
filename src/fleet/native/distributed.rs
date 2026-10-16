@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS distributed_attempts(
  id TEXT PRIMARY KEY,machine TEXT NOT NULL,project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,
  state TEXT NOT NULL,started_at INTEGER NOT NULL,finished_at INTEGER,summary TEXT NOT NULL,payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS distributed_issue_attempts ON distributed_attempts(project_id,issue_number,started_at,id);
+CREATE INDEX IF NOT EXISTS distributed_working_attempts ON distributed_attempts(project_id,issue_number,started_at,id) WHERE state='running' AND finished_at IS NULL;
 CREATE TABLE IF NOT EXISTS distributed_job_attempts(sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,project_id TEXT NOT NULL,job_id TEXT NOT NULL,created_at INTEGER NOT NULL,scheduled_at INTEGER NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS distributed_job_history ON distributed_job_attempts(job_id,sequence DESC);
 CREATE INDEX IF NOT EXISTS distributed_job_calendar ON distributed_job_attempts(project_id,scheduled_at,id);

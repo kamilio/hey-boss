@@ -67,3 +67,15 @@ test('scheduled service ownership never invents an agent session', () => {
   const running=context.render({...issue,assignment:{kind:'agent',actor:'codex:exact-session'}});
   assert.match(running,/agent=codex%3Aexact-session/);
 });
+
+test('remote task work appears without inventing a local ownership filter', () => {
+  const issue={number:7,state:'open',assignee:null,assignment:{kind:'unassigned'},remote_attempts:[{id:'run',actor:'codex:remote',machine:'remote',host:'Devbox <2>',started_at:12}]};
+  const html=context.render(issue);
+  assert.match(html,/data-assignment-kind="agent"/);
+  assert.match(html,/Last reported working on Devbox &lt;2&gt;/);
+  assert.match(html,/agent=codex%3Aremote/);
+  assert.doesNotMatch(html,/Filter by|<2>/);
+  assert.equal(context.render({...issue,state:'closed'}),'');
+  const local=context.render({...issue,assignee:'codex:local',assignment:{kind:'agent',actor:'codex:local'}});
+  assert.match(local,/agent=codex%3Alocal/);
+});
