@@ -5,6 +5,11 @@ use serde_json::json;
 
 pub(in crate::fleet::native) fn request(ctx: &Context, request: &Value) -> Result<Value> {
     match request["kind"].as_str() {
+        // Utility definitions and ephemeral runs still belong to the supervisor.
+        // Distributed issue ownership must not redirect them to peer-local state.
+        Some("configuration" | "utils_resolve" | "utils_start" | "utils_poll") => {
+            Ok(authority::call(&ctx.state, &ctx.path, request.clone())?)
+        }
         Some("capabilities") => Ok(authority::capability_report(
             "local",
             authority::capabilities(),
