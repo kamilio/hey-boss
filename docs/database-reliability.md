@@ -252,6 +252,11 @@ cursors or source facts; triggers keep it current with accepted field writes.
 The backfill reads at most 128 source rows per database request, including
 unrelated document fields. This bounds individual requests on cold stores while
 retaining one atomic transaction: interrupted installs expose no partial graph.
+Queued installers recheck graph existence after acquiring the writer, so concurrent
+startup cannot repeat a completed backfill. Service regressions verify rollback
+after multiple pages and preservation of a peer's accepted write during recovery.
+The transaction still holds the writer across pages; bounded requests alone do
+not guarantee a bounded total writer wait on an overloaded machine.
 
 The CLI now sends issue database operations to a private Unix socket hosted by an
 existing Rust service. The supervisor, companion, web service and queue broker

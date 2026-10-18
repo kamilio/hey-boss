@@ -6,15 +6,25 @@ use std::collections::{BTreeMap, BTreeSet};
 // Keep graph reads separate from lifecycle records, which retain full task bodies.
 const BLOCKERS: &str = "SELECT entity,blockers FROM distributed_issue_graph WHERE project_id=?1 AND alive=1 AND blockers IS NOT NULL";
 
-pub(super) fn install(db: &Connection) -> Result<()> {
-    if db.query_row(
+fn installed(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph')",
         [],
         |r| r.get::<_, bool>(0),
-    )? {
+    )
+}
+
+pub(super) fn install(db: &Connection) -> Result<()> {
+    if installed(db)? {
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
+    // Another startup may have completed the migration while we queued for
+    // the service writer. Never repeat its potentially cold full backfill.
+    if installed(&tx)? {
+        tx.commit()?;
+        return Ok(());
+    }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS distributed_issue_graph(entity TEXT PRIMARY KEY,project_id TEXT,blockers TEXT,alive INTEGER) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS distributed_issue_graph_project ON distributed_issue_graph(project_id,entity,blockers) WHERE alive=1 AND blockers IS NOT NULL;")?;
     for operation in ["INSERT", "UPDATE"] {
@@ -154,6 +164,81 @@ pub(super) fn subtasks(db: &Connection, project: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_graph_installers_do_not_repeat_the_backfill() {
+        use std::{sync::mpsc, time::Duration};
+        let root = crate::admin::Temporary::new().unwrap();
+        let path = root.0.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let db = Connection::connect(&path).unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        db.execute_batch("INSERT INTO distributed_fields VALUES('issues','{\"project_id\":\"p\",\"number\":1}','@alive',1,'a','true')").unwrap();
+        let (entered, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (late, transport) =
+            crate::database::tests::pause_before_batch(&path, "BEGIN DEFERRED", entered, resume);
+        let installer = std::thread::spawn(move || install(&late));
+        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        install(&db).unwrap();
+        // Any repeated backfill writes to the already published graph fail.
+        db.execute_batch("CREATE TRIGGER graph_already_published BEFORE INSERT ON distributed_issue_graph BEGIN SELECT RAISE(ABORT,'Repeated graph backfill'); END").unwrap();
+        release.send(()).unwrap();
+        let result = installer.join().unwrap();
+        transport.join().unwrap();
+        drop(db);
+        owner.stop();
+        result.expect("A queued installer must recheck after acquiring the writer");
+    }
+
+    #[test]
+    fn failed_graph_backfill_releases_service_writer_and_preserves_source() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let path = root.0.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let db = Connection::connect(&path).unwrap();
+        let peer = Connection::connect(&path).unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2400),
+            fields(field,value) AS (VALUES('@alive','true'),('@lifecycle','{\"blockers\":\"[]\"}'),('@requirements',json_quote(printf('%.*c',16384,'x'))))
+            INSERT INTO distributed_fields SELECT 'issues',json_object('project_id','p','number',x),field,1,'a',value FROM n CROSS JOIN fields;
+            INSERT INTO distributed_fields VALUES('issues','{\"project_id\":\"z\",\"number\":1}','@lifecycle',1,'a','{\"blockers\":\"[]\"}');").unwrap();
+        let pid = db.owner_pid().unwrap();
+        let started = std::time::Instant::now();
+        let (interrupted, transport) = crate::database::tests::lose_commit_response(&path, false);
+        assert!(install(&interrupted).is_err());
+        drop(interrupted);
+        transport.join().unwrap();
+        // The same peer must acquire the released writer and retain its accepted
+        // source edit through a later migration on the original connection.
+        peer.execute("UPDATE distributed_fields SET value='{\"blockers\":\"[42]\"}' WHERE entity='{\"project_id\":\"z\",\"number\":1}'", []).unwrap();
+        assert!(!installed(&peer).unwrap());
+        install(&db).unwrap();
+        eprintln!(
+            "2,400-task service backfill, rollback and recovery: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(db.owner_pid().unwrap(), pid);
+        assert_eq!(
+            peer.query_row(
+                "SELECT blockers FROM distributed_issue_graph WHERE project_id='z'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "[42]"
+        );
+        assert_eq!(
+            peer.query_row("SELECT count(*) FROM distributed_fields", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            7201
+        );
+        assert_eq!(blockers(&peer, "p").unwrap().len(), 2400);
+        drop(peer);
+        drop(db);
+        owner.stop();
+    }
 
     #[test]
     fn graph_backfill_pages_share_the_existing_service_transaction() {
