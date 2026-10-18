@@ -6,6 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 // Keep graph reads separate from lifecycle records, which retain full task bodies.
 const BLOCKERS: &str = "SELECT entity,blockers FROM distributed_issue_graph WHERE project_id=?1 AND alive=1 AND blockers IS NOT NULL";
 
+fn ensure_dependents_index(db: &Connection) -> Result<()> {
+    db.execute_batch("CREATE INDEX IF NOT EXISTS distributed_issue_graph_dependents ON distributed_issue_graph(project_id,entity) WHERE json_array_length(blockers)>0")?;
+    Ok(())
+}
+
 fn installed(db: &Connection) -> rusqlite::Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph')",
@@ -15,18 +20,26 @@ fn installed(db: &Connection) -> rusqlite::Result<bool> {
 }
 
 pub(super) fn install(db: &Connection) -> Result<()> {
-    if installed(db)? {
+    // The index also proves the graph exists. Keep the common path to one
+    // read-only request, without acquiring the writer on every store access.
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph_dependents')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
     // Another startup may have completed the migration while we queued for
     // the service writer. Never repeat its potentially cold full backfill.
     if installed(&tx)? {
+        ensure_dependents_index(&tx)?;
         tx.commit()?;
         return Ok(());
     }
     tx.execute_batch("CREATE TABLE IF NOT EXISTS distributed_issue_graph(entity TEXT PRIMARY KEY,project_id TEXT,blockers TEXT,alive INTEGER) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS distributed_issue_graph_project ON distributed_issue_graph(project_id,entity,blockers) WHERE alive=1 AND blockers IS NOT NULL;")?;
+    ensure_dependents_index(&tx)?;
     for operation in ["INSERT", "UPDATE"] {
         tx.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS distributed_issue_graph_{operation} AFTER {operation} ON distributed_fields
             WHEN NEW.table_name='issues' AND NEW.field IN ('@alive','@lifecycle') BEGIN
@@ -78,6 +91,13 @@ fn reaches(edges: &BTreeMap<String, Vec<String>>, from: &str, target: &str) -> b
         }
     }
     false
+}
+
+pub(super) fn dirty_dependents(db: &Connection, project: &str) -> Result<()> {
+    // Retain tombstones and partially received tasks, exactly as the lifecycle
+    // scan did. The edge index excludes documents and unrelated projects.
+    db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT 'issues',entity FROM distributed_issue_graph WHERE project_id=?1 AND json_array_length(blockers)>0", [project])?;
+    Ok(())
 }
 
 fn rows(db: &Connection, table: &str, project: &str) -> Result<Vec<(Value, Value)>> {
@@ -164,6 +184,90 @@ pub(super) fn subtasks(db: &Connection, project: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_graph_gains_dependents_index_without_repeating_backfill() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE fleet_row_ids(origin TEXT,table_name TEXT,local_id TEXT,origin_id TEXT)",
+        )
+        .unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        install(&db).unwrap();
+        db.execute_batch("INSERT INTO distributed_fields VALUES('issues','{\"project_id\":\"p\",\"number\":1}','@lifecycle',1,'a','{\"blockers\":\"[42]\"}');
+            DROP INDEX distributed_issue_graph_dependents;
+            CREATE TRIGGER graph_already_published BEFORE INSERT ON distributed_issue_graph BEGIN SELECT RAISE(ABORT,'Repeated graph backfill'); END;").unwrap();
+        install(&db).unwrap();
+        install(&db).unwrap();
+        dirty_dependents(&db, "p").unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph_dependents')", [], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn dirty_dependents_keep_tombstones_without_reading_lifecycle_documents() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let db = Connection::open(root.0.join("graph.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE fleet_row_ids(origin TEXT,table_name TEXT,local_id TEXT,origin_id TEXT)",
+        )
+        .unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        install(&db).unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2400)
+            INSERT INTO distributed_fields SELECT 'issues',json_object('project_id','p','number',x),'@lifecycle',1,'a',json_object('blockers',CASE WHEN x<=3 THEN '[42]' ELSE '[]' END,'body',printf('%.*c',16384,'x')) FROM n;
+            INSERT INTO distributed_fields VALUES
+            ('issues','{\"project_id\":\"p\",\"number\":1}','@alive',1,'a','true'),
+            ('issues','{\"project_id\":\"p\",\"number\":2}','@alive',1,'a','false'),
+            ('issues','{\"project_id\":\"other\",\"number\":1}','@lifecycle',1,'a','{\"blockers\":\"[42]\"}');
+            PRAGMA cache_size=-64; PRAGMA shrink_memory;").unwrap();
+        let (mut pages, mut high) = (0, 0);
+        unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                db.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut pages,
+                &mut high,
+                1,
+            );
+        }
+        dirty_dependents(&db, "p").unwrap();
+        unsafe {
+            rusqlite::ffi::sqlite3_db_status(
+                db.handle(),
+                rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS,
+                &mut pages,
+                &mut high,
+                0,
+            );
+        }
+        let rows = replica::rows(&db, "SELECT json_extract(entity,'$.number') AS number FROM distributed_dirty WHERE table_name='issues' ORDER BY number", &[]).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                json!({"number":1}),
+                json!({"number":2}),
+                json!({"number":3})
+            ]
+        );
+        dirty_dependents(&db, "p").unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        eprintln!("Dependency invalidation cold page reads: {pages}");
+        assert!(
+            pages < 100,
+            "Dependency invalidation reread lifecycle documents: {pages}"
+        );
+    }
 
     #[test]
     fn concurrent_graph_installers_do_not_repeat_the_backfill() {
