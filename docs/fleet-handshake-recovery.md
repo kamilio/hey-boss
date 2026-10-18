@@ -62,6 +62,15 @@ application thread, and local reservation preservation after lease expiry. They
 reproduce the failure mechanisms without claiming to identify the historical
 contending writer.
 
+Database service logs identify a writer wait after five seconds and a completed
+SQL operation taking at least two seconds. Each record includes a bounded SQL
+shape with literals, quoted identifiers, comments and bound values omitted.
+Writer waits include the holding session, lease age and whether its last operation
+is executing or awaiting the client. Transport failures distinguish sending a
+request, waiting for its reply and receiving result rows. On macOS a reply timeout
+can report `Resource temporarily unavailable`; this does not prove a failed write.
+These diagnostics do not change deadlines, replay writes or release reservations.
+
 Authority commands allow up to 15 seconds for a missing/refused local relay or
 an unfinished supervisor handshake to recover. The same deadline covers the
 response, including partial frames; cancellation stops waiting. An explicit

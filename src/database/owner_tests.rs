@@ -6,6 +6,7 @@ fn writer(db: rusqlite::Connection) -> Writer {
         waiters: Mutex::new(VecDeque::new()),
         ready: Condvar::new(),
         next: AtomicUsize::new(0),
+        activity: Mutex::new(None),
     }
 }
 
@@ -21,7 +22,13 @@ fn writer_release_cannot_notify_between_availability_check_and_wait() {
         let stop_ref = &stop;
         let owner = scope.spawn(move || {
             let (stream, _peer) = UnixStream::pair().unwrap();
-            let lease = acquire(writer_ref, &stream, stop_ref).unwrap();
+            let lease = acquire(
+                writer_ref,
+                &stream,
+                stop_ref,
+                &Operation::new(&Command::Hello),
+            )
+            .unwrap();
             held_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             drop(lease);
@@ -62,7 +69,7 @@ fn writer_handoff_keeps_fifo_order_after_a_queued_client_disconnects() {
     let writer = writer(rusqlite::Connection::open_in_memory().unwrap());
     let stop = AtomicBool::new(false);
     let (stream, _peer) = UnixStream::pair().unwrap();
-    let lease = acquire(&writer, &stream, &stop).unwrap();
+    let lease = acquire(&writer, &stream, &stop, &Operation::new(&Command::Hello)).unwrap();
     std::thread::scope(|scope| {
         let (sent, received) = std::sync::mpsc::channel();
         let mut peers = Vec::new();
@@ -73,7 +80,7 @@ fn writer_handoff_keeps_fifo_order_after_a_queued_client_disconnects() {
             let writer = &writer;
             let stop = &stop;
             scope.spawn(move || {
-                let lease = acquire(writer, &stream, stop);
+                let lease = acquire(writer, &stream, stop, &Operation::new(&Command::Hello));
                 sent.send((index, lease.is_ok())).unwrap();
                 drop(lease);
             });
