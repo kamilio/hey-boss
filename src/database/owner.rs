@@ -1,6 +1,6 @@
 use super::{
     Connection,
-    diagnostics::{Activity, Operation},
+    diagnostics::{Activity, Log, Operation},
     error, local,
     wire::{self, Command, Failure, Reply},
 };
@@ -284,6 +284,7 @@ fn serve(
         ready: Condvar::new(),
         next: AtomicUsize::new(0),
         activity: Mutex::new(None),
+        diagnostics: Log::new(directory().join(format!("{}.diagnostics.jsonl", identity(&path)))),
     });
     let clients = Arc::new(AtomicUsize::new(0));
     // Maintenance uses an ordinary service session. Cold compression and disk
@@ -370,6 +371,7 @@ struct Writer {
     ready: Condvar,
     next: AtomicUsize,
     activity: Mutex<Option<Activity>>,
+    diagnostics: Log,
 }
 struct Lease<'a>(Option<MutexGuard<'a, rusqlite::Connection>>, &'a Writer);
 impl std::ops::Deref for Lease<'_> {
@@ -423,7 +425,7 @@ fn acquire<'a>(
             let evidence = serde_json::json!({"event":"database_writer_wait","wait_ms":started.elapsed().as_millis(),
                 "operation":operation.name,"sql":operation.sql,"queued":waiters.len(),"holder":holder});
             drop(waiters);
-            eprintln!("{evidence}");
+            writer.diagnostics.record(evidence);
             waiters = writer.waiters.lock().unwrap();
         }
         let cancelled = if stop.load(Ordering::Acquire) {
@@ -662,8 +664,7 @@ fn session(
             reply.error = Some(Failure::capture(e));
         }
         if started.elapsed() >= Duration::from_secs(2) {
-            eprintln!(
-                "{}",
+            writer.diagnostics.record(
                 serde_json::json!({"event":"database_slow_operation",
                 "operation":operation.name,"sql":operation.sql,"elapsed_ms":started.elapsed().as_millis(),
                 "writer":lease.is_some(),"transaction":reply.transaction,"failed":reply.error.is_some()})

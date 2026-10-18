@@ -7,6 +7,7 @@ fn writer(db: rusqlite::Connection) -> Writer {
         ready: Condvar::new(),
         next: AtomicUsize::new(0),
         activity: Mutex::new(None),
+        diagnostics: Log::default(),
     }
 }
 
