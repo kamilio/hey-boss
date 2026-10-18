@@ -120,6 +120,62 @@ struct Fixture {
     service: Option<Child>,
     replacement: Option<u32>,
 }
+
+#[test]
+fn queued_transaction_gets_its_idle_budget_after_the_writer_replies() {
+    let root = std::env::temp_dir().join(format!("hb-writer-idle-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    drop(hey_boss::issues::Store::open(&fixture.root.join("issues.db")).unwrap());
+    {
+        let db = rusqlite::Connection::open(fixture.root.join("issues.db")).unwrap();
+        db.execute_batch("CREATE TABLE contention(value INTEGER)")
+            .unwrap();
+    }
+    let mut owner = hey_boss::database::Owner::start(&fixture.root.join("issues.db"))
+        .unwrap()
+        .unwrap();
+    let holder = fixture.connection();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let waiting = fixture.connection();
+    let (started, received) = std::sync::mpsc::channel();
+    let transaction = std::thread::spawn(move || -> rusqlite::Result<()> {
+        started.send(()).unwrap();
+        waiting.execute_batch("BEGIN IMMEDIATE")?;
+        waiting.execute("INSERT INTO contention VALUES(42)", [])?;
+        waiting.execute_batch("COMMIT")
+    });
+    received.recv().unwrap();
+    // Cross the 30-second idle limit while retaining an actively used writer.
+    // The queued BEGIN is still within the separate 45-second acquisition limit.
+    let deadline = Instant::now() + Duration::from_secs(32);
+    while Instant::now() < deadline {
+        holder
+            .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    holder.execute_batch("COMMIT").unwrap();
+    let result = transaction.join().unwrap();
+    eprintln!("Queued transaction result: {result:?}");
+    let values = holder
+        .query_collect("SELECT value FROM contention", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap();
+    drop(holder);
+    owner.stop();
+    result.expect("The owner expired a transaction while it was waiting for the writer");
+    assert_eq!(
+        values,
+        vec![42],
+        "The queued transaction must commit exactly once"
+    );
+}
 impl Fixture {
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
