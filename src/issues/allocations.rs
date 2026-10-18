@@ -162,6 +162,21 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
     if !enabled(db)? {
         return Ok(());
     }
+    // An expired local pulse is not evidence that its process stopped. A peer
+    // update or projection may acquire the writer before the renewal loop does.
+    // Refresh those actual processes in this same transaction before choosing
+    // winners. Remote evidence still expires normally.
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM worker_allocations a
+        JOIN worker_allocation_observations o ON o.id=a.id
+        JOIN worker_runs r ON r.id=a.id
+        WHERE a.machine=(SELECT node FROM fleet_meta WHERE id=1) AND a.released=0
+        AND r.finished_at IS NULL AND (o.boot<>?1 OR o.deadline_tick<=?2))",
+        params![clock.boot, clock.tick],
+        |r| r.get::<_, bool>(0),
+    )? {
+        renew_local(db, clock)?;
+    }
     db.execute("INSERT INTO worker_allocation_observations(id,boot,deadline_tick,ready_tick)
         SELECT id,?1,?2+lease_ms,?2+settle_ms FROM worker_allocations WHERE released=0
         ON CONFLICT(id) DO UPDATE SET boot=excluded.boot,
@@ -212,13 +227,22 @@ pub(crate) fn maintain(db: &Connection) -> Result<()> {
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
+    // The writer queue may outlast a lease. Date process evidence when the
+    // transaction can actually collect it, not when it joined that queue.
+    let clock = Clock::read()?;
+    renew_local(&tx, &clock)?;
+    reconcile(&tx, &clock)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn renew_local(tx: &Connection, clock: &Clock) -> Result<()> {
     // Several transports can arrive together. Recheck under the write transaction.
     if !tx.query_row(
         "SELECT boot<>?1 OR renewed_tick+?3<=?2 FROM worker_allocation_clock WHERE id=1",
         params![clock.boot, clock.tick, ms(SYNC_INTERVAL)],
         |r| r.get::<_, bool>(0),
     )? {
-        tx.commit()?;
         return Ok(());
     }
     let exchange: i64 = tx.query_row(
@@ -245,8 +269,6 @@ pub(crate) fn maintain(db: &Connection) -> Result<()> {
     }
     tx.execute("INSERT INTO worker_allocation_presence SELECT node,presence_sequence,?1,?2,?3,lease_ms FROM fleet_meta CROSS JOIN worker_allocation_clock WHERE fleet_meta.id=1 AND worker_allocation_clock.id=1
         ON CONFLICT(machine) DO UPDATE SET sequence=excluded.sequence,attempts=excluded.attempts,boot=excluded.boot,seen_tick=excluded.seen_tick,remaining_ms=excluded.remaining_ms",params![serde_json::to_string(&active)?,clock.boot,clock.tick])?;
-    reconcile(&tx, &clock)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -272,6 +294,9 @@ pub(crate) fn receive_presence(
 ) -> Result<()> {
     let clock = Clock::read()?;
     let tx = db.unchecked_transaction()?;
+    // Age remote evidence through the writer wait, but refresh local evidence
+    // from the actual processes before this transaction can expire their work.
+    let current = Clock::read()?;
     for pulse in pulses {
         if pulse.machine.is_empty() || pulse.sequence < 0 || pulse.remaining_ms < 0 {
             return Err(Error::invalid("Invalid allocation presence"));
@@ -282,7 +307,7 @@ pub(crate) fn receive_presence(
             ON CONFLICT(machine) DO UPDATE SET sequence=excluded.sequence,attempts=excluded.attempts,boot=excluded.boot,seen_tick=excluded.seen_tick,remaining_ms=excluded.remaining_ms
             WHERE excluded.sequence>worker_allocation_presence.sequence",params![pulse.machine,pulse.sequence,serde_json::to_string(&pulse.attempts)?,clock.boot,clock.tick,pulse.remaining_ms.saturating_sub(ms(elapsed)).max(0)])?;
     }
-    reconcile(&tx, &clock)?;
+    reconcile(&tx, &current)?;
     tx.commit()?;
     Ok(())
 }
@@ -315,8 +340,8 @@ pub(crate) fn launch(db: &Connection, id: &str) -> Result<Option<Duration>> {
     if !enabled(db)? {
         return Ok(None);
     }
-    let clock = Clock::read()?;
     let tx = db.unchecked_transaction()?;
+    let clock = Clock::read()?;
     reconcile(&tx, &clock)?;
     let row: Option<(String,i64,i64,Option<i64>)>=tx.query_row("SELECT a.project_id,a.issue_number,o.ready_tick,a.launched FROM worker_allocations a JOIN worker_allocation_observations o ON o.id=a.id WHERE a.id=?1 AND a.released=0", [id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let Some((project, number, ready, launched)) = row else {
@@ -546,6 +571,112 @@ mod tests {
             winner(&db),
             None,
             "Released attempts require a fresh reservation, even if a PID is reused"
+        );
+    }
+    fn live_attempt(db: &Connection) {
+        db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('p','Project',2);
+            INSERT INTO agents VALUES('agent','{}',0);
+            INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',1,'Task','','open','agent',1,1,1,'[]');
+            INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at)
+            VALUES('a','p',1,'{}','agent','running',1,'pending','local',0,0)").unwrap();
+        db.execute(
+            "UPDATE worker_runs SET owner_pid=?1,owner_start=?2",
+            params![
+                std::process::id(),
+                crate::agents::process_identity(std::process::id()).unwrap()
+            ],
+        )
+        .unwrap();
+        db.execute("UPDATE worker_allocations SET launched=0 WHERE id='a'", [])
+            .unwrap();
+        maintain(db).unwrap();
+    }
+
+    #[test]
+    fn peer_presence_after_contention_preserves_a_live_local_attempt() {
+        let (_root, db) = fixture();
+        live_attempt(&db);
+        db.execute_batch(
+            "UPDATE worker_allocation_clock SET renewed_tick=0;
+            UPDATE worker_allocation_presence SET seen_tick=0;
+            UPDATE worker_allocation_observations SET deadline_tick=0",
+        )
+        .unwrap();
+        receive_presence(&db, &[], Duration::ZERO).unwrap();
+        assert_eq!(
+            winner(&db).as_deref(),
+            Some("a"),
+            "Peer reconciliation must refresh local process evidence before expiring it"
+        );
+        assert!(owns(&db, "a", "p", 1).unwrap());
+        db.execute_batch(
+            "UPDATE worker_runs SET owner_start='dead-process';
+            UPDATE worker_allocation_clock SET renewed_tick=0;
+            UPDATE worker_allocation_observations SET deadline_tick=0",
+        )
+        .unwrap();
+        receive_presence(&db, &[], Duration::ZERO).unwrap();
+        assert_eq!(
+            winner(&db),
+            None,
+            "A dead process must still lose its reservation"
+        );
+    }
+
+    #[test]
+    fn projection_after_contention_preserves_local_work_but_expires_remote_evidence() {
+        let (_root, db) = fixture();
+        live_attempt(&db);
+        reserve(&db, "remote", "remote", 0, Some(0));
+        reconcile(&db, &Clock::read().unwrap()).unwrap();
+        db.execute_batch(
+            "UPDATE worker_allocation_clock SET renewed_tick=0;
+            UPDATE worker_allocation_presence SET seen_tick=0;
+            UPDATE worker_allocation_observations SET deadline_tick=0",
+        )
+        .unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        reconcile(&tx, &Clock::read().unwrap()).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("a"));
+        assert!(
+            presence(&db)
+                .unwrap()
+                .iter()
+                .all(|pulse| pulse.machine == "local")
+        );
+    }
+
+    #[test]
+    fn renewal_timestamp_follows_writer_acquisition() {
+        let (root, db) = fixture();
+        live_attempt(&db);
+        db.execute("UPDATE worker_allocation_clock SET renewed_tick=0", [])
+            .unwrap();
+        drop(db);
+        let path = root.0.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let writer = Connection::connect(&path).unwrap();
+        let waiting = Connection::connect(&path).unwrap();
+        let tx = writer.unchecked_transaction().unwrap();
+        let task = std::thread::spawn(move || maintain(&waiting));
+        std::thread::sleep(Duration::from_millis(500));
+        let released = Clock::read().unwrap().tick;
+        tx.commit().unwrap();
+        let result = task.join().unwrap();
+        let renewed: i64 = writer
+            .query_row(
+                "SELECT renewed_tick FROM worker_allocation_clock",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        drop(writer);
+        owner.stop();
+        result.unwrap();
+        assert!(
+            renewed >= released,
+            "Writer queue time consumed the newly observed process lease"
         );
     }
     #[test]
