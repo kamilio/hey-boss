@@ -101,6 +101,12 @@ fn compact(mut data: Value, projects: &HashSet<String>) -> Result<Value> {
                         | "hostname"
                         | "state"
                         | "heartbeat"
+                        | "role"
+                        | "sync"
+                        | "sync_observed_at"
+                        | "database_errors"
+                        | "peer_sync_error"
+                        | "conflicts"
                         | "workers"
                         | "desired_revision"
                         | "applied_revision"
@@ -1297,6 +1303,38 @@ mod tests {
             "large private event"
         );
         assert!(result["conflicts"][0].get("saved_change").is_none());
+    }
+
+    #[test]
+    fn compact_overview_preserves_sync_health_and_contention_recovery() {
+        let mut machine = json!({"host":"peer","role":"companion","state":"connected",
+            "heartbeat":100,"sync_observed_at":100,
+            "sync":{"state":"healthy","message":"Changes are applied and sync is responding"},
+            "database_errors":{"pull":"Database writer queue timed out before execution"},
+            "peer_sync_error":null,"conflicts":0,
+            "workers":[{"id":"productive","pid":123,"active":1,"runs":[]}],
+            "unneeded_history":["discard"]});
+        for recovered in [false, true] {
+            if recovered {
+                machine["database_errors"] = json!({});
+            }
+            let result = compact(json!({"machines":[machine.clone()]}), &HashSet::new()).unwrap();
+            let projected = &result["machines"][0];
+            assert_eq!(projected["state"], "connected");
+            assert_eq!(projected["workers"][0]["pid"], 123);
+            assert_eq!(projected["workers"][0]["active"], 1);
+            for key in [
+                "role",
+                "sync",
+                "sync_observed_at",
+                "database_errors",
+                "peer_sync_error",
+                "conflicts",
+            ] {
+                assert_eq!(projected.get(key), machine.get(key), "Dashboard lost {key}");
+            }
+            assert!(projected.get("unneeded_history").is_none());
+        }
     }
 
     #[test]
