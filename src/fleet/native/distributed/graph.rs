@@ -1,5 +1,5 @@
 use super::*;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,13 +30,28 @@ pub(super) fn install(db: &Connection) -> Result<()> {
         WHEN OLD.table_name='issues' AND OLD.field IN ('@alive','@lifecycle') BEGIN
         UPDATE distributed_issue_graph SET blockers=CASE WHEN OLD.field='@lifecycle' THEN NULL ELSE blockers END,
             alive=CASE WHEN OLD.field='@alive' THEN NULL ELSE alive END WHERE entity=OLD.entity;
-        END;
-        INSERT INTO distributed_issue_graph
-        SELECT entity,json_extract(entity,'$.project_id'),
-            CASE WHEN field='@lifecycle' THEN coalesce(json_extract(value,'$.blockers'),'[]') END,
-            CASE WHEN field='@alive' THEN value='true' END
-        FROM distributed_fields WHERE table_name='issues' AND field IN ('@alive','@lifecycle')
-        ON CONFLICT(entity) DO UPDATE SET blockers=coalesce(excluded.blockers,blockers),alive=coalesce(excluded.alive,alive);")?;
+            END;
+        CREATE TEMP TABLE distributed_graph_page(entity TEXT,field TEXT,blockers TEXT,alive INTEGER,PRIMARY KEY(entity,field)) WITHOUT ROWID;")?;
+    // One cold scan can exceed the service reply timeout. Keep each request
+    // bounded, including skipped document fields, while publishing atomically.
+    let (mut entity, mut field) = (String::new(), String::new());
+    loop {
+        tx.execute("INSERT INTO temp.distributed_graph_page
+            SELECT entity,field,
+                CASE WHEN field='@lifecycle' THEN coalesce(json_extract(value,'$.blockers'),'[]') END,
+                CASE WHEN field='@alive' THEN value='true' END
+            FROM distributed_fields WHERE table_name='issues' AND (entity,field)>(?1,?2)
+            ORDER BY entity,field LIMIT 128", params![entity, field])?;
+        let last = tx.query_row("SELECT entity,field FROM temp.distributed_graph_page ORDER BY entity DESC,field DESC LIMIT 1", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;
+        let Some(last) = last else { break };
+        tx.execute_batch("INSERT INTO distributed_issue_graph
+            SELECT entity,json_extract(entity,'$.project_id'),blockers,alive
+            FROM temp.distributed_graph_page WHERE field IN ('@alive','@lifecycle')
+            ON CONFLICT(entity) DO UPDATE SET blockers=coalesce(excluded.blockers,blockers),alive=coalesce(excluded.alive,alive);
+            DELETE FROM temp.distributed_graph_page;")?;
+        (entity, field) = last;
+    }
+    tx.execute_batch("DROP TABLE temp.distributed_graph_page")?;
     tx.commit()?;
     Ok(())
 }
@@ -139,6 +154,103 @@ pub(super) fn subtasks(db: &Connection, project: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_backfill_pages_share_the_existing_service_transaction() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let path = root.0.join("issues.db");
+        let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
+        let db = Connection::connect(&path).unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<130),
+            fields(field,value) AS (VALUES('@alive','true'),('@lifecycle','{\"blockers\":\"[]\"}'))
+            INSERT INTO distributed_fields SELECT 'issues',json_object('project_id','p','number',x),field,1,'a',value FROM n CROSS JOIN fields;").unwrap();
+        let pid = db.owner_pid().unwrap();
+        install(&db).unwrap();
+        assert_eq!(blockers(&db, "p").unwrap().len(), 130);
+        assert_eq!(db.owner_pid().unwrap(), pid);
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM sqlite_temp_master WHERE name='distributed_graph_page'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        drop(db);
+        owner.stop();
+    }
+
+    #[test]
+    fn graph_backfill_bounds_each_statement_and_rolls_back_incomplete_installation() {
+        use std::cell::Cell;
+        struct Budget {
+            steps: Cell<usize>,
+            statements: Cell<usize>,
+            fail_after: usize,
+        }
+        unsafe extern "C" fn statement(
+            _: u32,
+            context: *mut std::ffi::c_void,
+            _: *mut std::ffi::c_void,
+            _: *mut std::ffi::c_void,
+        ) -> i32 {
+            let budget = unsafe { &*(context as *const Budget) };
+            budget.steps.set(0);
+            budget.statements.set(budget.statements.get() + 1);
+            0
+        }
+        unsafe extern "C" fn progress(context: *mut std::ffi::c_void) -> i32 {
+            let budget = unsafe { &*(context as *const Budget) };
+            budget.steps.set(budget.steps.get() + 100);
+            i32::from(budget.steps.get() > 20_000 || budget.statements.get() > budget.fail_after)
+        }
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE fleet_row_ids(origin TEXT,table_name TEXT,local_id TEXT,origin_id TEXT)",
+        )
+        .unwrap();
+        db.execute_batch(super::super::SCHEMA).unwrap();
+        db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2400),
+            fields(field,value) AS (VALUES('@alive','true'),('@lifecycle','{\"blockers\":\"[]\"}'),('@requirements',json_quote(printf('%.*c',16384,'x'))))
+            INSERT INTO distributed_fields SELECT 'issues',json_object('project_id','p','number',x),field,1,'a',value FROM n CROSS JOIN fields;").unwrap();
+        for fail_after in [12, usize::MAX] {
+            let mut budget = Budget {
+                steps: Cell::new(0),
+                statements: Cell::new(0),
+                fail_after,
+            };
+            let context = (&mut budget as *mut Budget).cast();
+            unsafe {
+                rusqlite::ffi::sqlite3_trace_v2(
+                    db.handle(),
+                    rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                    Some(statement),
+                    context,
+                );
+                rusqlite::ffi::sqlite3_progress_handler(db.handle(), 100, Some(progress), context);
+            }
+            let result = install(&db);
+            unsafe {
+                rusqlite::ffi::sqlite3_progress_handler(db.handle(), 0, None, std::ptr::null_mut());
+                rusqlite::ffi::sqlite3_trace_v2(db.handle(), 0, None, std::ptr::null_mut());
+            }
+            if fail_after != usize::MAX {
+                assert!(result.is_err());
+                assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph')", [], |r| r.get::<_, bool>(0)).unwrap());
+            } else {
+                result.expect("Backfill exceeded the per-statement work budget");
+            }
+        }
+        assert_eq!(blockers(&db, "p").unwrap().len(), 2400);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM distributed_fields", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            7200
+        );
+    }
 
     #[test]
     fn dependency_scan_keeps_alive_checks_out_of_document_pages() {

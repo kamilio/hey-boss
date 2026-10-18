@@ -249,6 +249,9 @@ to 30, retaining deleted-task filtering, deterministic cycle rejection and
 rollback behavior. This is a page-work measurement, not a live latency promise.
 Existing replicas backfill the derived graph once without changing journal
 cursors or source facts; triggers keep it current with accepted field writes.
+The backfill reads at most 128 source rows per database request, including
+unrelated document fields. This bounds individual requests on cold stores while
+retaining one atomic transaction: interrupted installs expose no partial graph.
 
 The CLI now sends issue database operations to a private Unix socket hosted by an
 existing Rust service. The supervisor, companion, web service and queue broker
