@@ -33,6 +33,7 @@ pub(super) fn upgrade_shadow(db: &Connection) -> Result<()> {
     tx.execute_batch(
         "ALTER TABLE distributed_meta ADD COLUMN format INTEGER NOT NULL DEFAULT 2;
         DROP VIEW IF EXISTS distributed_job_runs;
+        DROP TABLE IF EXISTS distributed_issue_graph;
         DROP TABLE distributed_fields;
         DROP TABLE distributed_dirty;
         DROP TABLE distributed_aliases;

@@ -1634,6 +1634,13 @@ fn shadow_identity_upgrade_preserves_application_data_and_rebuilds_derived_state
     assert!(pending > 0);
     install(&db, "a").unwrap();
     assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_issue_graph", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'distributed_issue_graph_%'", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    assert_eq!(
         db.query_row(
             "SELECT state,pid,finished_at FROM worker_runs WHERE id='preserved-run'",
             [],
@@ -2155,6 +2162,52 @@ fn dependency_projection_does_not_load_large_requirement_bodies() {
     assert!(
         bytes < 256 * 1024,
         "Dependency projection loaded document bodies: {bytes} bytes"
+    );
+}
+
+#[test]
+fn enrolled_replicas_gain_the_compact_dependency_graph_without_reenrollment() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    capture_all(&db, &mut engine);
+    let dependencies = graph::blockers(&db, "p").unwrap();
+    let before = replica::rows(&db, "SELECT * FROM distributed_meta", &[]).unwrap();
+    let fields: i64 = db
+        .query_row("SELECT count(*) FROM distributed_fields", [], |r| r.get(0))
+        .unwrap();
+    db.execute_batch("DROP TABLE IF EXISTS distributed_issue_graph")
+        .unwrap();
+    install(&db, "a").unwrap();
+    assert_eq!(graph::blockers(&db, "p").unwrap(), dependencies);
+    assert!(
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_issue_graph')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        replica::rows(&db, "SELECT * FROM distributed_meta", &[]).unwrap(),
+        before
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_fields", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        fields
+    );
+    let schema: i64 = db
+        .query_row("PRAGMA schema_version", [], |r| r.get(0))
+        .unwrap();
+    install(&db, "a").unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        schema
     );
 }
 
