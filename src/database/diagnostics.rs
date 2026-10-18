@@ -1,6 +1,65 @@
 //! Bounded database timing evidence. Never retain SQL values or result rows.
 use super::wire::Command;
-use std::time::Instant;
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::PathBuf,
+    sync::Mutex,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+
+const LOG_LIMIT: u64 = 64 * 1024;
+
+/// Keep evidence readable even when the service's journal needs root access.
+/// One owner serializes records; diagnostics must never fail a database request.
+#[derive(Default)]
+pub(super) struct Log(Option<Mutex<PathBuf>>);
+
+impl Log {
+    pub fn new(path: PathBuf) -> Self {
+        Self(Some(Mutex::new(path)))
+    }
+
+    pub fn record(&self, mut event: serde_json::Value) {
+        event["at_ms"] = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64)
+            .into();
+        event["pid"] = std::process::id().into();
+        eprintln!("{event}");
+        let _ = self.append(&format!("{event}\n"));
+    }
+
+    fn append(&self, record: &str) -> std::io::Result<()> {
+        let Some(path) = &self.0 else {
+            return Ok(());
+        };
+        let path = path
+            .lock()
+            .map_err(|_| std::io::Error::other("Diagnostic log poisoned"))?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&*path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::getuid() }
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o077 != 0
+            || record.len() as u64 > LOG_LIMIT
+        {
+            return Err(std::io::Error::other("Unsafe diagnostic log"));
+        }
+        if metadata.len() + record.len() as u64 > LOG_LIMIT {
+            file.set_len(0)?;
+        }
+        file.write_all(record.as_bytes())
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Operation {
@@ -99,6 +158,41 @@ pub(super) struct Activity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_file_is_bounded_private_and_rejects_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!(
+            "hb-diagnostics-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("evidence.jsonl");
+        let log = Log::new(path.clone());
+        let record = format!("{}\n", "x".repeat(1023));
+        for _ in 0..80 {
+            log.append(&record).unwrap();
+        }
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert!(metadata.len() <= LOG_LIMIT);
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(log.append(&"x".repeat(LOG_LIMIT as usize + 1)).is_err());
+        std::fs::remove_file(&path).unwrap();
+        let target = root.join("untouched");
+        std::fs::write(&target, "original").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(log.append("unsafe").is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::hard_link(&target, &path).unwrap();
+        assert!(log.append("unsafe").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn diagnostics_exclude_values_comments_paths_and_control_characters() {

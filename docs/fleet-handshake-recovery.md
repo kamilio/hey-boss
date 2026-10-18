@@ -74,6 +74,11 @@ is executing or awaiting the client. Transport failures distinguish sending a
 request, waiting for its reply and receiving result rows. On macOS a reply timeout
 can report `Resource temporarily unavailable`; this does not prove a failed write.
 These diagnostics do not change deadlines, replay writes or release reservations.
+The same redacted records, with time and owner PID, are retained in
+`/tmp/hey-boss-db-UID/DB-HASH.diagnostics.jsonl` beside the database socket.
+Each private file is capped at 64 KiB, replacing older records when full. This
+keeps recent evidence available when the service journal requires privileged
+access; a diagnostic file failure never fails a database request.
 
 Authority commands allow up to 15 seconds for a missing/refused local relay or
 an unfinished supervisor handshake to recover. The same deadline covers the

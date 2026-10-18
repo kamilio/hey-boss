@@ -130,13 +130,22 @@ fn writer_wait_reports_the_holder_without_sql_values_and_recovers() {
         service: None,
         replacement: None,
     };
-    let log = fixture.root.join("service.log");
+    use sha2::{Digest, Sha256};
+    let database = fixture.root.canonicalize().unwrap().join("issues.db");
+    let identity = format!(
+        "{:x}",
+        Sha256::digest(database.as_os_str().as_encoded_bytes())
+    );
+    let log = PathBuf::from("/tmp")
+        .join(format!("hey-boss-db-{}", unsafe { libc::getuid() }))
+        .join(format!("{}.diagnostics.jsonl", &identity[..24]));
     fixture.service = Some(
         fixture
             .command(&["fleet", "companion"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(fs::File::create(&log).unwrap())
+            // Service journals may be inaccessible to the logged-in user.
+            .stderr(Stdio::null())
             .spawn()
             .unwrap(),
     );
@@ -155,7 +164,7 @@ fn writer_wait_reports_the_holder_without_sql_values_and_recovers() {
     });
     let deadline = Instant::now() + Duration::from_secs(12);
     let evidence = loop {
-        let log = fs::read_to_string(&log).unwrap();
+        let log = fs::read_to_string(&log).unwrap_or_default();
         if let Some(record) = log
             .lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -183,7 +192,10 @@ fn writer_wait_reports_the_holder_without_sql_values_and_recovers() {
             .unwrap(),
         2
     );
-    let evidence = evidence.expect("No bounded writer contention evidence was recorded");
+    let _ = fs::remove_file(&log);
+    let evidence = evidence.expect("No user-readable writer contention evidence was recorded");
+    assert!(evidence["at_ms"].as_u64().unwrap() > 0);
+    assert_eq!(evidence["pid"], owner);
     assert_eq!(evidence["holder"]["operation"], "execute");
     assert_eq!(evidence["holder"]["executing"], false);
     assert!(evidence["holder"]["held_ms"].as_u64().unwrap() >= 5000);
