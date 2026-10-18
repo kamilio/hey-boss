@@ -112,39 +112,35 @@ struct Application {
 }
 impl Application {
     fn start(ctx: &Context, controller: bool, peer: &str) -> Self {
+        Self::with_database(ctx, controller, peer, Context::db)
+    }
+    fn with_database(
+        ctx: &Context,
+        controller: bool,
+        peer: &str,
+        open: impl FnOnce(&Context) -> Result<Connection> + Send + 'static,
+    ) -> Self {
         let state = Arc::new(std::sync::Mutex::new(ApplicationState::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (shared, stopping, ctx, peer) =
             (state.clone(), stop.clone(), ctx.clone(), peer.to_owned());
         let thread = std::thread::spawn(move || {
             let run = || -> Result<()> {
-                let db = ctx.db()?;
+                let db = open(&ctx)?;
                 let mut journal = engine(&ctx)?;
                 while !cancelled(&ctx, &stopping) {
-                    let received = shared.lock().unwrap().incoming.take();
-                    if let Some(received) = received {
-                        crate::issues::allocations::receive_presence(
-                            &db,
-                            &received.pulses,
-                            received.age.saturating_add(received.captured.elapsed()),
-                        )?;
-                        crate::issues::allocations::record_exchange(&db, &peer, received.age)?;
-                    }
-                    // This connection's presence must progress even when a
-                    // different connection is preparing the same application.
-                    let captured = Instant::now();
-                    let pulses = crate::issues::allocations::presence(&db)?;
-                    shared.lock().unwrap().outgoing = Some(PresenceSnapshot {
-                        pulses,
-                        captured,
-                        age: Duration::ZERO,
-                    });
-                    if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
-                        crate::issues::allocations::maintain(&db)?;
-                        prepare(&ctx, &db, &mut journal, controller)?;
-                        health::prepared(&ctx, &db, &journal)?;
-                        // Timestamp before the query so query latency never
-                        // grants extra lifetime to a cached pulse.
+                    let result = (|| -> Result<()> {
+                        let received = shared.lock().unwrap().incoming.take();
+                        if let Some(received) = received {
+                            crate::issues::allocations::receive_presence(
+                                &db,
+                                &received.pulses,
+                                received.age.saturating_add(received.captured.elapsed()),
+                            )?;
+                            crate::issues::allocations::record_exchange(&db, &peer, received.age)?;
+                        }
+                        // This connection's presence must progress even when a
+                        // different connection is preparing the same application.
                         let captured = Instant::now();
                         let pulses = crate::issues::allocations::presence(&db)?;
                         shared.lock().unwrap().outgoing = Some(PresenceSnapshot {
@@ -152,6 +148,30 @@ impl Application {
                             captured,
                             age: Duration::ZERO,
                         });
+                        if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
+                            crate::issues::allocations::maintain(&db)?;
+                            prepare(&ctx, &db, &mut journal, controller)?;
+                            health::prepared(&ctx, &db, &journal)?;
+                            // Timestamp before the query so query latency never
+                            // grants extra lifetime to a cached pulse.
+                            let captured = Instant::now();
+                            let pulses = crate::issues::allocations::presence(&db)?;
+                            shared.lock().unwrap().outgoing = Some(PresenceSnapshot {
+                                pulses,
+                                captured,
+                                age: Duration::ZERO,
+                            });
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = result {
+                        if !super::super::companion::database_busy(error.as_ref()) {
+                            return Err(error);
+                        }
+                        // Retry from committed cursors on the same transport.
+                        // Failed presence is replaceable by the next exchange;
+                        // unknown write outcomes must still stop this session.
+                        health::waiting(&ctx, &error.to_string());
                     }
                     wait(&ctx, &stopping, SYNC_INTERVAL);
                 }
@@ -546,6 +566,73 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn application_recovers_after_writer_queue_timeout_without_reconnecting() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.json"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "a".repeat(32),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let db = crate::issues::Store::open(&ctx.path)
+            .unwrap()
+            .into_database();
+        install(&db, &ctx.node).unwrap();
+        drop(db);
+        let mut owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
+        let writer = Connection::connect(&ctx.path).unwrap();
+        let tx = writer.unchecked_transaction().unwrap();
+        let application = Application::with_database(&ctx, false, "peer", |ctx| {
+            Ok(Connection::connect(&ctx.path)?)
+        });
+        application.received(vec![], Duration::ZERO);
+        let deadline = Instant::now() + Duration::from_secs(50);
+        loop {
+            tx.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                .unwrap();
+            let health = ctx
+                .read_json(&ctx.state.join("distributed-health.json"), Value::Null)
+                .unwrap();
+            if health["error"]
+                .as_str()
+                .is_some_and(|s| s.contains("writer queue timed out"))
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Did not reproduce writer queue timeout: {health}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tx.commit().unwrap();
+        let still_running = application.check();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let recovered = loop {
+            let health = ctx
+                .read_json(&ctx.state.join("distributed-health.json"), Value::Null)
+                .unwrap();
+            if health["projected"].is_number() && health["error"].is_null() {
+                break true;
+            }
+            if Instant::now() >= deadline || application.check().is_err() {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        drop(application);
+        drop(writer);
+        owner.stop();
+        still_running.expect("Retryable writer contention killed the application thread");
+        assert!(
+            recovered,
+            "Application did not recover on the same connection"
+        );
+    }
     #[test]
     fn an_atomic_install_invalidates_a_persistent_sync_session() {
         let root = crate::admin::Temporary::new().unwrap();

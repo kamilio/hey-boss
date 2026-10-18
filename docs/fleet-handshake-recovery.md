@@ -46,6 +46,22 @@ and unknown write outcomes remain errors and are never automatically replayed.
 Queue timeouts are distinguished from service shutdown and writer failure.
 The Workers page shows “Database busy” while retaining connected worker activity.
 
+Distributed application processing also retries typed contention on its existing
+transport, using committed cursors. A writer queue timeout no longer terminates
+that thread. Fresh application progress clears the waiting status; an old status
+still becomes unknown. Unknown write outcomes and non-contention failures still
+stop the session.
+
+Reservation renewal timestamps are taken after acquiring the writer. Before
+expiring local reservations, reconciliation checks the owning process and renews
+live attempts in the same transaction. This also covers a peer update or journal
+projection that reaches the writer before the renewal loop. Dead processes and
+remote evidence still expire; replayed presence cannot renew a remote lease.
+Regressions exercise the 45-second writer queue timeout, recovery without a new
+application thread, and local reservation preservation after lease expiry. They
+reproduce the failure mechanisms without claiming to identify the historical
+contending writer.
+
 Authority commands allow up to 15 seconds for a missing/refused local relay or
 an unfinished supervisor handshake to recover. The same deadline covers the
 response, including partial frames; cancellation stops waiting. An explicit

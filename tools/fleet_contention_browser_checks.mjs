@@ -8,7 +8,7 @@ const source = resolve('src/issues/web');
 const project = {id:'named:Contention QA',name:'Contention QA'};
 const runs = Array.from({length:2},(_,i)=>({id:'run-'+i,project_id:project.id,project_name:project.name,number:i+1,title:['Keep the current task running','Apply changes after the database is available'][i],state:'running',started_at:Date.now()-120000,finished_at:null,last_event:'Working through the existing task.'}));
 let state = 'healthy';
-const fleet = () => ({ok:true,machines:[{host:'remote',hostname:'Connected MacBook',role:'agent',state:state==='offline'?'disconnected':'connected',heartbeat:Date.now()/1000,desired_revision:'current',applied_revision:'current',sync_observed_at:Date.now()/1000,sync:{state:'healthy',message:'Changes are applied and sync is responding'},database_errors:state==='waiting'?{pull:'Database writer queue timed out before execution'}:{},workers:[{id:'preserved-worker',pid:123,intent:'running',managed:true,active:2,config:{name:'Productive worker',enabled:true,concurrency:3,projects:[project.id]},runs}]}],signals:[],conflicts:[]});
+const fleet = () => ({ok:true,machines:[{host:'remote',hostname:'Connected MacBook',role:'agent',state:state==='offline'?'disconnected':'connected',heartbeat:Date.now()/1000,desired_revision:'current',applied_revision:'current',sync_observed_at:Date.now()/1000,sync:state==='sync_waiting'?{state:'waiting',message:'Database busy; data sync will retry',error:'Database writer queue timed out before execution'}:{state:'healthy',message:'Changes are applied and sync is responding'},database_errors:state==='waiting'?{pull:'Database writer queue timed out before execution'}:{},workers:[{id:'preserved-worker',pid:123,intent:'running',managed:true,active:2,config:{name:'Productive worker',enabled:true,concurrency:3,projects:[project.id]},runs}]}],signals:[],conflicts:[]});
 const mutations=[];
 const server=createServer((req,res)=>{
   const url=new URL(req.url,'http://fixture'),path=url.pathname;
@@ -43,11 +43,11 @@ try{
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
     await page.goto(`http://127.0.0.1:${server.address().port}/workers${paired?'?paired=1':''}`);
     await page.locator('.activity-machine').waitFor();
-    for(const next of ['healthy','waiting','recovered','offline']){
+    for(const next of ['healthy','waiting','sync_waiting','recovered','offline']){
       state=next;await page.locator('#refresh').click();
       await page.waitForFunction(expected=>{
         const message=document.querySelector('#fleet-attention').textContent;
-        return expected==='waiting'?message.includes('Database busy'):expected==='offline'?message.includes('offline; activity is last known'):!message.trim();
+        return ['waiting','sync_waiting'].includes(expected)?message.includes('Database busy'):expected==='offline'?message.includes('offline; activity is last known'):!message.trim();
       },state);
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Layout fits '+width);
       assert.equal(await page.locator('.activity-machine').count(),1);
@@ -58,7 +58,7 @@ try{
       const worker=page.locator('.activity-worker');
       if(await worker.count()&&!await worker.evaluate(el=>el.open))await worker.locator('summary').first().click();
       assert.equal(await page.locator('.activity-task').count(),2,'Both current tasks are retained');
-      if(state==='waiting')assert.match(await page.locator('#fleet-attention').innerText(),/Database busy; data sync will retry/);
+      if(['waiting','sync_waiting'].includes(state))assert.match(await page.locator('#fleet-attention').innerText(),/Database busy; data sync will retry/);
       if(process.env.FLEET_SCREENSHOTS&&[1440,390,320].includes(width)){
         mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});
         await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`${paired?'paired':'desktop'}-${colorScheme}-${width}-${state}.png`),fullPage:true});
