@@ -152,6 +152,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             capture::install(&tx)?;
             tx.commit()?;
         }
+        graph::install(db)?;
         activation::protect_role(db)?;
         return Ok(());
     }
@@ -172,6 +173,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
     resources::initialize(&tx)?;
     activation::protect_role(&tx)?;
     tx.commit()?;
+    graph::install(db)?;
     Ok(())
 }
 

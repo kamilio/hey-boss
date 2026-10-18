@@ -240,6 +240,16 @@ joining them. Production integrity and fleet convergence are checked separately.
 
 ## Service-owned database sessions
 
+Dependency projection now reads a compact, transactionally maintained graph.
+Live contention diagnostics identified the dependency query holding a writer
+for 37.7 seconds. Although its expression index was reported as covering,
+SQLite still emitted a lookup into the large lifecycle table for each task.
+A private 2,400-task cold-cache regression reduced graph reads from 447 pages
+to 30, retaining deleted-task filtering, deterministic cycle rejection and
+rollback behavior. This is a page-work measurement, not a live latency promise.
+Existing replicas backfill the derived graph once without changing journal
+cursors or source facts; triggers keep it current with accepted field writes.
+
 The CLI now sends issue database operations to a private Unix socket hosted by an
 existing Rust service. The supervisor, companion, web service and queue broker
 can host it; an OS lock elects exactly one owner for the database. Workers, issue
