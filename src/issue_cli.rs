@@ -2064,6 +2064,51 @@ fn status_datetime(value: &Value) -> String {
         String::from_utf8_lossy(&text[..size]).into_owned()
     }
 }
+fn issue_owner_label(issue: &Value) -> String {
+    if let Some(owner) = issue["assignee_name"]
+        .as_str()
+        .or_else(|| issue["assignee"].as_str())
+    {
+        return line(&json!(owner));
+    }
+    let assignment = &issue["assignment"];
+    if issue["state"] == "open"
+        && issue["deleted_at"].is_null()
+        && matches!(
+            assignment["kind"].as_str(),
+            None | Some("unassigned" | "machine")
+        )
+        && let Some(attempts) = issue["remote_attempts"].as_array()
+        && let Some(attempt) = attempts
+            .iter()
+            .find(|attempt| attempt["machine"] == assignment["machine"])
+            .or_else(|| attempts.first())
+    {
+        let host = attempt["host"]
+            .as_str()
+            .or_else(|| attempt["machine"].as_str())
+            .unwrap_or("another device");
+        let actor = attempt["actor"]
+            .as_str()
+            .map(|actor| format!(" ({})", line(&json!(actor))))
+            .unwrap_or_default();
+        let others = if attempts.len() > 1 {
+            format!(" · {} remote attempts", attempts.len())
+        } else {
+            String::new()
+        };
+        return format!("working on {}{actor}{others}", line(&json!(host)));
+    }
+    if assignment["kind"] == "machine" {
+        let machine = assignment["machine_name"]
+            .as_str()
+            .or_else(|| assignment["machine"].as_str())
+            .unwrap_or("another device");
+        return format!("assigned to {}", line(&json!(machine)));
+    }
+    "unassigned".into()
+}
+
 fn print_issue_line(issue: &Value) {
     if issue["draft"] == true {
         print!("Draft · ");
@@ -2076,10 +2121,7 @@ fn print_issue_line(issue: &Value) {
     } else {
         "deleted"
     };
-    let owner = issue["assignee_name"]
-        .as_str()
-        .or_else(|| issue["assignee"].as_str())
-        .unwrap_or("unassigned");
+    let owner = issue_owner_label(issue);
     println!(
         "#{} [{}] {} · {} · {} agent launch{}{}",
         issue["number"],

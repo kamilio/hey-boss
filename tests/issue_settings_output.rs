@@ -78,6 +78,47 @@ fn claims_show_iteration_count_before_instructions_without_counting_claims() {
 }
 
 #[test]
+fn remote_running_attempt_is_visible_in_text_without_inventing_a_local_claim() {
+    let f = Fixture::new();
+    f.text(&["create", "--title", "Remote work"]);
+    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
+    db.execute_batch("CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT,project_id TEXT,issue_number INTEGER,state TEXT,started_at INTEGER,finished_at INTEGER,summary TEXT,payload TEXT);
+        INSERT INTO agents VALUES('codex:remote','{\"machine\":\"remote\",\"host\":\"devbox\"}',0);
+        INSERT INTO distributed_attempts VALUES('working','remote','named:Settings QA',1,'running',2,NULL,'','{\"actor_id\":\"codex:remote\"}');").unwrap();
+    for args in [vec!["list"], vec!["view", "1"]] {
+        let output = f.text(&args);
+        assert!(
+            output.contains("working on devbox (codex:remote)"),
+            "{output}"
+        );
+        assert!(!output.contains(" · unassigned · "), "{output}");
+    }
+    let json: Value = serde_json::from_str(&f.text(&["view", "1", "--json"])).unwrap();
+    assert!(json["issue"]["assignee"].is_null());
+    assert_eq!(json["issue"]["remote_attempts"][0]["id"], "working");
+    db.execute("UPDATE issues SET state='closed'", []).unwrap();
+    assert!(!f.text(&["view", "1"]).contains("working on devbox"));
+    db.execute(
+        "UPDATE issues SET state='open',assignment_target='machine:remote'",
+        [],
+    )
+    .unwrap();
+    assert!(
+        f.text(&["list"])
+            .contains("working on devbox (codex:remote)")
+    );
+    db.execute(
+        "UPDATE distributed_attempts SET finished_at=3,state='completed'",
+        [],
+    )
+    .unwrap();
+    assert!(f.text(&["list"]).contains(" · assigned to remote · "));
+    db.execute("UPDATE issues SET assignment_target=NULL", [])
+        .unwrap();
+    assert!(f.text(&["list"]).contains(" · unassigned · "));
+}
+
+#[test]
 fn ordinary_issue_output_omits_absent_and_disabled_settings() {
     let f = Fixture::new();
     for args in [
