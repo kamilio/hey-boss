@@ -33,7 +33,11 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
     let state = if age(sample).is_none_or(|age| age > FRESH_MS) {
         "unknown"
     } else if sample["error"].is_string() {
-        "error"
+        if sample["retrying"] == true {
+            "waiting"
+        } else {
+            "error"
+        }
     } else if !complete {
         "unknown"
     } else if sample["active"] != 1 {
@@ -81,6 +85,7 @@ fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
         "catching_up" => "Changes are waiting to be applied or sent",
         "disconnected" => "No recent completed sync exchange; local work is retained",
         "error" => "Sync could not prepare or apply changes",
+        "waiting" => "Database busy; data sync will retry",
         _ => "Sync progress has not been verified recently",
     });
     result
@@ -176,6 +181,14 @@ pub(super) fn prepared(
 
 pub(super) fn failed(ctx: &Context, error: &str) {
     let _ = save(ctx, "distributed-health.json", json!({"error":error}));
+}
+
+pub(super) fn waiting(ctx: &Context, error: &str) {
+    let _ = save(
+        ctx,
+        "distributed-health.json",
+        json!({"error":error,"retrying":true}),
+    );
 }
 
 pub(super) fn peer_exchanged(
@@ -297,6 +310,31 @@ mod tests {
         assert_eq!(classify(&s, &s, "boot", 101)["state"], "catching_up");
         s["error"] = json!("disk full");
         assert_eq!(classify(&s, &s, "boot", 101)["state"], "error");
+    }
+    #[test]
+    fn retryable_contention_is_waiting_until_fresh_application_progress() {
+        let mut sample = sample();
+        let exchange = json!({"boot":"boot","tick":100,"incoming_drained":true,"journal_head":7});
+        sample["error"] = json!("Database writer queue timed out before execution");
+        sample["retrying"] = json!(true);
+        assert_eq!(
+            classify(&sample, &exchange, "boot", 101)["state"],
+            "waiting"
+        );
+        assert_eq!(
+            classify(&sample, &exchange, "boot", 101)["message"],
+            "Database busy; data sync will retry"
+        );
+        assert_eq!(
+            classify(&sample, &exchange, "boot", 31_000)["state"],
+            "unknown"
+        );
+        sample.as_object_mut().unwrap().remove("error");
+        sample.as_object_mut().unwrap().remove("retrying");
+        assert_eq!(
+            classify(&sample, &exchange, "boot", 101)["state"],
+            "healthy"
+        );
     }
     #[test]
     fn corrupt_diagnostics_do_not_break_the_fleet_dashboard() {

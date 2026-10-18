@@ -151,7 +151,7 @@ impl Contention {
     }
 }
 
-fn database_busy(mut error: &(dyn std::error::Error + 'static)) -> bool {
+pub(super) fn database_busy(mut error: &(dyn std::error::Error + 'static)) -> bool {
     loop {
         if error
             .downcast_ref::<crate::issues::Error>()
