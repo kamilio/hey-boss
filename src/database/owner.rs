@@ -405,10 +405,28 @@ fn acquire<'a>(
     let mut waiters = writer.waiters.lock().unwrap();
     waiters.push_back(ticket);
     loop {
-        if stop.load(Ordering::Acquire) || Instant::now() >= deadline || disconnected(stream) {
+        let cancelled = if stop.load(Ordering::Acquire) {
+            Some((
+                std::io::ErrorKind::Interrupted,
+                "Database service is stopping",
+            ))
+        } else if disconnected(stream) {
+            Some((
+                std::io::ErrorKind::ConnectionAborted,
+                "Database client disconnected while waiting for the writer",
+            ))
+        } else if Instant::now() >= deadline {
+            Some((
+                std::io::ErrorKind::TimedOut,
+                "Database writer queue timed out before execution",
+            ))
+        } else {
+            None
+        };
+        if let Some((kind, message)) = cancelled {
             waiters.retain(|id| *id != ticket);
             writer.ready.notify_all();
-            return Err(std::io::Error::other("Database writer wait cancelled"));
+            return Err(std::io::Error::new(kind, message));
         }
         if waiters.front() == Some(&ticket) {
             match writer.db.try_lock() {
@@ -516,7 +534,6 @@ fn session(
         input
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(250)))?;
-        last_request = Instant::now();
         let repair = matches!(command, Command::CheckSchema)
             && reader
                 .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
@@ -539,8 +556,23 @@ fn session(
         if lease.is_none() && reader.is_autocommit() && needs_writer {
             lease = match acquire(writer, input.get_ref(), stop) {
                 Ok(lease) => Some(lease),
-                Err(_) => {
-                    let reply = Reply { version: wire::VERSION, pid: std::process::id(), error: Some(Failure::capture(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY), Some("Database writer unavailable before execution; retry after service recovery".into())))), ..Reply::default() };
+                Err(e) => {
+                    // Only queue exhaustion is contention. Shutdown, client
+                    // loss and a poisoned writer must not become retryable SQL.
+                    let failure = if e.kind() == std::io::ErrorKind::TimedOut {
+                        rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                            Some(e.to_string()),
+                        )
+                    } else {
+                        error(e.to_string())
+                    };
+                    let reply = Reply {
+                        version: wire::VERSION,
+                        pid: std::process::id(),
+                        error: Some(Failure::capture(failure)),
+                        ..Reply::default()
+                    };
                     wire::write(input.get_mut(), &reply)?;
                     continue;
                 }
@@ -597,6 +629,10 @@ fn session(
             lease = None;
         }
         wire::write(input.get_mut(), &reply)?;
+        // Waiting for the writer, executing SQL and delivering rows are work,
+        // not client idle time. In particular, a queued BEGIN can take longer
+        // than the idle limit while still meeting the acquisition deadline.
+        last_request = Instant::now();
     }
     Ok(())
 }
