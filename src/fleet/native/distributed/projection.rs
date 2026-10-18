@@ -266,7 +266,9 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         // have no edges to reconsider; creating one must not replay the entire
         // project, including its archived history. The changed row is already
         // dirty above, even when it just lost its last edge.
-        db.execute("INSERT OR IGNORE INTO distributed_dirty SELECT table_name,entity FROM distributed_fields WHERE table_name='issues' AND field='@lifecycle' AND json_extract(entity,'$.project_id')=?1 AND json_array_length(json_extract(value,'$.blockers'))>0",[row["project_id"].as_str()])?;
+        if let Some(project) = row["project_id"].as_str() {
+            graph::dirty_dependents(db, project)?;
+        }
     }
     if fact.table == "worker_runs"
         && let Some(row) = &fact.after
