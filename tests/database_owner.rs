@@ -122,6 +122,75 @@ struct Fixture {
 }
 
 #[test]
+fn writer_wait_reports_the_holder_without_sql_values_and_recovers() {
+    let root = std::env::temp_dir().join(format!("hb-writer-evidence-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let mut fixture = Fixture {
+        root,
+        service: None,
+        replacement: None,
+    };
+    let log = fixture.root.join("service.log");
+    fixture.service = Some(
+        fixture
+            .command(&["fleet", "companion"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let holder = fixture.connection();
+    holder
+        .execute_batch("CREATE TABLE contention(value TEXT)")
+        .unwrap();
+    let owner = holder.owner_pid().unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    holder
+        .execute("INSERT INTO contention VALUES('private literal')", [])
+        .unwrap();
+    let waiting = fixture.connection();
+    let write = std::thread::spawn(move || {
+        waiting.execute("INSERT INTO contention VALUES(?1)", ["private binding"])
+    });
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let evidence = loop {
+        let log = fs::read_to_string(&log).unwrap();
+        if let Some(record) = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|record| {
+                record["event"] == "database_writer_wait"
+                    && record["sql"]
+                        .as_str()
+                        .is_some_and(|sql| sql.contains("contention"))
+            })
+        {
+            break Some(record);
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    holder.execute_batch("COMMIT").unwrap();
+    assert_eq!(write.join().unwrap().unwrap(), 1);
+    assert_eq!(holder.owner_pid().unwrap(), owner);
+    assert_eq!(
+        holder
+            .query_row("SELECT count(*) FROM contention", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let evidence = evidence.expect("No bounded writer contention evidence was recorded");
+    assert_eq!(evidence["holder"]["operation"], "execute");
+    assert_eq!(evidence["holder"]["executing"], false);
+    assert!(evidence["holder"]["held_ms"].as_u64().unwrap() >= 5000);
+    assert!(!evidence.to_string().contains("private"));
+}
+
+#[test]
 fn queued_transaction_gets_its_idle_budget_after_the_writer_replies() {
     let root = std::env::temp_dir().join(format!("hb-writer-idle-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();

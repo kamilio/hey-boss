@@ -1,5 +1,7 @@
 use super::{
-    Connection, error, local,
+    Connection,
+    diagnostics::{Activity, Operation},
+    error, local,
     wire::{self, Command, Failure, Reply},
 };
 use rusqlite::Result;
@@ -281,6 +283,7 @@ fn serve(
         waiters: Mutex::new(VecDeque::new()),
         ready: Condvar::new(),
         next: AtomicUsize::new(0),
+        activity: Mutex::new(None),
     });
     let clients = Arc::new(AtomicUsize::new(0));
     // Maintenance uses an ordinary service session. Cold compression and disk
@@ -366,6 +369,7 @@ struct Writer {
     waiters: Mutex<VecDeque<usize>>,
     ready: Condvar,
     next: AtomicUsize,
+    activity: Mutex<Option<Activity>>,
 }
 struct Lease<'a>(Option<MutexGuard<'a, rusqlite::Connection>>, &'a Writer);
 impl std::ops::Deref for Lease<'_> {
@@ -387,6 +391,7 @@ impl Drop for Lease<'_> {
                 true,
             );
             let _ = db.execute_batch("PRAGMA synchronous=FULL;");
+            self.1.activity.lock().unwrap().take();
             // Pair availability changes with acquire's check-to-wait lock so
             // release cannot notify just before the next writer goes to sleep.
             let _waiters = self.1.waiters.lock().unwrap();
@@ -399,12 +404,28 @@ fn acquire<'a>(
     writer: &'a Writer,
     stream: &UnixStream,
     stop: &AtomicBool,
+    operation: &Operation,
 ) -> std::io::Result<Lease<'a>> {
-    let deadline = Instant::now() + Duration::from_secs(45);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(45);
+    let mut reported = false;
     let ticket = writer.next.fetch_add(1, Ordering::Relaxed);
     let mut waiters = writer.waiters.lock().unwrap();
     waiters.push_back(ticket);
     loop {
+        if !reported && started.elapsed() >= Duration::from_secs(5) {
+            reported = true;
+            let holder = writer.activity.lock().unwrap().as_ref().map(|active| {
+                serde_json::json!({"session":active.session,"held_ms":active.acquired.elapsed().as_millis(),
+                    "operation":active.operation.name,"sql":active.operation.sql,
+                    "executing":active.executing,"operation_ms":active.started.elapsed().as_millis()})
+            });
+            let evidence = serde_json::json!({"event":"database_writer_wait","wait_ms":started.elapsed().as_millis(),
+                "operation":operation.name,"sql":operation.sql,"queued":waiters.len(),"holder":holder});
+            drop(waiters);
+            eprintln!("{evidence}");
+            waiters = writer.waiters.lock().unwrap();
+        }
         let cancelled = if stop.load(Ordering::Acquire) {
             Some((
                 std::io::ErrorKind::Interrupted,
@@ -432,6 +453,13 @@ fn acquire<'a>(
             match writer.db.try_lock() {
                 Ok(guard) => {
                     waiters.pop_front();
+                    *writer.activity.lock().unwrap() = Some(Activity {
+                        session: ticket,
+                        acquired: Instant::now(),
+                        started: Instant::now(),
+                        operation: operation.clone(),
+                        executing: true,
+                    });
                     return Ok(Lease(Some(guard), writer));
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -553,8 +581,9 @@ fn session(
                 .unwrap_or(false),
             _ => false,
         };
+        let operation = Operation::new(&command);
         if lease.is_none() && reader.is_autocommit() && needs_writer {
-            lease = match acquire(writer, input.get_ref(), stop) {
+            lease = match acquire(writer, input.get_ref(), stop, &operation) {
                 Ok(lease) => Some(lease),
                 Err(e) => {
                     // Only queue exhaustion is contention. Shutdown, client
@@ -595,6 +624,14 @@ fn session(
         if matches!(command, Command::ExclusiveSession) {
             pinned = true;
         }
+        let started = Instant::now();
+        if lease.is_some() {
+            if let Some(active) = writer.activity.lock().unwrap().as_mut() {
+                active.started = started;
+                active.operation = operation.clone();
+                active.executing = true;
+            }
+        }
         let db = lease.as_deref().unwrap_or(&reader);
         let mut reply = Reply {
             version: wire::VERSION,
@@ -623,6 +660,19 @@ fn session(
         }
         if let Err(e) = result {
             reply.error = Some(Failure::capture(e));
+        }
+        if started.elapsed() >= Duration::from_secs(2) {
+            eprintln!(
+                "{}",
+                serde_json::json!({"event":"database_slow_operation",
+                "operation":operation.name,"sql":operation.sql,"elapsed_ms":started.elapsed().as_millis(),
+                "writer":lease.is_some(),"transaction":reply.transaction,"failed":reply.error.is_some()})
+            );
+        }
+        if lease.is_some() {
+            if let Some(active) = writer.activity.lock().unwrap().as_mut() {
+                active.executing = false;
+            }
         }
         reply.more = false;
         if !reply.transaction && !pinned {

@@ -1,6 +1,7 @@
 //! Transparent SQLite sessions hosted by the existing local service.
 //! Transactions retain exclusive access to one writer until commit, rollback,
 //! or caller disconnect. Independent queries use a read-only WAL connection.
+mod diagnostics;
 pub(crate) mod owner;
 mod paths;
 mod wire;
@@ -16,7 +17,7 @@ use std::{
     io::BufReader,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wire::{Command, Reply, SqlValue};
 
@@ -470,13 +471,17 @@ impl Remote {
             *state = replacement.stream.into_inner();
         }
         let stream = state.as_mut().unwrap();
+        let started = Instant::now();
+        let mut phase = "sending request";
         let result: std::io::Result<Reply> = (|| {
             wire::write(stream.get_mut(), &command)?;
+            phase = "waiting for reply";
             let mut reply = wire::read::<Reply>(stream)?
                 .ok_or_else(|| std::io::Error::other("Database service disconnected"))?;
             let mut rows = Vec::new();
             while reply.more {
                 rows.append(&mut reply.rows);
+                phase = "receiving result rows";
                 reply = wire::read::<Reply>(stream)?
                     .ok_or_else(|| std::io::Error::other("Database result stream disconnected"))?;
             }
@@ -500,6 +505,13 @@ impl Remote {
                 Ok(reply)
             }
             Err(e) => {
+                let operation = diagnostics::Operation::new(&command);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"event":"database_transport_failure",
+                    "operation":operation.name,"sql":operation.sql,"phase":phase,
+                    "elapsed_ms":started.elapsed().as_millis(),"error":e.to_string()})
+                );
                 *state = None;
                 // Dropping the transport makes the service roll back its lease.
                 // A lost rollback reply must not pin this client forever to a
@@ -511,7 +523,8 @@ impl Remote {
                     std::io::Error::new(
                         e.kind(),
                         format!(
-                            "Database service transport failed: {e}. Write outcome may be unknown; mutations are never automatically replayed."
+                            "Database service transport failed: {e} (while {phase}, after {} ms). Write outcome may be unknown; mutations are never automatically replayed.",
+                            started.elapsed().as_millis()
                         ),
                     ),
                 )))

@@ -970,6 +970,53 @@ fn committed_write_with_a_lost_response_is_not_replayed() {
 }
 
 #[test]
+fn reply_timeout_identifies_the_phase_and_never_replays_an_accepted_write() {
+    let fixture = Fixture::new();
+    let forwarding = fixture.connect();
+    forwarding
+        .execute_batch(
+            "CREATE TABLE timeout_counter(value INTEGER); INSERT INTO timeout_counter VALUES(0)",
+        )
+        .unwrap();
+    let (client, server) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let connection = Connection {
+        backend: Backend::Remote(Remote {
+            path: fixture.directory.join("issues.db"),
+            stream: RefCell::new(Some(BufReader::new(client))),
+            transaction: Cell::new(false),
+            last_id: Cell::new(0),
+        }),
+    };
+    let (release, wait) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut server = BufReader::new(server);
+        let Some(Command::Execute { sql, values }) = wire::read(&mut server).unwrap() else {
+            panic!("Expected mutation");
+        };
+        forwarding.execute(&sql, params_from_iter(values)).unwrap();
+        wait.recv().unwrap();
+    });
+    let error = connection
+        .execute("UPDATE timeout_counter SET value=value+1", [])
+        .unwrap_err()
+        .to_string();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM timeout_counter", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(error.contains("waiting for reply"), "{error}");
+    assert!(error.contains("Write outcome may be unknown"), "{error}");
+}
+
+#[test]
 fn graceful_service_shutdown_finishes_an_active_transaction() {
     let mut fixture = Fixture::new();
     let connection = fixture.connect();
