@@ -54,6 +54,15 @@ fn machine(value: &Value, workers: Option<&Vec<Value>>) -> Value {
         result["role"] = json!("companion");
     }
     result["sync"] = super::super::distributed::health::observed(value, now());
+    let mut errors = fields(
+        &value["database_errors"],
+        &["configure", "pull", "heartbeat"],
+    );
+    errors
+        .as_object_mut()
+        .unwrap()
+        .retain(|_, error| error.is_string());
+    result["database_errors"] = errors;
     result["peer_sync"] = value.get("peer_sync").cloned().unwrap_or(Value::Null);
     result["jobs"] = value.get("jobs").cloned().unwrap_or(Value::Null);
     result["worker_count"] = json!(workers.map(Vec::len));

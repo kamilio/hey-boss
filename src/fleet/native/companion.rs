@@ -122,6 +122,53 @@ impl Drop for OperationProgress {
     }
 }
 
+#[derive(Default)]
+struct Contention(std::collections::HashSet<&'static str>);
+impl Contention {
+    fn finish(
+        &mut self,
+        operation: Option<&'static str>,
+        result: Result<()>,
+    ) -> Result<Option<Value>> {
+        let Some(operation @ ("configure" | "pull" | "heartbeat")) = operation else {
+            return result.map(|()| None);
+        };
+        match result {
+            Ok(()) if self.0.remove(operation) => Ok(Some(json!({
+                "kind":"ack","database_operation":operation,"database_error":null
+            }))),
+            Ok(()) => Ok(None),
+            Err(error) if database_busy(error.as_ref()) => {
+                // Do not replay a partially completed operation here. The next
+                // configuration/pull/ping uses durable revisions and cursors.
+                // No snapshot or application acknowledgment accompanies failure.
+                self.0.insert(operation);
+                Ok(Some(json!({"kind":"ack","database_operation":operation,
+                    "database_error":error.to_string()})))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn database_busy(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<crate::issues::Error>()
+            .is_some_and(|e| e.code == "database_busy")
+            || matches!(error.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+        {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
 // Receive replies independently of database work. Four wire-bounded frames
 // retain backpressure for bulk transfers; repeated pings occupy only one slot
 // until their heartbeat has finished. A slow pull must not hide an RPC reply.
@@ -415,6 +462,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         output.clone(),
     );
     let mut pulls = pull::PullReader::default();
+    let mut contention = Contention::default();
     while !ctx.stopped() {
         let Some(message) = input.next()? else {
             break;
@@ -426,7 +474,8 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         }
         let operation = match message["kind"].as_str() {
             Some("pull" | "pull_end") => Some("pull"),
-            Some("configure" | "sync_config") => Some("configure"),
+            Some("configure") => Some("configure"),
+            Some("sync_config") => Some("sync_config"),
             Some("ping") => Some("heartbeat"),
             Some("conversation" | "takeover" | "steer") => Some("request"),
             _ => None,
@@ -436,154 +485,171 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
         let Some(message) = pulls.receive(message)? else {
             continue;
         };
-        match message["kind"].as_str() {
-            Some("sync_config") => {
-                let result = match super::peer_sync::apply(&ctx, &message["settings"]) {
-                    Ok(result) => json!({"kind":"sync_config_ack","result":result}),
-                    Err(error) => json!({"kind":"sync_config_ack","error":error.to_string()}),
-                };
-                reply(&output, result)?;
-            }
-            Some("configure") => {
-                incremental_history = message["worker_history_v1"] == true;
-                relay.configure(&message);
-                reply(&output, control::configure_companion(&ctx, &message)?)?;
-            }
-            Some("pull") => {
-                if db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
-                    r.get::<_, bool>(0)
-                })? {
-                    return Err(invalid(
-                        "Legacy replication is fenced after distributed cutover; upgrade the relay",
-                    ));
+        let mut completed = true;
+        let result = (|| -> Result<()> {
+            match message["kind"].as_str() {
+                Some("sync_config") => {
+                    let result = match super::peer_sync::apply(&ctx, &message["settings"]) {
+                        Ok(result) => json!({"kind":"sync_config_ack","result":result}),
+                        Err(error) => json!({"kind":"sync_config_ack","error":error.to_string()}),
+                    };
+                    reply(&output, result)?;
                 }
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    let payload = super::archive::prepare_pull(
-                        &db,
-                        &message["payload"],
-                        |key, project, number, cursor| {
-                            authority::call_cancellable(
-                                &ctx.state,
-                                &ctx.path,
-                                json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
-                                &|| ctx.stopped(),
-                            )
-                        },
-                    )?;
-                    match replica::apply_pull(
-                        &db,
-                        &ctx.node,
-                        &payload,
-                        message["receipts"]
-                            .as_array()
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]),
-                    ) {
-                        Ok(()) => break,
-                        Err(error)
-                            if error
-                                .downcast_ref::<crate::issues::Error>()
-                                .is_some_and(|e| e.code == "archive_retry")
-                                && Instant::now() < deadline =>
-                        {
-                            continue;
-                        }
-                        Err(error) => {
-                            if error
-                                .downcast_ref::<crate::issues::Error>()
-                                .is_some_and(|e| e.code == "watch_delta_base")
+                Some("configure") => {
+                    incremental_history = message["worker_history_v1"] == true;
+                    relay.configure(&message);
+                    let ack = control::configure_companion(&ctx, &message)?;
+                    completed = ack.get("revision").is_some();
+                    reply(&output, ack)?;
+                }
+                Some("pull") => {
+                    if db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                        r.get::<_, bool>(0)
+                    })? {
+                        return Err(invalid(
+                            "Legacy replication is fenced after distributed cutover; upgrade the relay",
+                        ));
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        let payload = super::archive::prepare_pull(
+                            &db,
+                            &message["payload"],
+                            |key, project, number, cursor| {
+                                authority::call_cancellable(
+                                    &ctx.state,
+                                    &ctx.path,
+                                    json!({"kind":"issue_archive","key":key,"project":project,"number":number,"cursor":cursor}),
+                                    &|| ctx.stopped(),
+                                )
+                            },
+                        )?;
+                        match replica::apply_pull(
+                            &db,
+                            &ctx.node,
+                            &payload,
+                            message["receipts"]
+                                .as_array()
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
+                        ) {
+                            Ok(()) => break,
+                            Err(error)
+                                if error
+                                    .downcast_ref::<crate::issues::Error>()
+                                    .is_some_and(|e| e.code == "archive_retry")
+                                    && Instant::now() < deadline =>
                             {
-                                // Retry this unacknowledged cursor with full watch
-                                // rows once. Keep the cursor and other tables intact.
-                                replica::state_set(&db, "watch_delta_repair", &json!(true))?;
+                                continue;
                             }
-                            return Err(error);
+                            Err(error) => {
+                                if error
+                                    .downcast_ref::<crate::issues::Error>()
+                                    .is_some_and(|e| e.code == "watch_delta_base")
+                                {
+                                    // Retry this unacknowledged cursor with full watch
+                                    // rows once. Keep the cursor and other tables intact.
+                                    replica::state_set(&db, "watch_delta_repair", &json!(true))?;
+                                }
+                                return Err(error);
+                            }
                         }
                     }
-                }
-                crate::chief_ownership::stop_unassigned(&db)?;
-                status.lock().unwrap().synced()?;
-                control::reconcile(
-                    &ctx,
-                    &ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?,
-                )?;
-                reply(
-                    &output,
-                    json!({"kind":"ack","cursor":replica::state_get(&db,"cursor",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
-                )?;
-            }
-            Some("signal") => {
-                if tx.try_send(message.clone()).is_err() {
+                    crate::chief_ownership::stop_unassigned(&db)?;
+                    status.lock().unwrap().synced()?;
+                    control::reconcile(
+                        &ctx,
+                        &ctx.read_json(&ctx.state.join("fleet-agent.json"), json!({}))?,
+                    )?;
                     reply(
                         &output,
-                        json!({"kind":"ack","signal":{"id":message["id"],"state":"pending","error":"Worker control queue is busy"}}),
+                        json!({"kind":"ack","cursor":replica::state_get(&db,"cursor",Value::Null)?,"pending":count(&db,"fleet_outbox")?}),
                     )?;
                 }
-            }
-            Some("conversation" | "takeover" | "steer") => {
-                let cursor = message.get("cursor").cloned().unwrap_or(json!(0));
-                let result = if message["kind"] == "steer" {
-                    takeover::steer(&ctx, &message)
-                } else if message["kind"] == "takeover" {
-                    takeover::apply(&ctx, message["run"].as_str().unwrap_or(""))
-                } else {
-                    conversation::page(&ctx, message["run"].as_str().unwrap_or(""), &cursor)
+                Some("signal") => {
+                    if tx.try_send(message.clone()).is_err() {
+                        reply(
+                            &output,
+                            json!({"kind":"ack","signal":{"id":message["id"],"state":"pending","error":"Worker control queue is busy"}}),
+                        )?;
+                    }
                 }
-                .unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
-                reply(
-                    &output,
-                    json!({"kind":message["kind"],"id":message["id"],"result":result}),
-                )?;
-            }
-            Some("job_dispatch") => {
-                let dispatch = serde_json::from_value(message["dispatch"].clone())?;
-                let markdown = message["markdown"]
-                    .as_str()
-                    .ok_or_else(|| invalid("Missing job instructions"))?;
-                super::jobs::receive(&ctx, &dispatch, markdown)?;
-            }
-            Some("job_ack") => {
-                super::jobs::acknowledge(
-                    &ctx,
-                    &serde_json::from_value(message["report"].clone())?,
-                )?;
-            }
-            Some("ping") => {
-                let utility_error = message
-                    .get("global_utilities")
-                    .map(|names| super::global_utilities::apply(&ctx, names))
-                    .unwrap_or(Value::Null);
-                let mut workers = if incremental_history {
-                    ctx.workers_incremental(&mut history_versions)?
-                } else {
-                    ctx.workers()?
-                };
-                if incremental_history {
-                    history.encode(&mut workers);
+                Some("conversation" | "takeover" | "steer") => {
+                    let cursor = message.get("cursor").cloned().unwrap_or(json!(0));
+                    let result = if message["kind"] == "steer" {
+                        takeover::steer(&ctx, &message)
+                    } else if message["kind"] == "takeover" {
+                        takeover::apply(&ctx, message["run"].as_str().unwrap_or(""))
+                    } else {
+                        conversation::page(&ctx, message["run"].as_str().unwrap_or(""), &cursor)
+                    }
+                    .unwrap_or_else(|e| json!({"ok":false,"error":e.to_string()}));
+                    reply(
+                        &output,
+                        json!({"kind":message["kind"],"id":message["id"],"result":result}),
+                    )?;
                 }
-                // Acknowledgment precedes observation of the stopped Chief.
-                let chief_ownership = crate::chief_ownership::read(&db)?;
-                let distributed_active =
-                    db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
-                        r.get::<_, bool>(0)
-                    })?;
-                let changes = if distributed_active {
-                    vec![]
-                } else {
-                    replica::journal(&db, 0)?
-                };
-                let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":changes,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
-                let mut heartbeat = heartbeat;
-                heartbeat["distributed_active"] = json!(distributed_active);
-                heartbeat["sync"] = super::distributed::health::cached(&ctx)?;
-                heartbeat["peer_sync"] = super::peer_sync::status(&ctx)?;
-                heartbeat["utility_error"] = utility_error;
-                // The peer can send its next ping as soon as it receives this reply.
-                input.finish_ping();
-                reply(&output, heartbeat)?;
+                Some("job_dispatch") => {
+                    let dispatch = serde_json::from_value(message["dispatch"].clone())?;
+                    let markdown = message["markdown"]
+                        .as_str()
+                        .ok_or_else(|| invalid("Missing job instructions"))?;
+                    super::jobs::receive(&ctx, &dispatch, markdown)?;
+                }
+                Some("job_ack") => {
+                    super::jobs::acknowledge(
+                        &ctx,
+                        &serde_json::from_value(message["report"].clone())?,
+                    )?;
+                }
+                Some("ping") => {
+                    let utility_error = message
+                        .get("global_utilities")
+                        .map(|names| super::global_utilities::apply(&ctx, names))
+                        .unwrap_or(Value::Null);
+                    let mut next_versions = history_versions.clone();
+                    let workers = if incremental_history {
+                        ctx.workers_incremental(&mut next_versions)?
+                    } else {
+                        ctx.workers()?
+                    };
+                    // Acknowledgment precedes observation of the stopped Chief.
+                    let chief_ownership = crate::chief_ownership::read(&db)?;
+                    let distributed_active =
+                        db.query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+                            r.get::<_, bool>(0)
+                        })?;
+                    let changes = if distributed_active {
+                        vec![]
+                    } else {
+                        replica::journal(&db, 0)?
+                    };
+                    let heartbeat = json!({"kind":"heartbeat","jobs":super::jobs::capability(&ctx)?,"job_reports":super::jobs::reports(&ctx)?,"watch_deltas":replica::state_get(&db,"watch_delta_repair",json!(false))? != true,"at":now(),"chief_ownership":chief_ownership,"worker_history_v1":incremental_history,"workers":workers,"changes":changes,"cursor":replica::state_get(&db,"cursor",Value::Null)?,"local_config":local_config(&ctx)?,"pending":count(&db,"fleet_outbox")?,"conflicts":replica::rows(&db,"SELECT count(*) count FROM fleet_conflicts WHERE resolved=0",&[])?[0]["count"],"revision":replica::state_get(&db,"revision",Value::Null)?});
+                    let mut heartbeat = heartbeat;
+                    heartbeat["distributed_active"] = json!(distributed_active);
+                    heartbeat["sync"] = super::distributed::health::cached(&ctx)?;
+                    heartbeat["peer_sync"] = super::peer_sync::status(&ctx)?;
+                    heartbeat["utility_error"] = utility_error;
+                    // Only a fully collected heartbeat advances the delta baseline.
+                    // A failed observation must not lose runs on the next ping.
+                    if incremental_history {
+                        history.encode(heartbeat["workers"].as_array_mut().unwrap());
+                        history_versions = next_versions;
+                    }
+                    // The peer can send its next ping as soon as it receives this reply.
+                    input.finish_ping();
+                    reply(&output, heartbeat)?;
+                }
+                _ => return Err(invalid("Unknown fleet message kind")),
             }
-            _ => return Err(invalid("Unknown fleet message kind")),
+            Ok(())
+        })();
+        if result.is_ok() && !completed {
+            continue;
+        }
+        if let Some(ack) = contention.finish(operation, result)? {
+            input.finish_ping();
+            reply(&output, ack)?;
         }
     }
     // Closing the transport leaves detached workers and active agents alive.
@@ -669,6 +735,65 @@ pub(super) fn daemon(ctx: Context) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contention_reports_only_typed_busy_errors_and_clears_each_operation_after_success() {
+        let mut contention = Contention::default();
+        for operation in ["configure", "pull", "heartbeat"] {
+            for code in [
+                rusqlite::ffi::SQLITE_BUSY,
+                rusqlite::ffi::SQLITE_LOCKED,
+                rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            ] {
+                let error = rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(code),
+                    Some("fixture contention".into()),
+                );
+                let ack = contention
+                    .finish(Some(operation), Err(error.into()))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(ack["database_operation"], operation);
+                assert!(ack["database_error"].is_string());
+                for field in ["revision", "cursor", "workers", "last_sync"] {
+                    assert!(ack.get(field).is_none(), "Failure acknowledged {field}");
+                }
+            }
+        }
+        assert_eq!(contention.0.len(), 3);
+        for operation in ["configure", "pull", "heartbeat"] {
+            let ack = contention.finish(Some(operation), Ok(())).unwrap().unwrap();
+            assert_eq!(ack["database_error"], Value::Null);
+            assert!(
+                contention
+                    .finish(Some(operation), Ok(()))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for error in [
+            invalid("database is locked; this text is not a typed SQLite error"),
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "unknown write outcome").into(),
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+                None,
+            )
+            .into(),
+        ] {
+            assert!(contention.finish(Some("pull"), Err(error)).is_err());
+        }
+        let busy = || {
+            Box::new(crate::issues::Error::new("database_busy", "fixture"))
+                as Box<dyn std::error::Error + Send + Sync>
+        };
+        assert!(contention.finish(Some("request"), Err(busy())).is_err());
+        assert!(
+            contention
+                .finish(Some("heartbeat"), Err(busy()))
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn utilities_execute_while_replication_is_blocked() {
