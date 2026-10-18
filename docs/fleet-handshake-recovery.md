@@ -55,8 +55,12 @@ stop the session.
 Reservation renewal timestamps are taken after acquiring the writer. Before
 expiring local reservations, reconciliation checks the owning process and renews
 live attempts in the same transaction. This also covers a peer update or journal
-projection that reaches the writer before the renewal loop. Dead processes and
-remote evidence still expire; replayed presence cannot renew a remote lease.
+projection that reaches the writer before the renewal loop. Unlaunched reservations
+can expire, but launched attempts retain their reservation until the owning machine
+publishes release after completion or process death. Missing presence, an observer
+reboot, or a delayed presence list cannot prove a remote agent stopped. Replayed
+presence cannot renew a lease. An unreachable owner therefore keeps its launched
+work reserved until it reconnects and reconciles its actual processes.
 Regressions exercise the 45-second writer queue timeout, recovery without a new
 application thread, and local reservation preservation after lease expiry. They
 reproduce the failure mechanisms without claiming to identify the historical

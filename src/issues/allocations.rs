@@ -157,7 +157,7 @@ pub(crate) fn record_exchange(db: &Connection, peer: &str, elapsed: Duration) ->
 
 /// Called inside the application's write transaction after projection or pickup.
 /// Unchanged/replayed heartbeats never extend a lease. Each replica ages what it
-/// actually received, so skewed clocks and stale replay cannot keep claims alive.
+/// actually received. Launched attempts retain a durable fence until release.
 pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
     if !enabled(db)? {
         return Ok(());
@@ -165,7 +165,7 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
     // An expired local pulse is not evidence that its process stopped. A peer
     // update or projection may acquire the writer before the renewal loop does.
     // Refresh those actual processes in this same transaction before choosing
-    // winners. Remote evidence still expires normally.
+    // winners. Expired remote presence never proves a launched process stopped.
     if db.query_row(
         "SELECT EXISTS(SELECT 1 FROM worker_allocations a
         JOIN worker_allocation_observations o ON o.id=a.id
@@ -189,20 +189,23 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
         deadline_tick=CASE WHEN EXISTS(SELECT 1 FROM json_each(p.attempts) WHERE value=a.id) THEN p.seen_tick+p.remaining_ms ELSE ?2 END
         FROM worker_allocations a JOIN worker_allocation_presence p ON p.machine=a.machine
         WHERE o.id=a.id AND a.released=0 AND p.boot=?1 AND p.sequence>=a.presence_after AND p.sequence>o.presence_sequence",params![clock.boot,clock.tick])?;
-    // Work on the active frontier only. Historical attempt facts remain durable.
+    // Missing presence cannot prove that a launched process stopped. Keep its
+    // durable reservation until its owner publishes release; only unlaunched
+    // reservations may expire. Otherwise a delayed writer can enable duplicate
+    // pickup on a different machine while the original agent keeps running.
     db.execute("DELETE FROM fleet_allocations WHERE (project_id,issue_number) IN (
         SELECT w.project_id,w.issue_number FROM worker_allocation_winners w WHERE NOT EXISTS(
         SELECT 1 FROM worker_allocations a JOIN worker_allocation_observations o ON o.id=a.id
-        WHERE a.project_id=w.project_id AND a.issue_number=w.issue_number AND a.released=0 AND o.boot=?1 AND o.deadline_tick>?2))", params![clock.boot,clock.tick])?;
+        WHERE a.project_id=w.project_id AND a.issue_number=w.issue_number AND a.released=0 AND (a.launched IS NOT NULL OR (o.boot=?1 AND o.deadline_tick>?2))))", params![clock.boot,clock.tick])?;
     db.execute("DELETE FROM worker_allocation_winners AS w WHERE NOT EXISTS(
         SELECT 1 FROM worker_allocations a JOIN worker_allocation_observations o ON o.id=a.id
-        WHERE a.project_id=w.project_id AND a.issue_number=w.issue_number AND a.released=0 AND o.boot=?1 AND o.deadline_tick>?2)",params![clock.boot,clock.tick])?;
+        WHERE a.project_id=w.project_id AND a.issue_number=w.issue_number AND a.released=0 AND (a.launched IS NOT NULL OR (o.boot=?1 AND o.deadline_tick>?2)))",params![clock.boot,clock.tick])?;
     db.execute("INSERT INTO worker_allocation_winners
         SELECT project_id,issue_number,id,machine FROM (
         SELECT a.project_id,a.issue_number,a.id,a.machine,
           row_number() OVER (PARTITION BY a.project_id,a.issue_number ORDER BY a.launched IS NULL,coalesce(a.launched,a.ticket),a.machine,a.id) AS rank
         FROM worker_allocations a JOIN worker_allocation_observations o ON o.id=a.id
-        WHERE a.released=0 AND o.boot=?1 AND o.deadline_tick>?2) WHERE rank=1
+        WHERE a.released=0 AND (a.launched IS NOT NULL OR (o.boot=?1 AND o.deadline_tick>?2))) WHERE rank=1
         ON CONFLICT(project_id,issue_number) DO UPDATE SET id=excluded.id,machine=excluded.machine
         WHERE worker_allocation_winners.id<>excluded.id OR worker_allocation_winners.machine<>excluded.machine", params![clock.boot,clock.tick])?;
     db.execute_batch("INSERT INTO fleet_allocations SELECT project_id,issue_number,machine FROM worker_allocation_winners WHERE true
@@ -212,7 +215,7 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
 }
 
 /// Renew only while the local worker process still owns the attempt. Restarts
-/// cannot resurrect a dead process; remote replicas expire its last heartbeat.
+/// cannot resurrect a dead process; its owner publishes release to the replicas.
 pub(crate) fn maintain(db: &Connection) -> Result<()> {
     if !enabled(db)? {
         return Ok(());
@@ -455,6 +458,63 @@ mod tests {
         }
     }
     #[test]
+    fn lost_presence_cannot_offer_a_launched_remote_attempt_to_another_worker() {
+        let (_root, db) = fixture();
+        reserve(&db, "running-remote", "remote", 1, Some(1));
+        reconcile(&db, &clock(0)).unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("running-remote"));
+        // The remote application's writer can stop renewals while its agent
+        // continues running. Time alone cannot establish that it exited.
+        reconcile(&db, &clock(100_000)).unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("running-remote"));
+        reserve(&db, "new-local", "local", 2, None);
+        reconcile(&db, &clock(100_001)).unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("running-remote"));
+        assert!(!owns(&db, "new-local", "p", 1).unwrap());
+        // Even a fresh presence list that omits the attempt is not a durable
+        // release: presence and launch facts can arrive in different orders.
+        pulse(&db, "remote", 2, "[]", 100_002, 10);
+        reconcile(&db, &clock(100_002)).unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("running-remote"));
+        // Rebooting an observer and receiving old presence cannot clear the
+        // durable launch fence either. Only the owning replica releases it.
+        reconcile(
+            &db,
+            &Clock {
+                boot: "next-boot".into(),
+                tick: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("running-remote"));
+        db.execute(
+            "UPDATE worker_allocations SET released=1 WHERE id='running-remote'",
+            [],
+        )
+        .unwrap();
+        reconcile(
+            &db,
+            &Clock {
+                boot: "next-boot".into(),
+                tick: 2,
+            },
+        )
+        .unwrap();
+        assert!(winner(&db).is_none());
+        reserve(&db, "next-local", "local", 3, None);
+        reconcile(
+            &db,
+            &Clock {
+                boot: "next-boot".into(),
+                tick: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("next-local"));
+        assert!(owns(&db, "next-local", "p", 1).unwrap());
+    }
+
+    #[test]
     fn idle_reconciliation_does_not_write_or_extend_deadlines() {
         let (_root, db) = fixture();
         reserve(&db, "a", "machine-a", 1, None);
@@ -485,11 +545,11 @@ mod tests {
         assert_eq!(winner(&db).as_deref(), Some("a"));
         reconcile(&db, &clock(110)).unwrap();
         assert_eq!(winner(&db), None);
-        // Even a launch update cannot renew the liveness lease.
+        // A delayed launch fact fences new pickup without renewing presence.
         db.execute("UPDATE worker_allocations SET launched=2", [])
             .unwrap();
         reconcile(&db, &clock(111)).unwrap();
-        assert_eq!(winner(&db), None);
+        assert_eq!(winner(&db).as_deref(), Some("a"));
         pulse(&db, "machine-a", 2, "[\"a\"]", 112, 10);
         reconcile(&db, &clock(112)).unwrap();
         assert_eq!(winner(&db).as_deref(), Some("a"));
@@ -501,6 +561,10 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(winner(&db).as_deref(), Some("a"));
+        db.execute("UPDATE worker_allocations SET released=1", [])
+            .unwrap();
+        reconcile(&db, &clock(113)).unwrap();
         assert_eq!(winner(&db), None);
     }
     #[test]
