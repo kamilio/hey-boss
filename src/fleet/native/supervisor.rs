@@ -101,6 +101,29 @@ impl Supervisor {
             state.events.pop_front();
         }
     }
+    fn database_observation(&self, host: &str, message: &Value) -> Result<()> {
+        let Some(operation) = message["database_operation"].as_str() else {
+            return Ok(());
+        };
+        if !matches!(operation, "configure" | "pull" | "heartbeat")
+            || !(message["database_error"].is_string()
+                || message.get("database_error") == Some(&Value::Null))
+        {
+            return Err(invalid("Invalid database observation"));
+        }
+        let mut errors = self.machine(host)["database_errors"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(error) = message["database_error"].as_str() {
+            errors.insert(operation.into(), json!(error));
+            self.event(host, "database", &format!("{operation}: {error}"));
+        } else {
+            errors.remove(operation);
+            self.event(host, "database", &format!("{operation}: recovered"));
+        }
+        self.update(host, json!({"database_errors":errors}))
+    }
     fn update(&self, host: &str, fields: Value) -> Result<()> {
         let fields = fields
             .as_object()
@@ -1114,7 +1137,7 @@ impl Supervisor {
         // Publishing connected permits utility requests immediately. Their
         // replies must already bypass a blocked synchronization handler.
         peer.set(node.to_owned()).unwrap();
-        self.update(host,json!({"utils_v1":hello["capabilities"]["utils_v1"],"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"error":null}))?;
+        self.update(host,json!({"utils_v1":hello["capabilities"]["utils_v1"],"node":node,"hostname":hello["hostname"],"state":"connected","role":"agent","heartbeat":now(),"build":hello["build"],"installed_build":null,"workers":hello["workers"],"chief_ownership":hello["chief_ownership"],"desired_workers":workers,"desired_revision":revision,"applied_revision":hello["revision"],"pending":hello.get("pending").unwrap_or(&json!(0)),"database_errors":{},"error":null}))?;
         self.event(host, "connected", "Companion connected");
         let github = if hello["capabilities"]["github_reads_v1"] == true {
             Some(super::github_reads::Backend::new(hey_gh::ApiClient::new(
@@ -1332,6 +1355,7 @@ impl Supervisor {
                             .as_object()
                             .is_some_and(|r| !r.is_empty())
                         || !self.machine(host)["configuration_error"].is_null()
+                        || self.machine(host)["database_errors"]["configure"].is_string()
                         || message["local_config"]
                             .as_array()
                             .is_some_and(|changes| !changes.is_empty())
@@ -1362,6 +1386,7 @@ impl Supervisor {
                     }
                 }
                 Some("ack") => {
+                    self.database_observation(host, &message)?;
                     if let Some(checkouts) = message.get("project_checkouts") {
                         self.update(host, json!({"project_checkouts":checkouts}))?;
                     }
@@ -2184,6 +2209,56 @@ fn configuration_base_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_waits_preserve_workers_and_sync_evidence_until_each_operation_recovers() {
+        let (_directory, app) = test_supervisor();
+        let worker = json!({"id":"productive","pid":123,"active":1,"runs":[{"id":"run"}]});
+        app.update(
+            "peer",
+            json!({"state":"connected","workers":[worker],"last_sync":42,"applied_revision":"old"}),
+        )
+        .unwrap();
+        for operation in ["configure", "pull", "heartbeat"] {
+            app.database_observation(
+                "peer",
+                &json!({"database_operation":operation,"database_error":"writer queue timed out"}),
+            )
+            .unwrap();
+        }
+        app.database_observation(
+            "peer",
+            &json!({"database_operation":"heartbeat","database_error":null}),
+        )
+        .unwrap();
+        let machine = app.machine("peer");
+        assert_eq!(machine["state"], "connected");
+        assert_eq!(machine["workers"], json!([worker]));
+        assert_eq!(machine["last_sync"], 42);
+        assert_eq!(machine["applied_revision"], "old");
+        assert_eq!(machine["database_errors"].as_object().unwrap().len(), 2);
+        let status = app.status_request(&json!({"view":"summary"})).unwrap();
+        let compact = status["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["host"] == "peer")
+            .unwrap();
+        assert_eq!(compact["database_errors"], machine["database_errors"]);
+        for operation in ["configure", "pull"] {
+            app.database_observation(
+                "peer",
+                &json!({"database_operation":operation,"database_error":null}),
+            )
+            .unwrap();
+        }
+        assert!(
+            app.machine("peer")["database_errors"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn distributed_cutover_rejects_old_peers_before_importing_their_rows() {

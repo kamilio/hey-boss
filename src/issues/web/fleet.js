@@ -178,6 +178,8 @@ function jobConversation(entry,data,now=Date.now()) {
   return {...entry,machine:machine||entry.machine,online:!!machine&&machine.state==='connected'&&now/1000-(machine.heartbeat||0)<=15};
 }
 function syncProblem(machine, now=Date.now()) {
+  const waiting=['configure','pull','heartbeat'].filter(operation=>machine.database_errors?.[operation]);
+  if(waiting.length){const names={configure:'settings',pull:'data sync',heartbeat:'activity'};return 'Database busy; '+waiting.map(operation=>names[operation]).join(' and ')+' will retry';}
   if(machine.peer_sync_error)return 'Peer sync: '+machine.peer_sync_error;
   const sample=machine.sync;
   const local=['supervisor','controller'].includes(machine.role);

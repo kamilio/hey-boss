@@ -86,6 +86,9 @@ pub(super) fn status_text(v: &Value) -> String {
                 let _ = writeln!(out, "  {key}: {}", text(&m[key]));
             }
         }
+        for (operation, error) in m["database_errors"].as_object().into_iter().flatten() {
+            let _ = writeln!(out, "  Database waiting ({operation}): {}", text(error));
+        }
         if let Some(available) = m["jobs"]["available"].as_bool() {
             let _ = writeln!(
                 out,

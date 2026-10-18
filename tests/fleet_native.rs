@@ -322,6 +322,118 @@ fn configuration_reports_liveness_while_waiting_for_the_writer() {
 }
 
 #[test]
+fn configuration_contention_keeps_the_connection_and_retries_without_a_false_revision() {
+    companion_recovers_from_contention("configure");
+}
+
+#[test]
+fn pull_contention_keeps_the_connection_and_retries_without_a_false_cursor() {
+    companion_recovers_from_contention("pull");
+}
+
+fn companion_recovers_from_contention(operation: &str) {
+    use serde_json::json;
+    use std::sync::mpsc;
+
+    let fixture = Fixture::new();
+    let mut child = Service(
+        fixture
+            .command(&["fleet", "companion", "--stdio"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id();
+    let mut input = child.0.stdin.take().unwrap();
+    let output = child.0.stdout.take().unwrap();
+    let (frames, received) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            if frames
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    loop {
+        if received.recv_timeout(Duration::from_secs(20)).unwrap()["kind"] == "hello" {
+            break;
+        }
+    }
+    let db = hey_boss::database::Connection::connect(&fixture.root.join("issues.db")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let message = if operation == "configure" {
+        json!({"version":1,"kind":"configure","controller":"fixture","revision":"after-contention","workers":[]})
+    } else {
+        json!({"version":1,"kind":"pull","payload":{"changes":[],"cursor":42,"allocations":[],"ranges":[]},"receipts":[]})
+    };
+    writeln!(input, "{message}").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(55);
+    let failure = loop {
+        // Keep the contending transaction productive beyond the owner's
+        // 45-second writer-acquisition deadline, without touching live data.
+        db.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        match received.recv_timeout(Duration::from_secs(1)) {
+            Ok(frame) => {
+                assert!(
+                    frame.get("revision").is_none() && frame.get("cursor").is_none(),
+                    "Premature acknowledgment: {frame}"
+                );
+                if frame.get("database_error").is_some() {
+                    break frame;
+                }
+                assert_eq!(frame["progress"], operation, "{frame}");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+            error => panic!("Companion lost {operation} during contention: {error:?}"),
+        }
+    };
+    assert_eq!(failure["database_operation"], operation);
+    assert!(
+        failure["database_error"]
+            .as_str()
+            .unwrap()
+            .contains("writer")
+    );
+    assert!(child.0.try_wait().unwrap().is_none());
+    db.execute_batch("COMMIT").unwrap();
+    writeln!(input, "{message}").unwrap();
+    let mut acknowledged = false;
+    loop {
+        let frame = received.recv_timeout(Duration::from_secs(15)).unwrap();
+        if operation == "configure" && frame["revision"] == "after-contention"
+            || operation == "pull" && frame["cursor"] == 42
+        {
+            acknowledged = true;
+        }
+        if frame["database_operation"] == operation && frame["database_error"].is_null() {
+            assert!(
+                acknowledged,
+                "Recovery must follow the applied acknowledgment"
+            );
+            break;
+        }
+    }
+    // The same process can still report workers after recovering.
+    writeln!(input, "{}", json!({"version":1,"kind":"ping"})).unwrap();
+    loop {
+        if received.recv_timeout(Duration::from_secs(15)).unwrap()["kind"] == "heartbeat" {
+            break;
+        }
+    }
+    assert_eq!(child.0.id(), pid);
+    drop(db);
+    drop(input);
+    assert!(child.0.wait().unwrap().success());
+    reader.join().unwrap();
+}
+
+#[test]
 fn authority_replies_arrive_while_a_replica_pull_waits_for_the_writer() {
     use serde_json::json;
     use std::sync::mpsc;

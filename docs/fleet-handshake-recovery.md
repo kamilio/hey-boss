@@ -31,6 +31,21 @@ Writes are throttled to once per second. Only a completed pull advances
 `last_sync`; EOF clears connection freshness without erasing the last sync time.
 No worker restart, pause, capacity adjustment, or assignment change is needed.
 
+The database owner measures transaction idle time after sending a reply. Writer
+queue waits and SQL execution do not consume the client's 30-second idle budget.
+A focused reproduction holds an active writer for 32 seconds: a queued transaction
+must still insert and commit once, without a broken connection after `BEGIN`.
+
+When configuration, pull application, or heartbeat collection encounters typed
+SQLite busy/locked errors, the companion keeps its transport and reports the
+waiting operation. It sends no replacement worker snapshot, revision, or cursor
+for the failed operation. Subsequent supervisor messages retry from durable state;
+the warning clears separately for each completed operation. Worker history delta
+baselines advance only after a complete heartbeat is ready. Transport failures
+and unknown write outcomes remain errors and are never automatically replayed.
+Queue timeouts are distinguished from service shutdown and writer failure.
+The Workers page shows “Database busy” while retaining connected worker activity.
+
 Authority commands allow up to 15 seconds for a missing/refused local relay or
 an unfinished supervisor handshake to recover. The same deadline covers the
 response, including partial frames; cancellation stops waiting. An explicit
@@ -49,6 +64,7 @@ Verification uses private databases and transport processes:
 cargo test --locked -p hey-boss --lib fleet::native::
 cargo test --locked -p hey-boss --test fleet_native --test fleet_tunnel
 node tools/test_fleet_view.js
+node tools/fleet_contention_browser_checks.mjs
 ```
 
 `tools/fleet_handshake_browser_checks.js` runs with `playwright-cli run-code`

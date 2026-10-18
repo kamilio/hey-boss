@@ -160,3 +160,6 @@ assert.match(syncProblem({...connectedSync,sync:{state:'shadow',message:'Migrati
 assert.match(syncProblem({...connectedSync,sync:undefined},now),/not verified/);
 assert.match(syncProblem({...connectedSync,sync_observed_at:now/1000-31},now),/not verified/);
 assert.match(syncProblem({...connectedSync,peer_sync_error:'No SSH route'},now),/No SSH route/);
+assert.equal(syncProblem({...connectedSync,database_errors:{pull:'Database writer unavailable'}},now),'Database busy; data sync will retry');
+assert.equal(syncProblem({...connectedSync,database_errors:{configure:'Database writer unavailable',heartbeat:'locked'}},now),'Database busy; settings and activity will retry');
+assert.equal(syncProblem({...connectedSync,database_errors:{}},now),null,'Only completed recovery clears the contention warning');
