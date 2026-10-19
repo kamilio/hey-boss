@@ -78,6 +78,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let view = Overlay()
             view.onToggle = { [weak self] in self?.toggle() }
             view.onCancel = { [weak self] in self?.cancel() }
+            view.onOpenAccessibility = { [weak self] in
+                self?.accessibilitySetup.show()
+                self?.accessibilitySetup.openSettings()
+            }
             view.level = { [weak self] in self?.capture.level ?? 0 }
             overlay = view
         }
@@ -277,7 +281,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         if self.session.generation == id {
                             self.scheduleRelease()
                             if !saved { self.overlay?.error("History could not be saved. Copy your text from Dictation History before quitting.") }
-                            else if let reason { self.overlay?.error(reason.message) }
+                            else if let reason { self.overlay?.error(reason.message, accessibilityAction: reason == .accessibility) }
                         }
                     }
                     if shouldPaste, self.session.generation == id {
