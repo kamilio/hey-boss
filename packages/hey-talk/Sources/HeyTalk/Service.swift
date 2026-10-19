@@ -8,6 +8,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let inference = Inference()
     private let history = DictationHistory()
     private var historyWindow: HistoryWindow?
+    private lazy var accessibilitySetup = AccessibilitySetup()
     private lazy var cues = AudioCues()
     private var session = RecordingSession()
     private var overlay: Overlay?
@@ -38,8 +39,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         hotkey?.onAction = { [weak self] action in
             guard let self else { return }
             switch action {
-            case .start: self.start(showOverlay: self.overlayEnabled, paste: true) { _ in }
-            case .stop: if self.session.phase == .recording { self.stop { _ in } }
+            case .toggle: self.toggle()
             case .cancel: if self.session.phase == .recording || self.session.phase == .processing { self.cancel() }
             case .none: break
             }
@@ -47,12 +47,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Enable Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menuItem?.menu = menu
         history.refresh()
         if overlayEnabled { showOverlay(true) }
+        if CommandLine.arguments.contains("--show-history") { showHistory() }
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
@@ -62,6 +63,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     func applicationWillTerminate(_ notification: Notification) { capture.cancel(); inference.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showOverlay(true); showHistory(); return true
+    }
+    @objc private func showAccessibilitySetup() { accessibilitySetup.show() }
     @objc private func showHistory() {
         if historyWindow == nil { historyWindow = HistoryWindow(history: history) }
         history.refresh(); historyWindow?.show()
@@ -88,12 +93,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         var value: [String: Any] = [
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
-            "hotkey": DictationShortcut.name, "hotkey_registered": hotkey?.registered ?? false,
+            "hotkey_mode": "toggle", "hotkey": DictationShortcut.name, "hotkey_registered": hotkey?.registered ?? false,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
             "capture_start_ms": captureMilliseconds, "peak_rms": capture.maximumLevel,
             "microphone_ready": captureReady,
+            "bluetooth_input": capture.usesBluetooth,
             "microphone": permissionName, "accessibility": AXIsProcessTrusted(),
         ]
         if let pid = inference.pid { value["inference_pid"] = pid }
@@ -178,8 +184,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if request["kind"] as? String == "microphone" {
                 AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { reply(self.status()) } }
             } else if request["kind"] as? String == "accessibility" {
-                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-                _ = AXIsProcessTrustedWithOptions(options); reply(status())
+                showAccessibilitySetup(); reply(status())
             } else { reply(failure("Use permissions microphone or permissions accessibility")) }
         case "quit":
             reply(["ok": true, "state": "stopped"])
@@ -207,7 +212,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.captureMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 self.captureReady = true
                 self.overlay?.update(.recording); self.hotkey?.captureEscape(true)
-                self.cues.start()
+                // NSSound can switch a Bluetooth headset's output profile and
+                // invalidate its microphone graph. The visible pill is the cue.
+                if !self.capture.usesBluetooth { self.cues.start() }
                 let limit = DispatchWorkItem { [weak self] in
                     guard let self, self.session.generation == id, self.session.phase == .recording else { return }
                     self.stop { _ in }
@@ -226,7 +233,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         guard session.phase == .recording else { reply(failure("No recording is active")); return }
         maximumDuration?.cancel(); maximumDuration = nil
         let id = session.generation
-        guard captureReady else { cancel(); reply(failure("Released before the microphone was ready")); return }
+        guard captureReady else { cancel(); reply(failure("Stopped before the microphone was ready")); return }
         captureReady = false
         do { try session.processing(id) } catch { reply(failure(error.localizedDescription)); return }
         overlay?.update(.processing); pendingReply = reply
@@ -235,7 +242,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let samples):
-                self.cues.stop()
+                if !self.capture.usesBluetooth { self.cues.stop() }
                 guard samples.count >= 2400 else { self.cancel(); return }
                 self.decode(samples, id: id)
             }

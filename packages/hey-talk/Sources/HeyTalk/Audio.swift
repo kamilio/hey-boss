@@ -13,6 +13,13 @@ struct InputDevice {
 }
 
 enum AudioDevices {
+    static func isBluetoothInput(uid: String?) -> Bool {
+        let device = uid.flatMap { selected in list().first(where: { $0.uid == selected })?.id } ?? defaultInput
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0, size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return false }
+        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
     static var defaultInput: AudioDeviceID {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var device: AudioDeviceID = 0, size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -42,8 +49,20 @@ enum AudioDevices {
     }
 }
 
+private final class CaptureReceiver: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
+    let receive: (CMSampleBuffer) -> Void
+    init(receive: @escaping (CMSampleBuffer) -> Void) { self.receive = receive }
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        receive(sampleBuffer)
+    }
+}
+
 final class AudioCapture {
-    private var engine: AVAudioEngine?
+    private var captureSession: AVCaptureSession?
+    private var receiver: CaptureReceiver?
+    private var output: AVCaptureAudioDataOutput?
+    private var observers: [NSObjectProtocol] = []
+    private var watchdog: DispatchSourceTimer?
     private let control = DispatchQueue(label: "hey-talk.audio-control", qos: .userInitiated)
     private let processing = DispatchQueue(label: "hey-talk.audio", qos: .userInteractive)
     private let lock = NSLock()
@@ -51,129 +70,128 @@ final class AudioCapture {
     private var rms: Double = 0
     private var peak: Float = 0
     private var fault: String?
-    private var pending = 0
     private var token: UInt64 = 0
-    private var observer: NSObjectProtocol?
-    private var routeRestarts = 0
+    private var bluetooth = false
+    private var lastAudioAt: TimeInterval = 0
     var onFailure: ((String) -> Void)?
     var level: Double { lock.lock(); defer { lock.unlock() }; return rms }
     var sampleCount: Int { lock.lock(); defer { lock.unlock() }; return samples.count }
     var maximumLevel: Float { lock.lock(); defer { lock.unlock() }; return peak }
+    var usesBluetooth: Bool { lock.lock(); defer { lock.unlock() }; return bluetooth }
 
     func start(uid: String?, completion: @escaping (Result<Void, Error>) -> Void) {
         lock.lock(); token &+= 1; let ticket = token; lock.unlock()
         control.async {
-            let result = Result { try self.startSync(uid: uid, captureToken: ticket) }
-            DispatchQueue.main.async { completion(result) }
+            do {
+                try self.startSync(uid: uid, captureToken: ticket)
+                self.waitForAudio(token: ticket, deadline: ProcessInfo.processInfo.systemUptime + 5, completion: completion)
+            } catch { DispatchQueue.main.async { completion(.failure(error)) } }
         }
+    }
+    private func waitForAudio(token: UInt64, deadline: TimeInterval, completion: @escaping (Result<Void, Error>) -> Void) {
+        lock.lock()
+        let current = self.token == token, ready = samples.count >= 2400, fault = self.fault
+        lock.unlock()
+        let result: Result<Void, Error>
+        if !current { result = .failure(TalkError("Recording cancelled")) }
+        else if let fault { result = .failure(TalkError(fault)) }
+        else if ready { result = .success(()) }
+        else if ProcessInfo.processInfo.systemUptime >= deadline {
+            result = .failure(TalkError("The microphone opened but sent no audio. Reconnect it or choose another input."))
+        } else {
+            control.asyncAfter(deadline: .now() + 0.02) { self.waitForAudio(token: token, deadline: deadline, completion: completion) }
+            return
+        }
+        DispatchQueue.main.async { completion(result) }
     }
     private func startSync(uid: String?, captureToken: UInt64) throws {
         lock.lock(); let current = token == captureToken; lock.unlock()
         guard current else { throw TalkError("Recording cancelled") }
-        guard engine == nil else { throw TalkError("Microphone already recording") }
+        guard captureSession == nil else { throw TalkError("Microphone already recording") }
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
             throw TalkError("Microphone access is required. Run hey-talk permissions microphone.")
         }
-        let audio = AVAudioEngine(), input = audio.inputNode
-        if let uid {
-            guard var id = AudioDevices.list().first(where: { $0.uid == uid })?.id else {
-                throw TalkError("Selected microphone is disconnected. Use hey-talk input default or select another device.")
-            }
-            guard let unit = input.audioUnit,
-                  AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &id, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr else {
-                throw TalkError("Cannot select the microphone")
-            }
+        // Capture-only sessions do not create an output audio graph. In particular,
+        // they avoid AVAudioEngine's stale Bluetooth output format after route changes.
+        let selectedUID = uid ?? AudioDevices.list().first(where: { $0.id == AudioDevices.defaultInput })?.uid
+        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
+        guard let device = selectedUID.flatMap({ selected in devices.first(where: { $0.uniqueID == selected }) }) else {
+            throw TalkError("Selected microphone is disconnected. Use hey-talk input default or select another device.")
         }
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0,
-              let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false),
-              let converter = AVAudioConverter(from: format, to: target) else { throw TalkError("Microphone has no usable audio format") }
-        converter.primeMethod = .none
+        let session = AVCaptureSession()
+        let input = try AVCaptureDeviceInput(device: device)
+        let output = AVCaptureAudioDataOutput()
+        output.audioSettings = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16_000,
+                                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 32,
+                                AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: false]
+        let receiver = CaptureReceiver { [weak self] buffer in self?.consume(buffer, token: captureToken) }
+        output.setSampleBufferDelegate(receiver, queue: processing)
+        session.beginConfiguration()
+        guard session.canAddInput(input), session.canAddOutput(output) else {
+            session.commitConfiguration(); throw TalkError("Cannot configure microphone capture")
+        }
+        session.addInput(input); session.addOutput(output); session.commitConfiguration()
+        let usesBluetooth = AudioDevices.isBluetoothInput(uid: selectedUID)
         lock.lock()
         guard token == captureToken else { lock.unlock(); throw TalkError("Recording cancelled") }
         samples = []; samples.reserveCapacity(PCMFrame.maxSamples)
-        rms = 0; peak = 0; fault = nil; pending = 0
+        rms = 0; peak = 0; fault = nil; bluetooth = usesBluetooth
+        lastAudioAt = ProcessInfo.processInfo.systemUptime
         lock.unlock()
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            guard let self else { return }
-            self.lock.lock()
-            guard self.token == captureToken, self.fault == nil, self.pending < 16 else {
-                let overflow = self.token == captureToken && self.pending >= 16 && self.fault == nil
-                self.lock.unlock()
-                if overflow { self.fail("Audio processing could not keep up; recording stopped", token: captureToken) }
-                return
-            }
-            self.pending += 1
-            self.lock.unlock()
-            // No model work, file IO, UI updates, or waits on the realtime tap.
-            guard let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength) else {
-                self.fail("Cannot allocate audio buffer", token: captureToken); return
-            }
-            copy.frameLength = buffer.frameLength
-            let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-            let destination = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-            for i in 0..<source.count {
-                if let from = source[i].mData, let to = destination[i].mData {
-                    memcpy(to, from, Int(source[i].mDataByteSize))
-                }
-            }
-            self.processing.async {
-                defer { self.lock.lock(); if self.token == captureToken { self.pending -= 1 }; self.lock.unlock() }
-                let capacity = AVAudioFrameCount(ceil(Double(copy.frameLength) * 16_000 / format.sampleRate) + 32)
-                guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-                var supplied = false
-                var error: NSError?
-                let status = converter.convert(to: converted, error: &error) { _, state in
-                    if supplied { state.pointee = .noDataNow; return nil }
-                    supplied = true; state.pointee = .haveData; return copy
-                }
-                guard status != .error, let channel = converted.floatChannelData?[0] else {
-                    self.fail(error?.localizedDescription ?? "Audio conversion failed", token: captureToken); return
-                }
-                let count = Int(converted.frameLength)
-                guard count > 0 else { return }
-                var level: Float = 0
-                vDSP_rmsqv(channel, 1, &level, vDSP_Length(count))
-                guard level.isFinite else { self.fail("Microphone returned invalid audio", token: captureToken); return }
-                self.lock.lock()
-                guard self.token == captureToken else { self.lock.unlock(); return }
-                guard self.samples.count + count <= PCMFrame.maxSamples else {
-                    self.lock.unlock(); self.fail("Five-minute recording limit reached. Stop and start a new dictation.", token: captureToken); return
-                }
-                self.samples.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
-                self.rms = Double(level); self.peak = max(self.peak, level)
-                self.lock.unlock()
-            }
+        captureSession = session; self.output = output; self.receiver = receiver
+        for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: session, queue: nil) { [weak self] notification in
+                let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
+                self?.fail(error?.localizedDescription ?? "Microphone capture was interrupted. Start a new recording.", token: captureToken)
+            })
         }
-        do { audio.prepare(); try audio.start() }
-        catch { input.removeTap(onBus: 0); throw error }
-        engine = audio
+        session.startRunning()
         lock.lock(); let cancelled = token != captureToken; lock.unlock()
         if cancelled { _ = try? stopSync(); throw TalkError("Recording cancelled") }
-        routeRestarts = 0
-        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: audio, queue: .main) { [weak self, weak audio] _ in
-            guard let self, let audio else { return }
-            self.control.async {
-            guard self.engine === audio else { return }
-            // Bluetooth output switches profile when a cue plays. Core Audio
-            // can stop the graph although the microphone's format is unchanged.
-            // Resume that graph without discarding already captured samples.
-            if audio.isRunning { return }
-            let current = audio.inputNode.outputFormat(forBus: 0)
-            guard current.sampleRate == format.sampleRate, current.channelCount == format.channelCount, self.routeRestarts < 3 else {
-                self.fail("Microphone connection changed. Start a new recording.", token: captureToken); return
-            }
-            self.routeRestarts += 1
-            do { try audio.start() }
-            catch { self.fail("Microphone could not resume: \(error.localizedDescription)", token: captureToken) }
-            }
+        guard session.isRunning else { _ = try? stopSync(); throw TalkError("Microphone could not start") }
+        let timer = DispatchSource.makeTimerSource(queue: control)
+        timer.schedule(deadline: .now() + 5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let stale = self.token == captureToken && ProcessInfo.processInfo.systemUptime - self.lastAudioAt > 3; self.lock.unlock()
+            if stale { self.fail("The microphone stopped sending audio. Reconnect it or choose another input.", token: captureToken) }
         }
+        watchdog = timer; timer.resume()
+    }
+    private func consume(_ buffer: CMSampleBuffer, token: UInt64) {
+        lock.lock(); let current = self.token == token && fault == nil; lock.unlock()
+        guard current, let description = CMSampleBufferGetFormatDescription(buffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description) else { return }
+        let format = asbd.pointee
+        guard format.mFormatID == kAudioFormatLinearPCM, format.mSampleRate == 16_000,
+              format.mChannelsPerFrame == 1, format.mBitsPerChannel == 32,
+              format.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
+            fail("Microphone returned an unsupported audio format", token: token); return
+        }
+        let count = CMSampleBufferGetNumSamples(buffer)
+        guard count > 0, count <= PCMFrame.rate else { return }
+        var values = [Float](repeating: 0, count: count)
+        let status = values.withUnsafeMutableBytes { raw -> OSStatus in
+            var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(raw.count), mData: raw.baseAddress))
+            return CMSampleBufferCopyPCMDataIntoAudioBufferList(buffer, at: 0, frameCount: Int32(count), into: &list)
+        }
+        guard status == noErr else { fail("Cannot read microphone samples", token: token); return }
+        var level: Float = 0
+        vDSP_rmsqv(values, 1, &level, vDSP_Length(count))
+        guard level.isFinite else { fail("Microphone returned invalid audio", token: token); return }
+        lock.lock()
+        guard self.token == token else { lock.unlock(); return }
+        guard samples.count + count <= PCMFrame.maxSamples else {
+            lock.unlock(); fail("Five-minute recording limit reached. Stop and start a new dictation.", token: token); return
+        }
+        samples.append(contentsOf: values); rms = Double(level); peak = max(peak, level)
+        lastAudioAt = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
     }
     private func fail(_ message: String, token: UInt64) {
         lock.lock()
         guard self.token == token, fault == nil else { lock.unlock(); return }
-        fault = message
-        lock.unlock()
+        fault = message; lock.unlock()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.lock.lock(); let current = self.token == token; self.lock.unlock()
@@ -187,9 +205,12 @@ final class AudioCapture {
         }
     }
     private func stopSync() throws -> [Float] {
-        if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
-        engine?.inputNode.removeTap(onBus: 0); engine?.stop(); engine = nil
-        processing.sync {} // drain the final copied audio buffers before decoding
+        watchdog?.cancel(); watchdog = nil
+        observers.forEach(NotificationCenter.default.removeObserver); observers = []
+        captureSession?.stopRunning()
+        output?.setSampleBufferDelegate(nil, queue: nil)
+        processing.sync {} // Drain the final callbacks before decoding.
+        output = nil; receiver = nil; captureSession = nil
         lock.lock(); defer { lock.unlock() }
         let captured = samples; samples = []; rms = 0
         if let fault { throw TalkError(fault) }
