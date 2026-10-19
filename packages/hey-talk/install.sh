@@ -9,15 +9,16 @@ mkdir -p "$HOME/Applications" "$HOME/.local/bin"
 if [ -e "$destination" ]; then
   "$destination/Contents/MacOS/hey-talk" quit
 fi
-stage="$HOME/Applications/Hey Talk.staging.app"
-rm -rf "$stage"
+staging_root=$(mktemp -d "$HOME/Applications/.hey-talk-install.XXXXXX")
+stage="$staging_root/Hey Talk.app"
 ditto 'dist/Hey Talk.app' "$stage"
 codesign --verify --deep --strict "$stage"
-previous="$HOME/Applications/Hey Talk.previous.app"
 if [ -e "$destination" ]; then
-  rm -rf "$previous"
+  mkdir -p "$HOME/.Trash"
+  previous="$HOME/.Trash/Hey Talk-$(date +%Y%m%d-%H%M%S)-$$.app"
   mv "$destination" "$previous"
 fi
 mv "$stage" "$destination"
+rmdir "$staging_root"
 ln -sfn "$destination/Contents/MacOS/hey-talk" "$HOME/.local/bin/hey-talk"
 printf 'Installed %s\nRun ~/.local/bin/hey-talk --help. Nothing starts at login.\n' "$destination"
