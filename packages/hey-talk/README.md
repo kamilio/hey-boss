@@ -134,7 +134,9 @@ Audio is bounded to five minutes, held only in memory, and discarded on cancel.
 The microphone closes when recording stops. Inference stays warm for ten
 minutes, then releases model memory. Waveform updates run only during visible
 recording. Bluetooth can take roughly two seconds to open its microphone profile
-on first use; ten repeated starts measured 183–496 ms on the tested headset.
+on first use. Ten starts on the tested headset measured 50–325 ms, with a 57 ms
+median (previously 205 ms). Readiness now follows the first valid audio buffer;
+the waveform appears immediately, without the previous 660 ms reveal delay.
 Startup runs off the UI thread and remains cancellable.
 
 On an M5 Pro, a 5.05-second synthetic speech clip decoded in 138–203 ms with a

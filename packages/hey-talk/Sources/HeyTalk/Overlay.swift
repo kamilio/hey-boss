@@ -77,7 +77,6 @@ final class Overlay {
     private var timer: Timer?
     private var phase: Phase = .idle
     private var hovering = false
-    private var generation: UInt64 = 0
     private var expanded = false
     private var enabled = true
     private var toast: NSPanel?
@@ -140,7 +139,10 @@ final class Overlay {
             root.addSubview(pill); root.addSubview(cancelGlass)
         }
         pill.wantsLayer = true
+        // Keep the live waveform inside the capsule while it expands.
+        pill.clipsToBounds = true
         wave.isHidden = true
+        wave.identifier = NSUserInterfaceItemIdentifier("recording-waveform")
         pillContent.addSubview(identity); pillContent.addSubview(wave)
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
@@ -171,28 +173,18 @@ final class Overlay {
         updateTimer()
     }
     func update(_ next: Phase) {
-        generation &+= 1; let ticket = generation
         if next == .recording || next == .processing { toast?.orderOut(nil) }
-        phase = next; expanded = false
+        phase = next; expanded = next == .recording
         pillContent.accent = next == .recording ? TalkDesign.active : TalkDesign.accent
         wave.heights = Array(repeating: 4, count: Waveform.count)
-        wave.isHidden = true
-        wave.alphaValue = 0
+        wave.isHidden = next != .recording
+        wave.alphaValue = 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
         glow.isHidden = next != .processing; halo.isHidden = next != .processing
         pillContent.setAccessibilityLabel(next == .recording ? "Stop dictation" : next == .processing ? "Transcribing" : "Start dictation")
         layout(animated: true); showCancel(); updateTimer()
-        if next == .recording {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) { [weak self] in
-                guard let self, self.generation == ticket else { return }
-                self.expanded = true; self.wave.isHidden = false; self.layout(animated: true)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                    guard let self, self.generation == ticket else { return }
-                    NSAnimationContext.runAnimationGroup { context in context.duration = 0.2; self.wave.animator().alphaValue = 1 }
-                }
-            }
-        } else if next == .processing {
+        if next == .processing {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 let shimmer = CABasicAnimation(keyPath: "opacity")
                 shimmer.fromValue = 0.35; shimmer.toValue = 1; shimmer.duration = 0.9
@@ -210,6 +202,7 @@ final class Overlay {
         pillContent.setAccessibilityLabel("Opening microphone")
     }
     private func layout(animated: Bool) {
+        let duration = phase == .recording ? 0.16 : 0.3
         let size = expanded ? TalkDesign.recordingSize : TalkDesign.idleSize
         let width = size.width, height = size.height
         let frame = NSRect(x: 100 - width / 2, y: 12, width: width, height: height)
@@ -221,7 +214,7 @@ final class Overlay {
             for key in ["path", "shadowPath"] {
                 let transition = CABasicAnimation(keyPath: key)
                 transition.fromValue = depth.presentation()?.value(forKey: key) ?? depth.value(forKey: key)
-                transition.toValue = outline; transition.duration = 0.3
+                transition.toValue = outline; transition.duration = duration
                 transition.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
                 depth.add(transition, forKey: key)
             }
@@ -230,7 +223,7 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         CATransaction.commit()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.3 : 0
+            context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
             identity.animator().frame = NSRect(x: expanded ? 9 : (width - 22) / 2, y: (height - 22) / 2, width: 22, height: 22)

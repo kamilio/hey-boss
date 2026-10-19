@@ -3,6 +3,58 @@ import AVFoundation
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
+    func testFirstTenMillisecondsOfAudioAreReadyWithoutLosingSamples() throws {
+        let capture = AudioCapture()
+        capture.consume(try firstBuffer(), token: 0)
+        let ready = expectation(description: "First audio is ready")
+        // An expired deadline avoids waiting: real audio must take precedence.
+        capture.waitForAudio(token: 0, deadline: 0) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            ready.fulfill()
+        }
+        wait(for: [ready], timeout: 1)
+        XCTAssertEqual(capture.sampleCount, 160)
+        XCTAssertEqual(capture.level, 0.25, accuracy: 0.001)
+    }
+
+    func testNoAudioAndCancelledStartupNeverReportReady() throws {
+        let capture = AudioCapture()
+        let empty = expectation(description: "No audio times out")
+        capture.waitForAudio(token: 0, deadline: 0) { result in
+            if case .success = result { XCTFail("Empty capture is not ready") }
+            empty.fulfill()
+        }
+        wait(for: [empty], timeout: 1)
+        capture.cancel()
+        capture.consume(try firstBuffer(), token: 0)
+        let cancelled = expectation(description: "Cancelled startup stays cancelled")
+        capture.waitForAudio(token: 0, deadline: .greatestFiniteMagnitude) { result in
+            if case .success = result { XCTFail("Stale audio must not revive capture") }
+            cancelled.fulfill()
+        }
+        wait(for: [cancelled], timeout: 1)
+        XCTAssertEqual(capture.sampleCount, 0)
+    }
+
+    private func firstBuffer() throws -> CMSampleBuffer {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: true)!
+        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
+        pcm.frameLength = 160
+        for index in 0..<160 { pcm.floatChannelData![0][index] = 0.25 }
+        var description: CMAudioFormatDescription?
+        XCTAssertEqual(CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: format.streamDescription,
+            layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &description), noErr)
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 16_000), presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        var buffer: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreate(allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description, sampleCount: 160,
+            sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &buffer), noErr)
+        let result = try XCTUnwrap(buffer)
+        XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(result, blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault, flags: 0, bufferList: pcm.audioBufferList), noErr)
+        return result
+    }
+
     func testFileResamplingPreservesDurationAndFiniteSamples() throws {
         for (rate, channels) in [(16_000.0, 1), (22_050.0, 1), (44_100.0, 2), (48_000.0, 2), (96_000.0, 1)] {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("hey-talk-test-\(UUID()).caf")
