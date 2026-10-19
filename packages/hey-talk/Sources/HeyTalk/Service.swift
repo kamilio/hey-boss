@@ -6,6 +6,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let server = CommandServer()
     private let capture = AudioCapture()
     private let inference = Inference()
+    private let history = DictationHistory()
+    private var historyWindow: HistoryWindow?
     private lazy var cues = AudioCues()
     private var session = RecordingSession()
     private var overlay: Overlay?
@@ -15,6 +17,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication?
     private var paste = true
+    private var transcriptionSource = "microphone"
     private var overlayEnabled: Bool
     private var error: String?
     private var captureReady = false
@@ -44,10 +47,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menuItem?.menu = menu
+        history.refresh()
         if overlayEnabled { showOverlay(true) }
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -56,7 +60,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
     }
-    func applicationWillTerminate(_ notification: Notification) { capture.cancel(); inference.cancel() }
+    func applicationWillTerminate(_ notification: Notification) { capture.cancel(); inference.cancel(); history.finishPendingWrites() }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    @objc private func showHistory() {
+        if historyWindow == nil { historyWindow = HistoryWindow(history: history) }
+        history.refresh(); historyWindow?.show()
+    }
     private func showOverlay(_ show: Bool) {
         if overlay == nil && show {
             let view = Overlay()
@@ -79,7 +88,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         var value: [String: Any] = [
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
-            "hotkey": "Control+Command+Option+Shift+E", "hotkey_registered": hotkey?.registered ?? false,
+            "hotkey": DictationShortcut.name, "hotkey_registered": hotkey?.registered ?? false,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
@@ -110,7 +119,32 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if session.phase == .recording { stop(reply) }
             else { start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, reply: reply) }
         case "cancel": cancel(); reply(status())
-        case "last": reply(["ok": true, "text": session.lastText])
+        case "last":
+            if !session.lastText.isEmpty { reply(["ok": true, "text": session.lastText]) }
+            else {
+                history.read { result in
+                    switch result {
+                    case .success(let entries): reply(["ok": true, "text": entries.first?.text ?? ""])
+                    case .failure(let error): reply(self.failure(error.localizedDescription))
+                    }
+                }
+            }
+        case "history":
+            if request["show"] as? Bool == true { showHistory(); reply(["ok": true]); return }
+            let before: UUID?
+            if let value = request["before"] as? String {
+                guard let id = UUID(uuidString: value) else { reply(failure("Invalid history cursor")); return }
+                before = id
+            } else { before = nil }
+            history.read(before: before) { result in
+                switch result {
+                case .success(let entries):
+                    var response: [String: Any] = ["ok": true, "entries": entries.map(\.json)]
+                    if entries.count == 50, let last = entries.last { response["next_before"] = last.id.uuidString }
+                    reply(response)
+                case .failure(let error): reply(self.failure(error.localizedDescription))
+                }
+            }
         case "devices": reply(["ok": true, "devices": AudioDevices.list().map(\.json)])
         case "input":
             guard session.phase == .idle || session.phase == .failed else { reply(failure("Stop recording before changing input")); return }
@@ -128,7 +162,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let file = request["file"] as? String else { reply(failure("Missing audio file")); return }
             do {
                 let id = try session.begin(); try session.processing(id)
-                paste = false; error = nil; pendingReply = reply
+                paste = false; transcriptionSource = "file"; error = nil; pendingReply = reply
                 idleRelease?.cancel(); overlay?.update(.processing)
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
@@ -157,7 +191,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let id: UInt64
         do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
         pendingStartReply = reply
-        error = nil; captureReady = false; self.paste = paste; target = NSWorkspace.shared.frontmostApplication
+        error = nil; captureReady = false; self.paste = paste; transcriptionSource = "microphone"
+        target = NSWorkspace.shared.frontmostApplication
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
@@ -216,15 +251,26 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 guard !text.isEmpty else { self.fail("No speech detected. Check your microphone with hey-talk devices."); return }
                 guard self.session.finish(id, text: text) else { return }
                 self.hotkey?.reset(); self.overlay?.update(.idle)
-                let complete: (String) -> Void = { delivery in
-                    self.pendingReply?(["ok": true, "text": text, "audio_seconds": audioSeconds,
-                                        "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
-                                        "capture_start_ms": self.captureMilliseconds, "delivery": delivery])
-                    self.pendingReply = nil; self.scheduleRelease()
-                    if delivery == "clipboard" { self.overlay?.error("Copied to clipboard. Allow Hey Talk in Accessibility for automatic paste.") }
+                let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
+                // Detach this result before disk IO: a new recording may start while saving.
+                let reply = self.pendingReply; self.pendingReply = nil
+                let shouldPaste = self.paste, target = self.target, captureMS = self.captureMilliseconds
+                self.history.save(entry) { saved in
+                    let complete: (String) -> Void = { delivery in
+                        reply?(["ok": true, "text": text, "audio_seconds": audioSeconds,
+                                "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
+                                "capture_start_ms": captureMS, "delivery": delivery,
+                                "history_id": entry.id.uuidString, "history_saved": saved])
+                        if self.session.generation == id {
+                            self.scheduleRelease()
+                            if !saved { self.overlay?.error("History could not be saved. Copy your text from Dictation History before quitting.") }
+                            else if delivery == "clipboard" { self.overlay?.error("Copied to clipboard and saved in Dictation History. Press ⌘V to paste.") }
+                        }
+                    }
+                    if shouldPaste, self.session.generation == id {
+                        Paste.deliver(text, target: target, completion: complete)
+                    } else { complete(shouldPaste ? "history" : "stdout") }
                 }
-                if self.paste { Paste.deliver(text, target: self.target, completion: complete) }
-                else { complete("stdout") }
             }
         } }
     }
