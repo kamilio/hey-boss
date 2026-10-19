@@ -22,13 +22,13 @@ final class Hotkey {
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
             if id.id == 2, pressed { owner.state.reset(); owner.onAction?(.cancel) }
             else if id.id == 1 {
-                let action = pressed ? owner.state.keyDown(code: 14, hyper: true, repeated: false) : owner.state.keyUp(code: 14)
+                let action = pressed ? owner.state.keyDown(code: DictationShortcut.keyCode, hyper: true, repeated: false) : owner.state.keyUp(code: DictationShortcut.keyCode)
                 if action != .none { owner.onAction?(action) }
             }
             return noErr
         }, 2, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
         let id = EventHotKeyID(signature: 0x48544C4B, id: 1)
-        registered = RegisterEventHotKey(14, UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &shortcut) == noErr
+        registered = RegisterEventHotKey(UInt32(DictationShortcut.keyCode), UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &shortcut) == noErr
     }
     func captureEscape(_ capture: Bool) {
         if capture, escape == nil {

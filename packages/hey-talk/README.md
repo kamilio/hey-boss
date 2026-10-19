@@ -1,6 +1,6 @@
 # hey-talk
 
-Native macOS dictation, controlled from the CLI. Hold Caps Lock + E to record;
+Native macOS dictation, controlled from the CLI. Hold Caps Lock + R to record;
 release to transcribe and paste. Caps Lock must already be mapped to Hyper
 (Control + Command + Option + Shift). Click the pill to toggle recording, drag
 to move it, or press Esc to discard.
@@ -46,13 +46,26 @@ hey-talk start --no-overlay --no-paste
 hey-talk stop --json
 hey-talk cancel
 hey-talk overlay show
+hey-talk history show
+hey-talk history --json
 hey-talk warm
 ```
 
 `record` stops on Enter or Ctrl-C. `stop` returns the transcript; `--json` also
 reports capture latency, inference duration, and real-time factor. `status
 --json` exposes readiness, measured microphone levels, hotkey registration,
-and process IDs. `last` reads the most recent transcript from memory.
+and process IDs. `last` reads the most recent transcript, including after restart.
+
+Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
+history show`. Each transcript has a timestamp and Copy button. Closing this
+window leaves dictation running. Older entries load in pages; nothing expires
+automatically. `history` prints the latest 50 entries; `history --before ID`
+reads the next page using the `next_before` cursor from JSON output.
+
+Completed microphone and file transcriptions are saved before any paste attempt
+in `~/Library/Application Support/hey-talk/history.sqlite3`, readable only by
+your user. Canceled work is never saved. If saving fails, the window keeps the
+text in memory and marks it **Unsaved** so you can copy it before quitting.
 
 Allow microphone access when macOS asks. For automatic paste, run `hey-talk
 permissions accessibility` and enable **Hey Talk** in System Settings. Without
@@ -89,7 +102,8 @@ swift test
 ```
 
 Integration tests use synthetic speech, check transcription, kill the inference
-worker to verify recovery, and cancel work in flight. They do not use the mic
+worker to verify recovery, cancel work in flight, and verify history across a
+restart. Synthetic history entries are removed afterward. They do not use the mic
 or paste text. The hardware microphone and global shortcut still depend on
 macOS permission and the user's keyboard mapping.
 

@@ -47,18 +47,22 @@ final class CoreTests: XCTestCase {
 
     func testHyperReleaseStopsEvenWhenModifiersReleasedFirst() {
         var hotkey = HotkeyState()
-        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .start)
-        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: true), .none)
+        XCTAssertEqual(DictationShortcut.keyCode, 15)
+        XCTAssertEqual(DictationShortcut.name, "Control+Command+Option+Shift+R")
+        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: false, repeated: false), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .start)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: true), .none)
         XCTAssertEqual(hotkey.modifiersChanged(hyper: false), .stop)
-        XCTAssertEqual(hotkey.keyUp(code: 14), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .start)
-        XCTAssertEqual(hotkey.keyUp(code: 14), .stop)
+        XCTAssertEqual(hotkey.keyUp(code: 15), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .start)
+        XCTAssertEqual(hotkey.keyUp(code: 15), .stop)
     }
 
     func testEscCancelsAndNeverCausesReleaseToPaste() {
         var hotkey = HotkeyState()
-        _ = hotkey.keyDown(code: 14, hyper: true, repeated: false)
+        _ = hotkey.keyDown(code: 15, hyper: true, repeated: false)
         XCTAssertEqual(hotkey.keyDown(code: 53, hyper: false, repeated: false), .cancel)
-        XCTAssertEqual(hotkey.keyUp(code: 14), .none)
+        XCTAssertEqual(hotkey.keyUp(code: 15), .none)
     }
 }
