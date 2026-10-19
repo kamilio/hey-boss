@@ -52,27 +52,20 @@ public enum DictationShortcut {
     public static let hint = "Caps Lock + R"
 }
 
-public enum HotkeyAction: Equatable { case none, start, stop, cancel }
+public enum HotkeyAction: Equatable { case none, toggle, cancel }
 public struct HotkeyState {
     public private(set) var held = false
     public init() {}
     public mutating func keyDown(code: Int, hyper: Bool, repeated: Bool) -> HotkeyAction {
-        if code == 53 { held = false; return .cancel }
+        if code == 53 { return repeated ? .none : .cancel }
         guard code == DictationShortcut.keyCode, hyper, !repeated, !held else { return .none }
         held = true
-        return .start
+        return .toggle
     }
     public mutating func keyUp(code: Int) -> HotkeyAction {
-        guard code == DictationShortcut.keyCode, held else { return .none }
-        held = false
-        return .stop
+        if code == DictationShortcut.keyCode { held = false }
+        return .none
     }
-    public mutating func modifiersChanged(hyper: Bool) -> HotkeyAction {
-        guard held, !hyper else { return .none }
-        held = false
-        return .stop
-    }
-    public mutating func reset() { held = false }
 }
 
 public enum PCMFrame {

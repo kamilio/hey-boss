@@ -27,7 +27,7 @@ enum CLI {
     hey-talk doctor                            Check permissions, model, and hotkey
     hey-talk quit                              Stop only Hey Talk and its worker
 
-    Hold \(DictationShortcut.hint) (Hyper+R) to dictate; release to paste. Esc cancels.
+    Press \(DictationShortcut.hint) (Hyper+R) to start; press again to stop and paste. Esc cancels.
     Commands start the app on demand. No login service or account is required.
     Audio stays in memory. File transcription never modifies your clipboard.
     """

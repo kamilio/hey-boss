@@ -45,24 +45,26 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try PCMFrame.encode([]))
     }
 
-    func testHyperReleaseStopsEvenWhenModifiersReleasedFirst() {
+    func testHyperRTogglesOncePerPressAndIgnoresRelease() {
         var hotkey = HotkeyState()
         XCTAssertEqual(DictationShortcut.keyCode, 15)
         XCTAssertEqual(DictationShortcut.name, "Control+Command+Option+Shift+R")
         XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .none)
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: false, repeated: false), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .start)
-        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: true), .none)
-        XCTAssertEqual(hotkey.modifiersChanged(hyper: false), .stop)
-        XCTAssertEqual(hotkey.keyUp(code: 15), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .start)
-        XCTAssertEqual(hotkey.keyUp(code: 15), .stop)
+        for _ in 0..<100 {
+            XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle)
+            XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .none)
+            XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: true), .none)
+            XCTAssertEqual(hotkey.keyUp(code: 15), .none)
+        }
     }
 
-    func testEscCancelsAndNeverCausesReleaseToPaste() {
+    func testEscCancelsWithoutRetriggeringHeldShortcut() {
         var hotkey = HotkeyState()
         _ = hotkey.keyDown(code: 15, hyper: true, repeated: false)
         XCTAssertEqual(hotkey.keyDown(code: 53, hyper: false, repeated: false), .cancel)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .none)
         XCTAssertEqual(hotkey.keyUp(code: 15), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle)
     }
 }

@@ -20,7 +20,7 @@ final class Hotkey {
             var id = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
-            if id.id == 2, pressed { owner.state.reset(); owner.onAction?(.cancel) }
+            if id.id == 2, pressed { owner.onAction?(.cancel) }
             else if id.id == 1 {
                 let action = pressed ? owner.state.keyDown(code: DictationShortcut.keyCode, hyper: true, repeated: false) : owner.state.keyUp(code: DictationShortcut.keyCode)
                 if action != .none { owner.onAction?(action) }
@@ -35,7 +35,7 @@ final class Hotkey {
             escapeRegistered = RegisterEventHotKey(53, 0, EventHotKeyID(signature: 0x48544C4B, id: 2), GetApplicationEventTarget(), 0, &escape) == noErr
         } else if !capture, let escape { UnregisterEventHotKey(escape); self.escape = nil; escapeRegistered = false }
     }
-    func reset() { state.reset(); captureEscape(false) }
+    func reset() { captureEscape(false) }
     deinit {
         if let shortcut { UnregisterEventHotKey(shortcut) }
         if let escape { UnregisterEventHotKey(escape) }

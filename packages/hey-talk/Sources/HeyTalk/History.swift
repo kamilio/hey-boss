@@ -115,7 +115,7 @@ private struct HistoryView: View {
                     Image(systemName: "text.bubble").font(.system(size: 38, weight: .light)).foregroundStyle(.secondary)
                     Text(history.loading ? "Loading history…" : "Your dictations will appear here")
                         .font(.system(size: 17, weight: .medium))
-                    Text("Hold \(DictationShortcut.hint) to speak. Release to paste.")
+                    Text("Press \(DictationShortcut.hint) to start. Press again to finish.")
                         .font(.callout).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -133,7 +133,7 @@ private struct HistoryView: View {
             }
             Divider()
             HStack {
-                Label("\(DictationShortcut.hint) · Hold to dictate", systemImage: "keyboard")
+                Label("\(DictationShortcut.hint) · Start / stop", systemImage: "keyboard")
                 Spacer()
                 Text("Audio is never saved")
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.vertical, 14)
