@@ -5,9 +5,11 @@ press again to stop, transcribe, and paste. Caps Lock must already be mapped to 
 (Control + Command + Option + Shift). Click the pill to toggle recording, drag
 to move it, or press Esc to discard.
 
-The recording pill follows OpenWhispr's dimensions, waveform, transitions,
-processing glow, and sound cues. macOS 26 uses real Liquid Glass; macOS 15–25
-uses a native translucent surface. There is no web renderer or account.
+The floating control is a compact glass capsule with an indigo waveform mark.
+It expands to show live teal audio levels while recording, then a quiet indigo
+glow while transcribing. Accent colors match the shared Hey Boss design tokens.
+macOS 26 uses native Liquid Glass with a fine reflective edge and soft shadow;
+macOS 15–25 uses a native translucent surface. There is no web renderer or account.
 Bluetooth microphones use the visual cue alone: playing a sound can switch the
 headset's audio profile and interrupt capture.
 

@@ -10,7 +10,7 @@ private final class RecordingPanel: NSPanel {
 private final class WaveView: NSView {
     var heights = Array(repeating: 4.0, count: Waveform.count) { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.labelColor.setFill()
+        TalkDesign.active.setFill()
         for (index, height) in heights.enumerated() {
             NSBezierPath(roundedRect: NSRect(x: CGFloat(index * 5), y: (bounds.height - height) / 2, width: 2, height: height), xRadius: 1, yRadius: 1).fill()
         }
@@ -19,11 +19,9 @@ private final class WaveView: NSView {
 
 private final class IdentityView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.labelColor.setStroke()
+        TalkDesign.accent.setStroke()
         let scale = bounds.width / 24
-        let ring = NSBezierPath(ovalIn: NSRect(x: 2 * scale, y: 2 * scale, width: 20 * scale, height: 20 * scale))
-        ring.lineWidth = 2 * scale; ring.stroke()
-        for (x, height) in [(8.75, 4.0), (12.0, 8.0), (15.25, 4.0)] {
+        for (x, height) in [(7.0, 6.0), (12.0, 14.0), (17.0, 9.0)] {
             let bar = NSBezierPath()
             bar.move(to: NSPoint(x: x * scale, y: (12 - height / 2) * scale))
             bar.line(to: NSPoint(x: x * scale, y: (12 + height / 2) * scale))
@@ -32,7 +30,7 @@ private final class IdentityView: NSView {
     }
 }
 
-private final class ClickSurface: NSView {
+private final class ClickSurface: GlassFace {
     var onClick: (() -> Void)?
     var onHover: ((Bool) -> Void)?
     private var start: NSPoint?
@@ -66,6 +64,7 @@ final class Overlay {
     private let cancelGlass: NSView
     private let cancelButton = NSButton()
     private let glow = CAGradientLayer()
+    private let depth = CAShapeLayer()
     private let halo = CAShapeLayer()
     private var timer: Timer?
     private var phase: Phase = .idle
@@ -88,16 +87,21 @@ final class Overlay {
         panel.isReleasedWhenClosed = false
         panel.contentView = root
         root.wantsLayer = true
+        depth.fillColor = NSColor.black.withAlphaComponent(0.035).cgColor
+        depth.shadowColor = NSColor.black.cgColor
+        depth.shadowOpacity = 0.22; depth.shadowRadius = 6
+        depth.shadowOffset = CGSize(width: 0, height: -3)
+        root.layer?.addSublayer(depth)
         glow.type = .conic
         glow.startPoint = CGPoint(x: 0.5, y: 0.5); glow.endPoint = CGPoint(x: 0.5, y: 0)
-        glow.colors = [NSColor.systemBlue.withAlphaComponent(0.25).cgColor, NSColor.systemIndigo.withAlphaComponent(0.55).cgColor, NSColor.systemBlue.cgColor, NSColor.systemCyan.cgColor, NSColor.white.cgColor]
+        glow.colors = [TalkDesign.accent.withAlphaComponent(0.15).cgColor, TalkDesign.accent.withAlphaComponent(0.3).cgColor, TalkDesign.accent.cgColor, TalkDesign.active.cgColor, NSColor.white.cgColor]
         glow.locations = [0, 0.45, 0.75, 0.94, 1]
         let mask = CAShapeLayer()
-        mask.path = CGPath(ellipseIn: CGRect(x: 1.25, y: 1.25, width: 41.5, height: 41.5), transform: nil)
-        mask.fillColor = nil; mask.strokeColor = NSColor.white.cgColor; mask.lineWidth = 2.5
+        mask.path = CGPath(roundedRect: CGRect(x: 1, y: 1, width: 58, height: 38), cornerWidth: 19, cornerHeight: 19, transform: nil)
+        mask.fillColor = nil; mask.strokeColor = NSColor.white.cgColor; mask.lineWidth = 1.5
         glow.mask = mask
-        halo.fillColor = NSColor.systemBlue.withAlphaComponent(0.3).cgColor
-        halo.shadowColor = NSColor.systemBlue.cgColor; halo.shadowOpacity = 0.7; halo.shadowRadius = 7
+        halo.fillColor = TalkDesign.accent.withAlphaComponent(0.12).cgColor
+        halo.shadowColor = TalkDesign.accent.cgColor; halo.shadowOpacity = 0.3; halo.shadowRadius = 6
         halo.shadowOffset = .zero
         glow.isHidden = true; halo.isHidden = true
         root.layer?.addSublayer(halo)
@@ -105,10 +109,11 @@ final class Overlay {
         if #available(macOS 26, *) {
             // This small floating control sits over other apps. Clear glass
             // preserves that backdrop instead of covering it with a frosted fill.
-            let glass = NSGlassEffectView(); glass.style = .clear; glass.cornerRadius = 20
+            let glass = NSGlassEffectView(); glass.style = .clear; glass.cornerRadius = 18
             glass.contentView = pillContent; pill = glass
             let cancel = NSGlassEffectView(); cancel.style = .clear; cancel.cornerRadius = 14
-            cancel.contentView = cancelButton; cancelGlass = cancel
+            let face = GlassFace(); face.addSubview(cancelButton)
+            cancel.contentView = face; cancelGlass = cancel
             let container = NSGlassEffectContainerView(frame: root.bounds)
             container.spacing = 8
             let content = NSView(frame: root.bounds)
@@ -122,7 +127,7 @@ final class Overlay {
                 content.autoresizingMask = [.width, .height]; view.addSubview(content)
                 return view
             }
-            pill = glass(pillContent, radius: 20); cancelGlass = glass(cancelButton, radius: 14)
+            pill = glass(pillContent, radius: 18); cancelGlass = glass(cancelButton, radius: 14)
             root.addSubview(pill); root.addSubview(cancelGlass)
         }
         pill.wantsLayer = true
@@ -132,7 +137,7 @@ final class Overlay {
         pillContent.setAccessibilityLabel("Start dictation")
         pillContent.toolTip = "Press \(DictationShortcut.hint) or click to start / stop · Drag to move"
         pillContent.onClick = { [weak self] in self?.onToggle?() }
-        pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.showCancel() }
+        pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }
         cancelButton.isBordered = false
         cancelButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Cancel dictation")
         cancelButton.imageScaling = .scaleNone
@@ -157,6 +162,7 @@ final class Overlay {
     func update(_ next: Phase) {
         generation &+= 1; let ticket = generation
         phase = next; expanded = false
+        pillContent.accent = next == .recording ? TalkDesign.active : TalkDesign.accent
         wave.heights = Array(repeating: 4, count: Waveform.count)
         wave.isHidden = true
         wave.alphaValue = 0
@@ -176,9 +182,10 @@ final class Overlay {
             }
         } else if next == .processing {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let spin = CABasicAnimation(keyPath: "transform.rotation.z")
-                spin.fromValue = 0; spin.toValue = 2 * Double.pi; spin.duration = 1.6; spin.repeatCount = .infinity
-                glow.add(spin, forKey: "orbit")
+                let shimmer = CABasicAnimation(keyPath: "opacity")
+                shimmer.fromValue = 0.35; shimmer.toValue = 1; shimmer.duration = 0.9
+                shimmer.autoreverses = true; shimmer.repeatCount = .infinity
+                glow.add(shimmer, forKey: "shimmer")
                 let pulse = CABasicAnimation(keyPath: "opacity")
                 pulse.fromValue = 0.55; pulse.toValue = 1; pulse.duration = 0.95
                 pulse.autoreverses = true; pulse.repeatCount = .infinity
@@ -191,17 +198,31 @@ final class Overlay {
         pillContent.setAccessibilityLabel("Opening microphone")
     }
     private func layout(animated: Bool) {
-        let width: CGFloat = expanded ? 98 : 40, height: CGFloat = expanded ? 36 : 40
+        let size = expanded ? TalkDesign.recordingSize : TalkDesign.idleSize
+        let width = size.width, height = size.height
         let frame = NSRect(x: 100 - width / 2, y: 12, width: width, height: height)
-        glow.frame = CGRect(x: 78, y: 10, width: 44, height: 44)
-        halo.frame = CGRect(x: 76, y: 8, width: 48, height: 48)
-        halo.path = CGPath(ellipseIn: CGRect(x: 4, y: 4, width: 40, height: 40), transform: nil)
+        glow.frame = CGRect(x: 70, y: 10, width: 60, height: 40)
+        halo.frame = CGRect(x: 68, y: 8, width: 64, height: 44)
+        halo.path = CGPath(roundedRect: CGRect(x: 4, y: 4, width: 56, height: 36), cornerWidth: 18, cornerHeight: 18, transform: nil)
+        let outline = CGPath(roundedRect: frame, cornerWidth: height / 2, cornerHeight: height / 2, transform: nil)
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            for key in ["path", "shadowPath"] {
+                let transition = CABasicAnimation(keyPath: key)
+                transition.fromValue = depth.presentation()?.value(forKey: key) ?? depth.value(forKey: key)
+                transition.toValue = outline; transition.duration = 0.3
+                transition.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
+                depth.add(transition, forKey: key)
+            }
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        depth.path = outline; depth.shadowPath = outline
+        CATransaction.commit()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.3 : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
-            identity.animator().frame = NSRect(x: expanded ? 6 : 9, y: (height - 22) / 2, width: 22, height: 22)
-            wave.animator().frame = NSRect(x: 34, y: (height - 24) / 2, width: 52, height: 24)
+            identity.animator().frame = NSRect(x: expanded ? 9 : (width - 22) / 2, y: (height - 22) / 2, width: 22, height: 22)
+            wave.animator().frame = NSRect(x: 39, y: (height - 24) / 2, width: 52, height: 24)
             cancelGlass.animator().frame = NSRect(x: frame.maxX + 8, y: frame.midY - 14, width: 28, height: 28)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
