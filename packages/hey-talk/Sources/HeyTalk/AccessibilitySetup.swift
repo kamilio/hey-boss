@@ -60,7 +60,7 @@ private struct AccessibilitySetupView: View {
                 }
             }
             if setup.granted {
-                Text("Press Caps Lock + R to start recording. Press again to finish. Every transcript is also saved in Dictation History.")
+                Text("Hyper+E finishes with paste. Hyper+R finishes with paste + Enter. Press either shortcut to start. Every transcript is also saved in Dictation History.")
                     .font(.body).lineSpacing(4)
                 Spacer()
             } else {

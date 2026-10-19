@@ -46,24 +46,26 @@ public enum Waveform {
     }
 }
 
-public enum DictationShortcut {
-    public static let keyCode = 15
-    public static let name = "Control+Command+Option+Shift+R"
-    public static let hint = "Caps Lock + R"
+public enum DictationShortcut: Int, CaseIterable {
+    case paste = 14, submit = 15
+    public var keyCode: Int { rawValue }
+    public var name: String { "Control+Command+Option+Shift+\(self == .paste ? "E" : "R")" }
+    public static let hint = "Caps Lock + E / R"
+    public static let help = "Hyper+E: paste · Hyper+R: paste + Enter"
 }
 
-public enum HotkeyAction: Equatable { case none, toggle, cancel }
+public enum HotkeyAction: Equatable { case none, toggle(DictationShortcut), cancel }
 public struct HotkeyState {
-    public private(set) var held = false
+    private var held: Int?
     public init() {}
     public mutating func keyDown(code: Int, hyper: Bool, repeated: Bool) -> HotkeyAction {
         if code == 53 { return repeated ? .none : .cancel }
-        guard code == DictationShortcut.keyCode, hyper, !repeated, !held else { return .none }
-        held = true
-        return .toggle
+        guard let shortcut = DictationShortcut(rawValue: code), hyper, !repeated, held == nil else { return .none }
+        held = code
+        return .toggle(shortcut)
     }
     public mutating func keyUp(code: Int) -> HotkeyAction {
-        if code == DictationShortcut.keyCode { held = false }
+        if code == held { held = nil }
         return .none
     }
 }

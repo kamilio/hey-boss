@@ -107,5 +107,5 @@ jq -e --slurpfile last .build/after-cancel.json '.ok and .text == $last[0].text'
 "$cli" history --json > .build/history-restarted.json
 jq -e --slurpfile last .build/after-cancel.json '.ok and .entries[0].id == $last[0].history_id and .entries[0].text == $last[0].text' .build/history-restarted.json >/dev/null
 "$cli" history --before "$(jq -r .history_id .build/after-cancel.json)" --json | jq -e --slurpfile previous .build/inflight-recovery.json '.entries[0].id == $previous[0].history_id' >/dev/null
-"$cli" status --json | jq -e '.hotkey_registered and .hotkey == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
-printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Hyper+R toggle registration\n'
+"$cli" status --json | jq -e '.hotkey_registered and .hotkeys.paste == "Control+Command+Option+Shift+E" and .hotkeys.submit == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
+printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Hyper+E and Hyper+R toggle registration\n'
