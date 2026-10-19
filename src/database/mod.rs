@@ -4,6 +4,7 @@
 mod diagnostics;
 pub(crate) mod owner;
 mod paths;
+mod readers;
 mod wire;
 pub use owner::Owner;
 pub(crate) use paths::protect_database_paths;
