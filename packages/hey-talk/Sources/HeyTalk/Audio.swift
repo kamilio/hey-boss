@@ -88,9 +88,11 @@ final class AudioCapture {
             } catch { DispatchQueue.main.async { completion(.failure(error)) } }
         }
     }
-    private func waitForAudio(token: UInt64, deadline: TimeInterval, completion: @escaping (Result<Void, Error>) -> Void) {
+    func waitForAudio(token: UInt64, deadline: TimeInterval, completion: @escaping (Result<Void, Error>) -> Void) {
         lock.lock()
-        let current = self.token == token, ready = samples.count >= 2400, fault = self.fault
+        // The first valid buffer proves capture is live. The minimum utterance
+        // length is checked on stop; waiting for it here only delays feedback.
+        let current = self.token == token, ready = !samples.isEmpty, fault = self.fault
         lock.unlock()
         let result: Result<Void, Error>
         if !current { result = .failure(TalkError("Recording cancelled")) }
@@ -158,7 +160,7 @@ final class AudioCapture {
         }
         watchdog = timer; timer.resume()
     }
-    private func consume(_ buffer: CMSampleBuffer, token: UInt64) {
+    func consume(_ buffer: CMSampleBuffer, token: UInt64) {
         lock.lock(); let current = self.token == token && fault == nil; lock.unlock()
         guard current, let description = CMSampleBufferGetFormatDescription(buffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description) else { return }
