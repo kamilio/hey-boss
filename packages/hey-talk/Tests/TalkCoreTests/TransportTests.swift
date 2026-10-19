@@ -7,6 +7,7 @@ final class TransportTests: XCTestCase {
         var pair: [Int32] = [0, 0]
         XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
         defer { close(pair[0]); close(pair[1]) }
+        try Wire.prepare(pair[0]); try Wire.prepare(pair[1])
         let sender = pair[0], receiver = pair[1]
         let expected = Data(repeating: 42, count: 200_000)
         let done = expectation(description: "writer finishes")
@@ -33,5 +34,14 @@ final class TransportTests: XCTestCase {
     }
     func testLongSocketPathIsRejected() {
         XCTAssertThrowsError(try ControlSocket.address(String(repeating: "a", count: 105)))
+    }
+    func testBackpressureWriteHasARealDeadline() throws {
+        var pair: [Int32] = [0, 0]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+        defer { close(pair[0]); close(pair[1]) }
+        try Wire.prepare(pair[0])
+        let start = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try Wire.write(Data(repeating: 42, count: 4_000_000), to: pair[0], timeout: 0.05))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 0.5)
     }
 }

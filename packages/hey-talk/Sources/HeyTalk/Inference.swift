@@ -81,6 +81,8 @@ final class Inference {
         child.standardInput = stdin; child.standardOutput = stdout
         child.standardError = FileHandle.standardError
         child.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") }
+        try Wire.prepare(stdin.fileHandleForWriting.fileDescriptor)
+        try Wire.prepare(stdout.fileHandleForReading.fileDescriptor)
         try child.run()
         process = child; input = stdin; output = stdout
         // Do not hold the lock while the worker loads: cancel can terminate it.
@@ -113,6 +115,8 @@ final class Inference {
 }
 
 func runInferenceWorker(model: String, library: String) throws {
+    try Wire.prepare(STDIN_FILENO)
+    try Wire.prepare(STDOUT_FILENO)
     // Exit if the recording service crashes while inference is in flight.
     let parent = getppid()
     let parentWatch = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .global())

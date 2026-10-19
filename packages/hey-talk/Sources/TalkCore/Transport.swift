@@ -2,6 +2,14 @@ import Foundation
 import Darwin
 
 public enum Wire {
+    /// poll() only bounds IO when the descriptor itself cannot block afterward.
+    public static func prepare(_ fd: Int32) throws {
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0,
+              fcntl(fd, F_SETFD, FD_CLOEXEC) == 0 else { throw TalkError("Cannot configure connection") }
+        var one: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+    }
     public static func write(_ data: Data, to fd: Int32, timeout: TimeInterval = 30) throws {
         let deadline = Date().addingTimeInterval(timeout)
         try data.withUnsafeBytes { raw in
@@ -85,6 +93,7 @@ public enum ControlSocket {
             }
         }
         guard result == 0 else { close(fd); throw TalkError("hey-talk is not running") }
+        do { try Wire.prepare(fd) } catch { close(fd); throw error }
         return fd
     }
     public static func request(_ request: [String: Any]) throws -> [String: Any] {
