@@ -1,13 +1,15 @@
 # hey-talk
 
-Native macOS dictation, controlled from the CLI. Hold Caps Lock + R to record;
-release to transcribe and paste. Caps Lock must already be mapped to Hyper
+Native macOS dictation, controlled from the CLI. Press Caps Lock + R to start;
+press again to stop, transcribe, and paste. Caps Lock must already be mapped to Hyper
 (Control + Command + Option + Shift). Click the pill to toggle recording, drag
 to move it, or press Esc to discard.
 
 The recording pill follows OpenWhispr's dimensions, waveform, transitions,
 processing glow, and sound cues. macOS 26 uses real Liquid Glass; macOS 15–25
 uses a native translucent surface. There is no web renderer or account.
+Bluetooth microphones use the visual cue alone: playing a sound can switch the
+headset's audio profile and interrupt capture.
 
 ## Build and run
 
@@ -33,6 +35,7 @@ Installation is explicit and local to the current Mac:
 ```
 
 This installs `~/Applications/Hey Talk.app` and `~/.local/bin/hey-talk`.
+The **Hey Talk…** item in Hey Boss's status-bar menu opens its history and overlay.
 No login agent or fleet deployment is created. Commands launch the app through
 Launch Services when needed; `hey-talk quit` stops it and its inference worker.
 Quit a development instance before rebuilding its bundle.
@@ -67,8 +70,12 @@ in `~/Library/Application Support/hey-talk/history.sqlite3`, readable only by
 your user. Canceled work is never saved. If saving fails, the window keeps the
 text in memory and marks it **Unsaved** so you can copy it before quitting.
 
-Allow microphone access when macOS asks. For automatic paste, run `hey-talk
-permissions accessibility` and enable **Hey Talk** in System Settings. Without
+Allow microphone access when macOS asks. For automatic paste, choose **Enable
+Automatic Paste…** in the waveform menu or run `hey-talk permissions
+accessibility`. The guide opens the Accessibility settings page, reveals the
+installed app in Finder if it needs adding, and detects when permission is on.
+In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
+**⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation copies to the clipboard. If focus changes while
 transcribing, it also leaves the text on the clipboard. `--no-paste` and file
 transcription leave the clipboard untouched. Locally rebuilt app signatures
@@ -77,6 +84,9 @@ can require permission again. Quit OpenWhispr if it owns the same hotkey.
 ## Runtime and privacy
 
 The Swift desktop process owns capture, keyboard shortcuts, and AppKit UI.
+Microphone capture uses a capture-only `AVCaptureSession`, with no output audio
+graph to interfere with Bluetooth profile changes. Recording becomes ready only
+after audio arrives, and a watchdog detects a microphone that stops sending data.
 A separate disposable process runs Orukeet v0.1.0 INT8 through sherpa-onnx and
 ONNX Runtime. Private pipes carry PCM; the CLI uses a same-user Unix socket
 with mode 0600. No network listener or inference network request is used.
@@ -86,7 +96,7 @@ Audio is bounded to five minutes, held only in memory, and discarded on cancel.
 The microphone closes when recording stops. Inference stays warm for ten
 minutes, then releases model memory. Waveform updates run only during visible
 recording. Bluetooth can take roughly two seconds to open its microphone profile
-on first use; subsequent starts measured around 90 ms on the tested headset.
+on first use; ten repeated starts measured 183–496 ms on the tested headset.
 Startup runs off the UI thread and remains cancellable.
 
 On an M5 Pro, a 5.05-second synthetic speech clip decoded in 138–203 ms with a
@@ -98,12 +108,20 @@ These are local measurements, not latency guarantees.
 
 ```sh
 swift test
+swift test --sanitize=thread
 ./test-integration.sh
+# To test the installed app instead:
+HEY_TALK_TEST_CLI="$HOME/.local/bin/hey-talk" ./test-integration.sh
+# Optional hardware check; captures and discards the selected microphone:
+./test-microphone.sh
 ```
 
-Integration tests use synthetic speech, check transcription, kill the inference
-worker to verify recovery, cancel work in flight, and verify history across a
-restart. Synthetic history entries are removed afterward. They do not use the mic
+Run integration tests while idle: they restart Hey Talk. They run 20 synthetic
+transcriptions, concurrent CLI calls, worker crashes before and during decode,
+cancellation, missing files, and a main-process crash to verify durable history
+and orphan cleanup. Synthetic history entries are removed afterward. Unit tests
+also cover database write failure, paging, audio formats, and unresponsive clients.
+Integration tests do not use the mic
 or paste text. The hardware microphone and global shortcut still depend on
 macOS permission and the user's keyboard mapping.
 
