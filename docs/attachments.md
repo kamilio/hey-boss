@@ -2,11 +2,13 @@
 
 Issues, mindmap nodes and artifacts share disk-backed attachments. Open the resource
 in the web UI, drop files on **Drop files here**, or use **Choose files**. Every row
-shows the original filename and size. Click the filename or download action to
-retrieve it. Removal asks for confirmation and deletes the stored file. Files are
-served as downloads; arbitrary HTML and other active content never execute in the
-interface. Any file type is accepted, up to 10 MiB per file and 1,000 files per
-resource.
+shows the original filename and size. Click a PNG, JPEG, GIF, WebP or SVG filename
+to open an image viewer. Images fit the screen; **Actual size** lets you scroll
+through the original, and Escape closes the viewer. The separate download action
+saves the original file. Other filenames download directly. Removal asks for
+confirmation and deletes the stored file. Previews use image elements, never
+embedded documents; HTML remains download-only. Any file type is accepted, up to
+10 MiB per file and 1,000 files per resource.
 
 ```sh
 hey-boss attachment upload ./design.png --issue 57

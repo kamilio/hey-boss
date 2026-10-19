@@ -97,6 +97,7 @@ const paths = {
   download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
   paperclip: '<path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5L13 2a4 4 0 0 1 5.7 5.7L9.5 17a2 2 0 0 1-2.8-2.8L15 6"/>',
   docs: '<path d="M5 2h9l5 5v15H5Z"/><path d="M14 2v6h5M8 12h8M8 16h8M8 19h5"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/>',
   question:
     '<path d="M21 11a9 9 0 0 1-9 9H4l-3 3v-12a10 10 0 0 1 20 0Z"/><path d="M9 8a3 3 0 1 1 5 2l-2 2v1M12 16v.5"/>',
   build: '<path d="m14 3 7 7-3 3-3-3-9 11-3-3 11-9-3-3Z"/>',
