@@ -11,12 +11,12 @@ final class AccessibilitySetup: NSObject, ObservableObject, NSWindowDelegate {
     func show() {
         refresh()
         if window == nil {
-            let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 540),
-                                 styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            let panel = NativeWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
+                                 styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             panel.title = "Hey Talk — Automatic Paste"
             panel.isReleasedWhenClosed = false
             panel.delegate = self
-            panel.contentView = NSHostingView(rootView: AccessibilitySetupView(setup: self))
+            panel.host(AccessibilitySetupView(setup: self))
             panel.center(); window = panel
         }
         window?.makeKeyAndOrderFront(nil)
@@ -37,7 +37,10 @@ final class AccessibilitySetup: NSObject, ObservableObject, NSWindowDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
     }
 
-    private func refresh() { granted = AXIsProcessTrusted() }
+    private func refresh() {
+        let current = AXIsProcessTrusted()
+        if granted != current { granted = current }
+    }
     func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil }
     deinit { timer?.invalidate() }
 }
@@ -48,11 +51,11 @@ private struct AccessibilitySetupView: View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
                 Image(systemName: setup.granted ? "checkmark.circle.fill" : "text.cursor")
-                    .font(.system(size: 34)).foregroundStyle(setup.granted ? .green : .blue)
+                    .font(.system(size: 34)).foregroundStyle(setup.granted ? .green : .teal)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(setup.granted ? "Automatic paste is ready" : "Enable automatic paste")
                         .font(.system(size: 23, weight: .semibold))
-                    Text(setup.granted ? "Your next dictation can paste into the active app." : "One macOS permission, then you’re set.")
+                    Text(setup.granted ? "Your next dictation can paste into the active app." : "macOS must trust the app that is running now.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
             }
@@ -68,26 +71,33 @@ private struct AccessibilitySetupView: View {
                     step("2", "Turn on Hey Talk in the app list.")
                     step("3", "Missing from the list? Click +, press ⇧⌘G, enter ~/Applications, then choose Hey Talk.app.")
                 }
-                Text("You can also drag Hey Talk from Finder into that list. This window updates when access is enabled.")
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Already enabled, but still not working?").fontWeight(.semibold)
+                    Text("A rebuild can leave an old permission in Settings. Turn Hey Talk off and on. If this window still says access is missing, remove its old entry with −, then add the installed app again using +.")
+                }
+                .font(.callout).padding(14)
+                .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                Text("This window checks the running app’s access every second. It will say “Automatic paste is ready” when macOS grants it.")
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 HStack {
                     Button("Show Hey Talk in Finder") { setup.revealApp() }
                     Spacer()
                     Button("Open Accessibility Settings") { setup.openSettings() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                 }
             }
         }
         .padding(28)
-        .frame(width: 540, height: 540)
-        .background(.regularMaterial)
+        .padding(.top, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .tint(.teal)
     }
     private func step(_ number: String, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(number).font(.system(size: 12, weight: .semibold))
                 .frame(width: 22, height: 22)
-                .background(.blue.opacity(0.12), in: Circle())
+                .background(.teal.opacity(0.12), in: Circle())
             Text(text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
         }
     }

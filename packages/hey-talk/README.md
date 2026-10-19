@@ -61,7 +61,11 @@ and process IDs. `last` reads the most recent transcript, including after restar
 
 Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
 history show`. Each transcript has a timestamp and Copy button. Closing this
-window leaves dictation running. Older entries load in pages; nothing expires
+window with ⌘W leaves dictation running. Standard copy, paste, cut, select-all,
+and undo commands work in native text fields. Select part of any transcript
+and press ⌘C, or use its Copy button for the whole text. The search field filters
+loaded entries. macOS 26 windows and notifications use native Liquid Glass.
+Older entries load in pages; nothing expires
 automatically. `history` prints the latest 50 entries; `history --before ID`
 reads the next page using the `next_before` cursor from JSON output.
 
@@ -70,8 +74,8 @@ in `~/Library/Application Support/hey-talk/history.sqlite3`, readable only by
 your user. Canceled work is never saved. If saving fails, the window keeps the
 text in memory and marks it **Unsaved** so you can copy it before quitting.
 
-Allow microphone access when macOS asks. For automatic paste, choose **Enable
-Automatic Paste…** in the waveform menu or run `hey-talk permissions
+Allow microphone access when macOS asks. For automatic paste, choose
+**Automatic Paste…** in the waveform menu or run `hey-talk permissions
 accessibility`. The guide opens the Accessibility settings page, reveals the
 installed app in Finder if it needs adding, and detects when permission is on.
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
@@ -79,7 +83,14 @@ In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 that permission, dictation copies to the clipboard. If focus changes while
 transcribing, it also leaves the text on the clipboard. `--no-paste` and file
 transcription leave the clipboard untouched. Locally rebuilt app signatures
-can require permission again. Quit OpenWhispr if it owns the same hotkey.
+can require permission again. If Settings shows Hey Talk enabled but the guide
+still reports missing access, turn its switch off and on. If that fails, remove
+the old entry and add `~/Applications/Hey Talk.app` again. The guide checks the
+running process, so “Automatic paste is ready” is the confirmation. Rebuilds
+currently use ad-hoc signing; permission persistence across builds is not solved.
+Clipboard-only results include `paste_block` in JSON; `status` exposes the most
+recent failure as `last_paste_block`. Notifications distinguish missing access
+from an app switch or a closed target. Quit OpenWhispr if it owns the same hotkey.
 
 ## Runtime and privacy
 

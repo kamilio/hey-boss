@@ -234,13 +234,17 @@ final class Overlay {
         let alert = RecordingPanel(contentRect: NSRect(x: panel.frame.midX - 170, y: panel.frame.maxY + 8, width: 340, height: 88), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         alert.level = .statusBar; alert.isOpaque = false; alert.backgroundColor = .clear; alert.hasShadow = true
         alert.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let surface = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 340, height: 88))
-        surface.material = .popover; surface.state = .active; surface.wantsLayer = true
-        surface.layer?.cornerRadius = 16; surface.layer?.masksToBounds = true
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 108))
         let label = NSTextField(wrappingLabelWithString: message)
-        label.frame = NSRect(x: 16, y: 12, width: 308, height: 64)
-        label.font = .systemFont(ofSize: 13); surface.addSubview(label)
-        alert.contentView = surface; alert.orderFrontRegardless(); toast = alert
+        label.frame = NSRect(x: 18, y: 16, width: 304, height: 76)
+        label.font = .systemFont(ofSize: 13)
+        label.drawsBackground = false
+        content.addSubview(label)
+        let surface = glassSurface(content: content, radius: 20)
+        surface.frame = content.bounds
+        alert.contentView = surface
+        alert.setContentSize(content.bounds.size)
+        alert.orderFrontRegardless(); toast = alert
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak alert] in alert?.orderOut(nil) }
     }
 }

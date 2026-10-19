@@ -61,6 +61,14 @@ wait "$client"
 remember_history .build/inflight-recovery.json
 jq -e '.ok and .history_saved and (.text | length > 100)' .build/inflight-recovery.json >/dev/null
 test "$("$cli" status --json | jq -r .pid)" = "$service_pid"
+# Long selectable transcripts previously trapped the main thread in SwiftUI
+# layout. Opening history must keep control requests responsive after layout.
+"$cli" history show
+for iteration in {1..10}; do
+  perl -e 'alarm 5; exec @ARGV' "$cli" status --json | jq -e '.ok and .state == "idle"' >/dev/null
+  sleep 0.1
+done
+
 # Cancel while file decoding/inference is in flight. The old result must not win.
 "$cli" history --json > .build/history-before-cancel.json
 "$cli" transcribe "$long_fixture" --json > .build/cancelled.json &
@@ -100,4 +108,4 @@ jq -e --slurpfile last .build/after-cancel.json '.ok and .text == $last[0].text'
 jq -e --slurpfile last .build/after-cancel.json '.ok and .entries[0].id == $last[0].history_id and .entries[0].text == $last[0].text' .build/history-restarted.json >/dev/null
 "$cli" history --before "$(jq -r .history_id .build/after-cancel.json)" --json | jq -e --slurpfile previous .build/inflight-recovery.json '.entries[0].id == $previous[0].history_id' >/dev/null
 "$cli" status --json | jq -e '.hotkey_registered and .hotkey == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
-printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, orphan cleanup, Hyper+R toggle registration\n'
+printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Hyper+R toggle registration\n'

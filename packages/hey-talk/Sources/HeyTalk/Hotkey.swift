@@ -43,20 +43,46 @@ final class Hotkey {
     }
 }
 
+enum PasteBlockReason: String {
+    case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
+    case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
+
+    static func check(trusted: Bool, targetAlive: Bool, targetIsSelf: Bool, targetIsFrontmost: Bool) -> Self? {
+        if !trusted { return .accessibility }
+        if !targetAlive { return .targetClosed }
+        if targetIsSelf { return .ownWindow }
+        if !targetIsFrontmost { return .focusChanged }
+        return nil
+    }
+    var message: String {
+        switch self {
+        case .accessibility: return "macOS hasn’t granted this build Accessibility access. Open Automatic Paste from the Hey Talk menu. Text saved and copied; ⌘V to paste."
+        case .targetClosed: return "The original app closed. Text saved and copied; ⌘V to paste."
+        case .focusChanged: return "You switched apps, so automatic paste was skipped. Text saved and copied; ⌘V to paste."
+        case .ownWindow: return "Start dictating from the app you want to paste into. Text saved and copied; ⌘V to paste."
+        case .eventUnavailable: return "macOS couldn’t send the paste shortcut. Text saved and copied; ⌘V to paste."
+        case .clipboardUnavailable: return "The clipboard is unavailable. Your text is saved in Dictation History."
+        }
+    }
+}
+
 enum Paste {
-    static func deliver(_ text: String, target: NSRunningApplication?, completion: @escaping (String) -> Void) {
+    static func deliver(_ text: String, target: NSRunningApplication?, completion: @escaping (String, PasteBlockReason?) -> Void) {
         let board = NSPasteboard.general
-        board.clearContents(); board.setString(text, forType: .string)
-        guard AXIsProcessTrusted() else { completion("clipboard"); return }
-        guard let target, !target.isTerminated else { completion("clipboard"); return }
-        // The overlay never activates. If the user moved to another app during
-        // decoding, leave text on the clipboard instead of pasting elsewhere.
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier else { completion("clipboard"); return }
+        board.clearContents()
+        guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
+        // Never redirect a dictation into an app the user switched to while decoding.
+        if let reason = PasteBlockReason.check(trusted: AXIsProcessTrusted(),
+            targetAlive: target.map { !$0.isTerminated } ?? false,
+            targetIsSelf: target?.processIdentifier == getpid(),
+            targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier) {
+            completion("clipboard", reason); return
+        }
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { completion("clipboard"); return }
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { completion("clipboard", .eventUnavailable); return }
         down.flags = .maskCommand; up.flags = .maskCommand
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
-        completion("pasted")
+        completion("pasted", nil)
     }
 }
