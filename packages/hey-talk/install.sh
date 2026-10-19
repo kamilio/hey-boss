@@ -30,6 +30,8 @@ staging_root=$(mktemp -d "$HOME/Applications/.hey-talk-install.XXXXXX")
 stage="$staging_root/Hey Talk.app"
 ditto 'dist/Hey Talk.app' "$stage"
 codesign --verify --deep --strict "$stage"
+identity=$(tr -d '[:space:]' < signing-identity.sha1)
+codesign --verify --strict -R "=identifier \"local.hey-talk\" and certificate leaf = H\"$identity\"" "$stage"
 if [ -e "$destination" ]; then
   mkdir -p "$HOME/.Trash"
   previous="$HOME/.Trash/Hey Talk-$(date +%Y%m%d-%H%M%S)-$$.app"
