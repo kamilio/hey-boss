@@ -47,6 +47,7 @@ pub struct ResolvedLeg {
 pub struct Plan {
     config: Arc<Config>,
     route: usize,
+    source_model: String,
     effort: Option<String>,
 }
 
@@ -66,7 +67,12 @@ impl Plan {
 
     /// Resolve safe route metadata without copying credentials or selecting a transport.
     pub fn resolve(&self, index: usize) -> Result<ResolvedLeg> {
-        self.config.routes[self.route].resolve(&self.config, index, self.effort.as_deref())
+        self.config.routes[self.route].resolve(
+            &self.config,
+            index,
+            &self.source_model,
+            self.effort.as_deref(),
+        )
     }
 }
 
@@ -76,6 +82,7 @@ impl Route {
         &self,
         config: &Config,
         index: usize,
+        source_model: &str,
         effort: Option<&str>,
     ) -> Result<ResolvedLeg> {
         let leg = self.legs.get(index).context("Unknown route leg")?;
@@ -83,7 +90,7 @@ impl Route {
             .accounts
             .get(&leg.provider)
             .context("Unknown route provider")?;
-        let model = leg.model.as_deref().unwrap_or(&self.model);
+        let model = leg.model.as_deref().unwrap_or(source_model);
         let rewrite = leg
             .override_name
             .as_ref()
@@ -103,7 +110,7 @@ impl Route {
             .or(effort);
         let resolved = ResolvedLeg {
             config_revision: config.revision.clone(),
-            source_model: self.model.clone(),
+            source_model: source_model.into(),
             upstream_model: upstream.into(),
             provider: leg.provider.clone(),
             implementation: account.implementation(),
@@ -132,12 +139,24 @@ impl Config {
         if self.mode == Mode::Client {
             return None;
         }
-        self.routes.iter().position(|route| {
-            route.model == model
-                && route
-                    .api_shape
-                    .is_none_or(|s| Some(s) == ApiShape::from_route_path(path))
-        })
+        let matches_shape = |route: &Route| {
+            route
+                .api_shape
+                .is_none_or(|s| Some(s) == ApiShape::from_route_path(path))
+        };
+        self.routes
+            .iter()
+            .position(|route| route.model == model && matches_shape(route))
+            .or_else(|| {
+                // A default never overrides deliberate legacy aliases or explicit
+                // provider prefixes. Exact routes always win, independent of order.
+                if self.alias_for(model, path).is_some() || model.contains('/') {
+                    return None;
+                }
+                self.routes
+                    .iter()
+                    .position(|route| route.model == "*" && matches_shape(route))
+            })
     }
 
     /// None delegates to the existing legacy alias/fallback path. A matching named
@@ -151,6 +170,7 @@ impl Config {
         self.route_index(model, path).map(|route| Plan {
             config: self.clone(),
             route,
+            source_model: model.into(),
             effort: effort.map(str::to_owned),
         })
     }

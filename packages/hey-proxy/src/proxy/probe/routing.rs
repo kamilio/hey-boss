@@ -45,7 +45,7 @@ pub(in crate::proxy) fn describe(config: &Config, path: &str, input: &Value) -> 
             "Configured provider order:".into(),
         ];
         for index in 0..route.legs.len() {
-            let leg = match route.resolve(config, index, incoming) {
+            let leg = match route.resolve(config, index, requested, incoming) {
                 Ok(leg) => leg,
                 Err(_) => {
                     return "Routing error: invalid provider route. No upstream request was made."

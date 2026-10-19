@@ -159,6 +159,31 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn default_subscription_preserves_requested_model_and_alpha_exception() {
+    let mut f = Fixture::new().await;
+    let mut config = (*f.proxy.config).clone();
+    config.routes.insert(
+        0,
+        serde_json::from_value(json!({
+            "model":"*", "legs":[{"provider":"personal"}]
+        }))
+        .unwrap(),
+    );
+    f.proxy = Arc::new(local_snapshot(config, f.proxy.service.source.clone()).unwrap());
+    for model in ["gpt-future", "gpt-6-astra"] {
+        let response = f.request(json!({"model":model,"input":[]})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0]["auth"], "Bearer oauth-personal");
+    assert_eq!(seen[0]["path"], "/backend-api/codex/responses");
+    assert_eq!(seen[0]["body"]["model"], "gpt-future");
+    assert_eq!(seen[1]["auth"], "Bearer synthetic-paid-key");
+    assert_eq!(seen[1]["body"]["model"], "ultima-alpha");
+}
+
+#[tokio::test]
 async fn sonnet_uses_included_native_messages_then_explicit_paid_responses_adapter() {
     for exhausted in [false, true] {
         let mut f = Fixture::new().await;
