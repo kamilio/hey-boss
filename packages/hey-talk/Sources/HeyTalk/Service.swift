@@ -7,6 +7,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let capture = AudioCapture()
     private let inference = Inference()
     private let history = DictationHistory()
+    private let enterExceptions = EnterExceptions()
     private var historyWindow: HistoryWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
     private lazy var cues = AudioCues()
@@ -109,6 +110,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
             "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name],
+            "enter_exceptions": enterExceptions.bundleIDs,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
@@ -135,6 +137,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let command = request["command"] as? String ?? ""
         switch command {
         case "status", "doctor": reply(status())
+        case "enter-exceptions":
+            do {
+                guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
+                reply(["ok": true, "enter_exceptions": try enterExceptions.command(arguments)])
+            } catch { reply(failure(error.localizedDescription)) }
         case "start": start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, reply: reply)
         case "stop": stop(reply)
         case "toggle":
@@ -297,7 +304,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         }
                     }
                     if shouldPaste, self.session.generation == id {
-                        Paste.deliver(text, target: target, pressEnter: pressEnter,
+                        let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
+                        Paste.deliver(text, target: target, pressEnter: submit,
                                       isCurrent: { self.session.generation == id }, completion: complete)
                     } else { complete(shouldPaste ? "history" : "stdout", nil) }
                 }
