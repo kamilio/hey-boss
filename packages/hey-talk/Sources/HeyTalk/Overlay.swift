@@ -103,9 +103,11 @@ final class Overlay {
         root.layer?.addSublayer(halo)
         root.layer?.addSublayer(glow)
         if #available(macOS 26, *) {
-            let glass = NSGlassEffectView(); glass.style = .regular; glass.cornerRadius = 20
+            // This small floating control sits over other apps. Clear glass
+            // preserves that backdrop instead of covering it with a frosted fill.
+            let glass = NSGlassEffectView(); glass.style = .clear; glass.cornerRadius = 20
             glass.contentView = pillContent; pill = glass
-            let cancel = NSGlassEffectView(); cancel.style = .regular; cancel.cornerRadius = 14
+            let cancel = NSGlassEffectView(); cancel.style = .clear; cancel.cornerRadius = 14
             cancel.contentView = cancelButton; cancelGlass = cancel
             let container = NSGlassEffectContainerView(frame: root.bounds)
             container.spacing = 8
@@ -124,6 +126,7 @@ final class Overlay {
             root.addSubview(pill); root.addSubview(cancelGlass)
         }
         pill.wantsLayer = true
+        wave.isHidden = true
         pillContent.addSubview(identity); pillContent.addSubview(wave)
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
@@ -155,6 +158,7 @@ final class Overlay {
         generation &+= 1; let ticket = generation
         phase = next; expanded = false
         wave.heights = Array(repeating: 4, count: Waveform.count)
+        wave.isHidden = true
         wave.alphaValue = 0
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
@@ -164,7 +168,7 @@ final class Overlay {
         if next == .recording {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) { [weak self] in
                 guard let self, self.generation == ticket else { return }
-                self.expanded = true; self.layout(animated: true)
+                self.expanded = true; self.wave.isHidden = false; self.layout(animated: true)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                     guard let self, self.generation == ticket else { return }
                     NSAnimationContext.runAnimationGroup { context in context.duration = 0.2; self.wave.animator().alphaValue = 1 }
