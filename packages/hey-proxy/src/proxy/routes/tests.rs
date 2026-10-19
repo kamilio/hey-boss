@@ -165,7 +165,7 @@ async fn default_subscription_preserves_requested_model_and_alpha_exception() {
     config.routes.insert(
         0,
         serde_json::from_value(json!({
-            "model":"*", "legs":[{"provider":"personal"}]
+            "model":"*", "api_shape":"responses", "legs":[{"provider":"personal"}]
         }))
         .unwrap(),
     );
@@ -181,6 +181,32 @@ async fn default_subscription_preserves_requested_model_and_alpha_exception() {
     assert_eq!(seen[0]["body"]["model"], "gpt-future");
     assert_eq!(seen[1]["auth"], "Bearer synthetic-paid-key");
     assert_eq!(seen[1]["body"]["model"], "ultima-alpha");
+}
+
+#[tokio::test]
+async fn default_responses_subscription_leaves_native_claude_on_its_subscription() {
+    let mut f = Fixture::new().await;
+    f.claude();
+    let mut config = (*f.proxy.config).clone();
+    config.claude = config.accounts["sonnet"].apply(&config).claude;
+    config.routes.retain(|r| r.model != "claude-sonnet-5-5");
+    config.routes.push(
+        serde_json::from_value(json!({
+            "model":"*", "api_shape":"responses", "legs":[{"provider":"personal"}]
+        }))
+        .unwrap(),
+    );
+    f.proxy = Arc::new(local_snapshot(config, f.proxy.service.source.clone()).unwrap());
+    let response = super::super::forward_api(f.proxy.clone(), Request::builder()
+        .method("POST").uri("/v1/messages")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"synthetic"}],"max_tokens":16}).to_string())).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["auth"], "Bearer sk-ant-oat01-synthetic-old");
+    assert_eq!(seen[0]["path"], "/v1/messages");
+    assert_eq!(seen[0]["body"]["model"], "claude-sonnet-5-5");
 }
 
 #[tokio::test]
