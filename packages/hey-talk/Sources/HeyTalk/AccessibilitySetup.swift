@@ -73,7 +73,7 @@ private struct AccessibilitySetupView: View {
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Already enabled, but still not working?").fontWeight(.semibold)
-                    Text("A rebuild can leave an old permission in Settings. Turn Hey Talk off and on. If this window still says access is missing, remove its old entry with −, then add the installed app again using +.")
+                    Text("Switching to the persistent signing certificate needs one final approval. If access is still missing, remove the old Hey Talk entry with −, then add the installed app using +. Future builds using this certificate keep the same identity.")
                 }
                 .font(.callout).padding(14)
                 .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))

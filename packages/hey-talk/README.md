@@ -22,11 +22,18 @@ will run it. Runtime downloads are pinned and SHA-256 verified.
 
 ```sh
 cd ~/Workspace/hey-boss/packages/hey-talk
+OP_ACCOUNT=my.1password.com ./setup-signing.sh  # Once per build machine
 ./build.sh
 "dist/Hey Talk.app/Contents/MacOS/hey-talk" --help
 "dist/Hey Talk.app/Contents/MacOS/hey-talk" record --no-paste
 "dist/Hey Talk.app/Contents/MacOS/hey-talk" transcribe recording.wav --json
 ```
+
+Release builds use a persistent local signing certificate backed up in the
+private 1Password item **Hey Talk local code signing**. Restore that same identity
+on each build machine; builds refuse to silently fall back to ad-hoc signing.
+Only its public fingerprint is committed. No private keys or passwords belong in
+the checkout. An installed build does not need 1Password or the signing key to run.
 
 The development build can reuse OpenWhispr's existing Orukeet download.
 `./prepare-model.sh` makes an independent, verified copy or downloads the model.
@@ -58,6 +65,18 @@ hey-talk history --json
 hey-talk warm
 ```
 
+Suppress Enter in specific desktop apps, even with Hyper+R:
+
+```sh
+hey-talk enter-exceptions add com.tinyspeck.slackmacgap
+hey-talk enter-exceptions                         # List exceptions
+hey-talk enter-exceptions remove com.tinyspeck.slackmacgap
+```
+
+Changes apply immediately and persist across restarts in the app's macOS
+preferences. Match the original target app's bundle ID; Slack in a browser is
+not covered by the Slack desktop exception. Hyper+E remains paste-only everywhere.
+
 `record` stops on Enter or Ctrl-C. `stop` returns the transcript; `--json` also
 reports capture latency, inference duration, and real-time factor. `status
 --json` exposes readiness, measured microphone levels, hotkey registration,
@@ -88,12 +107,14 @@ In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation copies to the clipboard. If focus changes while
 transcribing, it also leaves the text on the clipboard. `--no-paste` and file
-transcription leave the clipboard untouched. Locally rebuilt app signatures
-can require permission again. If Settings shows Hey Talk enabled but the guide
-still reports missing access, turn its switch off and on. If that fails, remove
+transcription leave the clipboard untouched. Switching from the old ad-hoc
+signature to the persistent certificate requires one final permission approval.
+Subsequent release builds keep the same certificate and app identity. If Settings
+shows Hey Talk enabled but the guide still reports missing access, turn its switch
+off and on. If that fails, remove
 the old entry and add `~/Applications/Hey Talk.app` again. The guide checks the
 running process, so “Automatic paste is ready” is the confirmation. Rebuilds
-currently use ad-hoc signing; permission persistence across builds is not solved.
+must use the same certificate; replacing it changes the permission identity.
 Clipboard-only results include `paste_block` in JSON; `status` exposes the most
 recent failure as `last_paste_block`. Notifications distinguish missing access
 from an app switch or a closed target. Quit OpenWhispr if it owns the same hotkey.
@@ -125,6 +146,8 @@ These are local measurements, not latency guarantees.
 
 ```sh
 swift test
+./test-signing.sh
+./test-enter-exceptions.sh
 swift test --sanitize=thread
 ./test-integration.sh
 # To test the installed app instead:

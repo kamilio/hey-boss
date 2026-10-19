@@ -54,6 +54,5 @@ for library in "$app/Contents/Frameworks/"*.dylib; do codesign --force --sign - 
 # The worker loads ad-hoc-signed native libraries and has no UI, microphone,
 # or Accessibility privileges. Keep the desktop executable hardened.
 codesign --force --sign - "$app/Contents/Helpers/hey-talk-inference"
-codesign --force --sign - --options runtime --entitlements entitlements.plist "$app"
-codesign --verify --deep --strict "$app"
+./sign-app.sh "$app"
 printf '\nBuilt: %s\nCLI: %s/Contents/MacOS/hey-talk --help\n' "$app" "$app"
