@@ -1,6 +1,6 @@
 // Run against tools/serve_image_preview_fixture.mjs with playwright-cli run-code.
 async page => {
-  const base = new URL(page.url()).origin;
+  const base = await page.evaluate(() => location.origin);
   if (base !== 'http://127.0.0.1:59661') throw Error('Use the isolated native fixture');
   const checks = [], errors = [], downloads = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
@@ -50,6 +50,7 @@ async page => {
   for (const colorScheme of ['light','dark']) for (const width of [1440,768,390,320]) {
     await page.emulateMedia({colorScheme,reducedMotion:'reduce'});
     await page.setViewportSize({width,height:900});
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     check(await dialog.evaluate(el => {const r=el.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight && el.scrollWidth<=el.clientWidth;}), `Viewer fits ${colorScheme}/${width}`);
     check(await dialog.locator('img').evaluate(el => {const r=el.getBoundingClientRect(),s=el.parentElement.getBoundingClientRect();return r.width>100&&r.left>=s.left&&r.right<=s.right+1&&r.bottom<=s.bottom+1;}), `Image fits ${colorScheme}/${width}`);
     await page.screenshot({path:`output/playwright/image-preview/${colorScheme}-${width}.png`});
@@ -60,7 +61,8 @@ async page => {
   await dialog.getByRole('button',{name:'Fit image',exact:true}).click();
   const [download] = await Promise.all([page.waitForEvent('download'),dialog.getByRole('button',{name:'Download image',exact:true}).click()]);
   const stream = await download.createReadStream(), chunks = []; for await (const chunk of stream) chunks.push(chunk);
-  check(Buffer.concat(chunks).toString('base64') === fixture.png, 'Explicit image download preserves bytes');
+  const downloadedBase64 = await page.evaluate(bytes => btoa(bytes.map(byte => String.fromCharCode(byte)).join('')), chunks.flatMap(chunk => Array.from(chunk)));
+  check(downloadedBase64 === fixture.png, 'Explicit image download preserves bytes');
   check(download.suggestedFilename() === 'release-overview.png', 'Explicit image download preserves name');
   await page.keyboard.press('Escape');
   await dialog.waitFor({state:'detached'});
