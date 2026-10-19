@@ -213,6 +213,10 @@ impl Config {
         for (i, route) in self.routes.iter().enumerate() {
             anyhow::ensure!(valid_model(&route.model), "Invalid route model");
             anyhow::ensure!(
+                route.model != "*" || route.api_shape.is_some(),
+                "Default routes require api_shape to preserve other provider APIs"
+            );
+            anyhow::ensure!(
                 !self.routes[..i]
                     .iter()
                     .any(|other| other.model == route.model

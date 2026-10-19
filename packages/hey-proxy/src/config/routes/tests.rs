@@ -30,12 +30,19 @@ fn ordered_routes_roundtrip() {
 #[test]
 fn default_route_preserves_models_and_explicit_exceptions() {
     let mut raw = fixture();
-    raw["routes"]
-        .as_array_mut()
-        .unwrap()
-        .insert(0, json!({"model":"*","legs":[{"provider":"personal"}]}));
+    raw["routes"].as_array_mut().unwrap().insert(
+        0,
+        json!({"model":"*","api_shape":"responses","legs":[{"provider":"personal"}]}),
+    );
     raw["aliases"] = json!([{"from":"gpt-6-astra","to":"ultima-alpha"}]);
     let c = Arc::new(config(raw).unwrap());
+    for path in [
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/custom/messages",
+    ] {
+        assert!(c.route_plan("claude-sonnet-5-5", path, None).is_none());
+    }
     for model in ["gpt-6.1-sol", "gpt-future"] {
         let plan = c.route_plan(model, "/v1/responses", Some("high")).unwrap();
         let (_, leg) = plan.select(0).unwrap();
@@ -117,6 +124,11 @@ fn rejects_ambiguous_routes_and_invalid_scopes() {
     let cases = [
         ("routes", json!([]), true),
         ("routes", json!([{"model":"logical","legs":[]}]), false),
+        (
+            "routes",
+            json!([{"model":"*","legs":[{"provider":"personal"}]}]),
+            false,
+        ),
         (
             "routes",
             json!([{"model":"logical","legs":[{"provider":"missing"}]}]),
