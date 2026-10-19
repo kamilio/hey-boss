@@ -1,9 +1,11 @@
 # hey-talk
 
-Native macOS dictation, controlled from the CLI. Press Caps Lock + R to start;
-press again to stop, transcribe, and paste. Caps Lock must already be mapped to Hyper
-(Control + Command + Option + Shift). Click the pill to toggle recording, drag
-to move it, or press Esc to discard.
+Native macOS dictation, controlled from the CLI. Press Hyper+E or Hyper+R to start;
+press Hyper+E to stop and paste, or Hyper+R to stop, paste, and press Enter.
+The shortcut used to stop chooses the behavior. Caps Lock must already be mapped
+to Hyper (Control + Command + Option + Shift). Click the pill to toggle recording,
+drag to move it, or press Esc to discard. Clicking to stop keeps the starting
+shortcut's behavior; recordings started by clicking or the CLI only paste.
 
 The floating control is a compact glass capsule with an indigo waveform mark.
 It expands to show live teal audio levels while recording, then a quiet indigo

@@ -144,7 +144,7 @@ final class Overlay {
         pillContent.addSubview(identity); pillContent.addSubview(wave)
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
-        pillContent.toolTip = "Press \(DictationShortcut.hint) or click to start / stop · Drag to move"
+        pillContent.toolTip = "\(DictationShortcut.help) · Click to start / stop · Drag to move"
         pillContent.onClick = { [weak self] in self?.onToggle?() }
         pillContent.onOpenAccessibility = { [weak self] in self?.onOpenAccessibility?() }
         pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }

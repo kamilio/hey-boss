@@ -18,6 +18,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication?
     private var paste = true
+    private var pressEnter = false
     private var transcriptionSource = "microphone"
     private var overlayEnabled: Bool
     private var error: String?
@@ -41,7 +42,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         hotkey?.onAction = { [weak self] action in
             guard let self else { return }
             switch action {
-            case .toggle: self.toggle()
+            case .toggle(let shortcut): self.toggleDictation(shortcut: shortcut)
             case .cancel: if self.session.phase == .recording || self.session.phase == .processing { self.cancel() }
             case .none: break
             }
@@ -89,8 +90,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
     @objc private func toggle() {
-        if session.phase == .recording { stop { _ in } }
-        else if session.phase != .processing { start(showOverlay: overlayEnabled, paste: true) { _ in } }
+        toggleDictation(shortcut: nil)
+    }
+    private func toggleDictation(shortcut: DictationShortcut?) {
+        if session.phase == .recording {
+            if let shortcut { pressEnter = shortcut == .submit }
+            stop { _ in }
+        } else if session.phase != .processing {
+            start(showOverlay: overlayEnabled, paste: true, pressEnter: shortcut == .submit) { _ in }
+        }
     }
     @objc private func cancelMenu() { cancel() }
     @objc private func quit() { NSApp.terminate(nil) }
@@ -99,7 +107,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         var value: [String: Any] = [
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
-            "hotkey_mode": "toggle", "hotkey": DictationShortcut.name, "hotkey_registered": hotkey?.registered ?? false,
+            "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
+            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name],
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
@@ -199,11 +208,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         default: reply(failure("Unknown command: \(command)"))
         }
     }
-    private func start(showOverlay: Bool, paste: Bool, reply: @escaping ([String: Any]) -> Void) {
+    private func start(showOverlay: Bool, paste: Bool, pressEnter: Bool = false, reply: @escaping ([String: Any]) -> Void) {
         let id: UInt64
         do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
         pendingStartReply = reply
-        error = nil; captureReady = false; self.paste = paste; transcriptionSource = "microphone"
+        error = nil; captureReady = false; self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
         target = NSWorkspace.shared.frontmostApplication
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
@@ -268,7 +277,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
                 // Detach this result before disk IO: a new recording may start while saving.
                 let reply = self.pendingReply; self.pendingReply = nil
-                let shouldPaste = self.paste, target = self.target, captureMS = self.captureMilliseconds
+                let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
                 self.history.save(entry) { saved in
                     let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
                         self.lastPasteBlock = reason
@@ -281,11 +290,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         if self.session.generation == id {
                             self.scheduleRelease()
                             if !saved { self.overlay?.error("History could not be saved. Copy your text from Dictation History before quitting.") }
-                            else if let reason { self.overlay?.error(reason.message, accessibilityAction: reason == .accessibility) }
+                            else if let reason {
+                                let message = delivery == "pasted" ? "Text was pasted, but Enter was skipped. Finish in the original app." : reason.message
+                                self.overlay?.error(message, accessibilityAction: reason == .accessibility)
+                            }
                         }
                     }
                     if shouldPaste, self.session.generation == id {
-                        Paste.deliver(text, target: target, completion: complete)
+                        Paste.deliver(text, target: target, pressEnter: pressEnter,
+                                      isCurrent: { self.session.generation == id }, completion: complete)
                     } else { complete(shouldPaste ? "history" : "stdout", nil) }
                 }
             }

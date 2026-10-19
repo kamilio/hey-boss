@@ -4,7 +4,7 @@ import TalkCore
 
 final class Hotkey {
     private var handler: EventHandlerRef?
-    private var shortcut: EventHotKeyRef?
+    private var shortcuts: [EventHotKeyRef] = []
     private var escape: EventHotKeyRef?
     private var state = HotkeyState()
     var onAction: ((HotkeyAction) -> Void)?
@@ -21,14 +21,20 @@ final class Hotkey {
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
             if id.id == 2, pressed { owner.onAction?(.cancel) }
-            else if id.id == 1 {
-                let action = pressed ? owner.state.keyDown(code: DictationShortcut.keyCode, hyper: true, repeated: false) : owner.state.keyUp(code: DictationShortcut.keyCode)
+            else if let shortcut = DictationShortcut(rawValue: Int(id.id)) {
+                let action = pressed ? owner.state.keyDown(code: shortcut.keyCode, hyper: true, repeated: false) : owner.state.keyUp(code: shortcut.keyCode)
                 if action != .none { owner.onAction?(action) }
             }
             return noErr
         }, 2, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        let id = EventHotKeyID(signature: 0x48544C4B, id: 1)
-        registered = RegisterEventHotKey(UInt32(DictationShortcut.keyCode), UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &shortcut) == noErr
+        for shortcut in DictationShortcut.allCases {
+            var ref: EventHotKeyRef?
+            let id = EventHotKeyID(signature: 0x48544C4B, id: UInt32(shortcut.keyCode))
+            if RegisterEventHotKey(UInt32(shortcut.keyCode), UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &ref) == noErr, let ref {
+                shortcuts.append(ref)
+            }
+        }
+        registered = shortcuts.count == DictationShortcut.allCases.count
     }
     func captureEscape(_ capture: Bool) {
         if capture, escape == nil {
@@ -37,7 +43,7 @@ final class Hotkey {
     }
     func reset() { captureEscape(false) }
     deinit {
-        if let shortcut { UnregisterEventHotKey(shortcut) }
+        for shortcut in shortcuts { UnregisterEventHotKey(shortcut) }
         if let escape { UnregisterEventHotKey(escape) }
         if let handler { RemoveEventHandler(handler) }
     }
@@ -67,22 +73,42 @@ enum PasteBlockReason: String {
 }
 
 enum Paste {
-    static func deliver(_ text: String, target: NSRunningApplication?, completion: @escaping (String, PasteBlockReason?) -> Void) {
+    static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool,
+                        isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
         let board = NSPasteboard.general
         board.clearContents()
         guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
         // Never redirect a dictation into an app the user switched to while decoding.
-        if let reason = PasteBlockReason.check(trusted: AXIsProcessTrusted(),
+        send(pressEnter: pressEnter, check: { PasteBlockReason.check(trusted: AXIsProcessTrusted(),
             targetAlive: target.map { !$0.isTerminated } ?? false,
             targetIsSelf: target?.processIdentifier == getpid(),
-            targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier) {
-            completion("clipboard", reason); return
+            targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
+        }, isCurrent: isCurrent, post: post, afterPaste: { action in
+            // Let the receiving app consume the paste before sending Return.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: action)
+        }, completion: completion)
+    }
+
+    static func send(pressEnter: Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
+                     post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
+                     completion: @escaping (String, PasteBlockReason?) -> Void) {
+        if let reason = check() { completion("clipboard", reason); return }
+        guard post(9, .maskCommand) else { completion("clipboard", .eventUnavailable); return }
+        guard pressEnter else { completion("pasted", nil); return }
+        afterPaste {
+            guard isCurrent() else { completion("pasted", nil); return }
+            if let reason = check() { completion("pasted", reason); return }
+            guard post(36, []) else { completion("pasted", .eventUnavailable); return }
+            completion("submitted", nil)
         }
+    }
+
+    private static func post(_ key: CGKeyCode, flags: CGEventFlags) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false) else { completion("clipboard", .eventUnavailable); return }
-        down.flags = .maskCommand; up.flags = .maskCommand
+              let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return false }
+        down.flags = flags; up.flags = flags
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
-        completion("pasted", nil)
+        return true
     }
 }
