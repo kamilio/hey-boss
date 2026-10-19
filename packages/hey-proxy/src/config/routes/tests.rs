@@ -28,6 +28,40 @@ fn ordered_routes_roundtrip() {
 }
 
 #[test]
+fn default_route_preserves_models_and_explicit_exceptions() {
+    let mut raw = fixture();
+    raw["routes"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, json!({"model":"*","legs":[{"provider":"personal"}]}));
+    raw["aliases"] = json!([{"from":"gpt-6-astra","to":"ultima-alpha"}]);
+    let c = Arc::new(config(raw).unwrap());
+    for model in ["gpt-6.1-sol", "gpt-future"] {
+        let plan = c.route_plan(model, "/v1/responses", Some("high")).unwrap();
+        let (_, leg) = plan.select(0).unwrap();
+        assert_eq!(leg.source_model, model);
+        assert_eq!(leg.upstream_model, model);
+        assert_eq!(leg.provider, "personal");
+    }
+    // An exact route wins regardless of list order. Explicit legacy aliases
+    // and native provider prefixes remain deliberate exceptions to the default.
+    assert_eq!(
+        c.route_plan("logical", "/v1/responses", None)
+            .unwrap()
+            .len(),
+        3
+    );
+    for model in [
+        "gpt-6-astra",
+        "openai/gpt-6-luna",
+        "gemini/gemini-test",
+        "claude/claude-test",
+    ] {
+        assert!(c.route_plan(model, "/v1/responses", None).is_none());
+    }
+}
+
+#[test]
 fn provider_selection_isolated_and_rewrites_exactly_once() {
     let mut raw = fixture();
     raw["aliases"] = json!([{"from":"logical","to":"wrong"},{"from":"upstream-fast","to":"twice"}]);
