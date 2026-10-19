@@ -56,7 +56,7 @@ enum PasteBlockReason: String {
     }
     var message: String {
         switch self {
-        case .accessibility: return "macOS hasn’t granted this build Accessibility access. Open Automatic Paste from the Hey Talk menu. Text saved and copied; ⌘V to paste."
+        case .accessibility: return "Automatic paste needs Accessibility access for this build. Your text is saved and copied; press ⌘V to paste."
         case .targetClosed: return "The original app closed. Text saved and copied; ⌘V to paste."
         case .focusChanged: return "You switched apps, so automatic paste was skipped. Text saved and copied; ⌘V to paste."
         case .ownWindow: return "Start dictating from the app you want to paste into. Text saved and copied; ⌘V to paste."

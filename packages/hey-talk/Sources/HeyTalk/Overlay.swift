@@ -33,6 +33,7 @@ private final class IdentityView: NSView {
 private final class ClickSurface: GlassFace {
     var onClick: (() -> Void)?
     var onHover: ((Bool) -> Void)?
+    var onOpenAccessibility: (() -> Void)?
     private var start: NSPoint?
     private var origin: NSPoint?
     private var dragged = false
@@ -51,6 +52,13 @@ private final class ClickSurface: GlassFace {
         if dragged { window?.setFrameOrigin(NSPoint(x: origin.x + current.x - start.x, y: origin.y + current.y - start.y)) }
     }
     override func mouseUp(with event: NSEvent) { if !dragged { onClick?() }; start = nil }
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
+        item.target = self; menu.addItem(item)
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+    @objc private func openAccessibility() { onOpenAccessibility?() }
     override func accessibilityPerformPress() -> Bool { onClick?(); return true }
 }
 
@@ -75,6 +83,7 @@ final class Overlay {
     private var toast: NSPanel?
     var onToggle: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onOpenAccessibility: (() -> Void)?
     var level: () -> Double = { 0 }
 
     init() {
@@ -137,6 +146,7 @@ final class Overlay {
         pillContent.setAccessibilityLabel("Start dictation")
         pillContent.toolTip = "Press \(DictationShortcut.hint) or click to start / stop · Drag to move"
         pillContent.onClick = { [weak self] in self?.onToggle?() }
+        pillContent.onOpenAccessibility = { [weak self] in self?.onOpenAccessibility?() }
         pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }
         cancelButton.isBordered = false
         cancelButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Cancel dictation")
@@ -156,11 +166,13 @@ final class Overlay {
     }
     func show(_ visible: Bool) {
         enabled = visible
+        if !visible { toast?.orderOut(nil) }
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
         updateTimer()
     }
     func update(_ next: Phase) {
         generation &+= 1; let ticket = generation
+        if next == .recording || next == .processing { toast?.orderOut(nil) }
         phase = next; expanded = false
         pillContent.accent = next == .recording ? TalkDesign.active : TalkDesign.accent
         wave.heights = Array(repeating: 4, count: Waveform.count)
@@ -253,23 +265,25 @@ final class Overlay {
         RunLoop.main.add(ticker, forMode: .common); timer = ticker
     }
     @objc private func cancel() { onCancel?() }
-    func error(_ message: String) {
+    func error(_ message: String, accessibilityAction: Bool = false) {
         guard enabled else { return }
         toast?.orderOut(nil)
-        let alert = RecordingPanel(contentRect: NSRect(x: panel.frame.midX - 170, y: panel.frame.maxY + 8, width: 340, height: 88), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let alert = RecordingPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        alert.title = accessibilityAction ? "Hey Talk — Automatic Paste" : "Hey Talk — Notice"
         alert.level = .statusBar; alert.isOpaque = false; alert.backgroundColor = .clear; alert.hasShadow = true
         alert.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 108))
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.frame = NSRect(x: 18, y: 16, width: 304, height: 76)
-        label.font = .systemFont(ofSize: 13)
-        label.drawsBackground = false
-        content.addSubview(label)
+        alert.hidesOnDeactivate = false
+        let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
+        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak alert] in alert?.orderOut(nil) })
         let surface = glassSurface(content: content, radius: 20)
         surface.frame = content.bounds
         alert.contentView = surface
         alert.setContentSize(content.bounds.size)
+        alert.setFrameOrigin(NSPoint(x: panel.frame.midX - content.bounds.width / 2, y: panel.frame.maxY + 8))
         alert.orderFrontRegardless(); toast = alert
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak alert] in alert?.orderOut(nil) }
+        // Keep the repair link available until clicked, dismissed, or recording resumes.
+        if !accessibilityAction {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak alert] in alert?.orderOut(nil) }
+        }
     }
 }

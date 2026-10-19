@@ -77,9 +77,11 @@ your user. Canceled work is never saved. If saving fails, the window keeps the
 text in memory and marks it **Unsaved** so you can copy it before quitting.
 
 Allow microphone access when macOS asks. For automatic paste, choose
-**Automatic Paste…** in the waveform menu or run `hey-talk permissions
-accessibility`. The guide opens the Accessibility settings page, reveals the
-installed app in Finder if it needs adding, and detects when permission is on.
+**Automatic Paste…** in the waveform menu or the floating capsule’s right-click
+menu, or run `hey-talk permissions accessibility`. A paste-permission error also
+has an **Open Accessibility Settings** button and stays visible until dismissed
+or recording resumes. The guide opens the Accessibility settings page, reveals
+the installed app in Finder if it needs adding, and detects when permission is on.
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation copies to the clipboard. If focus changes while
