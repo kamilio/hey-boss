@@ -5085,6 +5085,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         mindmapsMenuItem.action = #selector(showMindmaps)
         mindmapsMenuItem.target = self
         menu.addItem(mindmapsMenuItem)
+        let talkItem = NSMenuItem(title: "Hey Talk…", action: #selector(showHeyTalk), keyEquivalent: "")
+        talkItem.target = self
+        talkItem.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
+        menu.addItem(talkItem)
         menu.addItem(.separator())
         let quotaItem = NSMenuItem()
         quotaItem.view = subscriptionQuota.content
@@ -5134,6 +5138,20 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         var error: NSDictionary?
         NSAppleScript(source: script)?.executeAndReturnError(&error)
         if let error { NSLog("Could not launch hey-harvester: %@", error) }
+    }
+    @objc func showHeyTalk() {
+        let candidates = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Hey Talk.app"),
+                          URL(fileURLWithPath: "/Applications/Hey Talk.app")]
+        guard let app = candidates.first(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent("Contents/Info.plist").path) }) else {
+            let alert = NSAlert(); alert.messageText = "Hey Talk is not installed"
+            alert.informativeText = "Install Hey Talk on this Mac to use local dictation."
+            alert.runModal(); return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.arguments = ["--serve", "--show-history"]
+        NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
+            if let error { DispatchQueue.main.async { NSAlert(error: error).runModal() } }
+        }
     }
     func applyConnectionSettings(_ preferences: ConnectionPreferences, completion: @escaping (String?) -> Void) {
         let candidates = [cli, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
