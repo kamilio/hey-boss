@@ -50,3 +50,34 @@
 }
 .attachment-image-retry { max-width: 100%; white-space: normal; text-align: left; }
 .attachment-inline-status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+/* Image inspection stays in the current resource, with native modal focus. */
+:root:has(.attachment-viewer[open]) { overflow: hidden; }
+.attachment-viewer { box-sizing: border-box; width: min(1120px, calc(100vw - 40px)); height: min(880px, calc(100dvh - 48px)); max-width: none; max-height: none; margin: auto; padding: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--solid); color: var(--text); box-shadow: 0 24px 90px #0005; overflow: hidden; }
+.attachment-viewer[open] { display: flex; flex-direction: column; }
+.attachment-viewer::backdrop { background: #101828a6; backdrop-filter: blur(5px); }
+.attachment-viewer > header { display: flex; align-items: center; gap: 8px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
+.attachment-viewer-heading { flex: 1; min-width: 0; }
+.attachment-viewer h2 { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.attachment-viewer-heading p { margin: 3px 0 0; font-size: 12px; color: var(--muted); }
+.attachment-viewer .icon-button { width: 40px; height: 40px; flex-shrink: 0; }
+.attachment-viewer svg { width: 18px; height: 18px; }
+.attachment-viewer-stage { flex: 1; min-height: 0; min-width: 0; padding: 20px; display: flex; justify-content: center; align-items: center; overflow: auto; overscroll-behavior: contain; background: var(--hover); }
+.attachment-viewer-stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; flex-shrink: 0; }
+.attachment-viewer-stage.actual-size { display: block; }
+.attachment-viewer-stage.actual-size img { max-width: none; max-height: none; margin: auto; }
+.attachment-viewer [hidden] { display: none; }
+.attachment-viewer-message { max-width: 360px; text-align: center; color: var(--muted); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.attachment-viewer-message [role=alert] { color: var(--danger); }
+.attachment-viewer > footer { display: flex; flex-direction: row; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 18px; border-top: 1px solid var(--line); }
+.attachment-viewer-details { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.attachment-viewer [data-size] { min-height: 36px; }
+.attachment-viewer button:focus-visible, .attachment-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 480px) {
+  .attachment-viewer { width: calc(100vw - 16px); height: calc(100dvh - 24px); border-radius: 14px; }
+  .attachment-viewer > header { padding: 12px; gap: 4px; }
+  .attachment-viewer .icon-button { width: 44px; height: 44px; }
+  .attachment-viewer-stage { padding: 10px; }
+  .attachment-viewer > footer { padding: 8px 12px; }
+  .attachment-viewer [data-size] { min-height: 44px; }
+}

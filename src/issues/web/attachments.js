@@ -5,6 +5,88 @@ const HeyBossAttachments = (() => {
   const icon = name => HeyBossUI.icon(name);
   const size = n => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB`;
   const api = (context, operation, requestID) => HeyBossArtifacts.rpc(context, {action:"attachment", operation}, ["list","download"].includes(operation.command), requestID);
+  const bytes = value => Uint8Array.from(atob(value.data), c => c.charCodeAt(0));
+  const imageName = name => /\.(png|jpe?g|gif|webp|svg)$/i.test(name);
+  const imageType = data => {
+    if(data[0]===137&&data[1]===80&&data[2]===78&&data[3]===71)return "image/png";
+    if(data[0]===255&&data[1]===216&&data[2]===255)return "image/jpeg";
+    if(/^GIF8[79]a$/.test(String.fromCharCode(...data.slice(0,6))))return "image/gif";
+    if(String.fromCharCode(...data.slice(0,4))==="RIFF"&&String.fromCharCode(...data.slice(8,12))==="WEBP")return "image/webp";
+    if(/^\s*(?:<\?xml[^>]*>\s*)?<svg[\s>]/i.test(new TextDecoder().decode(data.slice(0,1024))))return "image/svg+xml";
+    return null;
+  };
+  function save(data, name) {
+    const url = URL.createObjectURL(new Blob([data], {type:"application/octet-stream"}));
+    const link = document.createElement("a");link.href=url;link.download=name;link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  let closePreview = null;
+  function preview(context, file, opener) {
+    closePreview?.();
+    const dialog = document.createElement("dialog");
+    dialog.className = "attachment-viewer";
+    dialog.setAttribute("aria-label", file.name);
+    dialog.innerHTML = `<header><div class="attachment-viewer-heading"><h2>${esc(file.name)}</h2><p>${size(file.size)}</p></div><button class="icon-button" type="button" data-save aria-label="Download image" title="Download image" disabled>${icon("download")}</button><button class="icon-button" type="button" data-close aria-label="Close image" title="Close image · Esc" autofocus>${icon("x")}</button></header><div class="attachment-viewer-stage" aria-busy="true"><img alt="${esc(file.name)}" hidden><div class="attachment-viewer-message"><p role="status">Loading image…</p><button class="button small" type="button" data-retry hidden>Retry</button></div></div><footer><span class="attachment-viewer-details">Image preview</span><button class="button small" type="button" data-size aria-pressed="false" disabled>Actual size</button></footer>`;
+    const $ = selector => dialog.querySelector(selector);
+    const img = $("img"), stage = $(".attachment-viewer-stage"), message = $(".attachment-viewer-message"), note = $("[role=status]");
+    let url = null, data = null, closed = false;
+    const revoke = () => {if(url)URL.revokeObjectURL(url);url=null;};
+    const close = () => {
+      if(closed)return;
+      closed=true;observer.disconnect();
+      window.removeEventListener("hashchange", close);window.removeEventListener("popstate", close);
+      img.onload=img.onerror=null;img.removeAttribute("src");revoke();data=null;
+      dialog.close();dialog.remove();closePreview=null;
+      if(opener.isConnected)opener.focus({preventScroll:true});
+    };
+    const observer = new MutationObserver(() => {if(!opener.isConnected || !dialog.isConnected)close();});
+    document.body.append(dialog);dialog.showModal();closePreview=close;
+    observer.observe(document.body, {childList:true,subtree:true});
+    window.addEventListener("hashchange", close);window.addEventListener("popstate", close);
+    $("[data-close]").onclick=close;
+    dialog.addEventListener("cancel", event => {event.preventDefault();close();});
+    dialog.addEventListener("click", event => {
+      if(event.target!==dialog)return;
+      const rect=dialog.getBoundingClientRect();
+      if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)close();
+    });
+    $("[data-save]").onclick=()=>{if(data)save(data,file.name);};
+    $("[data-size]").onclick=() => {
+      const actual=stage.classList.toggle("actual-size");
+      $("[data-size]").textContent=actual?"Fit image":"Actual size";
+      $("[data-size]").setAttribute("aria-pressed",String(actual));
+      stage.scrollTo(0,0);
+    };
+    function failed(error) {
+      if(closed)return;
+      img.onload=img.onerror=null;img.hidden=true;revoke();
+      stage.setAttribute("aria-busy","false");message.hidden=false;
+      note.setAttribute("role","alert");note.textContent=error.message;
+      $("[data-retry]").hidden=false;
+    }
+    async function load() {
+      stage.setAttribute("aria-busy","true");note.setAttribute("role","status");note.textContent="Loading image…";
+      $("[data-retry]").hidden=true;
+      try {
+        const value=await api(context,{command:"download",id:file.id});
+        if(closed)return;
+        data=bytes(value);$("[data-save]").disabled=false;
+        const type=imageType(data);
+        if(!type)throw Error("This file cannot be previewed. You can still download it.");
+        url=URL.createObjectURL(new Blob([data],{type}));
+        img.onload=() => {
+          if(closed)return;
+          img.onload=img.onerror=null;message.hidden=true;img.hidden=false;
+          stage.setAttribute("aria-busy","false");$("[data-size]").disabled=false;
+          $(".attachment-viewer-details").textContent=`${img.naturalWidth.toLocaleString()} × ${img.naturalHeight.toLocaleString()}`;
+        };
+        img.onerror=()=>failed(Error("The image could not be decoded. Try again or download the original."));
+        img.src=url;
+      } catch(error) {failed(error);}
+    }
+    $("[data-retry]").onclick=load;
+    load();
+  }
   function mount(root, context, editor = null) {
     if (!root) return;
     let entries = [], busy = false, pending = null, queue = [], generation = 0;
@@ -38,7 +120,7 @@ const HeyBossAttachments = (() => {
       if (!root.isConnected) return;
       $(".attachment-count").textContent = entries.length ? String(entries.length) : "";
       $(".attachment-heading h2").hidden = !entries.length;
-      $(".attachment-list").innerHTML = entries.map(file => `<li data-file="${esc(file.id)}"><span class="attachment-file-icon" aria-hidden="true">${icon("docs")}</span><div class="attachment-info"><button class="attachment-name" type="button" data-download="${esc(file.id)}" title="Download ${esc(file.name)}">${esc(file.name)}</button><span>${size(file.size)}</span></div><button class="icon-button" type="button" data-download="${esc(file.id)}" aria-label="Download ${esc(file.name)}" title="Download">${icon("download")}</button>${context.readonly ? "" : `<button class="icon-button attachment-remove" type="button" data-remove="${esc(file.id)}" aria-label="Remove ${esc(file.name)}" title="Remove">${icon("x")}</button>`}</li>`).join("");
+      $(".attachment-list").innerHTML = entries.map(file => `<li data-file="${esc(file.id)}"><span class="attachment-file-icon" aria-hidden="true">${icon(imageName(file.name)?"image":"docs")}</span><div class="attachment-info"><button class="attachment-name" type="button" data-${imageName(file.name)?"preview":"download"}="${esc(file.id)}" title="${imageName(file.name)?"Open image":"Download"} ${esc(file.name)}">${esc(file.name)}</button><span>${size(file.size)}</span></div><button class="icon-button" type="button" data-download="${esc(file.id)}" aria-label="Download ${esc(file.name)}" title="Download">${icon("download")}</button>${context.readonly ? "" : `<button class="icon-button attachment-remove" type="button" data-remove="${esc(file.id)}" aria-label="Remove ${esc(file.name)}" title="Remove">${icon("x")}</button>`}</li>`).join("");
       if (busy) root.querySelectorAll("button").forEach(button => button.disabled = true);
       visibility();
     };
@@ -86,15 +168,14 @@ const HeyBossAttachments = (() => {
       drop.addEventListener("drop", e => {if(!files(e))return;e.preventDefault();depth=0;drop.classList.remove("attachment-drag-over");if(busy)return;queue.push(...e.dataTransfer.files);uploads();});
     }
     root.addEventListener("click", async event => {
+      const open = event.target.closest("[data-preview]");
+      if (open && !busy) preview(context, entries.find(file => file.id===open.dataset.preview), open);
       const download = event.target.closest("[data-download]");
       if (download && !busy) {
         lock(true);status("Preparing download…");
         try {
           const value = await api(context,{command:"download",id:download.dataset.download});
-          const binary = atob(value.data),bytes = new Uint8Array(binary.length);
-          for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
-          const url = URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"}));
-          const link = document.createElement("a");link.href=url;link.download=value.attachment.name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);status("Download ready.");
+          save(bytes(value), value.attachment.name);status("Download ready.");
         } catch(e) {status("");error(e.message);} finally {lock(false);}
       }
       const remove = event.target.closest("[data-remove]");
@@ -118,15 +199,6 @@ const HeyBossAttachments = (() => {
   // including paired phones and remote project stores. Never fetch local paths.
   function hydrate(root,context,files=[]) {
     const identifier = value => /^\/attachments\/(f-[a-f0-9]{32})(?:[?#].*)?$/.exec(value||"")?.[1];
-    const bytes = value => Uint8Array.from(atob(value.data),c=>c.charCodeAt(0));
-    const imageType = data => {
-      if(data[0]===137&&data[1]===80&&data[2]===78&&data[3]===71)return "image/png";
-      if(data[0]===255&&data[1]===216&&data[2]===255)return "image/jpeg";
-      if(String.fromCharCode(...data.slice(0,6)).match(/^GIF8[79]a$/))return "image/gif";
-      if(String.fromCharCode(...data.slice(0,4))==="RIFF"&&String.fromCharCode(...data.slice(8,12))==="WEBP")return "image/webp";
-      if(/^\s*(?:<\?xml[^>]*>\s*)?<svg[\s>]/i.test(new TextDecoder().decode(data.slice(0,1024))))return "image/svg+xml";
-      return null;
-    };
     const queue=[...root.querySelectorAll("img[data-attachment-src],img[data-import-src]")];
     const pending=new Map();
     const read=id=>{if(!pending.has(id))pending.set(id,api(context,{command:"download",id}));return pending.get(id);};
@@ -161,9 +233,7 @@ const HeyBossAttachments = (() => {
       note.textContent=" Preparing download…";
       try {
         const value=await api(context,{command:"download",id});
-        const url=URL.createObjectURL(new Blob([bytes(value)],{type:"application/octet-stream"}));
-        const download=document.createElement("a");download.href=url;download.download=value.attachment.name;download.click();
-        setTimeout(()=>URL.revokeObjectURL(url),1000);note.textContent=" Download ready.";
+        save(bytes(value),value.attachment.name);note.textContent=" Download ready.";
       }catch(e){note.textContent=" "+e.message;}finally{link.removeAttribute("aria-busy");}
     });
   }
