@@ -21,6 +21,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var transcriptionSource = "microphone"
     private var overlayEnabled: Bool
     private var error: String?
+    private var lastPasteBlock: PasteBlockReason?
     private var captureReady = false
     private var captureMilliseconds: Double = 0
     private var idleRelease: DispatchWorkItem?
@@ -31,6 +32,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     init(headless: Bool) { overlayEnabled = !headless; super.init() }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NativeMenus.install()
         do { try server.start() }
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
@@ -47,7 +49,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Enable Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menuItem?.menu = menu
@@ -104,6 +106,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         ]
         if let pid = inference.pid { value["inference_pid"] = pid }
         if let error { value["last_error"] = error }
+        if let reason = lastPasteBlock { value["last_paste_block"] = reason.rawValue }
         return value
     }
     private var permissionName: String {
@@ -263,20 +266,23 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 let reply = self.pendingReply; self.pendingReply = nil
                 let shouldPaste = self.paste, target = self.target, captureMS = self.captureMilliseconds
                 self.history.save(entry) { saved in
-                    let complete: (String) -> Void = { delivery in
-                        reply?(["ok": true, "text": text, "audio_seconds": audioSeconds,
+                    let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
+                        self.lastPasteBlock = reason
+                        var response: [String: Any] = ["ok": true, "text": text, "audio_seconds": audioSeconds,
                                 "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
                                 "capture_start_ms": captureMS, "delivery": delivery,
-                                "history_id": entry.id.uuidString, "history_saved": saved])
+                                "history_id": entry.id.uuidString, "history_saved": saved]
+                        if let reason { response["paste_block"] = reason.rawValue }
+                        reply?(response)
                         if self.session.generation == id {
                             self.scheduleRelease()
                             if !saved { self.overlay?.error("History could not be saved. Copy your text from Dictation History before quitting.") }
-                            else if delivery == "clipboard" { self.overlay?.error("Copied to clipboard and saved in Dictation History. Press ⌘V to paste.") }
+                            else if let reason { self.overlay?.error(reason.message) }
                         }
                     }
                     if shouldPaste, self.session.generation == id {
                         Paste.deliver(text, target: target, completion: complete)
-                    } else { complete(shouldPaste ? "history" : "stdout") }
+                    } else { complete(shouldPaste ? "history" : "stdout", nil) }
                 }
             }
         } }
