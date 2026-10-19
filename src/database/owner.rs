@@ -2,6 +2,7 @@ use super::{
     Connection,
     diagnostics::{Activity, Log, Operation},
     error, local,
+    readers::Readers,
     wire::{self, Command, Failure, Reply},
 };
 use rusqlite::Result;
@@ -287,6 +288,7 @@ fn serve(
         diagnostics: Log::new(directory().join(format!("{}.diagnostics.jsonl", identity(&path)))),
     });
     let clients = Arc::new(AtomicUsize::new(0));
+    let readers = Arc::new(Readers::new(path.clone()));
     // Maintenance uses an ordinary service session. Cold compression and disk
     // writes never hold the hot writer lease; cancellation joins before this
     // owner releases its runtime identity.
@@ -330,8 +332,9 @@ fn serve(
                 let stop = stop.clone();
                 let clients = clients.clone();
                 let generation = generation.clone();
+                let readers = readers.clone();
                 sessions.push(std::thread::spawn(move || {
-                    let _ = session(stream, &path, &writer, &generation, &stop);
+                    let _ = session(stream, &path, &writer, &readers, &generation, &stop);
                     clients.fetch_sub(1, Ordering::AcqRel);
                 }));
             }
@@ -361,6 +364,7 @@ fn serve(
     // Keep the listener present throughout draining so another election cannot
     // open a second writer while old sessions are still committing.
     drop(listener);
+    drop(readers);
     drop(writer);
     drop(ownership);
 }
@@ -502,21 +506,14 @@ fn session(
     stream: UnixStream,
     path: &Path,
     writer: &Writer,
+    readers: &Readers,
     generation: &AtomicI64,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     stream.set_write_timeout(Some(Duration::from_secs(15)))?;
-    let reader = local(|| crate::issues::Store::open_read_connection(path))
-        .map_err(std::io::Error::other)?
-        .into_local();
-    reader
-        .busy_timeout(Duration::from_secs(1))
-        .map_err(std::io::Error::other)?;
-    reader
-        .execute_batch("PRAGMA foreign_keys=ON")
-        .map_err(std::io::Error::other)?;
+    let mut reader = readers.take()?;
     let mut input = BufReader::new(stream);
     let mut lease: Option<Lease<'_>> = None;
     let mut last_id = 0;
@@ -564,6 +561,7 @@ fn session(
         input
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(250)))?;
+        reader.observe(&command);
         let repair = matches!(command, Command::CheckSchema)
             && reader
                 .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))

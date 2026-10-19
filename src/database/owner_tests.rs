@@ -122,6 +122,66 @@ fn run(db: &rusqlite::Connection, command: Command) -> Result<Reply> {
 }
 
 #[test]
+fn socket_sessions_return_warm_readers_after_commit_or_disconnect() {
+    let path = std::env::temp_dir().join(format!(
+        "hb-session-pool-{}-{}.db",
+        std::process::id(),
+        crate::issues::worker::random_id().unwrap()
+    ));
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE counters(value INTEGER); INSERT INTO counters VALUES(1)").unwrap();
+    let writer = writer(db);
+    let readers = Readers::new(path.clone());
+    let generation = AtomicI64::new(-1);
+    let stop = AtomicBool::new(false);
+    for iteration in 0..32 {
+        std::thread::scope(|scope| {
+            let (client, server) = UnixStream::pair().unwrap();
+            let session =
+                scope.spawn(|| session(server, &path, &writer, &readers, &generation, &stop));
+            let mut client = BufReader::new(client);
+            let mut request = |command| {
+                wire::write(client.get_mut(), &command).unwrap();
+                let reply = wire::read::<Reply>(&mut client).unwrap().unwrap();
+                assert!(reply.error.is_none());
+                reply
+            };
+            request(Command::ReadTransaction);
+            let reply = request(Command::Query {
+                sql: "SELECT value FROM counters".into(),
+                values: vec![],
+            });
+            assert!(matches!(reply.rows[0][0], wire::SqlValue::Integer(n) if n == iteration + 1));
+            if iteration % 2 == 0 {
+                request(Command::Batch {
+                    sql: "COMMIT".into(),
+                });
+            }
+            // Odd sessions disconnect while their snapshot is still open.
+            drop(client);
+            session.join().unwrap().unwrap();
+        });
+        let reader = readers.take().unwrap();
+        assert!(reader.is_autocommit());
+        assert!(
+            !unsafe { rusqlite::ffi::sqlite3_next_stmt(reader.handle(), std::ptr::null_mut()) }
+                .is_null(),
+            "Completed socket sessions discarded their prepared statements"
+        );
+        drop(reader);
+        writer
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE counters SET value=value+1", [])
+            .unwrap();
+    }
+    drop(readers);
+    drop(writer);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn pragma_queries_and_setters_always_observe_current_settings() {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     let read = || Command::Query {
