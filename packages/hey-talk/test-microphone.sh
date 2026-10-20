@@ -14,14 +14,14 @@ for iteration in {1..10}; do
   "$cli" toggle --no-paste --json > ".build/microphone-start-$iteration.json"
   sleep 0.75
   "$cli" status --json > ".build/microphone-capture-$iteration.json"
-  jq -e '.state == "recording" and .microphone_ready and .sample_count > 2400' ".build/microphone-capture-$iteration.json" >/dev/null
+  jq -e '.state == "recording" and .microphone_ready and .capture_restarts == 0 and .sample_count > 2400' ".build/microphone-capture-$iteration.json" >/dev/null
   "$cli" cancel --json | jq -e '.state == "idle" and (.microphone_ready | not)' >/dev/null
 done
 "$cli" toggle --no-paste --json > .build/microphone-sustained-start.json
 for second in {1..30}; do
   sleep 1
   "$cli" status --json > .build/microphone-sustained.json
-  jq -e --argjson second "$second" '.state == "recording" and .microphone_ready and .sample_count > ($second * 12000)' .build/microphone-sustained.json >/dev/null
+  jq -e --argjson second "$second" '.state == "recording" and .microphone_ready and .capture_restarts == 0 and .sample_count > ($second * 12000)' .build/microphone-sustained.json >/dev/null
 done
 "$cli" cancel --json >/dev/null
 test "$("$cli" history --json | jq -c '[.entries[].id]')" = "$before"

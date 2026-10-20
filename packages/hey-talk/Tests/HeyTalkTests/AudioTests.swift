@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import TalkCore
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
@@ -36,11 +37,203 @@ final class AudioTests: XCTestCase {
         XCTAssertEqual(capture.sampleCount, 0)
     }
 
-    private func firstBuffer() throws -> CMSampleBuffer {
+    func testDigitalSilenceDoesNotProveTheMicrophoneIsReady() throws {
+        let capture = AudioCapture()
+        capture.consume(try firstBuffer(value: 0), token: 0)
+        let empty = expectation(description: "Zero-filled capture is not ready")
+        capture.waitForAudio(token: 0, deadline: 0) { result in
+            if case .success = result { XCTFail("A stalled or muted microphone can keep sending zero-filled buffers") }
+            empty.fulfill()
+        }
+        wait(for: [empty], timeout: 1)
+    }
+
+    func testDefaultInputChangeKeepsEarlierAudioAndRejectsOldStreamCallbacks() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        let old = try XCTUnwrap(rig.streams.first)
+        rig.input = CaptureRig.builtIn
+        capture.refresh()
+        eventually { capture.activeInput == CaptureRig.builtIn && capture.isReady }
+        XCTAssertEqual(capture.restartCount, 1)
+        XCTAssertTrue(old.stopped)
+        XCTAssertEqual(capture.sampleCount, 320)
+        old.receive(try firstBuffer(value: 0.75))
+        old.interrupted("Delayed failure from the old device")
+        capture.refresh()
+        let finished = expectation(description: "Both routes survive stop")
+        capture.stop { result in
+            switch result {
+            case .success(let samples): XCTAssertEqual(samples, Array(repeating: Float(0.25), count: 320))
+            case .failure(let error): XCTFail(error.localizedDescription)
+            }
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 2)
+    }
+
+    func testExplicitInputStaysSelectedWhenSystemDefaultChanges() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture, uid: CaptureRig.headset.uid)
+        rig.input = CaptureRig.builtIn
+        capture.refresh()
+        let finished = expectation(description: "Refresh is processed before stop")
+        capture.stop { _ in finished.fulfill() }
+        wait(for: [finished], timeout: 2)
+        XCTAssertEqual(rig.streams.count, 1)
+    }
+
+    func testInterruptedCaptureReopensWithoutDiscardingAudio() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        rig.streams[0].interrupted("Meeting changed the audio route")
+        eventually { !capture.isReady }
+        rig.advance(0.5)
+        capture.refresh()
+        eventually { capture.restartCount == 1 && capture.isReady }
+        XCTAssertEqual(capture.sampleCount, 320)
+    }
+
+    func testMissingBuffersAndZeroFilledBuffersBothRecover() throws {
+        for zeros in [false, true] {
+            let rig = try CaptureRig(buffer: firstBuffer())
+            let capture = rig.capture()
+            defer { capture.cancel() }
+            start(capture)
+            rig.advance(3.1)
+            if zeros { rig.streams[0].receive(try firstBuffer(value: 0)) }
+            capture.refresh()
+            eventually { !capture.isReady }
+            rig.advance(0.5)
+            capture.refresh()
+            eventually { capture.restartCount == 1 && capture.isReady }
+            XCTAssertEqual(capture.sampleCount, zeros ? 480 : 320)
+        }
+    }
+
+    func testTemporaryLossOfDefaultInputUsesLatestDeviceWhenItReturns() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        rig.input = nil
+        capture.refresh()
+        eventually { !capture.isReady }
+        rig.input = CaptureRig.builtIn
+        rig.advance(0.5)
+        capture.refresh()
+        eventually { capture.activeInput == CaptureRig.builtIn && capture.isReady }
+        XCTAssertEqual(capture.sampleCount, 320)
+    }
+
+    func testRecoveryHasDeadlineAndClosesTheMicrophone() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        rig.input = nil
+        capture.refresh()
+        eventually { !capture.isReady }
+        let failed = expectation(description: "Unavailable input fails visibly")
+        capture.onFailure = { _ in failed.fulfill() }
+        rig.advance(12.1)
+        capture.refresh()
+        wait(for: [failed], timeout: 2)
+        XCTAssertTrue(rig.streams.allSatisfy(\.stopped))
+        XCTAssertFalse(capture.isReady)
+    }
+
+    func testHealthyAudioAtRecoveryDeadlineWinsOverTimeout() throws {
+        let buffer = try firstBuffer()
+        let rig = try CaptureRig(buffer: buffer)
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        rig.streams[0].interrupted("Interrupted")
+        eventually { !capture.isReady }
+        rig.advance(10.9)
+        capture.refresh()
+        eventually { capture.isReady }
+        rig.advance(0.5); rig.streams[1].receive(buffer)
+        rig.advance(0.7); rig.streams[1].receive(buffer)
+        capture.refresh()
+        let finished = expectation(description: "Recovered audio can still be transcribed")
+        capture.stop { result in
+            switch result {
+            case .success(let samples): XCTAssertEqual(samples.count, 640)
+            case .failure(let error): XCTFail(error.localizedDescription)
+            }
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 2)
+    }
+
+    func testCancelDuringRecoveryCannotRestartCapture() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        start(capture)
+        let old = rig.streams[0]
+        old.interrupted("Interrupted")
+        eventually { !capture.isReady }
+        capture.cancel()
+        rig.advance(1)
+        capture.refresh()
+        old.receive(try firstBuffer())
+        old.interrupted("Late interruption")
+        let drained = expectation(description: "Cancelled callbacks drained")
+        capture.stop { _ in drained.fulfill() }
+        wait(for: [drained], timeout: 2)
+        XCTAssertEqual(rig.streams.count, 1)
+        XCTAssertEqual(capture.sampleCount, 0)
+        XCTAssertFalse(capture.isReady)
+    }
+
+    func testStopFinishingAfterCancelDoesNotInvalidateTheNextRecording() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        let stopping = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        rig.streams[0].onStop = { stopping.signal(); _ = release.wait(timeout: .now() + 2) }
+        let stopped = expectation(description: "Old stop completes")
+        capture.stop { _ in stopped.fulfill() }
+        XCTAssertEqual(stopping.wait(timeout: .now() + 2), .success)
+        capture.cancel()
+        let started = expectation(description: "New recording survives old stop")
+        capture.start(uid: nil) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            started.fulfill()
+        }
+        release.signal()
+        wait(for: [stopped, started], timeout: 2)
+        XCTAssertTrue(capture.isReady)
+    }
+
+    private func start(_ capture: AudioCapture, uid: String? = nil) {
+        let started = expectation(description: "Capture is receiving sound")
+        capture.start(uid: uid) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 2)
+    }
+
+    private func eventually(_ condition: @escaping () -> Bool) {
+        let condition = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        wait(for: [condition], timeout: 2)
+    }
+
+    private func firstBuffer(value: Float = 0.25) throws -> CMSampleBuffer {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: true)!
         let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
         pcm.frameLength = 160
-        for index in 0..<160 { pcm.floatChannelData![0][index] = 0.25 }
+        for index in 0..<160 { pcm.floatChannelData![0][index] = value }
         var description: CMAudioFormatDescription?
         XCTAssertEqual(CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: format.streamDescription,
             layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &description), noErr)
@@ -91,5 +284,57 @@ final class AudioTests: XCTestCase {
             }
             XCTAssertThrowsError(try AudioCapture.readFile(url.path))
         }
+    }
+}
+
+private final class TestMicrophoneStream: MicrophoneStream {
+    let receive: (CMSampleBuffer) -> Void
+    let interrupted: (String) -> Void
+    private let buffer: CMSampleBuffer
+    private let lock = NSLock()
+    private var didStop = false
+    private var stopCallback: (() -> Void)?
+    var onStop: (() -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return stopCallback }
+        set { lock.lock(); stopCallback = newValue; lock.unlock() }
+    }
+    var stopped: Bool { lock.lock(); defer { lock.unlock() }; return didStop }
+    init(buffer: CMSampleBuffer, receive: @escaping (CMSampleBuffer) -> Void, interrupted: @escaping (String) -> Void) {
+        self.buffer = buffer; self.receive = receive; self.interrupted = interrupted
+    }
+    func start() throws { receive(buffer) }
+    func stop() {
+        lock.lock(); let callback = didStop ? nil : stopCallback; didStop = true; lock.unlock()
+        callback?()
+    }
+}
+
+private final class CaptureRig {
+    static let headset = InputDevice(id: 10_001, uid: "test-headset", name: "Test headset")
+    static let builtIn = InputDevice(id: 10_002, uid: "test-built-in", name: "Test built-in")
+    private let lock = NSLock()
+    private let buffer: CMSampleBuffer
+    private var selected: InputDevice? = headset
+    private var opened: [TestMicrophoneStream] = []
+    private var time: TimeInterval = 100
+    var input: InputDevice? {
+        get { lock.lock(); defer { lock.unlock() }; return selected }
+        set { lock.lock(); selected = newValue; lock.unlock() }
+    }
+    var streams: [TestMicrophoneStream] { lock.lock(); defer { lock.unlock() }; return opened }
+    init(buffer: CMSampleBuffer) throws { self.buffer = buffer }
+    func advance(_ interval: TimeInterval) { lock.lock(); time += interval; lock.unlock() }
+    func capture() -> AudioCapture {
+        AudioCapture(resolveInput: { uid in
+            if let uid, uid == Self.headset.uid { return Self.headset }
+            guard let device = self.input else { throw TalkError("No system input") }
+            return device
+        }, makeStream: { _, _, receive, interrupted in
+            let stream = TestMicrophoneStream(buffer: self.buffer, receive: receive, interrupted: interrupted)
+            self.lock.lock(); self.opened.append(stream); self.lock.unlock()
+            return stream
+        }, now: {
+            self.lock.lock(); defer { self.lock.unlock() }; return self.time
+        })
     }
 }
