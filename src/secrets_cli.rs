@@ -142,10 +142,9 @@ fn execute(options: &Options) -> Result<()> {
                 ]);
                 cmd
             };
-            let output = backend::command(
-                ssh(format!("~/.local/bin/hey-boss secrets init --label {host}")),
-                &[],
-            )?;
+            backend::command(ssh("~/.local/bin/hey-boss secrets install".into()), &[])?;
+            let output =
+                backend::command(ssh("~/.local/bin/hey-boss secrets identity".into()), &[])?;
             let remote =
                 serde_json::from_slice(output.expose()).map_err(|_| Error::InvalidRecord)?;
             store.trust(&remote)?;
