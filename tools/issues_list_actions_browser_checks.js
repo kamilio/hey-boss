@@ -62,6 +62,7 @@ async page => {
       await trigger(1).click();
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `List fits ${scheme}/${width}`);
       check(await menu.evaluate(el => { const r=el.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth && r.top>=0 && r.bottom<=innerHeight; }), `Menu fits ${scheme}/${width}`);
+      if (width >= 700) check(await page.locator('[data-issue-number="1"]').evaluate(row => row.querySelector('.issue-row-main').getBoundingClientRect().width >= row.getBoundingClientRect().width * .6), `Actions leave room for titles ${scheme}/${width}`);
       if (width <= 390) check(await trigger(1).evaluate(el => el.getBoundingClientRect().width >= 44 && el.getBoundingClientRect().height >= 44), `Touch target ${scheme}/${width}`);
       await page.screenshot({path:`output/playwright/issue139/${surface}-${scheme}-${width}.png`});
       await page.keyboard.press('Escape');
@@ -236,6 +237,6 @@ async page => {
   await page.waitForFunction(() => model.route.issue === 2);
   check(!await menu.isVisible(), 'Navigation dismisses the menu');
   check(errors.length === 0, `No browser errors: ${errors.join(', ')}`);
-  if (checks.length !== 64) throw Error(`Incomplete browser suite: ${checks.length}/64`);
-  return {status:'COMPLETE', surface, completed:checks.length, expected:64, checks};
+  if (checks.length !== 68) throw Error(`Incomplete browser suite: ${checks.length}/68`);
+  return {status:'COMPLETE', surface, completed:checks.length, expected:68, checks};
 }

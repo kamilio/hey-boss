@@ -27,7 +27,7 @@ the native UI at `http://127.0.0.1:59639` and the paired UI at
 `http://127.0.0.1:52039/issues`. For the paired UI, retrieve the synthetic code from
 `/fixture-pairing` and POST it to `/api/pair` using the browser's request context.
 Run the suite on each surface; each must finish normally with `COMPLETE` and
-**64/64** checks against the compiled assets. Review the light/dark desktop and phone screenshots in
+**68/68** checks against the compiled assets. Review the light/dark desktop and phone screenshots in
 `output/playwright/issue139`, including the short phone viewport and ownership
 confirmation. Close the browser session, stop the fixture with Ctrl+C, and remove
 the generated screenshots and CLI reports. The fixture shuts down its own database
