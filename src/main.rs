@@ -17,6 +17,7 @@ mod notif_cli;
 mod project_cli;
 mod proxy_cli;
 mod secret_cli;
+mod secrets_cli;
 #[cfg(test)]
 #[path = "../tests/support/projects.rs"]
 mod test_projects;
@@ -170,6 +171,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Local encrypted records, explicit machine grants, and metadata inventory.
+    Secrets(secrets_cli::Options),
     /// Run the separately installed proxy (all arguments pass through to hey-proxy).
     Proxy,
     /// Configure or diagnose this machine's Git identity and commit signing.
@@ -469,6 +472,7 @@ fn run() -> std::io::Result<()> {
         Command::Admin(options) => return admin_cli::run(options),
         Command::Skill(options) => return admin_cli::skill(options),
         Command::Environment(options) => return hey_boss::environment::run(options),
+        Command::Secrets(options) => return secrets_cli::run(options),
         _ => {}
     }
     hey_boss::database::use_service();

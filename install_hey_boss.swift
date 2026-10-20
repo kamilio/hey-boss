@@ -51,6 +51,7 @@ func installHeyBoss() -> [String: String] {
         try! files.createSymbolicLink(atPath: shortcut.path, withDestinationPath: "hey-boss")
     }
     run(binary.path, ["configure-agents", "--binary", binary.path])
+    run(binary.path, ["secrets", "install"])
     try! files.removeItem(at: staging)
     let setup = root.appendingPathComponent("out/hey-boss-setup")
     run("/usr/bin/xcrun", ["swiftc", "-target", nativeTarget, "-O", root.appendingPathComponent("setup_hey_boss.swift").path, "-o", setup.path])

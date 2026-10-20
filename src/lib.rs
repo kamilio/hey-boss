@@ -28,6 +28,7 @@ pub mod quiet_hours;
 pub mod readiness;
 pub mod routes;
 pub mod skill;
+pub mod secrets;
 #[doc(hidden)]
 pub mod ssh;
 pub mod syntax;
