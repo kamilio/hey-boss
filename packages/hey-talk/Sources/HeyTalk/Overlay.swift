@@ -79,7 +79,9 @@ final class Overlay {
     private var hovering = false
     private var expanded = false
     private var enabled = true
-    private var toast: NSPanel?
+    private var notice: OverlayNotice?
+    private var noticeDismiss: DispatchWorkItem?
+    private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
     var onCancel: (() -> Void)?
     var onOpenAccessibility: (() -> Void)?
@@ -123,8 +125,10 @@ final class Overlay {
             let face = GlassFace(); face.addSubview(cancelButton)
             cancel.contentView = face; cancelGlass = cancel
             let container = NSGlassEffectContainerView(frame: root.bounds)
+            container.autoresizingMask = [.width, .height]
             container.spacing = 8
             let content = NSView(frame: root.bounds)
+            content.autoresizingMask = [.width, .height]
             container.contentView = content; root.addSubview(container)
             content.addSubview(pill); content.addSubview(cancelGlass)
         } else {
@@ -144,6 +148,13 @@ final class Overlay {
         wave.isHidden = true
         wave.identifier = NSUserInterfaceItemIdentifier("recording-waveform")
         pillContent.addSubview(identity); pillContent.addSubview(wave)
+        noticeRecordButton.title = ""
+        noticeRecordButton.isBordered = false
+        noticeRecordButton.setAccessibilityLabel("Start dictation")
+        noticeRecordButton.target = self
+        noticeRecordButton.action = #selector(recordFromNotice)
+        noticeRecordButton.isHidden = true
+        pillContent.addSubview(noticeRecordButton)
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
         pillContent.toolTip = "\(DictationShortcut.help) · Click to start / stop · Drag to move"
@@ -164,16 +175,16 @@ final class Overlay {
         let screen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main
         guard let screen else { return }
         let visible = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: visible.midX - 100, y: visible.minY + 12))
+        panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
     }
     func show(_ visible: Bool) {
         enabled = visible
-        if !visible { toast?.orderOut(nil) }
+        if !visible { dismissNotice(animated: false) }
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
         updateTimer()
     }
     func update(_ next: Phase) {
-        if next == .recording || next == .processing { toast?.orderOut(nil) }
+        clearNotice()
         phase = next; expanded = next == .recording
         pillContent.accent = next == .recording ? TalkDesign.active : TalkDesign.accent
         wave.heights = Array(repeating: 4, count: Waveform.count)
@@ -203,13 +214,16 @@ final class Overlay {
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
-        let size = expanded ? TalkDesign.recordingSize : TalkDesign.idleSize
+        let size = notice.map { NSSize(width: $0.frame.width, height: $0.frame.height + 36) }
+            ?? (expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
+        resizePanel(for: size)
         let width = size.width, height = size.height
-        let frame = NSRect(x: 100 - width / 2, y: 12, width: width, height: height)
-        glow.frame = CGRect(x: 70, y: 10, width: 60, height: 40)
-        halo.frame = CGRect(x: 68, y: 8, width: 64, height: 44)
+        let center = root.bounds.midX
+        let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
+        glow.frame = CGRect(x: center - 30, y: 10, width: 60, height: 40)
+        halo.frame = CGRect(x: center - 32, y: 8, width: 64, height: 44)
         halo.path = CGPath(roundedRect: CGRect(x: 4, y: 4, width: 56, height: 36), cornerWidth: 18, cornerHeight: 18, transform: nil)
-        let outline = CGPath(roundedRect: frame, cornerWidth: height / 2, cornerHeight: height / 2, transform: nil)
+        let outline = CGPath(roundedRect: frame, cornerWidth: 18, cornerHeight: 18, transform: nil)
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             for key in ["path", "shadowPath"] {
                 let transition = CABasicAnimation(keyPath: key)
@@ -226,12 +240,32 @@ final class Overlay {
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
-            identity.animator().frame = NSRect(x: expanded ? 9 : (width - 22) / 2, y: (height - 22) / 2, width: 22, height: 22)
+            identity.animator().frame = NSRect(x: expanded && notice == nil ? 9 : (width - 22) / 2, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: 39, y: (height - 24) / 2, width: 52, height: 24)
             cancelGlass.animator().frame = NSRect(x: frame.maxX + 8, y: frame.midY - 14, width: 28, height: 28)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
+        notice?.frame.origin = NSPoint(x: 0, y: 36)
+        noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
         cancelButton.frame = NSRect(x: 0, y: 0, width: 28, height: 28)
+    }
+    private func resizePanel(for size: NSSize) {
+        let windowSize = NSSize(width: max(200, size.width + 96), height: size.height + 48)
+        guard panel.frame.size != windowSize else { return }
+        let delta = (windowSize.width - root.bounds.width) / 2
+        var frame = NSRect(x: panel.frame.midX - windowSize.width / 2, y: panel.frame.minY, width: windowSize.width, height: windowSize.height)
+        if let screen = panel.screen {
+            let visible = screen.visibleFrame
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        panel.setFrame(frame, display: false)
+        pill.frame.origin.x += delta
+        cancelGlass.frame.origin.x += delta
+        var transform = CGAffineTransform(translationX: delta, y: 0)
+        depth.removeAllAnimations()
+        depth.path = depth.path?.copy(using: &transform)
+        depth.shadowPath = depth.path
     }
     private func showCancel() {
         let visible = hovering && (phase == .recording || phase == .processing)
@@ -258,25 +292,40 @@ final class Overlay {
         RunLoop.main.add(ticker, forMode: .common); timer = ticker
     }
     @objc private func cancel() { onCancel?() }
+    @objc private func recordFromNotice() { onToggle?() }
+    private func clearNotice() {
+        noticeDismiss?.cancel(); noticeDismiss = nil
+        notice?.removeFromSuperview(); notice = nil
+        noticeRecordButton.isHidden = true
+        pillContent.setAccessibilityRole(.button)
+    }
+    private func dismissNotice(animated: Bool = true) {
+        guard notice != nil else { return }
+        clearNotice()
+        pillContent.setAccessibilityLabel("Start dictation")
+        layout(animated: animated)
+    }
     func error(_ message: String, accessibilityAction: Bool = false) {
         guard enabled else { return }
-        toast?.orderOut(nil)
-        let alert = RecordingPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        alert.title = accessibilityAction ? "Hey Talk — Automatic Paste" : "Hey Talk — Notice"
-        alert.level = .statusBar; alert.isOpaque = false; alert.backgroundColor = .clear; alert.hasShadow = true
-        alert.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.hidesOnDeactivate = false
+        clearNotice()
         let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
-        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak alert] in alert?.orderOut(nil) })
-        let surface = glassSurface(content: content, radius: 20)
-        surface.frame = content.bounds
-        alert.contentView = surface
-        alert.setContentSize(content.bounds.size)
-        alert.setFrameOrigin(NSPoint(x: panel.frame.midX - content.bounds.width / 2, y: panel.frame.maxY + 8))
-        alert.orderFrontRegardless(); toast = alert
+        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() })
+        notice = content
+        pillContent.addSubview(content)
+        noticeRecordButton.isHidden = false
+        pillContent.setAccessibilityRole(.group)
+        pillContent.setAccessibilityLabel("Hey Talk")
+        content.alphaValue = 0
+        layout(animated: true)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.2
+            content.animator().alphaValue = 1
+        }
         // Keep the repair link available until clicked, dismissed, or recording resumes.
         if !accessibilityAction {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak alert] in alert?.orderOut(nil) }
+            let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
+            noticeDismiss = dismiss
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)
         }
     }
 }

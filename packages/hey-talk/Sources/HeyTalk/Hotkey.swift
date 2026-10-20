@@ -60,14 +60,17 @@ enum PasteBlockReason: String {
         if !targetIsFrontmost { return .focusChanged }
         return nil
     }
-    var message: String {
+    func message(targetName: String? = nil, pasted: Bool = false) -> String {
+        let name = targetName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let app = name.isEmpty ? "the original app" : name
+        if pasted { return "Pasted in \(app). Press Enter there." }
         switch self {
-        case .accessibility: return "Automatic paste needs Accessibility access for this build. Your text is saved and copied; press ⌘V to paste."
-        case .targetClosed: return "The original app closed. Text saved and copied; ⌘V to paste."
-        case .focusChanged: return "You switched apps, so automatic paste was skipped. Text saved and copied; ⌘V to paste."
-        case .ownWindow: return "Start dictating from the app you want to paste into. Text saved and copied; ⌘V to paste."
-        case .eventUnavailable: return "macOS couldn’t send the paste shortcut. Text saved and copied; ⌘V to paste."
-        case .clipboardUnavailable: return "The clipboard is unavailable. Your text is saved in Dictation History."
+        case .accessibility: return "Text copied. Allow automatic paste."
+        case .targetClosed: return "Reopen \(app). Press ⌘V."
+        case .focusChanged: return "Return to \(app). Press ⌘V."
+        case .ownWindow: return "Choose an app, then press ⌘V."
+        case .eventUnavailable: return "Couldn’t paste. Press ⌘V."
+        case .clipboardUnavailable: return "Clipboard unavailable. Open History."
         }
     }
 }

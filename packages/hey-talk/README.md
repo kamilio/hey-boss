@@ -87,7 +87,8 @@ history show`. Each transcript has a timestamp and Copy button. Closing this
 window with ⌘W leaves dictation running. Standard copy, paste, cut, select-all,
 and undo commands work in native text fields. Select part of any transcript
 and press ⌘C, or use its Copy button for the whole text. The search field filters
-loaded entries. macOS 26 windows and notifications use native Liquid Glass.
+loaded entries. macOS 26 windows use native Liquid Glass. Notices expand inside
+the floating capsule; `status --json` keeps the full error details.
 Older entries load in pages; nothing expires
 automatically. `history` prints the latest 50 entries; `history --before ID`
 reads the next page using the `next_before` cursor from JSON output.
@@ -100,13 +101,14 @@ text in memory and marks it **Unsaved** so you can copy it before quitting.
 Allow microphone access when macOS asks. For automatic paste, choose
 **Automatic Paste…** in the waveform menu or the floating capsule’s right-click
 menu, or run `hey-talk permissions accessibility`. A paste-permission error also
-has an **Open Accessibility Settings** button and stays visible until dismissed
+has an **Enable Accessibility** button and stays visible until dismissed
 or recording resumes. The guide opens the Accessibility settings page, reveals
 the installed app in Finder if it needs adding, and detects when permission is on.
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation copies to the clipboard. If focus changes while
-transcribing, it also leaves the text on the clipboard. `--no-paste` and file
+transcribing, it leaves the text on the clipboard and names the original app
+in the notice. `--no-paste` and file
 transcription leave the clipboard untouched. Switching from the old ad-hoc
 signature to the persistent certificate requires one final permission approval.
 Subsequent release builds keep the same certificate and app identity. If Settings
