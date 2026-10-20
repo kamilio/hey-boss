@@ -9,6 +9,19 @@ pub(crate) mod web;
 use crate::issues::{Error, Result, identifier};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadMode {
+    #[default]
+    New,
+    Resume,
+}
+impl ThreadMode {
+    fn is_new(&self) -> bool {
+        *self == Self::New
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
@@ -17,6 +30,8 @@ pub struct Definition {
     pub timezone: String,
     pub harness: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "ThreadMode::is_new")]
+    pub thread_mode: ThreadMode,
     /// Ordered fleet node IDs. Empty preserves automatic placement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<String>,

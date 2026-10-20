@@ -4,6 +4,112 @@ use std::{fs, process::Command, time::Instant};
 const PROJECT: &str = "named:Scheduled";
 const MARKDOWN: &str = include_str!("../../jobs/fixtures/original.md");
 
+#[test]
+fn resumed_job_threads_are_local_terminal_and_provider_scoped() {
+    let mut f = Fixture::new();
+    let previous = f.run("resume-boundaries");
+    receive(&f.ctx, &previous, MARKDOWN).unwrap();
+    let session = SessionRef {
+        provider: Provider::Pi,
+        id: "saved-session".into(),
+        path: Some(f.root.join("saved.jsonl")),
+        model: None,
+    };
+    remember_thread(&f.ctx, &previous, &session).unwrap();
+    let mut next = previous.clone();
+    next.run.id = "later-run".into();
+    next.run.snapshot.definition.thread_mode = crate::jobs::ThreadMode::Resume;
+    assert_eq!(
+        previous_thread(&f.ctx, &next, Provider::Pi).unwrap(),
+        None,
+        "Active execution cannot be resumed"
+    );
+    let mut report = f.report(&previous);
+    report.state = "succeeded".into();
+    report.finished_at = Some(now());
+    save(&f.ctx, &report).unwrap();
+    assert_eq!(
+        previous_thread(&f.ctx, &next, Provider::Pi).unwrap(),
+        Some(session),
+        "Exact Pi path survives durable storage"
+    );
+    assert_eq!(
+        previous_thread(&f.ctx, &next, Provider::Codex).unwrap(),
+        None
+    );
+    next.run.snapshot.job_id = "different-job".into();
+    assert_eq!(previous_thread(&f.ctx, &next, Provider::Pi).unwrap(), None);
+    next.run.snapshot.job_id = previous.run.snapshot.job_id.clone();
+    next.run.snapshot.project_id = "different-project".into();
+    assert_eq!(previous_thread(&f.ctx, &next, Provider::Pi).unwrap(), None);
+}
+
+#[test]
+fn job_thread_mode_starts_fresh_by_default_and_resumes_only_when_selected() {
+    if isolated(
+        "job_thread_mode_starts_fresh_by_default_and_resumes_only_when_selected",
+        &[("HEY_BOSS_FIXTURE_FRESH_THREADS", "1")],
+    ) {
+        return;
+    }
+    let mut f = Fixture::new();
+    let first = f.run("threads");
+    let complete = |f: &mut Fixture, d: &Dispatch| {
+        receive(&f.ctx, d, MARKDOWN).unwrap();
+        execute(&f.ctx, d).unwrap();
+        let report = f.report(d);
+        assert_eq!(report.state, "succeeded", "{report:?}");
+        f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+        report.session_id.unwrap()
+    };
+    let next = |f: &mut Fixture| {
+        let run = f.op(Operation::RunNow {
+            id: "threads".into(),
+        })["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+        f.store
+            .job_dispatches(&f.ctx.node)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.run.id == run)
+            .unwrap()
+    };
+    let a = complete(&mut f, &first);
+    let second = next(&mut f);
+    let b = complete(&mut f, &second);
+    assert_ne!(a, b, "Default occurrences must create independent threads");
+    let mut definition = serde_json::to_value(&first.run.snapshot.definition).unwrap();
+    definition["thread_mode"] = json!("resume");
+    f.op(Operation::Edit {
+        id: "threads".into(),
+        if_revision: 1,
+        definition: serde_json::from_value(definition.clone()).unwrap(),
+        markdown: None,
+    });
+    let third = next(&mut f);
+    assert_eq!(
+        complete(&mut f, &third),
+        b,
+        "Explicit resume continues the previous thread"
+    );
+    definition["thread_mode"] = json!("new");
+    f.op(Operation::Edit {
+        id: "threads".into(),
+        if_revision: 2,
+        definition: serde_json::from_value(definition).unwrap(),
+        markdown: None,
+    });
+    let fourth = next(&mut f);
+    assert_ne!(
+        complete(&mut f, &fourth),
+        b,
+        "Switching back to new discards thread continuity"
+    );
+}
+
 fn isolated(name: &str, extra: &[(&str, &str)]) -> bool {
     if std::env::var("HEY_BOSS_JOB_TEST").as_deref() == Ok(name) {
         return false;
@@ -79,6 +185,7 @@ impl Fixture {
                 machines: Vec::new(),
                 all_machines: false,
                 each_machine: false,
+                thread_mode: Default::default(),
             },
             markdown: MARKDOWN.into(),
             enabled: false,
@@ -865,6 +972,7 @@ fn all_machines_aggregates_independent_outcomes_and_preserves_execution_snapshot
             definition: Definition {
                 all_machines: false,
                 each_machine: false,
+                thread_mode: Default::default(),
                 ..definition
             },
             markdown: None,

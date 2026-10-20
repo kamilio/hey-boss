@@ -26,6 +26,10 @@ Markdown bytes are never normalized or stored as database prompt text. Reference
 
 ## Execution
 
+Every run starts a **New thread** by default, including existing jobs. Choose **Resume previous thread** in the editor or pass `--thread-mode resume` to create/edit to continue the most recent thread for this job on the assigned machine. The definition API uses `"thread_mode":"resume"`; omitted or `"new"` starts fresh. Changing this setting affects future runs only and does not change the instructions.
+
+Resume starts fresh when that machine has no saved thread for the job or its latest thread used a different harness. Saved references survive worker restarts and include Pi’s exact session file. Threads are never transferred between machines or resumed while their previous execution is active. A missing or rejected saved thread fails visibly rather than silently creating a replacement. Worktree creation still follows the assigned worker’s policy; resuming a thread does not restore a deleted worktree. The `job resume` command separately re-enables a paused schedule.
+
 Run Now can execute a paused schedule without enabling it. Use the same request ID to retry an uncertain request; overlapping scheduled/manual occurrences are recorded as skipped. Stop takes an exact run ID and cancels only its owned process group. Pause/delete affect future scheduling and retain current executions and history.
 
 Each occurrence creates only a Jobs history entry. It does not create an issue, allocate an issue number, or reserve a task slot. The entry records its worker, machine, session and outcome. Existing task links from older versions remain available.

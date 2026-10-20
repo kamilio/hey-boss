@@ -4,7 +4,7 @@ use crate::jobs::execution::{Dispatch, Report};
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='job_task_marker_immutable')",
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='job_task_marker_immutable') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_job_threads')",
         [],
         |r| r.get::<_, bool>(0),
     )? {
@@ -16,6 +16,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         revoking INTEGER NOT NULL DEFAULT 0,stop_requested INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS local_job_executions(run_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,dispatch TEXT NOT NULL,report TEXT NOT NULL,
         owner_pid INTEGER,owner_start TEXT,pid INTEGER,process_start TEXT,submitted INTEGER NOT NULL DEFAULT 0,acknowledged INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS local_job_threads(project_id TEXT NOT NULL,job_id TEXT NOT NULL,run_id TEXT NOT NULL,session TEXT NOT NULL,PRIMARY KEY(project_id,job_id));
         CREATE INDEX IF NOT EXISTS local_jobs_active ON local_job_executions(run_id) WHERE json_extract(report,'$.state') IN ('pending','running');
         CREATE INDEX IF NOT EXISTS local_jobs_unacknowledged ON local_job_executions(run_id) WHERE acknowledged=0;
         CREATE TRIGGER IF NOT EXISTS job_task_marker_immutable BEFORE UPDATE OF job_run_id ON issues
