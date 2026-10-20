@@ -14,6 +14,7 @@ pub(crate) mod codex_permissions;
 pub mod database;
 pub mod document;
 pub mod environment;
+pub mod error_inbox;
 pub mod fleet;
 pub mod utilities;
 pub mod health;

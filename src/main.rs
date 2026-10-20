@@ -7,6 +7,7 @@ mod autoconnect;
 mod broker;
 mod cli_request;
 mod companion;
+mod error_cli;
 mod health_cli;
 mod issue_attachments;
 mod issue_cli;
@@ -171,6 +172,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Local error ingestion and frequency-ranked diagnostics.
+    Errors(error_cli::Options),
     /// Local encrypted records, explicit machine grants, and metadata inventory.
     Secrets(secrets_cli::Options),
     /// Run the separately installed proxy (all arguments pass through to hey-proxy).
@@ -564,6 +567,13 @@ fn run() -> std::io::Result<()> {
                 } else {
                     eprintln!("hey-boss project: {error}");
                 }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Errors(options) => {
+            if let Err(error) = error_cli::run(options) {
+                eprintln!("hey-boss errors: {error}");
                 std::process::exit(error.exit_code());
             }
             return Ok(());

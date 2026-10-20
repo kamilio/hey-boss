@@ -2171,3 +2171,33 @@ fn unverified_public_ip_preserves_local_access_and_cannot_bypass_host_checks() {
         403
     );
 }
+
+#[test]
+fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
+    let w = Web::start();
+    let call = |mut action: Value| {
+        action["project"] = json!(w.project);
+        w.http("POST", "/api/errors", &[("Content-Type", "application/json"), ("X-Hey-Boss-CSRF", &w.token)], &serde_json::to_vec(&action).unwrap())
+    };
+    let shell = w.http("GET", "/errors", &[], &[]);
+    assert_eq!(shell.status, 200);
+    assert!(String::from_utf8(shell.body).unwrap().contains("id=\"nav-errors\""));
+    assert_eq!(call(json!({"action":"list"})).json()["enabled"], false);
+    let event = json!({"source":"synthetic","event_id":"one","timestamp":hey_boss::error_inbox::now(),"message":"Synthetic upload failure","count":7,"request_ref":"trace-qa"});
+    assert_ne!(call(json!({"action":"ingest","events":[event.clone()]})).status, 200);
+    let denied = w.http("POST", "/api/errors", &[("Content-Type", "application/json")], &serde_json::to_vec(&json!({"action":"enable","project":w.project,"enabled":true})).unwrap());
+    assert_eq!(denied.status, 403);
+    assert_eq!(call(json!({"action":"enable","enabled":true})).status, 200);
+    assert_eq!(call(json!({"action":"ingest","events":[event.clone()]})).json()["accepted"], 1);
+    assert_eq!(call(json!({"action":"ingest","events":[event]})).json()["accepted"], 0);
+    let list = call(json!({"action":"list"})).json();
+    assert_eq!(list["groups"][0]["count_24h"], 7);
+    let id = &list["groups"][0]["id"];
+    let first = call(json!({"action":"promote","id":id}));
+    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+    assert_eq!(first.json()["issue"], 1);
+    assert_eq!(call(json!({"action":"promote","id":id})).json()["issue"], 1);
+    let issue = w.ok(json!({"action":"view","number":1}));
+    assert!(issue["issue"]["body"].as_str().unwrap().contains("trace-qa"));
+    assert!(issue["issue"]["body"].as_str().unwrap().contains("Synthetic upload failure"));
+}

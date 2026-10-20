@@ -335,5 +335,21 @@ function date(at) {
     const format = value => value.toLocaleString();
     return `<nav class="list-pagination" aria-label="${esc(label)} pagination" tabindex="-1"><span class="pagination-range">${format(page.start)}–${format(page.end)} <span>of ${format(page.total)} ${esc(label)}</span></span><div class="pagination-controls">${link(page.current - 1, "Previous", "arrow-left")}<span class="pagination-position" aria-live="polite">Page ${format(page.current)} of ${format(page.pages)}</span>${link(page.current + 1, "Next", "arrow-right")}</div></nav>`;
   }
-  return {pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  async function post(path, body, boot, {mobile=false, fallback="Request failed"}={}, reconnect=true) {
+      const sentToken=boot.csrf;
+      const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json',...(!mobile?{'X-Hey-Boss-CSRF':sentToken}:{})},body:JSON.stringify(body),signal:AbortSignal.timeout(30000)});
+      const value=await response.json();
+      if(response.status===403&&!mobile&&reconnect){
+        try{
+          const response=await fetch('/api/bootstrap',{signal:AbortSignal.timeout(10000)}),fresh=await response.json();
+          if(response.ok&&fresh.ok&&typeof fresh.csrf==='string'&&fresh.csrf&&fresh.csrf!==sentToken&&fresh.actor?.id&&fresh.actor.id===boot.actor?.id){
+            boot.csrf=fresh.csrf;
+            return post(path,body,boot,{mobile,fallback},false);
+          }
+        }catch{/* Preserve the original error and the currently displayed rows. */}
+      }
+      if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||fallback);
+      return value;
+    }
+  return {post, pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();
