@@ -462,6 +462,11 @@ pub(super) fn revision(payload: &str) -> Result<Option<Revision>> {
     if header["protocol"] != PROTOCOL {
         return Err(replica::invalid("Unsupported distributed protocol"));
     }
+    if header["kind"] == hey_boss_secrets::KIND {
+        // The secret projector authenticates these independently. Never project
+        // secret metadata or ciphertext into issue rows.
+        return Ok(None);
+    }
     if header["kind"] == "archive_page" {
         if !header["page"].is_object() {
             return Err(replica::invalid("Unsupported archive protocol"));
