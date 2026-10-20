@@ -53,6 +53,10 @@ main{padding-top:10px!important}
 .state-tabs button svg{display:none}
 #issue-list{display:grid;gap:10px}
 .issue-row{--card-accent:var(--accent-success);border:1px solid var(--glass-edge);border-radius:var(--radius-card);background:var(--glass-surface);box-shadow:var(--glass-shadow);backdrop-filter:var(--glass-filter);-webkit-backdrop-filter:var(--glass-filter);padding:16px 14px 16px 16px;gap:10px;min-height:0}
+.issue-row:not(.subtask-row){display:grid;grid-template-columns:22px 17px minmax(0,1fr)}
+.issue-row:not(.subtask-row)>.issue-row-end{grid-column:3;justify-self:stretch;min-width:0;max-width:100%;margin-top:0}
+#issue-list.search-results>.issue-row{grid-template-columns:17px minmax(0,1fr)}
+#issue-list.search-results>.issue-row>.issue-row-end{grid-column:2}
 .issue-row:last-child{border-bottom:1px solid var(--glass-edge)}
 .issue-row:before{content:"";position:absolute;left:0;top:18px;height:34px;width:3px;border-radius:0 3px 3px 0;background:var(--card-accent)}
 .issue-row:has(.issue-state.blocked){--card-accent:var(--accent-warning)}
