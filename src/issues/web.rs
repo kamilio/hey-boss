@@ -661,6 +661,11 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     if request.method() == &Method::Get {
+        if path == "/api/secrets" {
+            let inventory = crate::secrets::open().and_then(|mut store| store.inventory())
+                .map_err(|e| Error::new("secrets_unavailable", e.to_string()))?;
+            return json_response(serde_json::to_value(inventory)?);
+        }
         if path == "/api/skills" {
             return json_response(crate::skill::manager::report()?);
         }
@@ -688,6 +693,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ));
         }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
+            "/secrets" => Some(("text/html; charset=utf-8", include_bytes!("web/secrets.html"))),
+            "/secrets.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/secrets.js"))),
+            "/secrets.css" => Some(("text/css; charset=utf-8", include_bytes!("web/secrets.css"))),
             "/skills" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/skills.html"),
@@ -872,10 +880,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/jobs"
                     | "/artifacts"
                     | "/skills"
+                    | "/secrets"
                     | "/admin"
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
+                    .replace("<!--secrets-current-->", if path == "/secrets" { " aria-current=\"page\"" } else { "" })
                     .replace(
                         "<!--header-actions-->",
                         if issues {
