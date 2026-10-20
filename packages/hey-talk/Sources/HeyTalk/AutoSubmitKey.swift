@@ -3,6 +3,7 @@ import AppKit
 enum AutoSubmitKeyAction { case pass, consume, submit }
 struct AutoSubmitKeyState {
     private var held: Set<Int> = []
+    var passNextEnter = false
     mutating func handle(key: Int, down: Bool, modified: Bool, repeated: Bool, capture: Bool) -> AutoSubmitKeyAction {
         guard key == 36 || key == 76 else { return .pass }
         if held.contains(key) {
@@ -10,6 +11,7 @@ struct AutoSubmitKeyState {
             return .consume
         }
         guard down, !modified, !repeated, capture else { return .pass }
+        if passNextEnter { passNextEnter = false; return .pass }
         held.insert(key)
         return .submit
     }
@@ -24,6 +26,10 @@ final class AutoSubmitKey {
     private var source: CFRunLoopSource?
     private var state = AutoSubmitKeyState()
     var ready: Bool { tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
+    var passNextEnter: Bool {
+        get { state.passNextEnter }
+        set { state.passNextEnter = newValue }
+    }
 
     @discardableResult func start() -> Bool {
         if ready { return true }

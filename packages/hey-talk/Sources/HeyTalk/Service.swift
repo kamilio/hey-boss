@@ -76,7 +76,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         autoSubmitKey.shouldCapture = { [weak self] in
             guard let self, let target = self.autoTarget else { return false }
-            if self.session.phase == .recording { return FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) != nil }
+            if self.session.phase == .recording {
+                let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs)
+                if input != target { self.autoSubmitKey.passNextEnter = false }
+                return input != nil
+            }
+            if self.session.phase == .idle && !self.autoSubmitKey.passNextEnter { return false }
             return self.autoDeliveryValid && target.isFocused()
         }
         autoSubmitKey.onSubmit = { [weak self] in
@@ -143,6 +148,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } else { autoSubmitKey.stop() }
     }
     private func focusedInputChanged(_ input: FocusedInput?, notice: String? = nil) {
+        if input != autoTarget { autoSubmitKey.passNextEnter = false }
         if automatic != nil {
             automatic?.focusChanged(input, at: ProcessInfo.processInfo.systemUptime)
             if session.phase == .recording {
@@ -172,9 +178,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let self, self.session.generation == id else { return }
             self.autoRestart = nil; self.hotkey?.reset()
             guard self.autoSettings.enabled, self.session.phase == .idle,
-                  let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) else { return }
+                  let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) else { self.clearAutomatic(); return }
+            // Carry an unused pass-through into this same input's next recording.
+            let passNextEnter = self.autoSubmitKey.passNextEnter && self.autoTarget == input
+            self.automatic = nil
             self.focusTrigger.reset()
             self.focusedInputChanged(input, notice: notice)
+            if self.autoTarget == input { self.autoSubmitKey.passNextEnter = passNextEnter }
         }
         autoRestart = restart
         hotkey?.captureEscape(true)
@@ -377,6 +387,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             automatic?.finish(in: input)
             target = input.app; targetName = input.app.localizedName
         }
+        autoSubmitKey.passNextEnter = false
         focusGrace?.cancel(); focusGrace = nil
         maximumDuration?.cancel(); maximumDuration = nil
         let id = session.generation
@@ -448,7 +459,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let message = "No speech detected. Check your microphone with hey-talk devices."
         guard autoTarget != nil else { fail(message); return }
         guard session.finish(id, text: "") else { return }
-        clearAutomatic(); hotkey?.reset()
+        // Keep the destination through the restart delay so a second Enter can
+        // pass through immediately, even before the microphone reopens.
+        autoSubmitKey.passNextEnter = autoDeliveryValid
+        hotkey?.reset()
         overlay?.update(.idle)
         let notice = OverlayNotice.concise(message)
         overlay?.error(notice)
@@ -475,6 +489,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func clearAutomatic() {
         automatic = nil
+        autoSubmitKey.passNextEnter = false
         focusGrace?.cancel(); focusGrace = nil
         autoRestart?.cancel(); autoRestart = nil
     }
