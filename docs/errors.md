@@ -7,7 +7,7 @@
 | Grouping | Project + source + stable fingerprint; original samples remain available |
 | Replay | Same project/source/event ID counts once, including overlapping backfills |
 | Inbox | Most observed occurrences in the last 24 hours; previous day and lifetime context |
-| Tasks | Manual Create investigation task; retries reuse one task and frozen evidence |
+| Tasks | Create task from a row or its evidence dialog; editable prompt; retries reuse one task and frozen evidence |
 | Retention | SQLite samples: 30 days; JSONL: four files up to 8 MiB each |
 | Enablement | Off by default; explicitly enabled for `named:poe2-legacy` |
 
@@ -26,7 +26,7 @@ hey-boss errors --project named:example list
 
 Use the current Unix millisecond timestamp. Maximum 500 events / 16 MiB per atomic batch; message 8 KiB, stack 16 KiB. Optional fields: `stack`, `release`, `request_ref`, `fingerprint`; `count` defaults to 1 and preserves already-coalesced browser reports. More than 1,000,000 retained events or 10,000 groups refuses the batch rather than silently dropping evidence. Logs sit beside the issue database as `issues.errors.jsonl[.1-.3]`; SQLite uses `issues.errors.db` and reuses freed pages. Journal lines can repeat after a crash; use event IDs when reading them.
 
-The HTTP form is `{ "action": "ingest", "project": "named:example", "events": [...] }`. It uses the existing same-origin and CSRF boundary. Other actions: `list`, `detail` (`id`), `enable` (`enabled`), `promote` (`id`). Untrusted diagnostic text is rendered as text, never HTML.
+The HTTP form is `{ "action": "ingest", "project": "named:example", "events": [...] }`. It uses the existing same-origin and CSRF boundary. Other actions: `list`, `detail` (`id`), `enable` (`enabled`), `promote` (`id`, optional `prompt`). The default task prompt lives in `src/issues/prompts/error_task.md` and can be overridden under Project settings → Error task; `{{command}}` expands to the error lookup command. The evidence dialog lets you edit the prompt for one task. Untrusted diagnostic text is rendered as text, never HTML.
 
 ## Poe adapter
 

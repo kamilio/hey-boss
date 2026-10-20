@@ -233,7 +233,6 @@ if(typeof document!=='undefined') (()=>{
       await action('delete',{skill:skill.name});
       closeDialog();
     };
-    dialog.onclick=e=>{if(e.target===dialog&&!pending)closeDialog();};
     dialog.oncancel=e=>{
       if(pending){e.preventDefault();return;}
       deletePromptSkill='';

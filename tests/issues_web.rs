@@ -2193,11 +2193,31 @@ fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
     let list = call(json!({"action":"list"})).json();
     assert_eq!(list["groups"][0]["count_24h"], 7);
     let id = &list["groups"][0]["id"];
+    let detail = call(json!({"action":"detail","id":id})).json();
+    let prompt = detail["task_prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("Fix this error: `hey-boss errors --project "));
+    assert!(prompt.contains(&format!("show '{}' # get error`", id.as_str().unwrap())));
     let first = call(json!({"action":"promote","id":id}));
     assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
     assert_eq!(first.json()["issue"], 1);
     assert_eq!(call(json!({"action":"promote","id":id})).json()["issue"], 1);
     let issue = w.ok(json!({"action":"view","number":1}));
-    assert!(issue["issue"]["body"].as_str().unwrap().contains("trace-qa"));
-    assert!(issue["issue"]["body"].as_str().unwrap().contains("Synthetic upload failure"));
+    assert_eq!(issue["issue"]["body"], prompt);
+    assert_eq!(issue["issue"]["title"], "Fix: Synthetic upload failure");
+    let detail = call(json!({"action":"detail","id":id})).json();
+    assert!(detail["snapshot"].as_str().unwrap().contains("trace-qa"));
+
+    w.ok(json!({"action":"configure_project","prompt_overrides":{"error_task":"Custom {{command}}"}}));
+    let event = json!({"source":"synthetic","event_id":"two","timestamp":hey_boss::error_inbox::now(),"message":"Different failure"});
+    call(json!({"action":"ingest","events":[event]}));
+    let groups = call(json!({"action":"list"})).json();
+    let id = &groups["groups"].as_array().unwrap().iter().find(|g| g["title"] == "Different failure").unwrap()["id"];
+    assert!(call(json!({"action":"detail","id":id})).json()["task_prompt"].as_str().unwrap().starts_with("Custom hey-boss errors"));
+    assert_ne!(call(json!({"action":"promote","id":id,"prompt":" "})).status, 200);
+    assert_eq!(call(json!({"action":"promote","id":id,"prompt":"Edited task prompt"})).json()["issue"], 2);
+    // A lost link acknowledgement must recover the same task and frozen prompt.
+    rusqlite::Connection::open(w.root.join("issues.errors.db")).unwrap()
+        .execute("UPDATE error_groups SET issue=NULL WHERE id=?1", [id.as_str().unwrap()]).unwrap();
+    assert_eq!(call(json!({"action":"promote","id":id,"prompt":"Changed retry"})).json()["issue"], 2);
+    assert_eq!(w.ok(json!({"action":"view","number":2}))["issue"]["body"], "Edited task prompt");
 }

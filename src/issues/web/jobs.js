@@ -291,7 +291,6 @@ const HeyBossJobs = (() => {
     $('#job-new').onclick=newJob;
     const closeJob=()=>{if(leave())location.hash=hash();};
     $('#job-close').onclick=closeJob;$('#job-dialog').addEventListener('cancel',event=>{event.preventDefault();closeJob();});
-    $('#job-dialog').addEventListener('click',event=>{if(event.target===$('#job-dialog')){const r=event.target.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeJob();}});
     $('#jobs-search').oninput=renderList;
     for(const button of document.querySelectorAll('[data-filter]'))button.onclick=()=>{filter=button.dataset.filter;renderList();};
     $('#jobs-view-list').onclick=()=>{if(leave())location.hash=hash(selected?.id);};

@@ -45,11 +45,6 @@ const HeyBossAttachments = (() => {
     window.addEventListener("hashchange", close);window.addEventListener("popstate", close);
     $("[data-close]").onclick=close;
     dialog.addEventListener("cancel", event => {event.preventDefault();close();});
-    dialog.addEventListener("click", event => {
-      if(event.target!==dialog)return;
-      const rect=dialog.getBoundingClientRect();
-      if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)close();
-    });
     $("[data-save]").onclick=()=>{if(data)save(data,file.name);};
     $("[data-size]").onclick=() => {
       const actual=stage.classList.toggle("actual-size");
