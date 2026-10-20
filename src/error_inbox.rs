@@ -1,6 +1,6 @@
 //! Local diagnostic inbox. Raw telemetry never enters fleet replication.
 use crate::issues::{Error, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -277,14 +277,13 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         let mut accepted = 0;
         let mut journal = Vec::new();
         for e in events {
-            let key = hash(&format!(
+            let group = hash(&format!(
                 "{}\n{}",
                 e.source,
                 e.fingerprint
                     .clone()
                     .unwrap_or_else(|| normalize(&e.message))
             ));
-            let group = key;
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO error_events VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 params![
@@ -330,7 +329,7 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         Self::read_detail(&self.db, project, id, now)
     }
     fn read_detail(db: &Connection, project: &str, id: &str, now: i64) -> Result<Value> {
-        let mut group=db.query_row("SELECT id,title,total,issue,snapshot FROM error_groups WHERE project=?1 AND id=?2",params![project,id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"issue":r.get::<_,Option<i64>>(3)?,"snapshot":r.get::<_,Option<String>>(4)?}))).map_err(|_|Error::new("not_found","Error group not found"))?;
+        let mut group=db.query_row("SELECT id,title,total,issue,snapshot FROM error_groups WHERE project=?1 AND id=?2",params![project,id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"issue":r.get::<_,Option<i64>>(3)?,"snapshot":r.get::<_,Option<String>>(4)?}))).optional()?.ok_or_else(||Error::new("not_found","Error group not found"))?;
         let mut stmt=db.prepare("SELECT payload FROM error_events WHERE project=?1 AND group_id=?2 ORDER BY time DESC,source,event_id LIMIT 10")?;
         let samples = stmt
             .query_map(params![project, id], |r| r.get::<_, String>(0))?
