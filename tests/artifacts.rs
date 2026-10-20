@@ -474,13 +474,18 @@ fn selection_anchors_use_the_readers_markdown_dialect() {
         created["artifact"]["body_html"]
             .as_str()
             .unwrap()
-            .contains("&lt;mark&gt;")
+            .contains("<mark>literal</mark>")
     );
     let commented = run(
         &mut store,
-        json!({"command":"comment","id":id,"body":"Discuss the literal example","quote":"<mark>literal</mark>"}),
+        json!({"command":"comment","id":id,"body":"Discuss the highlighted text","quote":"literal"}),
     );
     assert_eq!(commented["comments"][1]["outdated"], false);
+    let commented = run(
+        &mut store,
+        json!({"command":"comment","id":id,"body":"Old selection with literal tags","quote":"<mark>literal</mark>"}),
+    );
+    assert_eq!(commented["comments"][2]["outdated"], true);
 }
 
 #[test]

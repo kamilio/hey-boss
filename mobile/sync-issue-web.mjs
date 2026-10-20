@@ -12,10 +12,10 @@ let shell=readFileSync(new URL('app-shell.html',source),'utf8')
  .replace('<a id="nav-skills"','<a hidden id="nav-skills"')
  .replace('<a id="nav-admin"','<a hidden id="nav-admin"')
  .replace(/<!--[^]*?-->/g,'');
-for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)||['index.html','mindmap.html','artifacts.html','merged-prs.html','jobs.html'].includes(name))){
+for(const name of readdirSync(source).filter(name=>/\.(js|css|png)$/.test(name)||['index.html','mindmap.html','artifacts.html','merged-prs.html','jobs.html','html-preview.html','html-preview.csp'].includes(name))){
  let value=readFileSync(new URL(name,source));
  if(name==='routes.js')value=Buffer.from(value.toString().replace('/* ROUTE_DEFINITIONS */ []',readFileSync(new URL('routes.json',source),'utf8')));
- if(name.endsWith('.html')){
+ if(name.endsWith('.html')&&name!=='html-preview.html'){
   value=Buffer.from(addAgentGuidance(value.toString().replace('<!--app-shell-->',shell)
    .replace('<html lang="en">','<html lang="en" data-issue-mobile="true">')
    // Chrome skipped the tab transition when the opt-in loaded after the page styles.

@@ -1,0 +1,75 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTML preview</title></head><body><script>
+"use strict";
+// This endpoint is an opaque-origin sandbox. Its response policy also applies
+// after document.write, including when the page is opened outside an iframe.
+(() => {
+  function boot(theme) {
+    const send = (type, extra = {}) => parent.postMessage({channel:"hey-boss-html", type, ...extra}, "*");
+    function appearance(value) {
+      if (!value || !value.variables) return;
+      document.documentElement.style.colorScheme = value.dark ? "dark" : "light";
+      for (const [name, color] of Object.entries(value.variables)) {
+        if (/^--[a-z0-9-]+$/.test(name) && typeof color === "string" && color.length < 300) document.documentElement.style.setProperty(name, color);
+      }
+    }
+    appearance(theme);
+    addEventListener("message", event => {
+      if (event.source === parent && event.data?.channel === "hey-boss-html" && event.data.type === "theme") appearance(event.data.theme);
+    });
+    let previous = 0, queued = false, ready = false;
+    function measure() {
+      if (queued) return;
+      queued = true;
+      // WKWebView can suspend animation frames in a custom-scheme subframe.
+      // A coalesced timer also sizes those previews before their first paint.
+      setTimeout(() => {
+        queued = false;
+        if (!document.body) return;
+        const style = getComputedStyle(document.body);
+        const height = Math.ceil(Math.max(document.body.scrollHeight, document.body.getBoundingClientRect().height) + (parseFloat(style.marginTop)||0) + (parseFloat(style.marginBottom)||0));
+        if (height !== previous) { previous = height; send("size", {height}); }
+        if (!ready) { ready = true; send("ready"); }
+      }, 16);
+    }
+    addEventListener("error", event => send("error", {message: event.message || "A resource could not load. Use a self-contained HTML document."}), true);
+    addEventListener("unhandledrejection", () => send("error", {message:"A script could not finish."}));
+    addEventListener("securitypolicyviolation", event => {
+      if (event.blockedURI && event.blockedURI !== "inline") send("error", {message:"This preview uses self-contained HTML. External resources are blocked."});
+    });
+    document.addEventListener("click", event => {
+      const link = event.target.closest?.("a[href]");
+      if (!link) return;
+      const href = link.getAttribute("href");
+      if (href?.startsWith("#")) return;
+      event.preventDefault();
+      if (event.isTrusted && /^https?:\/\//i.test(href)) send("link", {url:href});
+    }, true);
+    addEventListener("keydown", event => {
+      if (event.isTrusted && event.key === "Escape") send("escape");
+    });
+    document.addEventListener("DOMContentLoaded", () => {
+      const observer = new ResizeObserver(measure);
+      observer.observe(document.body);
+      document.fonts?.ready.then(measure);
+      measure();
+    }, {once:true});
+    addEventListener("load", measure);
+  }
+  function initialize(event) {
+    const data = event.data;
+    if (event.source !== parent || data?.channel !== "hey-boss-html" || data.type !== "init" || typeof data.html !== "string" || data.html.length > 1048576) return;
+    removeEventListener("message", initialize);
+    const page = new DOMParser().parseFromString(data.html, "text/html");
+    // A document may supply its own layout, but never a navigation base or a
+    // refresh. All resource loads remain constrained by the response CSP.
+    page.querySelectorAll("base,meta[http-equiv]").forEach(node => node.remove());
+    const style = page.createElement("style");
+    style.textContent = "html{background:transparent;color:var(--foreground);font-family:var(--font-sans);font-size:14px;line-height:1.5;overflow-wrap:anywhere;overflow:hidden!important}body{margin:0;overflow:visible!important}html,body{height:auto!important;min-height:0!important;max-height:none!important}*{box-sizing:border-box}img,svg,canvas,video{max-width:100%}button,input,select,textarea{font:inherit}code,pre{font-family:var(--font-mono)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}";
+    const script = page.createElement("script");
+    script.textContent = "(" + boot.toString() + ")(" + JSON.stringify(data.theme).replace(/</g,"\\u003c") + ");";
+    page.head.prepend(style, script);
+    document.open(); document.write("<!doctype html>" + page.documentElement.outerHTML); document.close();
+  }
+  addEventListener("message", initialize);
+})();
+</script></body></html>

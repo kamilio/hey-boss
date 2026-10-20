@@ -597,6 +597,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
     // Mermaid's sanitized SVG includes scoped styles. Only its document page
     // permits those styles; script execution remains restricted to local assets.
     let artifact_page = request.url().split('?').next() == Some("/artifacts");
+    let html_preview = request.url().split('?').next() == Some("/html-preview");
     let reply = route(&mut request, app);
     let (status, kind, bytes) = match reply {
         Ok(value) => value,
@@ -626,13 +627,18 @@ fn respond(mut request: tiny_http::Request, app: &App) {
         ("Cache-Control", "no-store"),
         ("X-Content-Type-Options", "nosniff"),
         ("Referrer-Policy", "no-referrer"),
-        ("X-Frame-Options", "DENY"),
+        (
+            "X-Frame-Options",
+            if html_preview { "SAMEORIGIN" } else { "DENY" },
+        ),
         (
             "Content-Security-Policy",
-            if artifact_page {
-                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            if html_preview {
+                include_str!("web/html-preview.csp").trim()
+            } else if artifact_page {
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             } else {
-                "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+                "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             },
         ),
     ] {
@@ -655,6 +661,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     let path = request.url().split('?').next().unwrap_or("/").to_owned();
+    if request.method() == &Method::Get && path == "/html-preview" {
+        return Ok((
+            200,
+            "text/html; charset=utf-8",
+            include_bytes!("web/html-preview.html").to_vec(),
+        ));
+    }
     if request.method() == &Method::Get && path == "/routes.js" {
         return Ok((
             200,
@@ -749,6 +762,14 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/artifact-editor.js" => Some((
                 "application/javascript; charset=utf-8",
                 include_bytes!("web/artifact-editor.js"),
+            )),
+            "/html-preview.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/html-preview.js"),
+            )),
+            "/html-preview.css" => Some((
+                "text/css; charset=utf-8",
+                include_bytes!("web/html-preview.css"),
             )),
             "/artifact-diagrams.js" => Some((
                 "application/javascript; charset=utf-8",
