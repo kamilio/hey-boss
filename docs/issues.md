@@ -98,6 +98,7 @@ MD
 ```
 
 `--file issue.md` (alias `--markdown-file`) is an optional alternative to `--body`.
+It also accepts UTF-8 HTML files, for example `--file page.html` or `--file page.htm`.
 It snapshots the file's text into the database immediately. Editing, moving, or
 deleting the file afterward does not change the issue. `--file -` reads stdin.
 Bodies, file contents, and comments have the same 1 MiB bound. Relative assets

@@ -6899,9 +6899,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 do {
                     let url = URL(fileURLWithPath: file).resolvingSymlinksInPath()
                     let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-                    guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 64 * 1024 * 1024 else { throw StorageError(description: "Open a regular Markdown file up to 64 MiB.") }
+                    guard values.isRegularFile == true, (values.fileSize ?? Int.max) <= 64 * 1024 * 1024 else { throw StorageError(description: "Open a regular Markdown or HTML file up to 64 MiB.") }
                     let data = try Data(contentsOf: url)
-                    guard let body = String(data: data, encoding: .utf8) else { throw StorageError(description: "Markdown files must use UTF-8.") }
+                    guard let body = String(data: data, encoding: .utf8) else { throw StorageError(description: "Documents must use UTF-8.") }
                     onMain {
                         guard let self else { return }; self.originalFile = data
                         self.session.launch.file = url.path
@@ -7417,7 +7417,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     @objc func newDocument() { onOpen(ArtifactLaunch(project: libraryProject, host: session.launch.host, title: "Untitled artifact")) }
     @objc func openFile() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.plainText]; panel.allowsOtherFileTypes = true; panel.allowsMultipleSelection = true
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.plainText, .html]; panel.allowsOtherFileTypes = true; panel.allowsMultipleSelection = true
         panel.beginSheetModal(for: window) { [weak self] result in
             guard result == .OK, let self else { return }
             for url in panel.urls { self.onOpen(ArtifactLaunch(project: self.libraryProject, file: url.resolvingSymlinksInPath().path)) }

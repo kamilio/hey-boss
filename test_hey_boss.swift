@@ -3943,9 +3943,9 @@ func auditHTMLReader() {
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         precondition(condition(), label)
     }
-    func js(_ expression: String, frame: WKFrameInfo? = nil) -> Any? {
+    func js(_ expression: String, frame: WKFrameInfo? = nil, reader: ArtifactHTMLReader? = nil) -> Any? {
         var result: Any?, done = false
-        editor.htmlReader.view.evaluateJavaScript(expression, in: frame, in: .page) { value in
+        (reader ?? editor.htmlReader).view.evaluateJavaScript(expression, in: frame, in: .page) { value in
             switch value { case .success(let value): result = value; case .failure(let error): print("HTML audit JavaScript: \(error)") }
             done = true
         }
@@ -4010,5 +4010,17 @@ func auditHTMLReader() {
     _ = js("document.querySelector('#toggle').click()", frame: editor.htmlReader.previewFrame)
     wait("Whole HTML document shrinks", { (js("document.querySelector('iframe')?.clientHeight") as? Int ?? 0) < 500 })
     precondition(editor.text.string == wholePage, "Whole HTML source survives reading")
+    for name in ["page.html", "page.HTM"] {
+        let path = root.appendingPathComponent(name)
+        try! Data(wholePage.utf8).write(to: path)
+        let imported = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:HTML audit", file: path.path), journalRoot: root.appendingPathComponent("import-drafts"), cli: cli, present: false)
+        wait("HTML file opens", { imported.session.ready })
+        precondition(imported.text.string == wholePage, "HTML file import preserves source")
+        imported.window.makeKeyAndOrderFront(nil); imported.togglePreview()
+        wait("Imported HTML reader loads", { imported.htmlReader.loaded && imported.htmlReader.previewFrame != nil })
+        wait("Imported HTML fills its content height", { (js("document.querySelector('iframe')?.clientHeight", reader: imported.htmlReader) as? Int ?? 0) > 2800 })
+        precondition((try! Data(contentsOf: path)) == Data(wholePage.utf8), "Preview never changes the imported file")
+        imported.window.close()
+    }
     print("PASS native HTML reader, whole pages, uncapped height, sandbox, scripts, images, checklists, source fidelity, Find and teardown")
 }

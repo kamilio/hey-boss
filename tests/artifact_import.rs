@@ -2,6 +2,19 @@ use hey_boss::artifacts::import::{collect, local_destinations, rewrite};
 use std::collections::BTreeMap;
 
 #[test]
+fn html_pages_never_import_or_rewrite_markdown_like_text() {
+    let source = "\u{feff}<!doctype html>\n<html><body>\n\n[Literal](missing.csv)\n\n<script>const label = '[chart](private.png)';</script>\n</body></html>\n";
+    assert!(local_destinations(source).unwrap().is_empty());
+    assert!(
+        collect(source, std::path::Path::new("."))
+            .unwrap()
+            .is_empty()
+    );
+    let replacements = BTreeMap::from([("missing.csv".into(), "/attachments/f-wrong".into())]);
+    assert_eq!(rewrite(source, &replacements), source);
+}
+
+#[test]
 fn rewrites_only_parsed_destinations_preserving_markdown() {
     let source = "![*Chart*](<chart one.png> \"Title\")\n[CSV][data]\n\n[data]: data.csv 'Download'\n\n`![code](chart one.png)`\n```md\n[x](data.csv)\n```\n[web](https://example.com)\n";
     let replacements = BTreeMap::from([

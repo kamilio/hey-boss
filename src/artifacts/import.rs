@@ -64,6 +64,11 @@ fn decoded_markdown(raw: &str) -> String {
 }
 
 pub fn destinations(body: &str) -> Vec<(Range<usize>, String)> {
+    // A whole HTML page is source for the isolated preview, not Markdown. Its
+    // text and scripts must never become file reads or source rewrites.
+    if crate::markdown::is_html_document(body) {
+        return Vec::new();
+    }
     let parser = Parser::new_ext(body, crate::markdown::parser_options());
     let mut parser = parser.into_offset_iter();
     let mut spans = BTreeMap::new();

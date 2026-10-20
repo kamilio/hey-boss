@@ -53,8 +53,9 @@ explicitly select that revision before saving. Interrupted saves retain the
 original request ID and content so retrying does not create another document.
 **⌘S / Ctrl+S** saves from the editor. Back from a new attached document returns
 to its referring issue or map topic. Failed reads offer **Try again**.
-Import and Export use UTF-8 Markdown; comments and relationships remain in the
-project store, rather than the exported file.
+Import accepts UTF-8 Markdown and HTML (`.html` or `.htm`), including through
+`--file`. Export preserves the saved source; comments and relationships remain
+in the project store, rather than the exported file.
 
 HTML works in descriptions and documents on desktop, phones and the native
 artifact reader. Ordinary tags such as `<details>`, `<summary>` and `<table>`
@@ -71,6 +72,7 @@ as `--background`, `--foreground`, `--card`, `--border` and `--accent`.
 
 ```sh
 hey-boss artifact create --title 'Migration plan' --file plan.md --issue 12
+hey-boss artifact create --title 'Interactive page' --file page.html
 hey-boss artifact list --query migration --json
 hey-boss artifact view a-ID --json
 hey-boss artifact edit a-ID --file updated.md

@@ -2,7 +2,7 @@
 
 Desktop **Edit** opens a native macOS writing window. **Edit in browser** remains in the document’s More actions menu. The web reader refreshes after native saves without replacing a browser draft.
 
-`hey-boss artifact open` opens the library; `open --new` starts a note; `edit ID` opens an artifact; `open --file notes.md` edits a local UTF-8 Markdown file. Artifact commands with text capture revision guards automatically.
+`hey-boss artifact open` opens the library; `open --new` starts a note; `edit ID` opens an artifact; `open --file notes.md` edits a local UTF-8 Markdown or HTML file (`.html` and `.htm` work too). Artifact commands with text capture revision guards automatically.
 
 The library opens to a responsive gallery with document excerpts and updated dates. Choose a project above search, open a card, or start with **New document**. **All documents** returns to the gallery and refreshes it; search matches titles and document text. **Load more documents** reaches older pages. Project switching preserves the current document’s draft and keeps new documents in the selected project.
 
