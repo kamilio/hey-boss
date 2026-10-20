@@ -53,6 +53,22 @@ fn normalize(value: &Value) -> Result<Value> {
             if !limit.is_object() || limit["is_active"] == false {
                 continue;
             }
+            // Claude can include the same session in both legacy and new fields.
+            // Only discard an alias with matching measurements and no model scope.
+            if limit["kind"] == "session"
+                && limit["scope"]
+                    .as_object()
+                    .is_none_or(|scope| scope.values().all(Value::is_null))
+                && percent(&limit["percent"]).is_some()
+                && bounded(&limit["resets_at"]).is_some()
+                && windows.iter().any(|window| {
+                    window["id"] == "five_hour"
+                        && percent(&window["used_percent"]) == percent(&limit["percent"])
+                        && bounded(&window["resets_at"]) == bounded(&limit["resets_at"])
+                })
+            {
+                continue;
+            }
             let label = bounded(&limit["scope"]["model"]["display_name"])
                 .or_else(|| bounded(&limit["scope"]["model"]["id"]))
                 .or_else(|| bounded(&limit["kind"]))
@@ -260,6 +276,24 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_session_alias_is_removed_without_losing_distinct_limits() {
+        let data = normalize(&json!({
+            "five_hour":{"utilization":72,"resets_at":"2026-10-20T21:30:00Z"},
+            "limits":[
+                {"kind":"session","group":"session","percent":72,"resets_at":"2026-10-20T21:30:00Z"},
+                {"kind":"session","percent":72,"scope":{"model":{"id":"sonnet"}},"resets_at":"2026-10-20T21:30:00Z"},
+                {"kind":"session","percent":73,"resets_at":"2026-10-20T21:30:00Z"},
+                {"kind":"session","percent":72,"resets_at":"2026-10-20T22:30:00Z"}
+            ]
+        })).unwrap();
+        assert_eq!(data["windows"].as_array().unwrap().len(), 4);
+        assert_eq!(data["windows"][0]["id"], "five_hour");
+        assert_eq!(data["windows"][1]["model"], "sonnet");
+        let only_new = normalize(&json!({"limits":[{"kind":"session","percent":72}]})).unwrap();
+        assert_eq!(only_new["windows"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn remaining_and_extra_spend_have_explicit_units_and_preserve_unknowns() {

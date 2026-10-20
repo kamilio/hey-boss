@@ -3695,8 +3695,12 @@ func auditSubscriptionQuota() {
     ui.refresh()
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"}]}"#.utf8)))
     precondition(ui.rows[0].reading != nil, "Keep existing cards stable while their quota refreshes")
+    precondition(ui.subtitle.stringValue == "Subscription quota", "Refresh cached quotas silently")
     replies.removeFirst()(.failure(StorageError(description: "Synthetic refresh failure")))
-    precondition(ui.rows[0].reading == nil && !ui.loading, "A failed refresh must not leave old quota marked current")
+    precondition(ui.rows[0].reading != nil && !ui.loading && ui.rows[0].reading?.state == "stale", "A failed refresh preserves last-known quota")
+    ui.refresh()
+    replies.removeFirst()(.failure(StorageError(description: "Discovery offline")))
+    precondition(ui.rows.count == 1 && ui.rows[0].reading != nil, "Discovery failure preserves cached cards")
     ui.refresh()
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
     precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
@@ -3728,7 +3732,7 @@ func auditSubscriptionQuota() {
     precondition(ProcessInfo.processInfo.systemUptime - opened < 0.1 && menuCalls == 1)
     precondition(overview.subscriptionQuota.loading && overview.subscriptionQuota.timer != nil)
     overview.menuDidClose(overview.statusMenu)
-    precondition(overview.subscriptionQuota.timer == nil, "Closed menus stop polling")
+    precondition(overview.subscriptionQuota.timer != nil, "Closed menus keep quota warm in the background")
     overview.menuWillOpen(overview.statusMenu)
     precondition(menuCalls == 1, "Reopening during a pending read must coalesce")
     overview.menuDidClose(overview.statusMenu)
@@ -3754,7 +3758,26 @@ func auditSubscriptionQuota() {
     }
     RunLoop.main.add(inspect, forMode: .common)
     tracking.statusMenu.popUp(positioning: nil, at: NSPoint(x: 100, y: 600), in: nil)
-    precondition(tracked && tracking.subscriptionQuota.timer == nil, "Tracking ends cleanly and stops polling")
+    precondition(tracked && tracking.subscriptionQuota.timer != nil, "Tracking ends cleanly and keeps background refresh")
+    let cache = FileManager.default.temporaryDirectory.appendingPathComponent("quota-cache-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: cache) }
+    let cached = SubscriptionQuotaController(cacheURL: cache)
+    cached.rows = [SubscriptionQuotaRow(account: reading.account, reading: reading)]
+    cached.finish()
+    let restored = SubscriptionQuotaController(cacheURL: cache)
+    precondition(restored.rows.count == 1 && restored.rows[0].reading?.data?.windows[0].remaining == 90, "Cached quota is available before any request after restart")
+    var refreshCount = 0
+    restored.runner = { _, _ in refreshCount += 1 }
+    let reopenStart = ProcessInfo.processInfo.systemUptime
+    restored.open(cli: nil)
+    precondition(ProcessInfo.processInfo.systemUptime - reopenStart < 0.1 && refreshCount == 1 && restored.rows.count == 1)
+    precondition(restored.subtitle.stringValue == "Subscription quota" && restored.loading)
+    restored.close(); restored.timer?.fire()
+    precondition(refreshCount == 1, "Background refresh coalesces while a request is pending")
+    restored.finish(); restored.timer?.fire()
+    precondition(refreshCount == 2, "Background refresh runs with the menu closed")
+    try! Data("broken cache".utf8).write(to: cache)
+    precondition(SubscriptionQuotaController(cacheURL: cache).rows.isEmpty, "Invalid caches recover through normal refresh")
     print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, async inline menu")
 }
 

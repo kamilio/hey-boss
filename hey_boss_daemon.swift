@@ -4591,7 +4591,7 @@ final class NativeMindmapViewer: NSObject, WKNavigationDelegate {
 }
 
 // Subscription data comes only from the proxy's versioned CLI, never OAuth stores.
-struct SubscriptionQuotaAccount: Decodable, Equatable {
+struct SubscriptionQuotaAccount: Codable, Equatable {
     let provider: String
     let id: String
     var title: String { provider == "codex" ? "Codex" : provider == "claude" ? "Claude" : provider.capitalized }
@@ -4600,7 +4600,7 @@ struct SubscriptionQuotaAccounts: Decodable {
     let schema_version: Int
     let accounts: [SubscriptionQuotaAccount]
 }
-struct SubscriptionQuotaWindow: Decodable {
+struct SubscriptionQuotaWindow: Codable {
     let label: String
     let remaining_percent: Double?
     let resets_at: String?
@@ -4625,14 +4625,14 @@ struct SubscriptionQuotaWindow: Decodable {
         return "Resets in \(minutes / 1440)d \((minutes % 1440) / 60)h"
     }
 }
-struct SubscriptionQuotaReading: Decodable {
-    struct Usage: Decodable {
+struct SubscriptionQuotaReading: Codable {
+    struct Usage: Codable {
         let windows: [SubscriptionQuotaWindow]
         let availability_unknown: Bool?
     }
     let schema_version: Int
     let account: SubscriptionQuotaAccount
-    let state: String
+    var state: String
     let updated_at: Double?
     let data: Usage?
     func isFresh(now: Double = Date().timeIntervalSince1970) -> Bool {
@@ -4642,7 +4642,7 @@ struct SubscriptionQuotaReading: Decodable {
         return !data.windows.contains { $0.reset.map { $0.timeIntervalSince1970 <= now } ?? false }
     }
 }
-struct SubscriptionQuotaRow {
+struct SubscriptionQuotaRow: Codable {
     let account: SubscriptionQuotaAccount
     var reading: SubscriptionQuotaReading?
     var message: String = "Checking quota…"
@@ -4677,6 +4677,8 @@ final class QuotaCard: NSView {
     }
 }
 final class SubscriptionQuotaController: NSObject {
+    static let cacheURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/hey-boss/subscription-quota.json")
+    let cacheURL: URL?
     let content = QuotaCanvas(frame: NSRect(x: 0, y: 0, width: 340, height: 128))
     let scroll = NSScrollView()
     let body = QuotaCanvas()
@@ -4692,8 +4694,14 @@ final class SubscriptionQuotaController: NSObject {
     let queue: OperationQueue = {
         let queue = OperationQueue(); queue.name = "hey-boss.subscription-quota"; queue.qualityOfService = .userInitiated; queue.maxConcurrentOperationCount = 2; return queue
     }()
-    override init() {
+    init(cacheURL: URL? = nil) {
+        self.cacheURL = cacheURL
         super.init()
+        if let cacheURL, let data = try? Data(contentsOf: cacheURL), data.count <= 1024 * 1024,
+           let saved = try? JSONDecoder().decode([SubscriptionQuotaRow].self, from: data),
+           saved.allSatisfy({ row in row.reading.map { $0.schema_version == 1 && $0.account == row.account } ?? true }) {
+            rows = saved.filter { $0.reading != nil }
+        }
         subtitle.font = .systemFont(ofSize: 12, weight: .semibold)
         subtitle.textColor = .secondaryLabelColor
         subtitle.frame = NSRect(x: 18, y: 9, width: 250, height: 18)
@@ -4726,7 +4734,7 @@ final class SubscriptionQuotaController: NSObject {
             self.timer = timer
         }
     }
-    func close() { timer?.invalidate(); timer = nil }
+    func close() {} // Keep the cache warm while the menu is closed.
     deinit { timer?.invalidate() }
     @objc func refresh() {
         guard !loading else { return }
@@ -4748,20 +4756,30 @@ final class SubscriptionQuotaController: NSObject {
                         do {
                             let reading = try JSONDecoder().decode(SubscriptionQuotaReading.self, from: result.get())
                             guard reading.schema_version == 1, reading.account == account else { throw StorageError(description: "Invalid quota account") }
-                            self.rows[index].reading = reading
+                            if reading.data?.windows.isEmpty != false, ["error", "stale"].contains(reading.state), self.rows[index].reading != nil {
+                                self.rows[index].reading?.state = "stale"
+                            } else { self.rows[index].reading = reading }
                             self.rows[index].message = ""
-                        } catch { self.rows[index].reading = nil; self.rows[index].message = "Quota unavailable. Try refreshing." }
+                        } catch { self.rows[index].reading?.state = "stale"; self.rows[index].message = "Quota unavailable. Try refreshing." }
                         pending -= 1
                         if pending == 0 { self.finish() } else { self.render() }
                     }
                 }
             } catch {
-                // Do not leave old numbers looking current after discovery fails.
-                self.rows = []; self.message = "Could not load subscriptions"; self.finish()
+                for index in self.rows.indices { self.rows[index].reading?.state = "stale" }
+                self.message = "Could not load subscriptions"; self.finish()
             }
         }
     }
-    func finish() { loading = false; lastLoaded = Date(); render() }
+    func finish() {
+        loading = false; lastLoaded = Date()
+        if let cacheURL, let data = try? JSONEncoder().encode(rows), data.count <= 1024 * 1024 {
+            try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: cacheURL, options: [.atomic, .completeFileProtectionUnlessOpen])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
+        }
+        render()
+    }
     func request(_ args: [String], completion: @escaping (Result<Data, Error>) -> Void) {
         if let runner { runner(args, completion); return }
         let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
@@ -4790,7 +4808,7 @@ final class SubscriptionQuotaController: NSObject {
     }
     func render() {
         refreshButton.isEnabled = !loading
-        subtitle.stringValue = loading ? "Subscription quota · Updating…" : "Subscription quota"
+        subtitle.stringValue = "Subscription quota"
         let origin = scroll.contentView.bounds.origin
         body.subviews.forEach { $0.removeFromSuperview() }
         let width: CGFloat = 340, cardWidth: CGFloat = 316
@@ -4868,7 +4886,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
     let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "o")
     let mindmapsMenuItem = NSMenuItem(title: "Mindmaps…", action: nil, keyEquivalent: "")
-    let subscriptionQuota = SubscriptionQuotaController()
+    let subscriptionQuota: SubscriptionQuotaController
     func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli) }
     func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close() }
     let statusMenu = NSMenu()
@@ -4964,6 +4982,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     init(present: Bool = true, cli: String? = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], preferences: UserDefaults? = nil) {
         self.present = present
         self.cli = cli
+        subscriptionQuota = SubscriptionQuotaController(cacheURL: present ? SubscriptionQuotaController.cacheURL : nil)
         expansionDefaults = preferences ?? (present ? UserDefaults(suiteName: "local.hey-boss.overview") : nil)
         savedExpandedGroups = Set(expansionDefaults?.stringArray(forKey: "expandedRepositories") ?? [])
         expandedAgents = Set(expansionDefaults?.stringArray(forKey: "expandedAgents") ?? [])
@@ -5102,6 +5121,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         menu.addItem(withTitle: "Machines…", action: #selector(openSettings), keyEquivalent: "").target = self
         statusItem?.menu = menu
         rebuild()
+        if present { subscriptionQuota.open(cli: cli) }
     }
     func snapshotJSON() throws -> String {
         let state = OverviewState(observedAt: Date().timeIntervalSince1970,
