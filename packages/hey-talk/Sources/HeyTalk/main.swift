@@ -7,8 +7,8 @@ signal(SIGPIPE, SIG_IGN)
 let arguments = Array(CommandLine.arguments.dropFirst())
 do {
     if arguments.first == "--worker" {
-        guard arguments.count == 3 else { throw TalkError("Invalid worker arguments") }
-        try runInferenceWorker(model: arguments[1], library: arguments[2])
+        guard arguments.count == 4 else { throw TalkError("Invalid worker arguments") }
+        try runInferenceWorker(model: arguments[1], library: arguments[2], vocabulary: arguments[3])
     } else if arguments.contains("--serve") || (arguments.isEmpty && Bundle.main.bundleURL.pathExtension == "app") {
         let application = NSApplication.shared
         let delegate = TalkService(headless: arguments.contains("--headless"))

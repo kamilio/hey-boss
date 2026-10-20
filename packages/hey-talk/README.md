@@ -111,6 +111,23 @@ reports capture latency, inference duration, and real-time factor. `status
 --json` exposes readiness, measured microphone levels, hotkey registration,
 and process IDs. `last` reads the most recent transcript, including after restart.
 
+Manage vocabulary hints from the CLI:
+
+```sh
+hey-talk vocabulary                         # List words and phrases
+hey-talk vocabulary add Kamil Poe "T3 Code"
+hey-talk vocabulary remove "T3 Code"
+hey-talk vocabulary --json                  # Includes the Markdown file path
+```
+
+Changes apply to the next transcription without restarting or reloading the
+model. Quote phrases. Adding an existing term updates its preferred spelling;
+removal ignores case. The list lives in
+`~/Library/Application Support/hey-talk/vocabulary.md`, one term per line.
+The initial list comes from [vocabulary.md](vocabulary.md); app upgrades preserve
+your changes, including an empty list. Hints favor these terms during local
+recognition, but do not guarantee spelling or replace text afterward.
+
 Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
 history show`. Each transcript has a timestamp and Copy button. Closing this
 window with ⌘W leaves dictation running. Standard copy, paste, cut, select-all,
@@ -184,6 +201,7 @@ swift test
 ./test-login.sh # Installed app: login startup and explicit quit, while idle
 swift test --sanitize=thread
 ./test-integration.sh
+./test-vocabulary.sh # Separate worker: vocabulary reload, speech, silence, speed
 # To test the installed app instead:
 HEY_TALK_TEST_CLI="$HOME/.local/bin/hey-talk" ./test-integration.sh
 # Optional hardware check; captures and discards the selected microphone:
@@ -198,6 +216,9 @@ also cover database write failure, paging, audio formats, and unresponsive clien
 Integration tests do not use the mic
 or paste text. The hardware microphone and global shortcut still depend on
 macOS permission and the user's keyboard mapping.
+
+The vocabulary test leaves the running app, microphone, clipboard, preferences,
+and history untouched. Set `HEY_TALK_TEST_APP` to an installed app path to test it.
 
 Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
 check recording starts; Escape or focus a search field and check it stops.

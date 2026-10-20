@@ -12,10 +12,12 @@ enum ModelPaths {
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/openwhispr/parakeet-models/orukeet-v0.1.0")
     }
     static var library: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib") }
+    static var vocabulary: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/vocabulary.md") }
     static var available: Bool {
-        ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"].allSatisfy {
+        ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.vocab"].allSatisfy {
             FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path)
         } && FileManager.default.fileExists(atPath: library.path)
+          && FileManager.default.isReadableFile(atPath: vocabulary.path)
     }
 }
 
@@ -77,7 +79,7 @@ final class Inference {
         guard ModelPaths.available else { throw TalkError("Orukeet is missing. Run the hey-talk installer to prepare its model and runtime.") }
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/hey-talk-inference")
-        child.arguments = ["--worker", ModelPaths.directory.path, ModelPaths.library.path]
+        child.arguments = ["--worker", ModelPaths.directory.path, ModelPaths.library.path, try Vocabulary().prepare().path]
         child.standardInput = stdin; child.standardOutput = stdout
         child.standardError = FileHandle.standardError
         child.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") }
@@ -114,7 +116,11 @@ final class Inference {
     deinit { cancel() }
 }
 
-func runInferenceWorker(model: String, library: String) throws {
+func runInferenceWorker(model: String, library: String, vocabulary: String) throws {
+    guard FileManager.default.isReadableFile(atPath: vocabulary),
+          FileManager.default.isReadableFile(atPath: URL(fileURLWithPath: model).appendingPathComponent("bpe.vocab").path) else {
+        throw TalkError("Vocabulary files are missing. Run the hey-talk installer.")
+    }
     try Wire.prepare(STDIN_FILENO)
     try Wire.prepare(STDOUT_FILENO)
     // Exit if the recording service crashes while inference is in flight.
@@ -122,6 +128,8 @@ func runInferenceWorker(model: String, library: String) throws {
     let parentWatch = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .global())
     parentWatch.setEventHandler { _exit(0) }
     parentWatch.resume()
+    let terms = Vocabulary(file: URL(fileURLWithPath: vocabulary), defaults: nil)
+    _ = try terms.words()
     guard let recognizer = ht_create(library, model, 4) else { throw TalkError(String(cString: ht_error())) }
     defer { ht_destroy(recognizer); parentWatch.cancel() }
     try Wire.write(Wire.json(["ready": true]), to: STDOUT_FILENO)
@@ -131,7 +139,10 @@ func runInferenceWorker(model: String, library: String) throws {
         guard length > 0, length <= PCMFrame.maxSamples * 4, length % 4 == 0 else { throw TalkError("Invalid audio length") }
         let payload = try Wire.readExactly(length, from: STDIN_FILENO)
         let samples = try PCMFrame.decode(header + payload)
-        guard let result = samples.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count)) }) else {
+        // Snapshot the latest list for this utterance; updates never reload the model
+        // or interrupt an in-flight decode.
+        let hotwords = try terms.words().joined(separator: "/")
+        guard let result = samples.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count), hotwords) }) else {
             throw TalkError("Orukeet could not decode audio")
         }
         let text = String(cString: result)
