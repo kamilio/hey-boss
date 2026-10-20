@@ -636,9 +636,9 @@ async function setProjectVisibility(project) {
 }
 $("#restore-current-project").onclick = () =>
   setProjectVisibility(model.project.id);
-function listOperation() {
+function listOperation(semantic = true) {
   return {
-    action: "list",
+    action: model.route.search ? "search" : "list",
     state: model.route.state,
     mine: model.route.owner === "mine",
     unassigned: model.route.owner === "unassigned",
@@ -646,11 +646,50 @@ function listOperation() {
       ? null
       : model.route.owner,
     labels: model.route.label ? [model.route.label] : [],
-    search: model.route.search || null,
+    ...(model.route.search ? {query: model.route.search, semantic} : {search: null}),
     limit: 50,
     offset: 0,
     all: true,
   };
+}
+function renderSearchStatus(search, refining = false) {
+  const box = $("#issue-search-status");
+  box.hidden = !model.route.search || !search;
+  $(".list-sort").innerHTML = model.route.search ? (search?.enabled ? 'Best matches' : 'Matches') : 'Queue order' + icon("sort");
+  $(".list-sort").title = model.route.search ? 'Titles matter most, then descriptions, then comments' : 'Drag issue handles to change pickup order';
+  if (box.hidden) return;
+  const enabled = search.enabled !== false;
+  const message = !enabled ? 'Literal search · Smart search is off on this device.'
+    : refining ? 'Finding related meaning…'
+    : search.index === 'unavailable' ? 'Title matches · Search index temporarily unavailable.'
+    : search.semantic === 'unavailable' ? 'Keyword matches · Related meaning is temporarily unavailable.'
+    : search.indexing ? 'Best matches · Indexing in the background.'
+    : search.mode === 'hybrid' ? 'Best matches · Words and related meaning.' : 'Best matches · Keywords.';
+  const restoreFocus = box.contains(document.activeElement);
+  box.innerHTML = '<span role="status">' + message + '</span><button class="search-setting" type="button" title="Smart search sends issue titles, descriptions and comments to OpenAI through hey-proxy. The index stays on this device.">' + (enabled ? 'Turn off' : 'Enable smart search') + '</button>';
+  if (restoreFocus) $("button", box).focus({preventScroll:true});
+  $("button", box).onclick = async (event) => {
+    const button = event.currentTarget, sequence = model.sequence;
+    button.disabled = true;
+    try {
+      await api({action:"search_index", enabled:!enabled});
+      if (sequence === model.sequence) await renderRoute();
+    } catch (error) { toast(error.message, true); button.disabled = false; }
+  };
+}
+async function refineSearch(sequence, operation) {
+  model.searchRefining = sequence;
+  try {
+    const result = await api({...operation, semantic:true});
+    if (sequence !== model.sequence || $("#issue-search").value !== operation.query) return;
+    // Menus remain under the pointer; the next normal refresh can apply the result.
+    if (!assignmentCardContext && !listActionContext && !listActionBusy && !$("#editor-dialog").open) renderList(result);
+    else renderSearchStatus(result.search);
+  } catch (error) {
+    if (sequence === model.sequence && error.name !== "AbortError") renderSearchStatus({enabled:true,semantic:"unavailable"});
+  } finally {
+    if (model.searchRefining === sequence) model.searchRefining = null;
+  }
 }
 function emptyState() {
   const filtered =
@@ -881,6 +920,7 @@ function renderList(result) {
   model.issues = result.issues;
   if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; renderOwnerFilter(); }
   model.signature = JSON.stringify(result.issues);
+  renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueBlockers.matches(issue, model.route.blocked))};
   const createdIndex = createdHere && creation.reveal ? result.issues.findIndex(issue => issue.number === creation.number) : -1;
@@ -900,11 +940,12 @@ function renderList(result) {
     (control || $("#issue-pagination-top .list-pagination") || $("#issue-search"))?.focus({preventScroll:true});
   }
   $("#issue-list").classList.toggle("large-list", result.issues.length > 300);
+  $("#issue-list").classList.toggle("search-results", !!model.route.search);
   $("#issue-list").innerHTML = result.issues.length
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}"><button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button><span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i, result.prs_enabled)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div></div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listActionTrigger(i)}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}">${model.route.search ? "" : `<button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button>`}<span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i, result.prs_enabled)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div>${i.match ? `<p class="issue-match"><span>${esc(i.match.field)}${i.match.kind === "semantic" ? " · related meaning" : ""}</span> ${esc(i.match.excerpt)}</p>` : ""}</div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listActionTrigger(i)}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -944,7 +985,7 @@ function renderList(result) {
       row.classList.add("issue-created");
       if (creation.reveal) {
         creation.reveal = false;
-        row.querySelector(".issue-order-handle").focus({ preventScroll: true });
+        row.querySelector(".issue-order-handle, .issue-title")?.focus({ preventScroll: true });
         row.scrollIntoView({ block: "nearest" });
       }
       if (!creation.timer)
@@ -1115,9 +1156,14 @@ async function renderRoute() {
     $("#issue-pagination-bottom").replaceChildren();
     $("#list-footer").hidden = true;
     try {
-      const result = await api(listOperation());
+      const operation = listOperation(false);
+      const result = await api(operation);
       if (sequence !== model.sequence) return;
       renderList(result);
+      if (operation.action === "search" && result.search?.enabled) {
+        renderSearchStatus(result.search, true);
+        await refineSearch(sequence, operation);
+      }
     } catch (e) {
       if (sequence !== model.sequence) return;
       $("#issue-list").innerHTML =
@@ -1138,6 +1184,7 @@ async function refresh(quiet = true) {
     listActionContext ||
     listActionBusy ||
     model.polling ||
+    model.searchRefining === model.sequence ||
     !model.csrf ||
     document.hidden ||
     $("#editor-dialog").open ||
@@ -1226,6 +1273,7 @@ async function refresh(quiet = true) {
     } else {
       model.orderVersion = result.order_version;
       if (JSON.stringify(result.issues) !== model.signature) renderList(result);
+      else renderSearchStatus(result.search);
     }
     connection(true);
     if (!quiet) toast("Up to date");
@@ -1997,12 +2045,11 @@ $("#copy-list-command").onclick = () => {
   const {state, owner, label} = model.route;
   // Include search input even during its route-update debounce.
   const search = $("#issue-search").value;
-  let command = `hey-boss issue list ${issueCommandScope()} --all --state ${state}`;
+  let command = `hey-boss issue ${search ? "search " + shellQuote(search) : "list"} ${issueCommandScope()} --all --state ${state}`;
   if (owner === "unassigned") command += " --unassigned";
   // Web 'mine' is Boss, while CLI --mine would target the receiving agent.
   else if (owner !== "all") command += ` --assignee ${shellQuote(owner === "mine" ? "human:boss" : owner)}`;
   if (label) command += ` --label ${shellQuote(label)}`;
-  if (search) command += ` --search ${shellQuote(search)}`;
   return copyIssueCommand(command, "Issue list command copied. Retrieves all matching issues.");
 };
 $("#editor-close").onclick = closeEditor;
