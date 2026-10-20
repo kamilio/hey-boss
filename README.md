@@ -376,7 +376,9 @@ and hidden with the × button; their project-level close button dismisses the
 whole group, including document reviews.
 
 **Subscription quota** appears directly in the status-bar dropdown. Limits and
-reset times load asynchronously and refresh while open. Aliases sharing a
+reset times appear from the saved cache immediately and refresh quietly in the
+background, including while the menu is closed. Failed refreshes retain the last
+reading. Duplicate session aliases appear once. Aliases sharing a
 credential store appear once; distinct subscriptions stay separate. Unavailable
 and stale readings are labeled explicitly, and unknown limits stay unknown.
 
