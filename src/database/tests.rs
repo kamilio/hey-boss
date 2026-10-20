@@ -70,6 +70,7 @@ pub(crate) fn lose_commit_response(
                 stream: RefCell::new(Some(BufReader::new(client))),
                 transaction: Cell::new(false),
                 last_id: Cell::new(0),
+                recover: true,
             }),
         },
         thread,
@@ -184,6 +185,7 @@ fn pause_before_command(
                 stream: RefCell::new(Some(BufReader::new(client))),
                 transaction: Cell::new(false),
                 last_id: Cell::new(0),
+                recover: true,
             }),
         },
         transport,
@@ -223,6 +225,7 @@ pub(crate) fn measured_connection(
             stream: RefCell::new(Some(BufReader::new(client))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
+            recover: true,
         }),
     };
     (connection, transport)
@@ -554,6 +557,7 @@ fn lost_rollback_reply_does_not_poison_the_client_connection() {
             stream: RefCell::new(Some(BufReader::new(client))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
+            recover: true,
         }),
     };
     let transport = std::thread::spawn(move || {
@@ -677,6 +681,44 @@ fn owner_election_does_not_replace_a_live_socket() {
             .query_row("SELECT 42", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         42
+    );
+}
+
+#[test]
+fn background_sessions_do_not_reconnect_after_their_owner_stops() {
+    let mut fixture = Fixture::new();
+    let path = fixture.directory.join("issues.db");
+    let background = Connection::connect_background(&path).unwrap();
+    fixture.owner.stop();
+    let mut replacement = Owner::start(&path).unwrap().unwrap();
+    let result = background.query_row("SELECT 42", [], |r| r.get::<_, i64>(0));
+    replacement.stop();
+    assert!(
+        result.is_err(),
+        "Background work must end with its original owner"
+    );
+}
+
+#[test]
+fn background_handshake_yields_when_the_listener_is_draining() {
+    let mut fixture = Fixture::new();
+    let path = fixture.directory.join("issues.db");
+    fixture.owner.stop();
+    let listener = std::os::unix::net::UnixListener::bind(owner::socket_path(&path)).unwrap();
+    let (release, wait) = mpsc::channel();
+    let draining = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        let _ = wait.recv_timeout(Duration::from_secs(5));
+    });
+    let started = Instant::now();
+    let result = Connection::connect_background(&path);
+    let elapsed = started.elapsed();
+    let _ = release.send(());
+    draining.join().unwrap();
+    assert!(result.is_err());
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "Background handshake took {elapsed:?}"
     );
 }
 
@@ -945,6 +987,7 @@ fn committed_write_with_a_lost_response_is_not_replayed() {
             stream: RefCell::new(Some(BufReader::new(client))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
+            recover: true,
         }),
     };
     let server = std::thread::spawn(move || {
@@ -988,6 +1031,7 @@ fn reply_timeout_identifies_the_phase_and_never_replays_an_accepted_write() {
             stream: RefCell::new(Some(BufReader::new(client))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
+            recover: true,
         }),
     };
     let (release, wait) = mpsc::channel();

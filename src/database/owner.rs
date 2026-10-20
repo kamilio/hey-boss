@@ -301,7 +301,7 @@ fn serve(
             archive_wait.recv_timeout(delay),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ) {
-            let result = Connection::connect(&archive_path)
+            let result = Connection::connect_background(&archive_path)
                 .map_err(crate::issues::Error::from)
                 .and_then(|db| maintenance.run(&db, crate::issues::worker::now()));
             delay = match result {
