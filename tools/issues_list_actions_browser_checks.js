@@ -3,18 +3,18 @@ async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
   page.setDefaultTimeout(20000);
+  await page.setViewportSize({width:1440,height:900});
   page.on('pageerror', error => errors.push(error.message));
   const base = await page.evaluate(() => location.origin);
+  if (!['http://127.0.0.1:59639','http://127.0.0.1:52039'].includes(base)) throw Error('Synthetic fixture required');
   const path = await page.evaluate(() => location.pathname === '/issues' ? '/issues' : '/');
   const surface = path === '/issues' ? 'paired' : 'native';
   await page.context().grantPermissions(['clipboard-read','clipboard-write']);
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
-  // Exercise the working assets even when the fixture binary predates the edit.
-  if (surface === 'native') for (const name of ['app.js', 'app.css']) await page.route(`${base}/${name}`, route => route.fulfill({path:`src/issues/web/${name}`}));
   await page.goto(base + path);
-  await page.waitForFunction(() => model.csrf && model.project && model.signature);
-  const project = await page.evaluate(async () => {
-    const project = 'Quick actions ' + Date.now();
+  await page.waitForFunction(() => model.csrf && model.project);
+  const {project} = await (await page.request.post('http://127.0.0.1:52039/fixture-project')).json();
+  await page.evaluate(async project => {
     for (const title of ['Improve keyboard navigation in the issue list', 'Review the deployment checklist', 'Draft a release announcement', 'Waiting for access', 'Completed work', 'Archived mistake', 'Depends on another issue'])
       await api({action:'create',title,body:'Isolated quick-action regression fixture.',labels:[]}, project);
     await api({action:'assign_boss',number:2,force:false}, project);
@@ -22,8 +22,7 @@ async page => {
     await api({action:'block',number:4,force:false,comment:'Waiting for access'}, project);
     await api({action:'close',number:5,force:false,comment:null}, project);
     await api({action:'delete',number:6,force:false}, project);
-    return 'named:' + project;
-  });
+  }, project);
   const list = async state => {
     await page.goto(base + path + '#project=' + encodeURIComponent(project) + '&state=' + state);
     await page.waitForFunction(({state,project}) => model.route.state === state && model.project.id === project && model.signature, {state,project});
@@ -122,7 +121,7 @@ async page => {
 
   await list('blocked');
   await trigger(4).click();
-  await item('Unblock issue').click();
+  await item('Release hold').click();
   await idle();
   check(await trigger(4).count() === 0, 'Unblock persists and updates filtered list');
   await list('closed');
@@ -159,8 +158,60 @@ async page => {
   check(await menu.evaluate(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&r.bottom<=innerHeight&&r.top>=0}), 'Menu stays on screen near bottom of short phone viewport');
   await page.screenshot({path:`output/playwright/issue139/${surface}-dark-320-short-blocked.png`});
   await page.keyboard.press('Escape');
+  await page.request.post('http://127.0.0.1:52039/fixture-hold',{data:{project}});
+  await page.reload();
+  await trigger(7).click();
+  check(await menu.getByRole('menuitem',{name:/Release hold/}).isEnabled(), 'Manual hold can be released independently of dependencies');
+  await page.screenshot({path:`output/playwright/issue139/${surface}-release-hold.png`});
+  await menu.getByRole('menuitem',{name:/Release hold/}).click();
+  await idle();
+  check(await page.evaluate(() => {const i=model.issues.find(i=>i.number===7);return !i.manual_blocked&&i.state==='blocked'&&i.blocked_by.length===1;}), 'Release hold preserves unfinished dependency');
+
   await page.setViewportSize({width:1440,height:900});
   await list('open');
+  await page.evaluate(async () => {
+    await api({action:'configure_project',prs_enabled:true});
+    await api({action:'add_pull_request',number:5,url:'https://github.com/example/repo/pull/139'});
+    const detail=await api({action:'view',number:5});
+    await mutate({action:'ready',number:5,guard:detail.ready_guard,force:false});
+  });
+  await list('ready');
+  await trigger(5).click();
+  check(await item('Unassign').isVisible() && await item('Reopen issue').isVisible(), 'Ready issues offer Unassign and Reopen');
+  check(await item('Move to draft').count()===0, 'Ready handoff must be reopened before drafting');
+  await item('Unassign').click();
+  await idle();
+  check(await page.evaluate(async () => {const {issue}=await api({action:'view',number:5});return issue.state==='open'&&!issue.assignee;}), 'Unassign returns Ready issue to unassigned work');
+  await page.evaluate(async () => {
+    const detail=await api({action:'view',number:5});
+    await mutate({action:'ready',number:5,guard:detail.ready_guard,force:false});
+    await refresh(false);
+  });
+  await trigger(5).click();
+  await item('Reopen issue').click();
+  await idle();
+  check(await trigger(5).count()===0, 'Reopen withdraws Ready handoff from filtered list');
+  await list('open');
+  await page.evaluate(async () => {await api({action:'configure_project',drafts_enabled:false});});
+  await page.reload();
+  await trigger(5).click();
+  check(await item('Move to draft').count()===0, 'Project draft setting is respected');
+  await page.keyboard.press('Escape');
+  await page.evaluate(async () => {await api({action:'configure_project',drafts_enabled:true});});
+  await page.reload();
+  // Protected process attempts are supplied by the same list response as replicas.
+  const protectedAttempt=async route=>{
+    const response=await route.fetch(),value=await response.json();
+    value.issues?.forEach(issue=>{if(issue.number===5)issue.attempt_hold={host:'test-machine'};});
+    await route.fulfill({response,json:value});
+  };
+  await page.route('**/api/action',protectedAttempt);
+  await page.evaluate(()=>refresh(false));
+  await trigger(5).click();
+  check(await menu.getByRole('menuitem').count()===2, 'Protected attempts expose only View and Copy');
+  await page.keyboard.press('Escape');
+  await page.unroute('**/api/action',protectedAttempt);
+  await page.evaluate(()=>refresh(false));
   // Present another worker's claim through the same response shape used by replicas.
   const otherClaim = async route => {
     const response = await route.fetch();
@@ -185,6 +236,6 @@ async page => {
   await page.waitForFunction(() => model.route.issue === 2);
   check(!await menu.isVisible(), 'Navigation dismisses the menu');
   check(errors.length === 0, `No browser errors: ${errors.join(', ')}`);
-  if (checks.length !== 56) throw Error(`Incomplete browser suite: ${checks.length}/56`);
-  return {status:'COMPLETE', surface, completed:checks.length, expected:56, checks};
+  if (checks.length !== 64) throw Error(`Incomplete browser suite: ${checks.length}/64`);
+  return {status:'COMPLETE', surface, completed:checks.length, expected:64, checks};
 }

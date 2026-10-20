@@ -689,15 +689,19 @@ function issueListActions(issue) {
     {action:"view", label:"View issue", icon:"issue"},
     {action:"copy", label:"Copy issue link", icon:"copy"},
   ];
+  if (issue.attempt_hold) return actions;
   if (issue.deleted_at) return [...actions, {action:"restore", label:"Restore issue", icon:"refresh"}];
   if (issue.state === "closed") return [...actions, {action:"reopen", label:"Reopen issue", icon:"issue"}];
-  if (issue.state === "blocked") actions.push({action:"reopen", label:"Unblock issue", icon:"issue", disabled:!!issue.blocked_by?.length, hint:issue.blocked_by?.length ? "Resolve or unlink blocking issues first" : ""});
-  if (issue.state === "open" && !issue.draft) {
+  if (issue.state === "ready") actions.push({action:"reopen", label:"Reopen issue", icon:"issue"});
+  if (issue.state === "blocked") actions.push(issue.manual_blocked
+    ? {action:"clear_manual_hold", label:"Release hold", icon:"refresh", hint:issue.blocked_by?.length ? "Dependencies will still pause pickup" : ""}
+    : {action:"reopen", label:"Unblock issue", icon:"issue", disabled:!!issue.blocked_by?.length, hint:issue.blocked_by?.length ? "Resolve or unlink blocking issues first" : ""});
+  if (["open", "ready"].includes(issue.state) && !issue.draft) {
     if (!own(issue.assignee)) actions.push({action:"assign_boss", label:`Assign to ${model.boss.name}`, icon:"user"});
     if (issue.assignee) actions.push({action:"unassign", label:"Unassign", icon:"user"});
   }
   if (issue.draft && issue.state === "open") actions.push({action:"undraft", label:"Mark ready", icon:"check"});
-  else if (!issue.draft && !issue.assignee) actions.push({action:"draft", label:"Move to draft", icon:"edit"});
+  else if (["open", "blocked"].includes(issue.state) && !issue.draft && !issue.assignee && model.drafts_enabled !== false) actions.push({action:"draft", label:"Move to draft", icon:"edit"});
   actions.push({action:"close", label:"Close issue", icon:"closed"});
   if (issue.state === "open") actions.push({action:"block", label:"Block issue", icon:"blocked"});
   return actions;
@@ -891,6 +895,7 @@ function renderList(result) {
   model.listContext = listContext;
   model.orderVersion = result.order_version;
   model.issues = result.issues;
+  model.drafts_enabled = result.drafts_enabled;
   if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; IssueFilters.render(); }
   model.signature = JSON.stringify(result.issues);
   renderSearchStatus(result.search);
@@ -1242,6 +1247,7 @@ async function refresh(quiet = true) {
       }
     } else {
       model.orderVersion = result.order_version;
+      model.drafts_enabled = result.drafts_enabled;
       if (JSON.stringify(result.issues) !== model.signature) renderList(result);
       else renderSearchStatus(result.search);
     }

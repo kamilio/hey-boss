@@ -6,8 +6,10 @@ action's first letter move through the menu. Enter runs the focused action;
 Escape closes the menu and returns focus to its button.
 
 The menu offers assignment, Unassign, Close, Block, draft readiness, and the
-applicable Unblock, Reopen, or Restore action. Unblock explains when unfinished
-dependencies prevent it. View issue and Copy issue link are always available.
+applicable Unblock, Reopen, or Restore action. Release hold clears a manual pause
+while keeping unfinished dependencies. Ready handoffs can be reopened or
+unassigned. Protected attempts offer only View and Copy; disabled project drafts
+hide Move to draft. View issue and Copy issue link are always available.
 Changing another agent's claim retains the usual confirmation.
 
 Actions keep the current filters. If the changed issue leaves the list, focus
@@ -25,7 +27,7 @@ the native UI at `http://127.0.0.1:59639` and the paired UI at
 `http://127.0.0.1:52039/issues`. For the paired UI, retrieve the synthetic code from
 `/fixture-pairing` and POST it to `/api/pair` using the browser's request context.
 Run the suite on each surface; each must finish normally with `COMPLETE` and
-**56/56** checks. Review the light/dark desktop and phone screenshots in
+**64/64** checks against the compiled assets. Review the light/dark desktop and phone screenshots in
 `output/playwright/issue139`, including the short phone viewport and ownership
 confirmation. Close the browser session, stop the fixture with Ctrl+C, and remove
 the generated screenshots and CLI reports. The fixture shuts down its own database
