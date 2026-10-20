@@ -217,21 +217,25 @@ function date(at) {
     return fallback;
   }
   function projectNavigation(project) {
+    const route = new URLSearchParams(location.hash.slice(1));
     const hash = new URLSearchParams({project});
-    const host = new URLSearchParams(location.hash.slice(1)).get('host');
+    const host = route.get('host');
     if (host && !Object.keys(document.documentElement.dataset).some(key => key.endsWith('Mobile'))) hash.set('host', host);
-    if ($("#nav-merged-prs")) $("#nav-merged-prs").href = `/merged-prs#${hash}`;
-    if ($("#nav-jobs")) $("#nav-jobs").href = `/jobs#${hash}`;
-    if ($("#nav-artifacts")) $("#nav-artifacts").href = `/artifacts#${hash}`;
-    if ($("#nav-mindmaps")) $("#nav-mindmaps").href = `/mm#${hash}`;
-    if ($("#nav-workers")) $("#nav-workers").href = "/workers";
-    if ($("#nav-skills")) $("#nav-skills").href = `/skills#${hash}`;
-    if ($("#nav-admin")) $("#nav-admin").href = `/admin#${hash}`;
-    if (location.pathname !== "/") {
-      if ($("#nav-issues")) $("#nav-issues").href = `/#${hash}`;
-      if ($("#nav-inbox")) $("#nav-inbox").href = `/#${hash}&view=inbox`;
+    // Every project tab inherits context; global overflow entries keep their scope.
+    let projectPage = false;
+    for (const link of $$(".app-navigation a, #nav-admin")) {
+      const path = link.getAttribute("href").split("#")[0] || "/";
+      if (path === location.pathname) projectPage = true;
+      // The issue page owns its Inbox and Issues filters.
+      if (location.pathname === "/" && ["nav-issues", "nav-inbox"].includes(link.id)) continue;
+      link.href = `${path}#${hash}${link.id === "nav-inbox" ? "&view=inbox" : ""}`;
     }
     if ($(".brand")) $(".brand").href = `/#${hash}`;
+    // Pin remembered selections for Back/Forward, and keep picker changes reloadable.
+    if ((projectPage || route.has("project")) && route.get("project") !== project) {
+      route.set("project", project);
+      history.replaceState(null, "", "#" + route);
+    }
     try { localStorage.setItem("hey-boss-issues-project", JSON.stringify(project)); } catch {}
   }
 

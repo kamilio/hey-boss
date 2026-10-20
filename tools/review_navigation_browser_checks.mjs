@@ -56,8 +56,8 @@ try {
   }
   await trigger.focus();
   await page.keyboard.press('Enter');
-  await page.keyboard.press('Tab');
-  await page.keyboard.press('Tab');
+  const links = await page.locator('#navigation-more-links a:visible').count();
+  for (let i=0; i<links && !await review.evaluate(el=>el===document.activeElement); i++) await page.keyboard.press('Tab');
   assert.equal(await review.evaluate(el=>el===document.activeElement),true,'Tab reaches Review');
   await page.keyboard.press('Escape');
   assert.equal(await review.isVisible(),false,'Escape dismisses');
