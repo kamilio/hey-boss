@@ -101,6 +101,26 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
+    if let appearance = ProcessInfo.processInfo.environment["HEY_BOSS_SECRET_VISUAL"] {
+        // Isolated synthetic window for interactive testing; no daemon or store.
+        let data = try! JSONSerialization.data(withJSONObject: ["command":"secret", "sync":true, "project":"Synthetic UI test", "title":"Connection credentials"])
+        let request = try! JSONDecoder().decode(Request.self, from: data)
+        let form = SecretForm(fields: ["LOGIN", "PASSWORD"], login: true, destination: "Synthetic child process · no credentials will be used", reply: true)
+        let prompt = SecretPrompt(request: request, form: form) { outcome in
+            switch outcome {
+            case .replied(let text): print("Synthetic reply received: \(text)")
+            case .submitted: print("Synthetic credentials received")
+            case .cancelled: print("Synthetic request cancelled")
+            case .expired: print("Synthetic request expired")
+            }
+            NSApp.stop(nil)
+        }
+        prompt.window.appearance = NSAppearance(named: appearance == "dark" ? .darkAqua : .aqua)
+        // This test window contains synthetic inputs only; production remains excluded from capture.
+        prompt.window.sharingType = .readOnly
+        prompt.show()
+        withExtendedLifetime(prompt) { app.run() }; return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
     auditSubscriptionQuota()
     auditQuickIssue()
@@ -2651,7 +2671,10 @@ func auditSecretInput() {
     precondition(editor.text.isHorizontallyResizable == false && editor.text.isAutomaticQuoteSubstitutionEnabled == false)
     let requestData = try! JSONSerialization.data(withJSONObject: ["command":"secret", "sync":true, "project":"Synthetic test", "title":"Credentials", "question":"{\"fields\":[\"LOGIN\",\"PASSWORD\"],\"login\":true,\"destination\":\"Synthetic private file\"}"])
     let request = try! JSONDecoder().decode(Request.self, from: requestData)
-    let form = SecretForm.decode(request)!
+    var form = SecretForm.decode(request)!
+    let legacy = SecretPrompt(request: request, form: form) { _ in }
+    precondition(legacy.mode.isHidden, "Old callers cannot receive public replies")
+    form.reply = true
     var result: SecretOutcome?
     let prompt = SecretPrompt(request: request, form: form) { result = $0 }
     func capture(_ prompt: SecretPrompt, _ name: String) {
@@ -2713,14 +2736,44 @@ func auditSecretInput() {
     single.entries[0].toggle.state = .on; single.entries[0].toggleVisibility()
     capture(single, "single-revealed")
     single.cancel(); precondition(single.entries[0].value.isEmpty && result == .cancelled)
+    let responseText = "Synthetic reply\nUse the existing configuration 🦀."
+    let responsePrompt = SecretPrompt(request: request, form: form) { result = $0 }
+    responsePrompt.entries[1].masked.stringValue = long
+    responsePrompt.mode.selectedSegment = 1; responsePrompt.changeMode()
+    precondition(responsePrompt.credentialContent.isHidden && !responsePrompt.replyContent.isHidden)
+    precondition(!responsePrompt.submit.isEnabled && responsePrompt.submit.title == "Send reply")
+    responsePrompt.window.appearance = NSAppearance(named: .aqua)
+    capture(responsePrompt, "reply-empty")
+    for invalid in [" \n\t", String(repeating: "x", count: 8193), "synthetic\u{0}", "synthetic\u{1b}"] {
+        responsePrompt.replyInput.stringValue = invalid; responsePrompt.validate()
+        precondition(!responsePrompt.submit.isEnabled)
+    }
+    capture(responsePrompt, "reply-invalid")
+    responsePrompt.replyInput.stringValue = responseText; responsePrompt.validate()
+    precondition(responsePrompt.submit.isEnabled)
+    capture(responsePrompt, "reply-light")
+    responsePrompt.window.appearance = NSAppearance(named: .darkAqua)
+    capture(responsePrompt, "reply-dark")
+    responsePrompt.window.setContentSize(NSSize(width: 600, height: 398))
+    capture(responsePrompt, "reply-compact")
+    responsePrompt.replyInput.stringValue = String(repeating: "Synthetic long reply line.\n", count: 100)
+    responsePrompt.validate(); capture(responsePrompt, "reply-long")
+    responsePrompt.mode.selectedSegment = 0; responsePrompt.changeMode()
+    precondition(responsePrompt.replyContent.isHidden && responsePrompt.submit.title == "Use credentials")
+    precondition(!responsePrompt.submit.isEnabled, "Reply text must never satisfy credential validation")
+    responsePrompt.mode.selectedSegment = 1; responsePrompt.changeMode()
+    responsePrompt.replyInput.stringValue = responseText; responsePrompt.finish()
+    precondition(result == .replied(responseText))
+    precondition(responsePrompt.entries.allSatisfy { $0.value.isEmpty } && responsePrompt.replyInput.stringValue.isEmpty)
+    responsePrompt.cancel(); precondition(result == .replied(responseText), "Completion is exactly once")
     var cancelled = false
     let discard = SecretPrompt(request: request, form: form) { cancelled = $0 == .cancelled }
-    discard.entries[1].masked.stringValue = long; discard.cancel()
-    precondition(cancelled && discard.entries.allSatisfy { $0.value.isEmpty })
+    discard.entries[1].masked.stringValue = long; discard.replyInput.stringValue = responseText; discard.cancel()
+    precondition(cancelled && discard.entries.allSatisfy { $0.value.isEmpty } && discard.replyInput.stringValue.isEmpty)
     var expired = false
     let timeout = SecretPrompt(request: request, form: form) { expired = $0 == .expired }
-    timeout.entries[1].masked.stringValue = long; timeout.complete(.expired)
-    precondition(expired && timeout.entries.allSatisfy { $0.value.isEmpty })
+    timeout.entries[1].masked.stringValue = long; timeout.replyInput.stringValue = responseText; timeout.complete(.expired)
+    precondition(expired && timeout.entries.allSatisfy { $0.value.isEmpty } && timeout.replyInput.stringValue.isEmpty)
     let prompts = SecretPrompts(present: false)
     var peers: [Int32] = [0,0]; precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
     let reply = Reply(peers[1]); shutdown(peers[0], SHUT_WR)
@@ -2747,7 +2800,7 @@ func auditSecretInput() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
     precondition(prompts.active.isEmpty && pending.entries.allSatisfy { $0.value.isEmpty }, "Disconnected secret requests must be removed and their fields cleared")
-    for expected in ["cancelled", "expired", "rejected", "busy"] {
+    for expected in ["cancelled", "expired", "rejected", "busy", "replied"] {
         precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0)
         let statusReply = Reply(peers[1]); shutdown(peers[0], SHUT_WR)
         if expected == "rejected" {
@@ -2762,12 +2815,14 @@ func auditSecretInput() {
             prompts.active.removeAll()
         } else {
             prompts.handle(request, statusReply)
-            prompts.active.values.first!.complete(expected == "expired" ? .expired : .cancelled)
+            prompts.active.values.first!.complete(expected == "replied" ? .replied(responseText) : expected == "expired" ? .expired : .cancelled)
         }
         let reader = FileHandle(fileDescriptor: peers[0], closeOnDealloc: true)
         let response = try! JSONSerialization.jsonObject(with: reader.readDataToEndOfFile()) as! [String: Any]
         precondition(response["status"] as? String == expected && response["task_id"] as? String == "secret")
-        precondition(response["result"] == nil && prompts.active.isEmpty)
+        precondition(prompts.active.isEmpty)
+        if expected == "replied" { precondition(response["result"] as? String == responseText) }
+        else { precondition(response["result"] == nil) }
         try! reader.close()
     }
     let ui = Interface(present: false)

@@ -1055,7 +1055,7 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join("bridge-protocol"), "1").unwrap();
-        for status in ["cancelled", "expired", "rejected", "busy"] {
+        for status in ["cancelled", "expired", "rejected", "busy", "replied"] {
             let listener = UnixListener::bind(root.join("bridge.sock")).unwrap();
             let server = std::thread::spawn(move || {
                 let mut stream = accept_secret(&listener);
@@ -1064,7 +1064,8 @@ mod tests {
                 stream
                     .write_all(
                         &serde_json::to_vec(
-                            &serde_json::json!({"task_id":"secret", "status":status}),
+                            &serde_json::json!({"task_id":"secret", "status":status,
+                                "result": if status == "replied" { Some("Synthetic public reply\nUse existing configuration.") } else { None }}),
                         )
                         .unwrap(),
                     )
@@ -1077,7 +1078,14 @@ mod tests {
                     .unwrap();
             let reply = handle(&root, &Mutex::new(()), request, &caller).unwrap();
             assert_eq!(reply.status.as_deref(), Some(status));
-            assert!(reply.result.is_none());
+            assert_eq!(
+                reply.result.as_deref(),
+                if status == "replied" {
+                    Some("Synthetic public reply\nUse existing configuration.")
+                } else {
+                    None
+                }
+            );
             server.join().unwrap();
             assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
             std::fs::remove_file(root.join("bridge.sock")).unwrap();

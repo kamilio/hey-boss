@@ -236,7 +236,7 @@ impl SystemNonce {
 #[derive(Deserialize)]
 struct SecretResponse {
     status: String,
-    // Decode the result only for success. Cancellation/rejection must not depend
+    // Decode the result only for credentials or an explicit public reply. Cancellation/rejection must not depend
     // on the shape of an unused (and potentially credential-bearing) payload.
     result: Option<Box<serde_json::value::RawValue>>,
 }
@@ -309,6 +309,23 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Vec<String>> {
     let reply: SecretResponse = serde_json::from_slice(&bytes).map_err(|_| malformed())?;
     match reply.status.as_str() {
         "ok" => {}
+        "replied" => {
+            let text: String =
+                serde_json::from_str(reply.result.as_ref().ok_or_else(malformed)?.get())
+                    .map_err(|_| malformed())?;
+            if text.trim().is_empty()
+                || text.len() > 8192
+                || text
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+            {
+                return Err(malformed());
+            }
+            return Err(not_delivered(
+                "user_reply",
+                &format!("User replied instead of providing credentials:\n{text}"),
+            ));
+        }
         "cancelled" => {
             return Err(not_delivered(
                 "cancelled",
@@ -419,7 +436,7 @@ fn run_inner(options: &Options) -> io::Result<()> {
     super::initialize(&executable)?;
     let state = fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
     let request = serde_json::json!({"command":"secret","sync":true,"project":options.project,"title":options.title,
-        "question":serde_json::json!({"fields":options.fields,"login":options.login,"destination":destination}).to_string()});
+        "question":serde_json::json!({"fields":options.fields,"login":options.login,"destination":destination,"reply":true}).to_string()});
     let values = receive(&Path::new(state.trim()).join("daemon.sock"), &request)?;
     if values.len() != options.fields.len()
         || values

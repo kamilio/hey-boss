@@ -74,6 +74,82 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn agent_reply_returns_on_stderr_without_delivering_credentials() {
+    for sink in ["file", "stdout", "child"] {
+        let fixture = Fixture::new();
+        let reply = "Synthetic reply\nUse the existing configuration 🦀.";
+        let server = fixture.raw_reply(
+            serde_json::to_vec(&serde_json::json!({
+                "status": "replied", "result": reply,
+            }))
+            .unwrap(),
+        );
+        let mut command = fixture.command();
+        command.args(["--field", "KEY"]);
+        match sink {
+            "file" => {
+                command.args(["--env-file", ".env"]);
+            }
+            "stdout" => {
+                let file = fs::File::create(fixture.root.join("redirected")).unwrap();
+                file.set_permissions(fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                command.arg("--stdout").stdout(Stdio::from(file));
+            }
+            _ => {
+                command.args(["--", "touch", "child-ran"]);
+            }
+        }
+        let output = command.output().unwrap();
+        server.join().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let message = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            message.contains("delivery=not_delivered reason=user_reply:"),
+            "{message}"
+        );
+        assert!(message.contains(reply), "{message}");
+        assert!(!fixture.root.join(".env").exists());
+        assert!(!fixture.root.join("child-ran").exists());
+        assert!(!fixture.root.join("history.db").exists());
+        if sink == "stdout" {
+            assert_eq!(
+                fs::metadata(fixture.root.join("redirected")).unwrap().len(),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_agent_replies_are_redacted() {
+    for result in [
+        serde_json::Value::Null,
+        serde_json::json!(["synthetic-private"]),
+        serde_json::json!(" \n"),
+        serde_json::json!("synthetic-private\u{0}"),
+        serde_json::json!("synthetic-private".repeat(1024)),
+    ] {
+        let fixture = Fixture::new();
+        let server = fixture.raw_reply(
+            serde_json::to_vec(&serde_json::json!({"status":"replied", "result":result})).unwrap(),
+        );
+        let output = fixture
+            .command()
+            .args(["--field", "KEY", "--", "touch", "child-ran"])
+            .output()
+            .unwrap();
+        server.join().unwrap();
+        assert!(!output.status.success());
+        let message = String::from_utf8(output.stderr).unwrap();
+        assert!(message.contains("reason=response_malformed:"), "{message}");
+        assert!(!message.contains("synthetic-private"));
+        assert!(!fixture.root.join("child-ran").exists());
+    }
+}
+
+#[test]
 fn secret_waits_for_restarting_local_broker_before_sending() {
     let fixture = Fixture::new();
     let mut child = fixture
