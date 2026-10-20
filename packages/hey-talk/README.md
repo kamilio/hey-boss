@@ -47,8 +47,11 @@ Installation is explicit and local to the current Mac:
 
 This installs `~/Applications/Hey Talk.app` and `~/.local/bin/hey-talk`.
 The **Hey Talk…** item in Hey Boss's status-bar menu opens its history and overlay.
-No login agent or fleet deployment is created. Commands launch the app through
-Launch Services when needed; `hey-talk quit` stops it and its inference worker.
+The installer starts the app and registers a login agent so the overlay and
+shortcuts are ready after sign-in. Commands also launch the app through
+Launch Services when needed; `hey-talk quit` stops it and its inference worker
+until the next login or command that opens it.
+For an existing installation, `./install-login.sh` enables login startup without rebuilding.
 Quit a development instance before rebuilding its bundle.
 
 ## Daily use
@@ -152,6 +155,7 @@ These are local measurements, not latency guarantees.
 swift test
 ./test-signing.sh
 ./test-enter-exceptions.sh
+./test-login.sh # Installed app: login startup and explicit quit, while idle
 swift test --sanitize=thread
 ./test-integration.sh
 # To test the installed app instead:
