@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+skill_scripts=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+mkdir -p "$HOME/.local/bin"
+destination="$HOME/.local/bin/poe-login"
+if [ -e "$destination" ] || [ -L "$destination" ]; then
+  if [ ! -L "$destination" ] || [ "$(readlink -- "$destination")" != "$skill_scripts/poe-login" ]; then
+    echo 'poe-login: refusing to replace an unrelated command' >&2
+    exit 1
+  fi
+else
+  ln -s "$skill_scripts/poe-login" "$destination"
+fi

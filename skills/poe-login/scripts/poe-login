@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+skill_entry=$0
+while [ -L "$skill_entry" ]; do
+  skill_parent=$(dirname -- "$skill_entry")
+  skill_link=$(readlink -- "$skill_entry")
+  case "$skill_link" in /*) skill_entry=$skill_link ;; *) skill_entry=$skill_parent/$skill_link ;; esac
+done
+skill_scripts=$(CDPATH= cd -- "$(dirname -- "$skill_entry")" && pwd)
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+exec cargo run --quiet --locked --release --manifest-path "$skill_scripts/cli/Cargo.toml" --target-dir "${XDG_CACHE_HOME:-$HOME/.cache}/poe-login" -- "$@"
