@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A complete HTML page</title>
+<style>
+html,body{height:100%;overflow:auto}
+body{color:var(--foreground);background:var(--card);padding:24px;border:1px solid var(--border);border-radius:12px}
+h1{font-size:28px;letter-spacing:-.04em;margin:0 0 12px}
+button{border:0;border-radius:8px;padding:10px 16px;background:var(--primary);color:var(--primary-foreground);cursor:pointer}
+#long{height:2800px;background:linear-gradient(var(--accent-surface),transparent);border-left:2px solid var(--accent);margin-top:24px;padding:20px}
+</style>
+</head>
+<body>
+<h1>The whole page is HTML.</h1>
+<p>This document has no Markdown wrapper. It shares the surrounding page's scroll.</p>
+<button id="toggle" onclick="document.querySelector('#long').hidden=!document.querySelector('#long').hidden">Toggle long section</button>
+<section id="long"><p>Content beyond the old preview limit.</p></section>
+<p id="end">The end remains reachable.</p>
+</body>
+</html>

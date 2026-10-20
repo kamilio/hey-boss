@@ -10,6 +10,7 @@ const HeyBossArtifacts = (() => {
     return `${mobile?"/project-resource":kind==="issue"?"/":"/mm"}#${params}`;
   };
   let mobile = false;
+  const browserEditor = () => mobile || document.documentElement.dataset.issueMobile === "true" || matchMedia("(pointer: coarse)").matches;
   const author=value=>HeyBossUI.actorLabel(value);
   async function rpc(context,operation,reading,requestID) {
     const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||HeyBossUI.requestId())};
@@ -45,11 +46,11 @@ const HeyBossArtifacts = (() => {
     return value;
   }
   function anchorText(range) {
-    if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram"))return range.toString();
+    if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram, .html-preview"))return range.toString();
     const fragment=range.cloneContents();
     // The server anchors against rendered Markdown. Keep original code text,
     // excluding generated SVG labels and diagram controls from that context.
-    for(const diagram of fragment.querySelectorAll(".artifact-diagram")){
+    for(const diagram of fragment.querySelectorAll(".artifact-diagram, .html-preview")){
       const source=diagram.querySelector("pre");
       if(source)diagram.replaceWith(source);else diagram.remove();
     }
@@ -428,12 +429,12 @@ const HeyBossArtifacts = (() => {
       const backlinks=v.backlinks.map(l=>`<li>${l.title?`<a href="${esc(resourceURL(context,l.kind,l.target))}">${esc(l.title)}${l.kind==="issue"?` · #${esc(l.target)}`:""}</a>`:`<span class="artifact-muted">Removed ${esc(l.kind)} · ${esc(l.target)}</span>`}</li>`).join("");
       const commentCount=v.comments.filter(c=>!c.parent&&!c.resolved).length;
       commentsOpen ??= false;
-      $("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
+      const markup=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
         <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel">${mobile?"":`<button id="artifact-edit-browser" type="button">${icon("edit")}Edit in browser</button>`}<button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
-      if(reuse)$("#artifact-reading").replaceWith(previous);
-      else{const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content,context);}
+      HeyBossHTML.replaceContent($("#artifact-document"),markup,reuse?previous:null);
+      if(!reuse){const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content,context);}
       externalLinks($("#artifact-threads"));
       HeyBossAttachments.mount($("#artifact-attachments"), {...context,target:{kind:"artifact",id:doc.id}});
       readingHTML=content;
@@ -447,7 +448,7 @@ const HeyBossArtifacts = (() => {
       menu.onkeydown=e=>{if(e.key==="Escape"){menu.open=false;$("summary",menu).focus();}};
       document.title=`${doc.title} · Artifacts · Hey Boss`;
       if($("#artifact-edit-browser"))$("#artifact-edit-browser").onclick=editor;
-      $("#artifact-edit").onclick=()=>mobile?editor():triggerNativeEdit({id:doc.id});
+      $("#artifact-edit").onclick=()=>browserEditor()?editor():triggerNativeEdit({id:doc.id});
       $("#artifact-export").onclick=()=>{menu.open=false;const blob=new Blob([doc.body],{type:"text/markdown;charset=utf-8"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=(doc.title.replace(/[^\p{L}\p{N}_ -]/gu,"_")||"artifact")+".md";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
       const mutate=async(op,button)=>{button.disabled=true;try{const r=await api(context,op);if(!button.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Saved");}catch(e){button.disabled=false;error(e);}};
       $("#artifact-archive").onclick=e=>documentAction(doc,"archive",e.currentTarget);
@@ -488,7 +489,7 @@ const HeyBossArtifacts = (() => {
         const range=selection.getRangeAt(0);
         if(!reader.contains(range.commonAncestorContainer))return;
         for(const node of [range.startContainer,range.endContainer]){
-          const diagram=(node.nodeType===1?node:node.parentElement)?.closest(".artifact-diagram");
+          const diagram=(node.nodeType===1?node:node.parentElement)?.closest(".artifact-diagram, .html-preview");
           if(diagram&&!diagram.querySelector("pre").contains(node))return;
         }
         const quote=selection.toString();
@@ -580,7 +581,7 @@ const HeyBossArtifacts = (() => {
     document.addEventListener("keydown",e=>{
       if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==="e"&&doc&&!editing){
         e.preventDefault();
-        triggerNativeEdit({id:doc.id});
+        if(browserEditor())editor();else triggerNativeEdit({id:doc.id});
       }
     });
     await navigate();

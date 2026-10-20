@@ -29,6 +29,8 @@ struct Node {
     align: Vec<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tokens: Vec<Token>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web: Option<super::WebDocument>,
 }
 #[derive(Serialize)]
 struct Token {
@@ -50,6 +52,7 @@ impl Node {
             lang: None,
             align: vec![],
             tokens: vec![],
+            web: None,
         }
     }
 }
@@ -260,6 +263,9 @@ pub fn render_native_document(source: &str) -> String {
             }
         }
     }
-    serde_json::to_string(&stack.pop().unwrap())
-        .expect("native document contains only valid strings")
+    let mut root = stack.pop().unwrap();
+    if super::needs_web_reader(source) {
+        root.web = Some(super::web_document(source));
+    }
+    serde_json::to_string(&root).expect("native document contains only valid strings")
 }

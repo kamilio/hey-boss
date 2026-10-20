@@ -1,4 +1,5 @@
 mod native;
+mod safe_html;
 pub use native::render_native_document;
 // CommonMark/GFM parsing with controlled HTML and native document presentations.
 use linkify::{LinkFinder, LinkKind};
@@ -32,34 +33,66 @@ pub fn render_review_document(source: &str) -> String {
 }
 /// Controlled Markdown HTML for embedding in an existing document.
 pub fn render_fragment(source: &str) -> String {
-    let (body, list_sizes) = render_body(source, false);
-    // Parser-generated list tags follow the same order as the list events.
-    // Raw HTML and code are escaped, so they cannot create matching tags here.
-    let mut decorated = String::with_capacity(body.len());
-    let mut cursor = 0;
-    let tags = body.match_indices('<').filter(|(offset, _)| {
-        let tag = &body[*offset..];
-        tag.starts_with("<ul>") || tag.starts_with("<ol>") || tag.starts_with("<ol start=")
-    });
-    for ((offset, _), count) in tags.zip(list_sizes) {
-        if count <= 120 {
-            decorated.push_str(&body[cursor..offset + 3]);
-            decorated.push_str(" class=\"markdown-short-list\"");
-            cursor = offset + 3;
-        }
+    if is_html_document(source) {
+        return html_preview_source(source);
     }
-    decorated.push_str(&body[cursor..]);
-    let mut body = decorated;
-    // The embedded app forbids inline styles. Convert only parser-generated
-    // table alignment attributes; source HTML has already been escaped.
-    for alignment in ["left", "center", "right"] {
-        body = body.replace(
-            &format!(" style=\"text-align: {alignment}\""),
-            &format!(" class=\"markdown-align-{alignment}\""),
-        );
+    render_body(source, false, true)
+}
+
+fn html_preview_source(source: &str) -> String {
+    format!(
+        "<pre tabindex=\"0\"><code class=\"language-html-render\">{}</code></pre>\n",
+        crate::syntax::escape(source)
+    )
+}
+
+fn is_html_document(source: &str) -> bool {
+    let source = source.trim_start_matches('\u{feff}').trim_start();
+    ["<!doctype html", "<html", "<head", "<body"]
+        .iter()
+        .any(|prefix| {
+            source
+                .get(..prefix.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+                && source
+                    .as_bytes()
+                    .get(prefix.len())
+                    .is_some_and(|b| b.is_ascii_whitespace() || *b == b'>')
+        })
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct WebDocument {
+    document: String,
+    frame: &'static str,
+    policy: &'static str,
+}
+
+fn needs_web_reader(source: &str) -> bool {
+    is_html_document(source)
+        || Parser::new_ext(source, parser_options()).any(|event| match event {
+            Event::Html(_) | Event::InlineHtml(_) => true,
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                info.split_whitespace().eq(["html", "render"])
+            }
+            _ => false,
+        })
+}
+
+fn web_document(source: &str) -> WebDocument {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let script = include_str!("issues/web/html-preview.js");
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
+    let document = render("", false)
+        .replace("default-src 'none'; style-src 'unsafe-inline'; img-src https: http: data:; base-uri 'none'; form-action 'none'", &format!("default-src 'none'; script-src 'sha256-{hash}'; style-src 'unsafe-inline'; img-src hey-boss-preview: data:; frame-src hey-boss-preview:; base-uri 'none'; form-action 'none'"))
+        .replace("</style></head>", &format!("{}\n:root{{--text:var(--fg);--solid:var(--bg);--accent:var(--link);--hover:var(--code);--danger:#b64559}}\n</style><script>{script}</script></head>", include_str!("issues/web/html-preview.css")))
+        .replace("<article></article>", &format!("<article class=\"markdown\">{}</article>", render_fragment(source)));
+    WebDocument {
+        document,
+        frame: include_str!("issues/web/html-preview.html"),
+        policy: include_str!("issues/web/html-preview.csp").trim(),
     }
-    body = body.replace("<pre>", "<pre tabindex=\"0\">");
-    body
 }
 /// Share the reader's dialect with document selection matching.
 pub(crate) fn parser_options() -> Options {
@@ -70,17 +103,22 @@ pub(crate) fn parser_options() -> Options {
         | Options::ENABLE_GFM
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
 }
-fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
+fn render_body(source: &str, source_map: bool, embedded: bool) -> String {
     let options = parser_options();
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let line_starts: Vec<usize> = std::iter::once(0)
         .chain(source.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let line_at = |offset: usize| line_starts.partition_point(|start| *start <= offset).max(1);
+    let mut has_html = false;
     let mut events: Vec<_> = TextMergeWithOffset::new(Parser::new_ext(source, options).into_offset_iter()).map(
         |(event, range)| {
             let event = match event {
-                // Raw HTML is displayed as text, never executed as document markup.
+                Event::Html(text) | Event::InlineHtml(text) if embedded => {
+                    has_html = true;
+                    Event::Html(text)
+                }
+                // Native text/review exports retain their literal HTML dialect.
                 Event::Html(text) | Event::InlineHtml(text) => {
                     let escaped = crate::syntax::escape(&text);
                     Event::Html(if source_map {
@@ -158,7 +196,13 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
                 Event::Text(text) | Event::Code(text) => {
                     label.push_str(&crate::syntax::escape(text))
                 }
-                Event::Html(text) if !source_map => label.push_str(text),
+                Event::Html(text) if !source_map => {
+                    if embedded {
+                        label.push_str(&crate::syntax::escape(text));
+                    } else {
+                        label.push_str(text);
+                    }
+                }
                 Event::SoftBreak | Event::HardBreak => label.push(' '),
                 _ => {}
             }
@@ -170,8 +214,13 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
         };
         events[index].0 = Event::Html(
             format!(
-                "<input disabled=\"\" type=\"checkbox\"{} aria-label=\"{label}\" />",
-                if checked { " checked=\"\"" } else { "" }
+                "<input disabled=\"\" type=\"checkbox\"{} aria-label=\"{label}\"{} />",
+                if checked { " checked=\"\"" } else { "" },
+                if embedded {
+                    format!(" data-task-line=\"{}\"", line_at(events[index].1.start))
+                } else {
+                    String::new()
+                }
             )
             .into(),
         );
@@ -181,6 +230,7 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
     let mut image_depth = 0;
     let mut literal_depth = 0;
     let mut finder = LinkFinder::new();
+    let mut list_index = 0;
     finder.url_must_have_scheme(false);
     while let Some((event, range)) = events.next() {
         if matches!(event, Event::Start(Tag::Image { .. })) {
@@ -196,7 +246,23 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
             Event::End(TagEnd::Link | TagEnd::CodeBlock) => literal_depth -= 1,
             _ => {}
         }
-        if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &event {
+        if embedded && let Event::Start(Tag::List(start)) = &event {
+            // Decorate parser-owned lists before mixing in author HTML.
+            let class = if list_sizes[list_index] <= 120 {
+                " class=\"markdown-short-list\""
+            } else {
+                ""
+            };
+            list_index += 1;
+            styled.push(Event::Html(
+                match start {
+                    Some(1) => format!("<ol{class}>\n"),
+                    Some(start) => format!("<ol{class} start=\"{start}\">\n"),
+                    None => format!("<ul{class}>\n"),
+                }
+                .into(),
+            ));
+        } else if let Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) = &event {
             let language = info.split_whitespace().next().unwrap_or("");
             let mut code = String::new();
             let mut code_events = Vec::new();
@@ -215,7 +281,9 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
                 }
                 code_events.push(next);
             }
-            if source_map {
+            if embedded && info.split_whitespace().eq(["html", "render"]) {
+                styled.push(Event::Html(html_preview_source(&code).into()));
+            } else if source_map {
                 let mut highlighted = String::new();
                 for (index, line) in code.split_inclusive('\n').enumerate() {
                     let number = line_at(code_start) + index;
@@ -270,7 +338,21 @@ fn render_body(source: &str, source_map: bool) -> (String, Vec<usize>) {
     }
     let mut body = String::new();
     html::push_html(&mut body, styled.into_iter());
-    (body, list_sizes)
+    if embedded {
+        for alignment in ["left", "center", "right"] {
+            body = body.replace(
+                &format!(" style=\"text-align: {alignment}\""),
+                &format!(" class=\"markdown-align-{alignment}\""),
+            );
+        }
+        body = body.replace("<pre>", "<pre tabindex=\"0\">");
+        // Sanitize the complete tree, so HTML spanning Markdown paragraphs stays
+        // balanced. Plain Markdown avoids the extra HTML parse entirely.
+        if has_html {
+            body = safe_html::clean(&body);
+        }
+    }
+    body
 }
 
 /// Link prose only, after Markdown parsing, so code and explicit link labels stay
@@ -307,7 +389,7 @@ fn autolink_text(text: &str, finder: &LinkFinder) -> Option<String> {
     Some(html)
 }
 fn render(source: &str, source_map: bool) -> String {
-    let body = render_body(source, source_map).0;
+    let body = render_body(source, source_map, false);
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -449,7 +531,13 @@ mod tests {
         assert!(html.contains("alt=\"https://alt.example.com\""), "{html}");
         assert!(!html.contains("href=\"javascript:"));
         assert!(!html.contains("<script>"));
-        assert!(!html.contains("\" onmouseover=\""));
+        assert!(
+            !html
+                .split('<')
+                .filter_map(|part| part.split_once('>'))
+                .any(|(tag, _)| tag.contains(" onmouseover=")),
+            "{html}"
+        );
     }
 
     #[test]

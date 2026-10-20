@@ -1,4 +1,5 @@
 import express from 'express';
+import {readFileSync} from 'node:fs';
 import {agentRoutes} from './agents.mjs';
 import {webRoutes} from './web.mjs';
 import {checkpointRoutes} from './checkpoint.mjs';
@@ -28,6 +29,7 @@ export function createApp({store=new HubStore(),hubToken,origin,secure=true,push
  }});
  const closeAgents=agentRoutes(app,{auth,pageAuth,bridge,store,now});
  const closeWeb=webRoutes(app,{auth,pageAuth,bridge});
+ app.get('/html-preview',auth,(req,res)=>{res.set('Content-Security-Policy',readFileSync(new URL('../dist/issue-web/html-preview.csp',import.meta.url),'utf8').trim());res.set('X-Frame-Options','SAMEORIGIN');res.sendFile(fileURLToPath(new URL('../dist/issue-web/html-preview.html',import.meta.url)));});
  app.use('/issue-web',auth,express.static(fileURLToPath(new URL('../dist/issue-web/',import.meta.url))));
  app.get('/healthz',(req,res)=>res.json({ok:true}));
  app.post('/api/bridge/pair-code',bridge,(req,res)=>res.json({code:store.pairing(),expiresIn:300}));

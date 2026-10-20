@@ -503,7 +503,7 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
     assert!(html.contains("type=\"checkbox\""));
     assert!(!html.contains("<script>"));
     assert!(!html.contains("href=\"javascript:"));
-    assert!(html.contains("&lt;script&gt;"));
+    assert!(!html.contains("window.pwned"));
 }
 
 #[test]
@@ -1372,11 +1372,13 @@ fn inbox_api_security_rendering_and_issue_relationships_do_not_mutate_issues() {
     );
     assert_eq!(linked.status, 200);
     assert_eq!(linked.json()["task"]["issue"]["project"], web.project);
+    let html = linked.json()["task"]["body_html"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
-        linked.json()["task"]["body_html"]
-            .as_str()
-            .unwrap()
-            .contains("&lt;script&gt;")
+        !html.contains("<script") && !html.contains("bad()"),
+        "{html}"
     );
     assert_eq!(
         linked.json()["task"]["comments"][0]["body_html"],

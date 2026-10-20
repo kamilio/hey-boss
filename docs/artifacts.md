@@ -56,6 +56,19 @@ to its referring issue or map topic. Failed reads offer **Try again**.
 Import and Export use UTF-8 Markdown; comments and relationships remain in the
 project store, rather than the exported file.
 
+HTML works in descriptions and documents on desktop, phones and the native
+artifact reader. Ordinary tags such as `<details>`, `<summary>` and `<table>`
+render alongside Markdown. For an interactive block, use a fenced block marked
+`html render`; a complete document starting with `<!doctype html>` or `<html>`
+renders directly. Ordinary `html` fences remain code examples.
+Previews grow to their full content height and scroll with the page. **HTML
+source** reveals the original text; editing and exporting preserve it exactly.
+Use self-contained HTML with inline CSS/JavaScript and embedded images. Scripts
+run in an isolated frame without access to the application or its storage;
+external scripts, styles and resource requests are blocked. Relative HTML assets
+are not uploaded automatically. Theme colors are available as CSS variables such
+as `--background`, `--foreground`, `--card`, `--border` and `--accent`.
+
 ```sh
 hey-boss artifact create --title 'Migration plan' --file plan.md --issue 12
 hey-boss artifact list --query migration --json
