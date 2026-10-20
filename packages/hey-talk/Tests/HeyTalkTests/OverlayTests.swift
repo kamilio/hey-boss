@@ -1,8 +1,62 @@
 import AppKit
+import TalkCore
 import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testCompactModeNoticeSurvivesCaptureStartingAndCloses() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func notices(_ view: NSView) -> [OverlayNotice] {
+            (view as? OverlayNotice).map { [$0] } ?? view.subviews.flatMap(notices)
+        }
+        let root = try XCTUnwrap(panel.contentView)
+        overlay.setAutoMode(true)
+        overlay.showModeNotice()
+        overlay.preparing(); overlay.update(.recording)
+        let notice = try XCTUnwrap(notices(root).first)
+        let message = try XCTUnwrap(notice.subviews.compactMap { $0 as? NSTextField }.first).stringValue
+        XCTAssertEqual(message, "Auto mode on")
+        XCTAssertEqual(notice.frame.width, 180)
+        XCTAssertFalse(panel.canBecomeKey)
+        let dismissed = expectation(description: "mode notice closes automatically")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
+            XCTAssertTrue(notices(root).isEmpty)
+            dismissed.fulfill()
+        }
+        wait(for: [dismissed], timeout: 4)
+        overlay.setAutoMode(false); overlay.showModeNotice()
+        let off = try XCTUnwrap(notices(root).first)
+        XCTAssertEqual(try XCTUnwrap(off.subviews.compactMap { $0 as? NSTextField }.first).stringValue, "Auto mode off")
+    }
+
+    @MainActor func testAutoGlowStaysVisibleWithoutAddingTextOrChangingPillSize() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let root = try XCTUnwrap(panel.contentView)
+        let glow = try XCTUnwrap(root.layer?.sublayers?.first { $0.name == "auto-mode-glow" } as? CAShapeLayer)
+        XCTAssertTrue(glow.isHidden)
+        for phase in [Phase.idle, .recording, .processing] {
+            overlay.setAutoMode(false)
+            overlay.update(phase)
+            let manualSize = panel.frame.size
+            overlay.setAutoMode(true)
+            XCTAssertFalse(glow.isHidden)
+            XCTAssertEqual(panel.frame.size, manualSize)
+            XCTAssertGreaterThan(glow.shadowOpacity, 0)
+            XCTAssertNotNil(glow.path)
+        }
+        overlay.setAutoMode(false)
+        XCTAssertTrue(glow.isHidden)
+        XCTAssertFalse(panel.canBecomeKey)
+    }
+
     @MainActor func testNoticeExpandsInsideRecordingPanelAndDismissesBeforeRecording() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))

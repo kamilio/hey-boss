@@ -21,6 +21,7 @@ enum CLI {
     hey-talk history show                      Open history with Copy buttons
     hey-talk devices                           List microphone names and UIDs
     hey-talk input UID|default                  Select microphone
+    hey-talk auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
     hey-talk overlay show|hide                  Control the floating recording pill
     hey-talk permissions microphone|accessibility
@@ -28,6 +29,7 @@ enum CLI {
     hey-talk doctor                            Check permissions, model, and hotkey
     hey-talk quit                              Stop only Hey Talk and its worker
 
+    Hyper+V toggles Auto mode. In Auto: focus a message field, speak, Enter to submit.
     Press Hyper+E or Hyper+R to start; press again to finish. Esc cancels.
     \(DictationShortcut.help). The shortcut used to stop chooses the behavior.
     Commands start the app on demand. No login service or account is required.
@@ -43,13 +45,18 @@ enum CLI {
         let args = arguments.filter { !["--json", "--no-overlay", "--no-paste"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
-        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "enter-exceptions", "overlay", "permissions", "warm", "doctor", "quit"]
+        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "enter-exceptions", "overlay", "permissions", "warm", "doctor", "quit"]
         guard known.contains(verb) else { throw TalkError("Unknown command: \(verb). Run hey-talk --help.") }
         let needsValue = ["transcribe", "input", "overlay", "permissions"].contains(verb)
-        if !["history", "enter-exceptions"].contains(verb) {
+        if !["history", "enter-exceptions", "auto"].contains(verb) {
             guard args.count == (needsValue ? 2 : 1) else { throw TalkError("Unexpected arguments. Run hey-talk --help.") }
         }
         var request: [String: Any] = ["command": verb]
+        if verb == "auto" {
+            let values = Array(args.dropFirst())
+            try AutoDictationSettings.validate(values)
+            request["arguments"] = values
+        }
         if verb == "enter-exceptions" {
             let values = Array(args.dropFirst())
             try EnterExceptions.validate(values)
@@ -73,7 +80,7 @@ enum CLI {
         if verb == "permissions" { request["kind"] = args[1] }
         if (try? ControlSocket.request(["command": "status"])) == nil {
             if ["status", "quit", "cancel"].contains(verb) { try output(["ok": true, "state": "stopped"], json: json); return }
-            try launch(headless: noOverlay || ["transcribe", "devices", "doctor", "input", "enter-exceptions", "permissions", "warm", "history", "last"].contains(verb))
+            try launch(headless: noOverlay || ["transcribe", "devices", "doctor", "input", "auto", "enter-exceptions", "permissions", "warm", "history", "last"].contains(verb))
         }
         if verb == "record" {
             request["command"] = "start"
@@ -98,6 +105,11 @@ enum CLI {
             let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
             print(String(decoding: data, as: UTF8.self))
         } else if let text = response["text"] as? String { print(text) }
+        else if let settings = response["auto"] as? [String: Any], response.count == 3 {
+            print("Auto mode: \(settings["enabled"] as? Bool == true ? "on" : "off") · Hyper+V to toggle")
+            print("Allowed apps: \((settings["apps"] as? [String] ?? []).joined(separator: ", "))")
+            if settings["enabled"] as? Bool == true, response["auto_ready"] as? Bool != true { print("Enable Accessibility with hey-talk permissions accessibility.") }
+        }
         else if let ids = response["enter_exceptions"] as? [String], response.count == 2 {
             print(ids.isEmpty ? "No Enter exceptions." : ids.joined(separator: "\n"))
         }

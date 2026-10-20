@@ -23,10 +23,10 @@ final class OverlayNotice: NSView {
     private let openAccessibility: (() -> Void)?
     private let dismiss: () -> Void
 
-    init(message: String, openAccessibility: (() -> Void)?, dismiss: @escaping () -> Void) {
+    init(message: String, openAccessibility: (() -> Void)?, dismiss: @escaping () -> Void, compact: Bool = false) {
         self.openAccessibility = openAccessibility
         self.dismiss = dismiss
-        super.init(frame: NSRect(x: 0, y: 0, width: 312, height: openAccessibility == nil ? 56 : 96))
+        super.init(frame: NSRect(x: 0, y: 0, width: compact ? 180 : 312, height: compact ? 40 : openAccessibility == nil ? 56 : 96))
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Dictation notice")
@@ -34,11 +34,11 @@ final class OverlayNotice: NSView {
         label.font = .systemFont(ofSize: 12, weight: .medium)
         label.drawsBackground = false
         label.maximumNumberOfLines = 2
-        label.frame = NSRect(x: 16, y: bounds.height - 45, width: 250, height: 34)
+        label.frame = NSRect(x: 16, y: compact ? 10 : bounds.height - 45, width: bounds.width - 62, height: compact ? 20 : 34)
         addSubview(label)
         let separator = NSBox()
         separator.boxType = .separator
-        separator.frame = NSRect(x: 16, y: 0, width: 280, height: 1)
+        separator.frame = NSRect(x: 16, y: 0, width: bounds.width - 32, height: 1)
         separator.alphaValue = 0.3
         addSubview(separator)
         let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss notice")!, target: self, action: #selector(closeNotice))
@@ -46,7 +46,7 @@ final class OverlayNotice: NSView {
         close.contentTintColor = .secondaryLabelColor
         close.setAccessibilityLabel("Dismiss notice")
         close.toolTip = "Dismiss"
-        close.frame = NSRect(x: 276, y: bounds.height - 33, width: 24, height: 24)
+        close.frame = NSRect(x: bounds.width - 36, y: bounds.height - 33, width: 24, height: 24)
         addSubview(close)
         if openAccessibility != nil {
             let settings = NoticeActionButton(title: "Enable Accessibility", target: self, action: #selector(openSettings))

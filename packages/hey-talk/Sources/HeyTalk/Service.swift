@@ -8,6 +8,16 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let inference = Inference()
     private let history = DictationHistory()
     private let enterExceptions = EnterExceptions()
+    private let autoSettings = AutoDictationSettings()
+    private let focusMonitor = InputFocusMonitor()
+    private let autoSubmitKey = AutoSubmitKey()
+    private var focusTrigger = FocusTrigger<FocusedInput>()
+    private var automatic: AutoRecording<FocusedInput>?
+    private var autoTarget: FocusedInput? { automatic?.target }
+    private var autoDeliveryValid: Bool { automatic?.deliveryValid ?? false }
+    private var focusGrace: DispatchWorkItem?
+    private var autoRestart: DispatchWorkItem?
+    private var autoMenuItem: NSMenuItem?
     private var historyWindow: HistoryWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
     private lazy var cues = AudioCues()
@@ -45,7 +55,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch action {
             case .toggle(let shortcut): self.toggleDictation(shortcut: shortcut)
-            case .cancel: if self.session.phase == .recording || self.session.phase == .processing { self.cancel() }
+            case .toggleAuto: self.toggleAutoMode()
+            case .cancel: if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
             case .none: break
             }
         }
@@ -56,8 +67,29 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
         }
         menuItem?.menu = menu
+        let autoItem = NSMenuItem(title: "Auto Mode · Hyper+V", action: #selector(toggleAutoMode), keyEquivalent: "")
+        autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
+        focusMonitor.onChange = { [weak self] input in self?.focusedInputChanged(input) }
+        focusMonitor.onSuspend = { [weak self] in
+            guard let self, self.autoTarget != nil || self.autoRestart != nil else { return }
+            self.cancel()
+        }
+        autoSubmitKey.shouldCapture = { [weak self] in
+            guard let self, let target = self.autoTarget else { return false }
+            if self.session.phase == .recording { return FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) != nil }
+            return self.autoDeliveryValid && target.isFocused()
+        }
+        autoSubmitKey.onSubmit = { [weak self] in
+            guard let self, self.session.phase == .recording else { return }
+            self.pressEnter = true; self.stop { _ in }
+        }
+        autoSubmitKey.onInterruption = { [weak self] in
+            guard let self, self.autoTarget != nil else { return }
+            self.cancel(); self.overlay?.error("Auto paused. Focus the message field again.")
+        }
         history.refresh()
         if overlayEnabled { showOverlay(true) }
+        applyAutoMode()
         if CommandLine.arguments.contains("--show-history") { showHistory() }
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
@@ -66,7 +98,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
     }
-    func applicationWillTerminate(_ notification: Notification) { capture.cancel(); inference.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -86,11 +118,67 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self?.accessibilitySetup.openSettings()
             }
             view.level = { [weak self] in self?.capture.level ?? 0 }
+            view.setAutoMode(autoSettings.enabled)
             overlay = view
         }
         overlayEnabled = show; overlay?.show(show)
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
+    @objc private func toggleAutoMode() {
+        autoSettings.enabled.toggle()
+        showOverlay(true)
+        applyAutoMode()
+        if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showModeNotice() }
+    }
+    private func applyAutoMode() {
+        if autoTarget != nil || autoRestart != nil { cancel() }
+        focusMonitor.stop(); focusTrigger.reset()
+        autoMenuItem?.state = autoSettings.enabled ? .on : .off
+        overlay?.setAutoMode(autoSettings.enabled)
+        if autoSettings.enabled {
+            if !autoSubmitKey.start() {
+                overlay?.error("Auto needs Accessibility. Enable automatic paste.", accessibilityAction: true)
+            }
+            focusMonitor.start(bundleIDs: autoSettings.bundleIDs)
+        } else { autoSubmitKey.stop() }
+    }
+    private func focusedInputChanged(_ input: FocusedInput?) {
+        if automatic != nil {
+            automatic?.focusChanged(input, at: ProcessInfo.processInfo.systemUptime)
+            if session.phase == .recording {
+                if let input {
+                    focusGrace?.cancel(); focusGrace = nil
+                    target = input.app; targetName = input.app.localizedName
+                } else if focusGrace == nil {
+                    let id = session.generation
+                    let timeout = DispatchWorkItem { [weak self] in
+                        guard let self, self.session.generation == id, self.session.phase == .recording else { return }
+                        self.focusMonitor.refresh()
+                        if self.automatic?.shouldCancel(at: ProcessInfo.processInfo.systemUptime) == true { self.cancel() }
+                    }
+                    focusGrace = timeout
+                    DispatchQueue.main.asyncAfter(deadline: .now() + AutoRecording<FocusedInput>.focusGrace, execute: timeout)
+                }
+            }
+        }
+        let available = autoSettings.enabled && autoTarget == nil && autoRestart == nil && (session.phase == .idle || session.phase == .failed)
+        guard focusTrigger.update(input, available: available), let input, autoSubmitKey.start() else { return }
+        start(showOverlay: true, paste: true, focusedInput: input) { _ in }
+    }
+    private func restartAfterSubmit(id: UInt64) {
+        let restart = DispatchWorkItem { [weak self] in
+            guard let self, self.session.generation == id else { return }
+            self.autoRestart = nil; self.hotkey?.reset()
+            guard self.autoSettings.enabled, self.session.phase == .idle,
+                  let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) else { return }
+            self.focusTrigger.reset()
+            self.focusedInputChanged(input)
+        }
+        autoRestart = restart
+        hotkey?.captureEscape(true)
+        // Give the app time to consume Return and clear or replace its editor.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: restart)
+    }
     @objc private func toggle() {
         toggleDictation(shortcut: nil)
     }
@@ -110,8 +198,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
-            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name],
+            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V"],
             "enter_exceptions": enterExceptions.bundleIDs,
+            "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
+            "auto_recording": autoTarget != nil, "auto_focused": focusMonitor.current != nil,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
@@ -138,6 +228,17 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let command = request["command"] as? String ?? ""
         switch command {
         case "status", "doctor": reply(status())
+        case "auto":
+            do {
+                guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing Auto arguments") }
+                let wasEnabled = autoSettings.enabled, apps = autoSettings.bundleIDs
+                try autoSettings.command(arguments)
+                if wasEnabled != autoSettings.enabled || apps != autoSettings.bundleIDs {
+                    showOverlay(true); applyAutoMode()
+                    if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showModeNotice() }
+                }
+                reply(["ok": true, "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready])
+            } catch { reply(failure(error.localizedDescription)) }
         case "enter-exceptions":
             do {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
@@ -192,6 +293,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let file = request["file"] as? String else { reply(failure("Missing audio file")); return }
             do {
                 let id = try session.begin(); try session.processing(id)
+                clearAutomatic()
                 paste = false; transcriptionSource = "file"; error = nil; pendingReply = reply
                 idleRelease?.cancel(); overlay?.update(.processing)
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -216,12 +318,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
         default: reply(failure("Unknown command: \(command)"))
         }
     }
-    private func start(showOverlay: Bool, paste: Bool, pressEnter: Bool = false, reply: @escaping ([String: Any]) -> Void) {
+    private func start(showOverlay: Bool, paste: Bool, pressEnter: Bool = false, focusedInput: FocusedInput? = nil,
+                       reply: @escaping ([String: Any]) -> Void) {
         let id: UInt64
         do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
         pendingStartReply = reply
         error = nil; captureReady = false; self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
-        target = NSWorkspace.shared.frontmostApplication
+        clearAutomatic()
+        automatic = focusedInput.map { AutoRecording(target: $0) }
+        target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
         targetName = target?.localizedName
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
@@ -242,7 +347,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 if !self.capture.usesBluetooth { self.cues.start() }
                 let limit = DispatchWorkItem { [weak self] in
                     guard let self, self.session.generation == id, self.session.phase == .recording else { return }
-                    self.stop { _ in }
+                    if self.autoTarget != nil {
+                        self.cancel(); self.overlay?.error("Auto timed out. Focus the message field again.")
+                    } else { self.stop { _ in } }
                 }
                 self.maximumDuration = limit
                 DispatchQueue.main.asyncAfter(deadline: .now() + 299, execute: limit)
@@ -256,6 +363,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func stop(_ reply: @escaping ([String: Any]) -> Void) {
         guard session.phase == .recording else { reply(failure("No recording is active")); return }
+        if automatic != nil {
+            guard let input = FocusedInput.current(bundleIDs: autoSettings.bundleIDs) else {
+                reply(failure("Focus an allowed input before finishing Auto dictation")); return
+            }
+            automatic?.finish(in: input)
+            target = input.app; targetName = input.app.localizedName
+        }
+        focusGrace?.cancel(); focusGrace = nil
         maximumDuration?.cancel(); maximumDuration = nil
         let id = session.generation
         guard captureReady else { cancel(); reply(failure("Stopped before the microphone was ready")); return }
@@ -282,12 +397,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.fail("No speech detected. Check your microphone with hey-talk devices."); return }
                 guard self.session.finish(id, text: text) else { return }
-                self.hotkey?.reset(); self.overlay?.update(.idle)
+                if self.autoTarget == nil { self.hotkey?.reset() }
+                self.overlay?.update(.idle)
                 let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
                 // Detach this result before disk IO: a new recording may start while saving.
                 let reply = self.pendingReply; self.pendingReply = nil
                 let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
                 let targetName = self.targetName
+                let focusedInput = self.autoTarget
                 self.history.save(entry) { saved in
                     let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
                         self.lastPasteBlock = reason
@@ -298,17 +415,20 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         if let reason { response["paste_block"] = reason.rawValue }
                         reply?(response)
                         if self.session.generation == id {
+                            self.automatic = nil; self.hotkey?.reset()
                             self.scheduleRelease()
                             if !saved { self.overlay?.error("Not saved. Copy from History before quitting.") }
                             else if let reason {
                                 let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
                                 self.overlay?.error(message, accessibilityAction: reason == .accessibility)
                             }
+                            if saved, delivery == "submitted", focusedInput != nil { self.restartAfterSubmit(id: id) }
                         }
                     }
                     if shouldPaste, self.session.generation == id {
                         let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
                         Paste.deliver(text, target: target, pressEnter: submit,
+                                      targetStillFocused: { focusedInput.map { self.autoDeliveryValid && $0.isFocused() } ?? true },
                                       isCurrent: { self.session.generation == id }, completion: complete)
                     } else { complete(shouldPaste ? "history" : "stdout", nil) }
                 }
@@ -317,6 +437,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func cancel() {
         captureReady = false
+        clearAutomatic()
         session.cancel(); maximumDuration?.cancel(); maximumDuration = nil
         capture.cancel(); inference.cancel(); hotkey?.reset(); overlay?.update(.idle)
         pendingStartReply?(failure("Cancelled")); pendingStartReply = nil
@@ -324,11 +445,17 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func fail(_ message: String) {
         captureReady = false
+        clearAutomatic()
         capture.cancel(); session.fail(session.generation); hotkey?.reset()
         maximumDuration?.cancel(); maximumDuration = nil
         error = message; overlay?.update(.failed); overlay?.error(OverlayNotice.concise(message))
         pendingStartReply?(failure(message)); pendingStartReply = nil
         pendingReply?(failure(message)); pendingReply = nil; scheduleRelease()
+    }
+    private func clearAutomatic() {
+        automatic = nil
+        focusGrace?.cancel(); focusGrace = nil
+        autoRestart?.cancel(); autoRestart = nil
     }
     private func failure(_ message: String) -> [String: Any] { ["ok": false, "error": message] }
     private func scheduleRelease() {

@@ -8,9 +8,10 @@ private final class RecordingPanel: NSPanel {
 }
 
 private final class WaveView: NSView {
+    var color = TalkDesign.active { didSet { needsDisplay = true } }
     var heights = Array(repeating: 4.0, count: Waveform.count) { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
-        TalkDesign.active.setFill()
+        color.setFill()
         for (index, height) in heights.enumerated() {
             NSBezierPath(roundedRect: NSRect(x: CGFloat(index * 5), y: (bounds.height - height) / 2, width: 2, height: height), xRadius: 1, yRadius: 1).fill()
         }
@@ -18,8 +19,9 @@ private final class WaveView: NSView {
 }
 
 private final class IdentityView: NSView {
+    var color = TalkDesign.accent { didSet { needsDisplay = true } }
     override func draw(_ dirtyRect: NSRect) {
-        TalkDesign.accent.setStroke()
+        color.setStroke()
         let scale = bounds.width / 24
         for (x, height) in [(7.0, 6.0), (12.0, 14.0), (17.0, 9.0)] {
             let bar = NSBezierPath()
@@ -69,6 +71,8 @@ final class Overlay {
     private let pillContent = ClickSurface()
     private let identity = IdentityView()
     private let wave = WaveView()
+    private let autoHalo = CAShapeLayer()
+    private var autoMode = false
     private let cancelGlass: NSView
     private let cancelButton = NSButton()
     private let glow = CAGradientLayer()
@@ -80,6 +84,7 @@ final class Overlay {
     private var expanded = false
     private var enabled = true
     private var notice: OverlayNotice?
+    private var modeNotice = false
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
@@ -102,6 +107,15 @@ final class Overlay {
         depth.shadowOpacity = 0.22; depth.shadowRadius = 6
         depth.shadowOffset = CGSize(width: 0, height: -3)
         root.layer?.addSublayer(depth)
+        autoHalo.name = "auto-mode-glow"
+        autoHalo.fillColor = nil
+        autoHalo.strokeColor = TalkDesign.automatic.withAlphaComponent(0.65).cgColor
+        autoHalo.lineWidth = 1.25
+        autoHalo.shadowColor = TalkDesign.automatic.cgColor
+        autoHalo.shadowOpacity = 0.65; autoHalo.shadowRadius = 6
+        autoHalo.shadowOffset = .zero
+        autoHalo.isHidden = true
+        root.layer?.addSublayer(autoHalo)
         glow.type = .conic
         glow.startPoint = CGPoint(x: 0.5, y: 0.5); glow.endPoint = CGPoint(x: 0.5, y: 0)
         glow.colors = [TalkDesign.accent.withAlphaComponent(0.15).cgColor, TalkDesign.accent.withAlphaComponent(0.3).cgColor, TalkDesign.accent.cgColor, TalkDesign.active.cgColor, NSColor.white.cgColor]
@@ -157,7 +171,7 @@ final class Overlay {
         pillContent.addSubview(noticeRecordButton)
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
-        pillContent.toolTip = "\(DictationShortcut.help) · Click to start / stop · Drag to move"
+        updateModeAppearance()
         pillContent.onClick = { [weak self] in self?.onToggle?() }
         pillContent.onOpenAccessibility = { [weak self] in self?.onOpenAccessibility?() }
         pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }
@@ -184,16 +198,16 @@ final class Overlay {
         updateTimer()
     }
     func update(_ next: Phase) {
-        clearNotice()
+        if !modeNotice { clearNotice() }
         phase = next; expanded = next == .recording
-        pillContent.accent = next == .recording ? TalkDesign.active : TalkDesign.accent
+        updateModeAppearance()
         wave.heights = Array(repeating: 4, count: Waveform.count)
         wave.isHidden = next != .recording
         wave.alphaValue = 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
         glow.isHidden = next != .processing; halo.isHidden = next != .processing
-        pillContent.setAccessibilityLabel(next == .recording ? "Stop dictation" : next == .processing ? "Transcribing" : "Start dictation")
+        updateAccessibilityLabel()
         layout(animated: true); showCancel(); updateTimer()
         if next == .processing {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -212,6 +226,23 @@ final class Overlay {
         update(.processing)
         pillContent.setAccessibilityLabel("Opening microphone")
     }
+    func setAutoMode(_ enabled: Bool) {
+        autoMode = enabled
+        autoHalo.isHidden = !enabled
+        updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
+    }
+    private func updateModeAppearance() {
+        pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
+        identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
+        wave.color = autoMode ? TalkDesign.automatic : TalkDesign.active
+        pillContent.toolTip = autoMode
+            ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
+            : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move"
+    }
+    private func updateAccessibilityLabel() {
+        let action = phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
+        pillContent.setAccessibilityLabel(autoMode ? "Auto mode · \(action)" : action)
+    }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
         let size = notice.map { NSSize(width: $0.frame.width, height: $0.frame.height + 36) }
@@ -224,6 +255,7 @@ final class Overlay {
         halo.frame = CGRect(x: center - 32, y: 8, width: 64, height: 44)
         halo.path = CGPath(roundedRect: CGRect(x: 4, y: 4, width: 56, height: 36), cornerWidth: 18, cornerHeight: 18, transform: nil)
         let outline = CGPath(roundedRect: frame, cornerWidth: 18, cornerHeight: 18, transform: nil)
+        let autoOutline = CGPath(roundedRect: frame.insetBy(dx: -0.5, dy: -0.5), cornerWidth: 18.5, cornerHeight: 18.5, transform: nil)
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             for key in ["path", "shadowPath"] {
                 let transition = CABasicAnimation(keyPath: key)
@@ -232,21 +264,29 @@ final class Overlay {
                 transition.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
                 depth.add(transition, forKey: key)
             }
+            let transition = CABasicAnimation(keyPath: "path")
+            transition.fromValue = autoHalo.presentation()?.path ?? autoHalo.path
+            transition.toValue = autoOutline; transition.duration = duration
+            transition.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
+            autoHalo.add(transition, forKey: "path")
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         depth.path = outline; depth.shadowPath = outline
+        autoHalo.path = autoOutline
         CATransaction.commit()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
-            identity.animator().frame = NSRect(x: expanded && notice == nil ? 9 : (width - 22) / 2, y: 7, width: 22, height: 22)
-            wave.animator().frame = NSRect(x: 39, y: (height - 24) / 2, width: 52, height: 24)
+            let contentOrigin = (width - TalkDesign.recordingSize.width) / 2
+            identity.animator().frame = NSRect(x: expanded ? contentOrigin + 9 : (width - 22) / 2, y: 7, width: 22, height: 22)
+            wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
             cancelGlass.animator().frame = NSRect(x: frame.maxX + 8, y: frame.midY - 14, width: 28, height: 28)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
         notice?.frame.origin = NSPoint(x: 0, y: 36)
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
+        noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
         cancelButton.frame = NSRect(x: 0, y: 0, width: 28, height: 28)
     }
     private func resizePanel(for size: NSSize) {
@@ -266,6 +306,8 @@ final class Overlay {
         depth.removeAllAnimations()
         depth.path = depth.path?.copy(using: &transform)
         depth.shadowPath = depth.path
+        autoHalo.removeAllAnimations()
+        autoHalo.path = autoHalo.path?.copy(using: &transform)
     }
     private func showCancel() {
         let visible = hovering && (phase == .recording || phase == .processing)
@@ -296,20 +338,29 @@ final class Overlay {
     private func clearNotice() {
         noticeDismiss?.cancel(); noticeDismiss = nil
         notice?.removeFromSuperview(); notice = nil
+        modeNotice = false
         noticeRecordButton.isHidden = true
         pillContent.setAccessibilityRole(.button)
     }
     private func dismissNotice(animated: Bool = true) {
         guard notice != nil else { return }
         clearNotice()
-        pillContent.setAccessibilityLabel("Start dictation")
+        updateAccessibilityLabel()
         layout(animated: animated)
     }
     func error(_ message: String, accessibilityAction: Bool = false) {
+        presentNotice(message, accessibilityAction: accessibilityAction, isModeNotice: false)
+    }
+    func showModeNotice() {
+        let message = autoMode ? "Auto mode on" : "Auto mode off"
+        presentNotice(message, accessibilityAction: false, isModeNotice: true)
+    }
+    private func presentNotice(_ message: String, accessibilityAction: Bool, isModeNotice: Bool) {
         guard enabled else { return }
         clearNotice()
+        modeNotice = isModeNotice
         let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
-        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() })
+        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() }, compact: isModeNotice)
         notice = content
         pillContent.addSubview(content)
         noticeRecordButton.isHidden = false
@@ -325,7 +376,7 @@ final class Overlay {
         if !accessibilityAction {
             let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
             noticeDismiss = dismiss
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (isModeNotice ? 3 : 6), execute: dismiss)
         }
     }
 }
