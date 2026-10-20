@@ -282,6 +282,133 @@ fn seed(db: &Connection) {
         INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels)
         VALUES('p',1,'Task','Original requirements','open','human:test',1,1,1,'[]');").unwrap();
 }
+
+#[test]
+fn remote_retry_cooldown_follows_the_attempt_between_machines() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        db.execute("UPDATE fleet_meta SET node=?1,role='peer'", [node])
+            .unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+    }
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    seed(&a);
+    let finished = crate::issues::worker::now();
+    a.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at,retry_count) VALUES('retry-a','p',1,'{}','human:test','blocked',100,'synthetic','a',?1,?1,?1,?2,4)", rusqlite::params![finished,finished+240_000]).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let ready = |db: &Connection| {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id='p' AND number=1)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    assert!(!ready(&a));
+    assert!(!ready(&b), "moving to another host must not bypass backoff");
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM worker_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "history must not import process ownership"
+    );
+    let retry: (i64, i64) = b.query_row("SELECT json_extract(payload,'$.retry_at'),json_extract(payload,'$.retry_count') FROM distributed_attempts WHERE id='retry-a'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(retry, (finished + 240_000, 4));
+
+    // Only retry metadata changes; the terminal attempt itself is unchanged.
+    a.execute("UPDATE worker_runs SET retry_at=0 WHERE id='retry-a'", [])
+        .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert!(ready(&a));
+    assert!(ready(&b), "an expired deadline must release remote pickup");
+    a.execute(
+        "UPDATE worker_runs SET retry_at=?1 WHERE id='retry-a'",
+        [finished + 3_600_000],
+    )
+    .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert!(
+        !ready(&b),
+        "provider retry deadlines must survive replication"
+    );
+
+    // Explicitly reopening on the receiving host releases the remote cooldown.
+    let project = crate::issues::Project {
+        id: "p".into(),
+        name: "Project".into(),
+    };
+    let actor = crate::issues::identity::resolve(Some("human:boss"), "b", &fb.0).unwrap();
+    let mut store = crate::issues::Store::open(&fb.0.join("issues.db")).unwrap();
+    store.execute(&serde_json::from_value(serde_json::json!({"version":1,"project":project,"actor":actor,"request_id":"remote-reopen","operation":{"action":"reopen","number":1}})).unwrap()).unwrap();
+    assert!(
+        ready(&b),
+        "explicit reopen must release a remote retry hold"
+    );
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert!(ready(&a), "reopen must release the originating host too");
+}
+
+#[test]
+fn remote_retry_cooldown_upgrade_preserves_pending_deadlines() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    // An enrolled store with the old trigger has no retry fields in its history.
+    db.execute_batch("DROP TRIGGER distributed_capture_worker_runs_UPDATE;
+        CREATE TRIGGER distributed_capture_worker_runs_UPDATE AFTER UPDATE OF state ON worker_runs BEGIN SELECT 1; END;").unwrap();
+    db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at,retry_count) VALUES('pending','p',1,'{}','human:test','failed',100,'synthetic','a',1,1,1,9000000000000,7)", []).unwrap();
+    db.execute("DELETE FROM distributed_outbox", []).unwrap();
+    install(&db, "a").unwrap();
+    let row: Value = serde_json::from_str(&db.query_row("SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'", [], |r|r.get::<_,String>(0)).unwrap()).unwrap();
+    assert_eq!(row["retry_at"], 9_000_000_000_000_i64);
+    assert_eq!(row["retry_count"], 7);
+    assert_eq!(row["retry_allowed"], 0);
+    db.execute("DELETE FROM distributed_outbox", []).unwrap();
+    install(&db, "a").unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM distributed_outbox", [], |r|r.get::<_,i64>(0)).unwrap(), 0, "migration is idempotent");
+    db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE id='pending'", []).unwrap();
+    let row: Value = serde_json::from_str(&db.query_row("SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'", [], |r|r.get::<_,String>(0)).unwrap()).unwrap();
+    assert_eq!(row["retry_allowed"], 1, "retry-only changes must be captured after upgrade");
+}
+
+#[test]
+fn remote_retry_cooldown_uses_latest_history_and_legacy_defaults() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    let finished = crate::issues::worker::now();
+    db.execute("INSERT INTO distributed_attempts VALUES('remote','b','p',1,'blocked',?1,?1,'Waiting for a prerequisite','{}')", [finished]).unwrap();
+    let ready = || db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id='p' AND number=1)", [], |r|r.get::<_,bool>(0)).unwrap();
+    assert!(!ready(), "old peers still get the existing five-minute fallback");
+    db.execute("UPDATE distributed_attempts SET state='cancelled'", []).unwrap();
+    assert!(ready(), "old-peer cancellations must not acquire a new cooldown");
+    db.execute("UPDATE distributed_attempts SET state='blocked',finished_at=1,summary='Codex needs input or approval: confirm'", []).unwrap();
+    assert!(!ready(), "approval waits are not released by time alone");
+    db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at) VALUES('local','p',1,'{}','human:test','failed',100,'synthetic','a',?1,?1,?1,0)", [finished+1]).unwrap();
+    assert!(ready(), "newer local history supersedes an older remote hold");
+    db.execute("INSERT INTO distributed_attempts VALUES('local','a','p',1,'failed',?1,?1,'','{}')", [finished+1]).unwrap();
+    assert!(ready(), "a local row wins over its stale replicated copy");
+    assert_eq!(db.query_row("SELECT count(*) FROM worker_retry_history WHERE id='local'", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+}
+
 fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
     while export(db, engine).unwrap() > 0 {}
     while import(db, engine).unwrap() > 0 {}

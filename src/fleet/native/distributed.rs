@@ -154,6 +154,8 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         }
         graph::install(db)?;
         activation::protect_role(db)?;
+        capture::upgrade_retry_metadata(db)?;
+        crate::issues::worker_retry::migrate(db)?;
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
@@ -174,6 +176,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
     activation::protect_role(&tx)?;
     tx.commit()?;
     graph::install(db)?;
+    crate::issues::worker_retry::migrate(db)?;
     Ok(())
 }
 

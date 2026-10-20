@@ -56,6 +56,9 @@ pub(super) fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
                         | "finished_at"
                         | "summary"
                         | "worker_id"
+                        | "retry_at"
+                        | "retry_count"
+                        | "retry_allowed"
                 ),
                 "scheduled_jobs" => c != "next_at",
                 "scheduled_job_runs" => c != "sequence",
@@ -63,6 +66,29 @@ pub(super) fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
             })
             .collect(),
     )
+}
+
+pub(super) fn upgrade_retry_metadata(db: &Connection) -> Result<()> {
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_runs_UPDATE' AND instr(sql,'''retry_at''')>0)", [], |r| r.get::<_,bool>(0))? {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    for operation in ["INSERT", "UPDATE", "DELETE"] {
+        tx.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS distributed_capture_worker_runs_{operation}"
+        ))?;
+    }
+    install(&tx)?;
+    // Publish current pending retry evidence as fresh facts. A clock-zero
+    // baseline cannot replace an already replicated terminal attempt.
+    let after = row_json(&columns(&tx, "worker_runs")?, "r");
+    let rows = tx.prepare(&format!("SELECT {after} FROM issues i JOIN worker_runs r ON r.id=(SELECT id FROM worker_runs WHERE project_id=i.project_id AND issue_number=i.number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) WHERE i.state='open' AND i.deleted_at IS NULL AND r.retry_allowed=0 AND r.state NOT IN ('completed','cancelled','interrupted')"))?.query_map([], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for row in rows {
+        tx.execute("UPDATE distributed_meta SET clock=clock+1 WHERE id=1", [])?;
+        tx.execute("INSERT INTO distributed_outbox SELECT clock,'worker_runs',NULL,?1 FROM distributed_meta WHERE id=1", [row])?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn row_json(columns: &[String], prefix: &str) -> String {

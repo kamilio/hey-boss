@@ -27,6 +27,7 @@ mod worker_approvals;
 pub(crate) mod worker_history;
 mod worker_infrastructure;
 mod worker_results;
+pub(crate) mod worker_retry;
 pub mod worktree_ownership;
 
 use serde::{Deserialize, Serialize};
