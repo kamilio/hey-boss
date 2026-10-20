@@ -55,12 +55,28 @@ struct Vocabulary {
         let result = words.values.sorted()
         guard result.count <= 256 else { throw TalkError("Keep vocabulary to 256 words or phrases.") }
         if result != previous || !FileManager.default.fileExists(atPath: file.path) {
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-            try (result.isEmpty ? "" : result.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            try write(result)
         }
         return result
+    }
+
+    func replace(_ words: [String]) throws -> [String] {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        var unique: [String: String] = [:]
+        for value in words { let word = try Self.term(value); unique[word.lowercased()] = word }
+        let result = unique.values.sorted()
+        guard result.count <= 256 else { throw TalkError("Keep vocabulary to 256 words or phrases.") }
+        try write(result)
+        return result
+    }
+
+    private func write(_ words: [String]) throws {
+        let text = words.isEmpty ? "" : words.joined(separator: "\n") + "\n"
+        if (try? String(contentsOf: file, encoding: .utf8)) == text { return }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try text.write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }
 
     func prepare() throws -> URL {

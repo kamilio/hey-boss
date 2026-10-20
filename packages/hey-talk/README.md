@@ -74,6 +74,8 @@ Launch Services when needed; `hey-talk quit` stops it and its inference worker
 until the next login or command that opens it.
 For an existing installation, `./install-login.sh` enables login startup without rebuilding.
 Quit a development instance before rebuilding its bundle.
+Installation and login startup are per Mac. Installing Hey Boss on another
+machine does not enable Hey Talk there.
 
 ## Daily use
 
@@ -120,13 +122,20 @@ hey-talk vocabulary remove "T3 Code"
 hey-talk vocabulary --json                  # Includes the Markdown file path
 ```
 
-Changes apply to the next transcription without restarting or reloading the
-model. Quote phrases. Adding an existing term updates its preferred spelling;
-removal ignores case. The list lives in
-`~/Library/Application Support/hey-talk/vocabulary.md`, one term per line.
-The initial list comes from [vocabulary.md](vocabulary.md); app upgrades preserve
-your changes, including an empty list. Hints favor these terms during local
-recognition, but do not guarantee spelling or replace text afterward.
+Vocabulary is shared through Hey Boss's existing machine sync. Install a current
+Hey Boss on participating machines. Changes made offline merge when they reconnect;
+removals survive a later import of an old list. The first use imports your saved
+words, or [vocabulary.md](vocabulary.md) on a fresh installation. Empty lists survive upgrades.
+
+Quote phrases. Adding a term updates its preferred spelling; removal ignores case.
+The CLI refreshes the local copy immediately and works while Hey Talk is stopped.
+The running app checks for shared changes every 15 seconds, off the recording thread.
+Inference reads `~/Library/Application Support/hey-talk/vocabulary.md`, so dictation
+keeps working offline. Use the CLI to edit the shared list; this Markdown file is
+its local cache. `--json` reports `source: fleet` or a cached result with `sync_error`.
+If Hey Boss is unavailable, edits fail visibly and the last good copy stays usable.
+Only the word list is shared; recordings, history, Auto mode and login startup stay
+on each Mac. Hints favor terms but do not guarantee spelling or replace text afterward.
 
 Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
 history show`. Each transcript has a timestamp and Copy button. Closing this
