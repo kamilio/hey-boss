@@ -9,9 +9,18 @@ for the explicitly selected private-file sink; child stdout and stderr stay supp
 | `not_delivered` | This invocation did not write credentials or start the child. |
 | `unknown` | Redirected output may be partially written. Do not repeat automatically. |
 
-Failure messages include a fixed `reason`, never the received payload, field values,
+Failure messages include a fixed `reason`, never credential values,
 destination path, child arguments, or upstream error text. Success exits 0; failures
 exit 1, including child failure after delivery. Inspect both status and exit code.
+
+**Reply to agent** is an explicit alternative to providing credentials. Its
+**Send reply** action returns `delivery=not_delivered reason=user_reply` followed
+by the user's public message on stderr, with exit code 1. No credential destination
+is written and no child starts. This reply is visible in agent/tool output; it is
+never copied from credential fields or stored in Hey Boss history. Empty replies,
+replies over 8 KiB, and control characters other than newlines/tabs are refused.
+Cancel, close, expiry, and disconnect discard both editors without sending a reply.
+The alternative appears only for callers advertising reply support.
 
 `cancelled` means the user declined; do not re-request automatically. `expired`
 means the native prompt reached its deadline. `rejected` means invalid request

@@ -1060,6 +1060,11 @@ for endpoint configuration and the limits of existing standalone sessions.
 
 ## Secret input
 
+Choose **Reply to agent** in the credentials dialog to send instructions instead.
+**Send reply** returns your message to the waiting command on stderr and exits 1,
+without saving credentials or starting its child process. Replies are visible to
+the agent, so keep credentials in the **Credentials** tab.
+
 `hey-boss notif secret --field API_KEY --env-file .env` opens masked native input and
 writes directly to a private file without returning values to the caller's output.
 For a login/password pair, use `--field LOGIN --field PASSWORD --login`.

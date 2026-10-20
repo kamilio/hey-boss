@@ -3484,6 +3484,7 @@ struct SecretForm: Decodable {
     var fields: [String]
     var login: Bool
     var destination: String
+    var reply: Bool? = nil
     static func decode(_ request: Request) -> SecretForm? {
         guard request.sync, let project = request.project, !project.isEmpty, project.utf8.count <= 200,
               let title = request.title, !title.isEmpty, title.utf8.count <= 300,
@@ -3540,13 +3541,18 @@ final class SecretEntry: NSObject, NSTextFieldDelegate {
 final class SecretFormStack: NSStackView { override var isFlipped: Bool { true } }
 final class SecretFormClip: NSClipView { override var isFlipped: Bool { true } }
 enum SecretOutcome: Equatable {
-    case submitted([String]), cancelled, expired
+    case submitted([String]), replied(String), cancelled, expired
 }
 final class SecretPrompt: NSObject, NSWindowDelegate {
     let window = CopyableWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     let entries: [SecretEntry]
     let submit = NSButton(title: "Use credentials", target: nil, action: nil)
     let message = NSTextField(wrappingLabelWithString: "")
+    let mode = NSSegmentedControl(labels: ["Credentials", "Reply to agent"], trackingMode: .selectOne, target: nil, action: nil)
+    let replyInput = GrowingTextInput(frame: NSRect(x: 0, y: 0, width: 590, height: 128))
+    let credentialContent = NSStackView()
+    let replyContent = NSStackView()
+    var replying: Bool { !mode.isHidden && mode.selectedSegment == 1 }
     var completion: ((SecretOutcome) -> Void)?
     var timer: Timer?
     init(request: Request, form: SecretForm, completion: @escaping (SecretOutcome) -> Void) {
@@ -3561,7 +3567,18 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
         let destination = NSTextField(wrappingLabelWithString: form.destination + "\nRequested on " + (request.source_host ?? "This Mac"))
         let note = NSTextField(wrappingLabelWithString: "Sent once to the requesting command. Not saved in Hey Boss history. Show reveals a value only in this window.")
         note.textColor = .secondaryLabelColor; note.font = .systemFont(ofSize: 12)
-        let stack = SecretFormStack(views: [heading, destination, note] + entries.map(\.view) + [message]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
+        mode.selectedSegment = 0; mode.target = self; mode.action = #selector(changeMode); mode.isHidden = form.reply != true
+        mode.setAccessibilityLabel("Response type")
+        for view in [note] + entries.map(\.view) { credentialContent.addArrangedSubview(view) }
+        let replyLabel = NSTextField(labelWithString: "Message to agent"); replyLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        let replyNote = NSTextField(wrappingLabelWithString: "Visible to the agent in command output. Do not include credentials. Sending ends this request without using any credentials.")
+        replyNote.textColor = .secondaryLabelColor; replyNote.font = .systemFont(ofSize: 12)
+        replyInput.text.font = .systemFont(ofSize: 14); replyInput.text.setAccessibilityLabel("Message to agent"); replyInput.text.allowsUndo = false
+        for view in [replyLabel, replyNote, replyInput] { replyContent.addArrangedSubview(view) }
+        for section in [credentialContent, replyContent] { section.orientation = .vertical; section.alignment = .leading; section.spacing = 12 }
+        replyContent.isHidden = true
+        let stack = SecretFormStack(views: [heading, destination, mode, credentialContent, replyContent, message]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
+        message.textColor = .secondaryLabelColor; message.font = .systemFont(ofSize: 12)
         let scroll = NSScrollView(); scroll.contentView = SecretFormClip(); scroll.documentView = stack; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel)); cancel.keyEquivalent = "\u{1b}"
         submit.target = self; submit.action = #selector(finish); submit.keyEquivalent = "\r"; submit.keyEquivalentModifierMask = .command
@@ -3572,20 +3589,43 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
             stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), stack.widthAnchor.constraint(equalTo: scroll.widthAnchor, constant: -16),
             submit.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20), submit.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24), cancel.trailingAnchor.constraint(equalTo: submit.leadingAnchor, constant: -12), cancel.centerYAnchor.constraint(equalTo: submit.centerYAnchor)
         ])
+        for view in [heading, destination, credentialContent, replyContent, message] { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        note.widthAnchor.constraint(equalTo: credentialContent.widthAnchor).isActive = true
+        replyNote.widthAnchor.constraint(equalTo: replyContent.widthAnchor).isActive = true
+        replyInput.widthAnchor.constraint(equalTo: replyContent.widthAnchor).isActive = true
+        let replyHeight = replyInput.heightAnchor.constraint(equalToConstant: 128); replyHeight.isActive = true
+        replyInput.heightChanged = { height in replyHeight.constant = max(128, height) }
+        replyInput.changed = { [weak self] in self?.validate() }
+        replyInput.submit = { [weak self] in self?.finish() }
         for entry in entries { entry.view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true; entry.changed = { [weak self] in self?.validate() }; entry.revealed.submit = { [weak self] in self?.finish() } }
         validate()
     }
     func validate() {
+        if replying {
+            let value = replyInput.stringValue
+            let invalid = value.utf8.count > 8192 || value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" }
+            submit.isEnabled = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !invalid
+            message.stringValue = invalid ? "Keep your reply under 8 KiB and remove control characters." : "⌘Return sends your reply. Cancel discards it."
+            return
+        }
         submit.isEnabled = entries.allSatisfy { !$0.value.isEmpty && $0.value.utf8.count <= 65536 && !$0.value.contains("\0") }
         message.stringValue = entries.contains { $0.value.utf8.count > 65536 || $0.value.contains("\0") } ? "Each value must be at most 64 KiB and cannot contain NUL." : "⌘Return submits. Cancel or closing discards all values."
     }
+    @objc func changeMode() {
+        window.makeFirstResponder(nil)
+        credentialContent.isHidden = replying; replyContent.isHidden = !replying
+        submit.title = replying ? "Send reply" : "Use credentials"
+        validate(); window.contentView?.layoutSubtreeIfNeeded()
+        if replying { window.makeFirstResponder(replyInput.text) }
+        else if let first = entries.first { window.makeFirstResponder(first.maskedMode ? first.masked : first.revealed.text) }
+    }
     func show() { NSApp.setActivationPolicy(.regular); window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); if let first = entries.first { window.makeFirstResponder(first.maskedMode ? first.masked : first.revealed.text) } }
-    @objc func finish() { validate(); guard submit.isEnabled else { return }; complete(.submitted(entries.map(\.value))) }
+    @objc func finish() { validate(); guard submit.isEnabled else { return }; complete(replying ? .replied(replyInput.stringValue) : .submitted(entries.map(\.value))) }
     @objc func cancel() { complete(.cancelled) }
     func windowWillClose(_ notification: Notification) { complete(.cancelled) }
     func complete(_ outcome: SecretOutcome) {
         guard let done = completion else { return }; completion = nil; timer?.invalidate(); timer = nil
-        window.makeFirstResponder(nil); entries.forEach { $0.clear() }; window.orderOut(nil); done(outcome)
+        window.makeFirstResponder(nil); entries.forEach { $0.clear() }; replyInput.clear(); window.orderOut(nil); done(outcome)
     }
 }
 final class SecretPrompts {
@@ -3603,6 +3643,7 @@ final class SecretPrompts {
                 guard let data = try? JSONSerialization.data(withJSONObject: values) else { reply.send(["task_id":"secret", "status":"error"]); return }
                 reply.send(["task_id":"secret", "status":"ok", "result":String(decoding:data,as:UTF8.self)])
             case .cancelled: reply.send(["task_id":"secret", "status":"cancelled"])
+            case .replied(let text): reply.send(["task_id":"secret", "status":"replied", "result":text])
             case .expired: reply.send(["task_id":"secret", "status":"expired"])
             }
         }
@@ -5152,13 +5193,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/config.json")
         if !NSWorkspace.shared.open(config) { NSLog("Could not open machine config") }
     }
-    @objc func showHealth() {
-        // Maintenance belongs to the standalone CLI; the menu is only a launcher.
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"export PATH=\\\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\\\"; hey-harvester\"\nend tell"
-        var error: NSDictionary?
-        NSAppleScript(source: script)?.executeAndReturnError(&error)
-        if let error { NSLog("Could not launch hey-harvester: %@", error) }
-    }
     @objc func showHeyTalk() {
         let candidates = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Hey Talk.app"),
                           URL(fileURLWithPath: "/Applications/Hey Talk.app")]
@@ -5172,6 +5206,13 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         NSWorkspace.shared.openApplication(at: app, configuration: configuration) { _, error in
             if let error { DispatchQueue.main.async { NSAlert(error: error).runModal() } }
         }
+    }
+    @objc func showHealth() {
+        // Maintenance belongs to the standalone CLI; the menu is only a launcher.
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"export PATH=\\\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\\\"; hey-harvester\"\nend tell"
+        var error: NSDictionary?
+        NSAppleScript(source: script)?.executeAndReturnError(&error)
+        if let error { NSLog("Could not launch hey-harvester: %@", error) }
     }
     func applyConnectionSettings(_ preferences: ConnectionPreferences, completion: @escaping (String?) -> Void) {
         let candidates = [cli, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
