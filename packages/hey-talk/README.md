@@ -7,6 +7,25 @@ to Hyper (Control + Command + Option + Shift). Click the pill to toggle recordin
 drag to move it, or press Esc to discard. Clicking to stop keeps the starting
 shortcut's behavior; recordings started by clicking or the CLI only paste.
 
+**Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
+The compact pill has a soft purple glow and purple recording bars. Focus T3's
+**Message** field to start recording, then press plain Enter to transcribe,
+paste, and submit. It starts listening again after submitting if an allowed
+input still has focus. Shift+Enter still inserts a newline. You can move between
+allowed inputs while speaking: Enter chooses the destination. Leaving the inputs
+for more than two seconds discards the recording; shorter gaps keep it running.
+Escape or turning Auto off discards immediately. After Escape, leave and refocus
+the field to resume. Hyper+E, Hyper+R, and clicking the
+pill still work; the stopping shortcut chooses paste or submit as usual.
+A small three-second drawer says “Auto mode on” or “Auto mode off” when toggled.
+
+Auto starts off and remembers your choice. T3 is the initial allowed app;
+its search and settings fields do not start recording. Other allowed apps use
+editable text fields, excluding password fields. Accessibility permission is
+required. A focus change during transcription keeps the result in History and
+on the clipboard instead of pasting or submitting into another field or thread.
+The existing per-app Enter exceptions also apply in Auto.
+
 The floating control is a compact glass capsule with an indigo waveform mark.
 It expands to show live teal audio levels while recording, then a quiet indigo
 glow while transcribing. Accent colors match the shared Hey Boss design tokens.
@@ -66,6 +85,11 @@ hey-talk overlay show
 hey-talk history show
 hey-talk history --json
 hey-talk warm
+hey-talk auto                               # Show mode and allowed apps
+hey-talk auto on                            # Also available in the menu or Hyper+V
+hey-talk auto off
+hey-talk auto add com.example.Editor        # Allow another desktop app
+hey-talk auto remove com.example.Editor
 ```
 
 Suppress Enter in specific desktop apps, even with Hyper+R:
@@ -172,6 +196,13 @@ also cover database write failure, paging, audio formats, and unresponsive clien
 Integration tests do not use the mic
 or paste text. The hardware microphone and global shortcut still depend on
 macOS permission and the user's keyboard mapping.
+
+Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
+check recording starts; Escape or focus a search field and check it stops.
+Refocus, dictate, and press Enter: exactly one message should submit and the
+microphone should reopen. Move between inputs while speaking and verify the
+recording continues; leaving them for two seconds should cancel. Also check Hyper+E pastes without submitting,
+Hyper+R submits, and switching fields during transcription prevents delivery.
 
 See [THIRD_PARTY.md](THIRD_PARTY.md) for the retained OpenWhispr, sherpa-onnx,
 ONNX Runtime, and Orukeet licenses.

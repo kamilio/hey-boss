@@ -21,20 +21,21 @@ final class Hotkey {
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &id)
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
             if id.id == 2, pressed { owner.onAction?(.cancel) }
-            else if let shortcut = DictationShortcut(rawValue: Int(id.id)) {
-                let action = pressed ? owner.state.keyDown(code: shortcut.keyCode, hyper: true, repeated: false) : owner.state.keyUp(code: shortcut.keyCode)
+            else {
+                let action = pressed ? owner.state.keyDown(code: Int(id.id), hyper: true, repeated: false) : owner.state.keyUp(code: Int(id.id))
                 if action != .none { owner.onAction?(action) }
             }
             return noErr
         }, 2, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        for shortcut in DictationShortcut.allCases {
+        let codes = DictationShortcut.allCases.map(\.keyCode) + [9] // Hyper+V toggles Auto.
+        for code in codes {
             var ref: EventHotKeyRef?
-            let id = EventHotKeyID(signature: 0x48544C4B, id: UInt32(shortcut.keyCode))
-            if RegisterEventHotKey(UInt32(shortcut.keyCode), UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &ref) == noErr, let ref {
+            let id = EventHotKeyID(signature: 0x48544C4B, id: UInt32(code))
+            if RegisterEventHotKey(UInt32(code), UInt32(controlKey | cmdKey | optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &ref) == noErr, let ref {
                 shortcuts.append(ref)
             }
         }
-        registered = shortcuts.count == DictationShortcut.allCases.count
+        registered = shortcuts.count == codes.count
     }
     func captureEscape(_ capture: Bool) {
         if capture, escape == nil {
@@ -76,7 +77,9 @@ enum PasteBlockReason: String {
 }
 
 enum Paste {
+    static let eventTag: Int64 = 0x48544C4B
     static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool,
+                        targetStillFocused: @escaping () -> Bool = { true },
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
         let board = NSPasteboard.general
         board.clearContents()
@@ -86,6 +89,7 @@ enum Paste {
             targetAlive: target.map { !$0.isTerminated } ?? false,
             targetIsSelf: target?.processIdentifier == getpid(),
             targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
+                ?? (targetStillFocused() ? nil : .focusChanged)
         }, isCurrent: isCurrent, post: post, afterPaste: { action in
             // Let the receiving app consume the paste before sending Return.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: action)
@@ -111,6 +115,8 @@ enum Paste {
               let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return false }
         down.flags = flags; up.flags = flags
+        down.setIntegerValueField(.eventSourceUserData, value: eventTag)
+        up.setIntegerValueField(.eventSourceUserData, value: eventTag)
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
         return true
     }

@@ -5,6 +5,7 @@ enum TalkDesign {
     static let accent = adaptive(light: 0x4655b5, dark: 0xa1afff)
     static let onAccent = adaptive(light: 0xffffff, dark: 0x18204c)
     static let active = adaptive(light: 0x168179, dark: 0x80cfca)
+    static let automatic = adaptive(light: 0x8250ad, dark: 0xd4b0ff)
     static let idleSize = NSSize(width: 56, height: 36)
     static let recordingSize = NSSize(width: 104, height: 36)
     private static func adaptive(light: UInt32, dark: UInt32) -> NSColor {
