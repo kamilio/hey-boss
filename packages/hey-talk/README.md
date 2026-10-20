@@ -33,8 +33,8 @@ It expands to show live teal audio levels while recording, then a quiet indigo
 glow while transcribing. Accent colors match the shared Hey Boss design tokens.
 macOS 26 uses native Liquid Glass with a fine reflective edge and soft shadow;
 macOS 15–25 uses a native translucent surface. There is no web renderer or account.
-Bluetooth microphones use the visual cue alone: playing a sound can switch the
-headset's audio profile and interrupt capture.
+Recording is silent on every microphone. The capsule provides the start and stop
+indicators.
 
 ## Build and run
 
