@@ -58,6 +58,61 @@ fn pause(stop: &AtomicBool, millis: u64) -> bool {
     true
 }
 
+// Keep newly changed issues ahead of historical backfill. Failed archives are
+// excluded so their retry delay does not prevent other issues being indexed.
+pub(super) fn enqueue_backfill(
+    db: &Connection,
+    cache: &rusqlite::Connection,
+    excluded: &str,
+    should_yield: impl Fn() -> bool,
+) -> Result<()> {
+    let queued: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_search_dirty d WHERE dirty=1 AND NOT EXISTS(SELECT 1 FROM json_each(?1) e WHERE json_extract(e.value,'$[0]')=d.project AND json_extract(e.value,'$[1]')=d.number))",
+        [excluded],
+        |r| r.get(0),
+    )?;
+    if queued
+        || cache.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='backfill_done')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(());
+    }
+    let saved: Option<String> = cache
+        .query_row(
+            "SELECT value FROM meta WHERE key='backfill_cursor'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let (project, number): (String, i64) = saved
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    let batch = db.query_collect("SELECT project_id,number FROM issues WHERE (project_id,number)>(?1,?2) ORDER BY project_id,number LIMIT 8", params![project,number], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?;
+    for (p, n) in &batch {
+        if should_yield() {
+            return Ok(());
+        }
+        db.execute("INSERT INTO issue_search_dirty VALUES(?1,?2,1,1) ON CONFLICT(project,number) DO UPDATE SET dirty=1", params![p,n])?;
+    }
+    if let Some(last) = batch.last() {
+        cache.execute(
+            "INSERT OR REPLACE INTO meta VALUES('backfill_cursor',?1)",
+            [serde_json::to_string(last)?],
+        )?;
+    } else {
+        cache.execute(
+            "INSERT OR REPLACE INTO meta VALUES('backfill_done','1')",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn start(path: PathBuf, stop: Arc<AtomicBool>, busy: Busy) -> JoinHandle<()> {
     std::thread::spawn(move || {
         background_priority();
@@ -82,46 +137,13 @@ pub(crate) fn start(path: PathBuf, stop: Arc<AtomicBool>, busy: Busy) -> JoinHan
             let result = (|| -> Result<usize> {
                 let db = Connection::connect(&path)?;
                 let cache = index::open(&path, true)?;
-                // Populate the local queue a few rows at a time. Persisting the cursor
-                // makes initial indexing resumable, including partially indexed threads.
-                if !cache.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key='backfill_done')",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )? {
-                    let saved: Option<String> = cache
-                        .query_row(
-                            "SELECT value FROM meta WHERE key='backfill_cursor'",
-                            [],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    let (project, number): (String, i64) = saved
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()?
-                        .unwrap_or_default();
-                    let batch = db.query_collect("SELECT project_id,number FROM issues WHERE (project_id,number)>(?1,?2) ORDER BY project_id,number LIMIT 8", params![project,number], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,i64>(1)?)))?;
-                    for (p, n) in &batch {
-                        if busy() || stop.load(Ordering::Acquire) {
-                            return Ok(0);
-                        }
-                        db.execute("INSERT INTO issue_search_dirty VALUES(?1,?2,1,1) ON CONFLICT(project,number) DO UPDATE SET dirty=1", params![p,n])?;
-                    }
-                    if let Some(last) = batch.last() {
-                        cache.execute(
-                            "INSERT OR REPLACE INTO meta VALUES('backfill_cursor',?1)",
-                            [serde_json::to_string(last)?],
-                        )?;
-                    } else {
-                        cache.execute(
-                            "INSERT OR REPLACE INTO meta VALUES('backfill_done','1')",
-                            [],
-                        )?;
-                    }
-                }
                 failures.retain(|_, at| *at > crate::issues::worker::now());
                 let excluded = serde_json::to_string(&failures.keys().collect::<Vec<_>>())?;
+                // Populate the local queue a few rows at a time. Persisting the cursor
+                // makes initial indexing resumable, including partially indexed threads.
+                enqueue_backfill(&db, &cache, &excluded, || {
+                    busy() || stop.load(Ordering::Acquire)
+                })?;
                 // Round-robin pages prevent long conversations or failed archives
                 // from starving newer edits. Exclude failures before the LIMIT.
                 let sql = "SELECT project,number,generation FROM issue_search_dirty d WHERE dirty=1 AND (project,number)>(?1,?2) AND NOT EXISTS(SELECT 1 FROM json_each(?3) e WHERE json_extract(e.value,'$[0]')=d.project AND json_extract(e.value,'$[1]')=d.number) ORDER BY project,number LIMIT 8";
