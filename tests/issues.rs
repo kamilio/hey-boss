@@ -1934,7 +1934,7 @@ fn issue_search_defaults_to_active_title_and_description_matches() {
             .map(|issue| issue["number"].as_i64().unwrap())
             .collect::<Vec<_>>()
     };
-    let found = f.run("a", &["search", "reconnect"]);
+    let found = f.run("a", &["search", "--literal", "reconnect"]);
     assert_eq!(numbers(&found), vec![1, 2, 3]);
     assert!(
         found["issues"]
@@ -1944,7 +1944,7 @@ fn issue_search_defaults_to_active_title_and_description_matches() {
             .all(|issue| issue.get("body").is_none())
     );
     assert_eq!(
-        numbers(&f.run("a", &["search", "reconnect", "--state", "all"])),
+        numbers(&f.run("a", &["search", "--literal", "reconnect", "--state", "all"])),
         vec![1, 2, 3, 4]
     );
     for (state, expected) in [
@@ -1955,7 +1955,7 @@ fn issue_search_defaults_to_active_title_and_description_matches() {
         ("deleted", 5),
     ] {
         assert_eq!(
-            numbers(&f.run("a", &["search", "reconnect", "--state", state])),
+            numbers(&f.run("a", &["search", "--literal", "reconnect", "--state", state])),
             vec![expected]
         );
     }
@@ -1967,7 +1967,7 @@ fn issue_search_defaults_to_active_title_and_description_matches() {
         numbers(&f.run("a", &["list", "--search", "reconnect", "--state", "active"])),
         vec![1, 2, 3]
     );
-    assert!(numbers(&f.run("a", &["search", "absent"])).is_empty());
+    assert!(numbers(&f.run("a", &["search", "--literal", "absent"])).is_empty());
 }
 
 #[test]
@@ -1987,46 +1987,46 @@ fn issue_search_preserves_literal_matching_filters_and_pagination() {
     );
     let first = f.run(
         "a",
-        &["search", "100%_done 🦀", "--label", "cli", "--limit", "1"],
+        &["search", "--literal", "100%_done 🦀", "--label", "cli", "--limit", "1"],
     );
     assert_eq!(first["issues"][0]["number"], 1);
     assert_eq!(first["next_offset"], 1);
     let next = f.run(
         "a",
-        &["search", "100%_done 🦀", "--limit", "1", "--offset", "1"],
+        &["search", "--literal", "100%_done 🦀", "--limit", "1", "--offset", "1"],
     );
     assert_eq!(next["issues"][0]["number"], 2);
     assert!(next["next_offset"].is_null());
     assert_eq!(
-        f.run("a", &["search", "100%_done 🦀", "--all"])["issues"]
+        f.run("a", &["search", "--literal", "100%_done 🦀", "--all"])["issues"]
             .as_array()
             .unwrap()
             .len(),
         2
     );
     assert!(
-        f.run("a", &["search", "100%_done 🦀", "--label", "missing"])["issues"]
+        f.run("a", &["search", "--literal", "100%_done 🦀", "--label", "missing"])["issues"]
             .as_array()
             .unwrap()
             .is_empty()
     );
     f.run("a", &["claim", "1"]);
     for filter in [&["--mine"][..], &["--assignee", "a"][..]] {
-        let mut args = vec!["search", "100%_done 🦀"];
+        let mut args = vec!["search", "--literal", "100%_done 🦀"];
         args.extend_from_slice(filter);
         let found = f.run("a", &args);
         assert_eq!(found["issues"].as_array().unwrap().len(), 1);
         assert_eq!(found["issues"][0]["number"], 1);
     }
-    let unassigned = f.run("a", &["search", "100%_done 🦀", "--unassigned"]);
+    let unassigned = f.run("a", &["search", "--literal", "100%_done 🦀", "--unassigned"]);
     assert_eq!(unassigned["issues"].as_array().unwrap().len(), 1);
     assert_eq!(unassigned["issues"][0]["number"], 2);
-    f.fail("a", &["search", " "], 2);
-    f.fail("a", &["search", &"x".repeat(1025)], 2);
+    f.fail("a", &["search", "--literal", " "], 2);
+    f.fail("a", &["search", "--literal", &"x".repeat(1025)], 2);
     for args in [
         vec!["search"],
-        vec!["search", "x", "--mine", "--unassigned"],
-        vec!["search", "x", "--all", "--limit", "1"],
+        vec!["search", "--literal", "x", "--mine", "--unassigned"],
+        vec!["search", "--literal", "x", "--all", "--limit", "1"],
     ] {
         assert_eq!(f.cmd("a", &args).output().unwrap().status.code(), Some(2));
     }
@@ -4337,4 +4337,19 @@ fn markdown_file_import_remains_a_one_time_body_import() {
     fs::write(f.cwd.join("body.md"), "# Changed file").unwrap();
     let ready = f.run("a", &["undraft", "1"]);
     assert_eq!(ready["issue"]["body"], "# Body heading\n\nOriginal body");
+}
+
+#[test]
+fn ranked_search_is_opt_in_and_exact_issue_numbers_win() {
+    let f=Fixture::new();
+    let _owner=hey_boss::database::Owner::host(&f.db).unwrap();
+    f.run("a", &["create","--title","Reconnect after sleep","--body","Network failure"]);
+    assert_eq!(f.run("a", &["search-index"])["search_index"]["enabled"],false);
+    assert_eq!(f.run("a", &["search","Network"])["issues"][0]["number"],1);
+    assert_eq!(f.run("a", &["search-index","--enable"])["search_index"]["enabled"],true);
+    let ranked=f.run("a", &["search","#1"]);
+    assert_eq!(ranked["issues"][0]["number"],1);
+    assert_eq!(ranked["issues"][0]["match"]["field"],"title");
+    f.run("a", &["search-index","--disable"]);
+    assert_eq!(f.run("a", &["search","Network"])["search"]["enabled"],false);
 }

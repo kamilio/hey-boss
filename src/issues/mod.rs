@@ -18,6 +18,7 @@ pub(crate) mod project_features;
 pub(crate) mod provenance;
 pub mod remote;
 mod reviewed_evidence;
+pub mod search;
 mod store;
 pub mod web;
 pub mod worker;
@@ -376,6 +377,14 @@ pub enum Operation {
         command: String,
     },
     Whoami,
+    /// Machine-local preference; never replicated or routed as an issue write.
+    SearchIndex {
+        enabled: Option<bool>,
+    },
+    Search {
+        #[serde(flatten)]
+        options: search::Options,
+    },
     List {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         compact: bool,
@@ -667,6 +676,8 @@ impl Operation {
                 | Self::WorkerRun { .. }
                 | Self::Whoami
                 | Self::List { .. }
+                | Self::SearchIndex { .. }
+                | Self::Search { .. }
                 | Self::View { .. }
                 | Self::ViewCompact { .. }
                 | Self::InspectAttempt { .. }
@@ -680,6 +691,12 @@ impl Operation {
         )
     }
     pub fn needs_actor(&self) -> bool {
+        if let Self::Search { options } = self {
+            return options.mine;
+        }
+        if let Self::SearchIndex { enabled } = self {
+            return enabled.is_some();
+        }
         self.writes()
             || matches!(
                 self,
@@ -715,6 +732,8 @@ impl Operation {
             | Self::WorkerControl { .. }
             | Self::Whoami
             | Self::List { .. }
+            | Self::SearchIndex { .. }
+            | Self::Search { .. }
             | Self::Create { .. } => None,
             Self::PullRequests { number }
             | Self::AddPullRequest { number, .. }
