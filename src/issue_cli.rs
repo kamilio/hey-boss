@@ -46,6 +46,11 @@ pub struct GlobalOptions {
 #[derive(Subcommand)]
 enum GlobalSettingsAction {
     Show,
+    /// Shared dictation hints; quote phrases containing spaces.
+    Vocabulary {
+        #[command(subcommand)]
+        action: Option<VocabularyAction>,
+    },
     Set {
         #[arg(long)]
         boss_name: Option<String>,
@@ -59,9 +64,46 @@ enum GlobalSettingsAction {
         if_version: Option<i64>,
     },
 }
+#[derive(Subcommand)]
+enum VocabularyAction {
+    Add {
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
+    Remove {
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
+    #[command(hide = true)]
+    Initialize {
+        #[arg(long)]
+        file: PathBuf,
+    },
+}
 pub fn run_global(options: &GlobalOptions) -> Result<()> {
     let operation = match &options.action {
         GlobalSettingsAction::Show => Operation::GlobalSettings,
+        GlobalSettingsAction::Vocabulary { action } => Operation::DictationVocabulary {
+            operation: match action {
+                None => issues::vocabulary::Operation::Show,
+                Some(VocabularyAction::Add { words }) => issues::vocabulary::Operation::Add {
+                    words: words.clone(),
+                },
+                Some(VocabularyAction::Remove { words }) => issues::vocabulary::Operation::Remove {
+                    words: words.clone(),
+                },
+                Some(VocabularyAction::Initialize { file }) => {
+                    let text = read_text(std::fs::File::open(file)?, 65_792)?;
+                    issues::vocabulary::Operation::Initialize {
+                        words: text
+                            .lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .map(str::to_owned)
+                            .collect(),
+                    }
+                }
+            },
+        },
         GlobalSettingsAction::Set {
             boss_name,
             auto_close_merged_prs,
@@ -1596,6 +1638,15 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if let Some(words) = value["vocabulary"].as_array() {
+        for word in words {
+            println!("{}", word.as_str().unwrap_or(""));
+        }
+        if words.is_empty() {
+            println!("No vocabulary hints.");
+        }
+        return;
+    }
     if let Some(index) = value.get("search_index") {
         println!(
             "Smart search on this machine: {}",

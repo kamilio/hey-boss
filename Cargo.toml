@@ -47,6 +47,7 @@ flate2 = { version = "1.1.10", default-features = false, features = ["rust_backe
 serde_yaml_ng = "0.10.0"
 jiff = "0.2.38"
 ammonia = "4.1.2"
+unicode-normalization = "0.1"
 
 [profile.release]
 lto = true

@@ -98,6 +98,7 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
     }
     let identity = request.actor.as_ref().map(|actor| actor.id.as_str());
     let mut result = match &request.operation {
+        Operation::DictationVocabulary { operation } => super::vocabulary::execute(db, operation)?,
         Operation::GlobalSettings => read(db)?,
         Operation::ConfigureGlobal {
             quiet_hours,
@@ -126,12 +127,14 @@ pub(super) fn execute(db: &Connection, request: &Request) -> Result<Value> {
         }
         _ => return Err(Error::invalid("Unknown global settings operation")),
     };
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let cwd = std::env::current_dir().ok();
-    result["skills"] = home
+    if !matches!(request.operation, Operation::DictationVocabulary { .. }) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let cwd = std::env::current_dir().ok();
+        result["skills"] = home
         .as_deref()
         .map(|h| crate::skill::audit_report(h, cwd.as_deref()))
         .unwrap_or_else(|| json!({"global_skills":[],"project_skills":[],"selected":[],"max_lines_policy":crate::skill::SKILL_MAX_LINES}));
+    }
     if let (Some(key), Some(actor)) = (&request.request_id, identity) {
         db.execute("INSERT INTO global_settings_requests(actor,request_id,payload,response) VALUES(?1,?2,?3,?4)",params![actor,key,payload,serde_json::to_string(&result)?])?;
     }

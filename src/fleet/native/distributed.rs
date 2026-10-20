@@ -147,7 +147,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             tx.commit()?;
         }
         // Additive protocol data needs capture on already-enrolled replicas too.
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT')", [], |r|r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT')", [], |r|r.get::<_,bool>(0))? {
             let tx=db.unchecked_transaction()?;
             capture::install(&tx)?;
             tx.commit()?;
@@ -250,7 +250,7 @@ pub(super) fn baseline(
             controller
                 || matches!(
                     **table,
-                    "worker_runs" | "scheduled_job_runs" | "worker_allocations"
+                    "worker_runs" | "scheduled_job_runs" | "worker_allocations" | "dictation_vocabulary"
                 )
         })
         .copied()
