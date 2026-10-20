@@ -3,6 +3,7 @@ import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, appendFileSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 const provider = process.env.HEY_BOSS_FIXTURE_PROVIDER;
 const args = process.argv.slice(2);
 if (provider === 'codex') {
@@ -12,6 +13,7 @@ if (provider === 'codex') {
 }
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 let session = process.env.HEY_BOSS_FIXTURE_SESSION_ID ?? '00000000-0000-0000-0000-000000000001';
+if (process.env.HEY_BOSS_FIXTURE_FRESH_THREADS) session = randomUUID();
 let file;
 let selectedModel = args.includes('--model') ? args[args.indexOf('--model') + 1] : 'default-model';
 let selectedRoute = 'proxy';
@@ -193,6 +195,7 @@ for await (const chunk of process.stdin) {
     if (r.method === 'initialized') continue;
     let result = {};
     if (r.method === 'thread/start' || r.method === 'thread/resume') {
+      if (process.env.HEY_BOSS_FIXTURE_FRESH_THREADS && r.method === 'thread/resume') session = p.threadId;
       if (p.approvalPolicy !== 'on-request' || p.approvalsReviewer !== 'auto_review' || p.sandbox !== 'workspace-write') throw new Error('Thread must explicitly use Auto permissions, including on resume');
       checkModel(p.model ?? 'default-model');
       if (modelFailure === 'reject') { send({id:r.id,error:{code:-32000,message:'Requested model unavailable'}}); continue; }

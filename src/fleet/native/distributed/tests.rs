@@ -736,6 +736,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             machines: Vec::new(),
             all_machines: false,
             each_machine: false,
+            thread_mode: Default::default(),
         },
         markdown: include_str!("../../../jobs/fixtures/original.md").into(),
         enabled: true,

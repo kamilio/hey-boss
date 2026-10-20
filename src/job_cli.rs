@@ -40,6 +40,9 @@ struct Fields {
     /// Logical model name, preserved in every execution snapshot.
     #[arg(long)]
     model: String,
+    /// Start a new thread (default), or resume this job's previous thread on this machine.
+    #[arg(long, value_enum, default_value = "new")]
+    thread_mode: hey_boss::jobs::ThreadMode,
     /// Restrict to these fleet node IDs in fallback order; repeat for each machine.
     #[arg(long = "machine", value_name = "NODE_ID")]
     machines: Vec<String>,
@@ -58,6 +61,7 @@ impl Fields {
             timezone: self.timezone.clone(),
             harness: self.harness.name().into(),
             model: self.model.clone(),
+            thread_mode: self.thread_mode,
             machines: self.machines.clone(),
             all_machines: self.all_machines,
             each_machine: self.each_machine,
@@ -420,6 +424,14 @@ fn print_job(job: &Value) {
         d["timezone"].as_str().unwrap_or(""),
         d["harness"].as_str().unwrap_or(""),
         d["model"].as_str().unwrap_or("")
+    );
+    println!(
+        "  Thread: {}",
+        if d["thread_mode"] == "resume" {
+            "resume previous"
+        } else {
+            "new for every run"
+        }
     );
     if d["all_machines"] == true {
         println!("  Machines: all fleet machines (one execution each)");

@@ -2,6 +2,18 @@ use super::*;
 use crate::jobs::Definition;
 const ORIGINAL: &str = include_str!("fixtures/original.md");
 const REVISED: &str = include_str!("fixtures/revised.md");
+
+#[test]
+fn legacy_job_definitions_keep_fresh_threads_and_immutable_serialization() {
+    let original = serde_json::to_value(definition()).unwrap();
+    assert!(original.get("thread_mode").is_none());
+    let decoded: Definition = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(decoded.thread_mode, crate::jobs::ThreadMode::New);
+    assert_eq!(serde_json::to_value(decoded).unwrap(), original);
+    let mut invalid = original;
+    invalid["thread_mode"] = json!("latest");
+    assert!(serde_json::from_value::<Definition>(invalid).is_err());
+}
 struct Fixture {
     store: Store,
     root: PathBuf,
@@ -57,6 +69,7 @@ fn definition() -> Definition {
         machines: Vec::new(),
         all_machines: false,
         each_machine: false,
+        thread_mode: Default::default(),
     }
 }
 fn request(op: JobOperation) -> Request {
