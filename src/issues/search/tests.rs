@@ -176,7 +176,7 @@ fn cached_semantics_find_paraphrases_without_network() {
     cache
         .execute(
             "INSERT INTO embeddings SELECT DISTINCT hash,?1 FROM passages",
-            [index::bytes(&v)],
+            [index::compact(&v)],
         )
         .unwrap();
     cache
@@ -241,4 +241,52 @@ fn long_threads_resume_after_restart_and_edits_reset_the_cursor() {
     .unwrap();
     f.index();
     assert_eq!(numbers(&f.search("edited_tail")), vec![n]);
+}
+
+#[test]
+fn compact_vectors_preserve_cosine_and_keep_storage_bounded() {
+    let mut q: Vec<f32> = (0..index::DIMENSIONS)
+        .map(|i| ((i * 7 % 31) as f32 - 15.0) / 200.0)
+        .collect();
+    let norm = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+    for v in &mut q {
+        *v /= norm;
+    }
+    let compact = index::compact(&q);
+    assert_eq!(compact.len(), index::DIMENSIONS + 4);
+    // Quantization retains at least 99% cosine agreement with the original.
+    let restored: Vec<_> = compact[..index::DIMENSIONS]
+        .iter()
+        .map(|v| *v as i8 as f32)
+        .collect();
+    let norm = restored.iter().map(|v| v * v).sum::<f32>().sqrt();
+    assert!(
+        q.iter()
+            .zip(&restored)
+            .map(|(a, b)| a * b / norm)
+            .sum::<f32>()
+            > 0.99
+    );
+}
+
+#[test]
+fn cache_format_changes_rebuild_derived_data_and_keep_opt_in() {
+    let mut f = Fixture::new();
+    f.add("Reconnect", "");
+    f.index();
+    let source = f.root.join("issues.db");
+    let cache = index::open(&source, true).unwrap();
+    cache
+        .execute("UPDATE meta SET value='old-model' WHERE key='identity'", [])
+        .unwrap();
+    drop(cache);
+    let cache = index::open(&source, true).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT count(*) FROM passages", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(super::enabled(&source));
+    assert_eq!(numbers(&f.search("reconnect")), vec![1]);
 }

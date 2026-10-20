@@ -274,7 +274,7 @@ fn embedding_loop(path: &Path, stop: &AtomicBool, busy: &Busy) {
             for ((hash, _), vector) in todo.iter().zip(vectors) {
                 tx.execute(
                     "INSERT OR IGNORE INTO embeddings VALUES(?1,?2)",
-                    params![hash, index::bytes(&vector)],
+                    params![hash, index::compact(&vector)],
                 )?;
             }
             tx.commit()?;
