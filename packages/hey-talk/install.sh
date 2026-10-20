@@ -1,5 +1,5 @@
 #!/bin/bash
-# Explicit, on-demand installation on the current Mac. No launch agent.
+# Install on the current Mac and start at login.
 set -euo pipefail
 cd "$(dirname "$0")"
 ./build.sh
@@ -40,4 +40,5 @@ fi
 mv "$stage" "$destination"
 rmdir "$staging_root"
 ln -sfn "$destination/Contents/MacOS/hey-talk" "$HOME/.local/bin/hey-talk"
-printf 'Installed %s\nRun ~/.local/bin/hey-talk --help. Nothing starts at login.\n' "$destination"
+./install-login.sh
+printf 'Installed %s\nRun ~/.local/bin/hey-talk --help.\n' "$destination"
