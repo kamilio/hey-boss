@@ -15,8 +15,8 @@ CREATE VIEW issue_pickup_ready AS
  ))
  AND (i.blockers='[]' OR NOT EXISTS(SELECT 1 FROM json_each(i.blockers) link LEFT JOIN issues dependency ON dependency.project_id=i.project_id AND dependency.number=link.value WHERE dependency.number IS NULL OR (dependency.deleted_at IS NULL AND dependency.state NOT IN ('closed','ready'))))
  AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL)
- AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.id=(
-  SELECT latest.id FROM worker_runs latest WHERE latest.project_id=i.project_id AND latest.issue_number=i.number AND latest.finished_at IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM worker_retry_history r WHERE r.id=(
+  SELECT latest.id FROM worker_retry_history latest WHERE latest.project_id=i.project_id AND latest.issue_number=i.number
   ORDER BY latest.finished_at DESC,latest.started_at DESC,latest.id DESC LIMIT 1)
   AND r.state!='completed' AND r.retry_allowed=0 AND (
    r.summary LIKE 'Codex needs input or approval:%'

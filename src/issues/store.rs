@@ -1327,7 +1327,7 @@ impl Store {
                 || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?
                 || prior_readiness
                     .as_ref()
-                    .is_none_or(|sql| !sql.contains("coalesce(r.retry_at")));
+                    .is_none_or(|sql| !sql.contains("worker_retry_history")));
         if version < SCHEMA_VERSION || needs_repair {
             db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
@@ -1496,6 +1496,7 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='file_attachment_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(crate::attachments::SCHEMA)?; }
         project_names::migrate(&db)?;
         project_names::reconcile_git_metadata(&db)?;
+        super::worker_retry::migrate(&db)?;
         super::blockers::migrate(&mut db)?;
         super::dependency_notices::migrate(&db)?;
         if needs_readiness_refresh {
@@ -3435,7 +3436,7 @@ fn mutate(
                 ));
             }
             let retry_hold = issue.assignee.is_none() && db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM worker_runs WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state!='completed' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM worker_retry_history WHERE id=(SELECT id FROM worker_retry_history WHERE project_id=?1 AND issue_number=?2 ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND state!='completed' AND retry_allowed=0) AND NOT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",
                 params![project.id, number], |r| r.get(0),
             )?;
             if *clear_manual_hold {

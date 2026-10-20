@@ -84,7 +84,7 @@ impl Store {
 
 fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
     let previous: Option<(i64, bool, String)> = db.query_row(
-        "SELECT retry_count,retry_allowed,state FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1",
+        "SELECT retry_count,retry_allowed,state FROM worker_retry_history WHERE project_id=?1 AND issue_number=?2 ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1",
         params![job.project.id,job.number()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional()?;
     let Some((count, reset, state)) = previous else {
@@ -98,7 +98,7 @@ fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
     }
     // Older attempts predate the counter. Four consecutive failures already
     // reach the delay cap; never scan an unbounded run history during pickup.
-    let history = db.prepare("SELECT state,retry_allowed FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 4")?.query_map(params![job.project.id,job.number()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let history = db.prepare("SELECT state,retry_allowed FROM worker_retry_history WHERE project_id=?1 AND issue_number=?2 ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 4")?.query_map(params![job.project.id,job.number()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,bool>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(1 + history
         .iter()
         .take_while(|(state, reset)| state != "completed" && !reset)
