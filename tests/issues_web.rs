@@ -1552,6 +1552,20 @@ fn main_navigation_includes_mindmaps_on_every_page() {
 }
 
 #[test]
+fn secrets_are_in_the_shared_global_menu_on_every_page() {
+    let web = Web::start();
+    for path in ["/", "/workers", "/mm", "/jobs", "/skills", "/artifacts", "/admin", "/secrets"] {
+        let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
+        let global = html.split("id=\"navigation-more-links\"").nth(1).unwrap().split("</nav>").next().unwrap();
+        assert!(global.contains("id=\"nav-secrets\" href=\"/secrets\""), "Missing global Secrets link on {path}");
+        let project = html.split("aria-label=\"Main navigation\"").nth(1).unwrap().split("</nav>").next().unwrap();
+        assert!(!project.contains("nav-secrets"), "Secrets must not be a project tab on {path}");
+        assert_eq!(html.matches("id=\"nav-secrets\"").count(), 1);
+        assert_eq!(global.contains("id=\"nav-secrets\" href=\"/secrets\" aria-current=\"page\""), path == "/secrets");
+    }
+}
+
+#[test]
 fn mindmap_assets_reads_and_authoring_boundary() {
     let web = Web::start();
     for (path, kind) in [

@@ -1,5 +1,6 @@
 (() => {
   const $ = id => document.getElementById(id);
+  HeyBossUI.icons();
   let inventory = null, selected = null, filter = 'active';
   const node = (tag, text, cls) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (cls) el.className = cls; return el; };
   const machine = id => inventory.machines.find(m => m.machine.id === id)?.machine.label || id.slice(0, 12);
@@ -56,6 +57,21 @@
   document.querySelectorAll('[data-filter]').forEach(button => button.onclick = () => {
     filter = button.dataset.filter;
     document.querySelectorAll('[data-filter]').forEach(b => b.setAttribute('aria-pressed', String(b === button))); render();
+  });
+  async function navigation() {
+    const response = await fetch('/api/bootstrap', { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+    const boot = await response.json();
+    if (!response.ok || !boot.ok) throw new Error('Could not load navigation');
+    const projects = boot.projects || [];
+    const initial = HeyBossUI.projectId(boot.project?.id || projects[0]?.id);
+    const picker = new HeyBossUI.ProjectPicker({ onSelect(id) {
+      // Project context only controls links back to project pages. Inventory is global.
+      picker.update(projects, projects.find(p => p.id === id) || null);
+    } });
+    picker.update(projects, projects.find(p => p.id === initial) || boot.project || projects[0] || null);
+  }
+  navigation().catch(() => {
+    $('connection').querySelector('span').textContent = 'Navigation unavailable';
   });
   load();
 })();
