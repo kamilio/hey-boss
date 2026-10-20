@@ -2,6 +2,7 @@ mod access;
 mod claude_auth;
 mod codex_auth;
 mod config;
+mod embed_cli;
 mod gemini_cli;
 #[cfg(test)]
 mod mode_tests;
@@ -33,6 +34,8 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Embed JSON from stdin through this proxy's configured OpenAI connection.
+    Embed(embed_cli::Args),
     /// Inspect configured provider routes without credentials, requests or profile changes
     ResolveRoute {
         model: String,
@@ -148,6 +151,9 @@ fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Embed(embedding)) = args.command {
+        return embed_cli::run(embedding, args.config).await;
+    }
     if let Some(Command::Usage(usage)) = args.command {
         return usage_cli::run(usage, args.config).await;
     }
