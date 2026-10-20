@@ -1,9 +1,10 @@
 // Isolated native and paired issue UI. Stop with Ctrl+C to remove the fixture.
 import {mkdtempSync, rmSync, existsSync, realpathSync} from 'node:fs';
-import {spawn} from 'node:child_process';
+import {spawn, execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
 import {createApp} from '../mobile/server/index.mjs';
 import {HubStore} from '../mobile/server/store.mjs';
 
@@ -13,6 +14,7 @@ const env = {...process.env, HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:ro
   HEY_BOSS_INBOX_SOCKET:join(root, 'inbox.sock'), HEY_BOSS_AGENT_ID:'human:boss'};
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','CODEX_THREAD_ID']) delete env[key];
 const binary = resolve('target/debug/hey-boss');
+const initProject = name => execFileSync(binary, ['project','init','--project',name,'--prs','false','--worktree','false','--yes','--json'], {env,cwd:root,stdio:'pipe'});
 const children = [];
 const start = args => {
   const child = spawn(binary, args, {env, stdio:['ignore','inherit','inherit']});
@@ -32,7 +34,8 @@ async function close() {
   server?.close();
   await Promise.all(children.map(child => new Promise(resolve => {
     if (child.exitCode !== null || child.signalCode !== null) return resolve();
-    child.once('exit', resolve);
+    const timeout = setTimeout(() => child.kill('SIGKILL'), 5000);
+    child.once('exit', () => {clearTimeout(timeout);resolve();});
     child.kill('SIGTERM');
   })));
   store?.close();
@@ -46,6 +49,7 @@ try {
     if (attempt === 200 || owner.exitCode !== null) throw Error('Fixture database did not start');
     await new Promise(resolve=>setTimeout(resolve,50));
   }
+  initProject('Quick action QA');
   start(['issue','--project','Quick action QA','web','--port','59639','--no-discovery','--json']);
   const native='http://127.0.0.1:59639', paired='http://127.0.0.1:52039';
   let boot;
@@ -58,6 +62,19 @@ try {
   const headers={'Content-Type':'application/json',Authorization:'Bearer '+'synthetic-quick-actions-fixture'.repeat(2)};
   app=createApp({store,hubToken:'synthetic-quick-actions-fixture'.repeat(2),origin:paired,secure:false});
   app.get('/fixture-pairing',(_req,res)=>res.json({code:store.pairing()}));
+  app.post('/fixture-project',(_req,res)=>{
+    const name='Quick actions '+Date.now();
+    initProject(name);
+    res.json({project:'named:'+name});
+  });
+  app.post('/fixture-hold',(req,res)=>{
+    const db=new DatabaseSync(database);
+    try {
+      db.exec('PRAGMA busy_timeout=5000');
+      db.prepare('UPDATE issues SET manual_blocked=1,version=version+1 WHERE project_id=? AND number=7 AND state=\'blocked\'').run(req.body.project);
+      res.json({ok:true});
+    } finally {db.close();}
+  });
   server=app.listen(52039,'127.0.0.1');
   async function relay() {
     try {

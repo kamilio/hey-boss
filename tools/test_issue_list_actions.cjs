@@ -19,7 +19,15 @@ assert.ok(actions({state:'blocked',blocked_by:[{number:2}]}).find(a=>a.action===
 assert.deepEqual(ids({state:'closed'}), ['view','copy','reopen']);
 assert.deepEqual(ids({deleted_at:1}), ['view','copy','restore']);
 assert.equal(actions({state:'closed'}).find(a=>a.action==='reopen').label, 'Reopen issue');
-console.log('COMPLETE: 11/11 issue list action state checks');
+assert.deepEqual(ids({state:'ready',assignee:'human:boss'}), ['view','copy','reopen','unassign','close']);
+assert.deepEqual(ids({state:'ready',draft:true}), ['view','copy','reopen','close']);
+assert.deepEqual(ids({state:'blocked',manual_blocked:true,blocked_by:[{number:2}]}), ['view','copy','clear_manual_hold','draft','close']);
+assert.equal(actions({state:'blocked',manual_blocked:true}).find(a=>a.action==='clear_manual_hold').label, 'Release hold');
+assert.deepEqual(ids({attempt_hold:{host:'test-machine'}}), ['view','copy']);
+context.model.drafts_enabled=false;
+assert.deepEqual(ids({}), ['view','copy','assign_boss','close','block']);
+assert.ok(ids({draft:true}).includes('undraft'), 'Existing drafts can still be marked ready when drafts are disabled');
+console.log('COMPLETE: 18/18 issue list action state checks');
 
 const actionStart = source.indexOf('async function performAction(');
 const calls = [], confirmations = [];
@@ -45,7 +53,9 @@ vm.runInContext(source.slice(actionStart, source.indexOf('async function submitC
   assert.equal(calls[1][0].if_version,7,'Reopening checks captured issue version');
   await context.performAction('block',{}, {...target,issue:{...target.issue,assignee:null}});
   assert.equal(calls[2][0].comment,null,'List actions never use hidden detail comments');
+  await context.performAction('clear_manual_hold',{},target);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[3][0])),{action:'reopen',number:12,clear_manual_hold:true,if_version:7},'Releasing a hold keeps the captured version and dependency checks');
   context.mutate=async()=>{throw Error('Connection lost');};
   await assert.rejects(context.performAction('close',{},target),/Connection lost/,'List owner handles failures without refreshing or announcing success');
-  console.log('COMPLETE: 5/5 list mutation ownership and scope checks');
+  console.log('COMPLETE: 6/6 list mutation ownership and scope checks');
 })().catch(error=>{console.error(error);process.exitCode=1;});
