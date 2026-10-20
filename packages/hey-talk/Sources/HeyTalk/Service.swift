@@ -142,7 +142,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             focusMonitor.start(bundleIDs: autoSettings.bundleIDs)
         } else { autoSubmitKey.stop() }
     }
-    private func focusedInputChanged(_ input: FocusedInput?) {
+    private func focusedInputChanged(_ input: FocusedInput?, notice: String? = nil) {
         if automatic != nil {
             automatic?.focusChanged(input, at: ProcessInfo.processInfo.systemUptime)
             if session.phase == .recording {
@@ -163,16 +163,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         let available = autoSettings.enabled && autoTarget == nil && autoRestart == nil && (session.phase == .idle || session.phase == .failed)
         guard focusTrigger.update(input, available: available), let input, autoSubmitKey.start() else { return }
-        start(showOverlay: true, paste: true, focusedInput: input) { _ in }
+        start(showOverlay: true, paste: true, focusedInput: input) { [weak self] result in
+            if result["ok"] as? Bool == true, let notice { self?.overlay?.error(notice) }
+        }
     }
-    private func restartAfterSubmit(id: UInt64) {
+    private func restartAutomatic(id: UInt64, notice: String? = nil) {
         let restart = DispatchWorkItem { [weak self] in
             guard let self, self.session.generation == id else { return }
             self.autoRestart = nil; self.hotkey?.reset()
             guard self.autoSettings.enabled, self.session.phase == .idle,
                   let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs) else { return }
             self.focusTrigger.reset()
-            self.focusedInputChanged(input)
+            self.focusedInputChanged(input, notice: notice)
         }
         autoRestart = restart
         hotkey?.captureEscape(true)
@@ -363,6 +365,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func stop(_ reply: @escaping ([String: Any]) -> Void) {
         guard session.phase == .recording else { reply(failure("No recording is active")); return }
+        guard captureReady else {
+            // An early Enter must not cancel Auto while the microphone opens.
+            if autoTarget == nil { cancel() }
+            reply(failure("Stopped before the microphone was ready")); return
+        }
         if automatic != nil {
             guard let input = FocusedInput.current(bundleIDs: autoSettings.bundleIDs) else {
                 reply(failure("Focus an allowed input before finishing Auto dictation")); return
@@ -373,7 +380,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
         focusGrace?.cancel(); focusGrace = nil
         maximumDuration?.cancel(); maximumDuration = nil
         let id = session.generation
-        guard captureReady else { cancel(); reply(failure("Stopped before the microphone was ready")); return }
         captureReady = false
         do { try session.processing(id) } catch { reply(failure(error.localizedDescription)); return }
         overlay?.update(.processing); pendingReply = reply
@@ -383,7 +389,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let samples):
                 if !self.capture.usesBluetooth { self.cues.stop() }
-                guard samples.count >= 2400 else { self.cancel(); return }
+                guard samples.count >= 2400 else {
+                    if self.autoTarget != nil { self.noSpeechDetected(id: id) } else { self.cancel() }
+                    return
+                }
                 self.decode(samples, id: id)
             }
         }
@@ -395,7 +404,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
-                guard !text.isEmpty else { self.fail("No speech detected. Check your microphone with hey-talk devices."); return }
+                guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
                 guard self.session.finish(id, text: text) else { return }
                 if self.autoTarget == nil { self.hotkey?.reset() }
                 self.overlay?.update(.idle)
@@ -422,7 +431,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                 let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
                                 self.overlay?.error(message, accessibilityAction: reason == .accessibility)
                             }
-                            if saved, delivery == "submitted", focusedInput != nil { self.restartAfterSubmit(id: id) }
+                            if saved, delivery == "submitted", focusedInput != nil { self.restartAutomatic(id: id) }
                         }
                     }
                     if shouldPaste, self.session.generation == id {
@@ -434,6 +443,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 }
             }
         } }
+    }
+    private func noSpeechDetected(id: UInt64) {
+        let message = "No speech detected. Check your microphone with hey-talk devices."
+        guard autoTarget != nil else { fail(message); return }
+        guard session.finish(id, text: "") else { return }
+        clearAutomatic(); hotkey?.reset()
+        overlay?.update(.idle)
+        let notice = OverlayNotice.concise(message)
+        overlay?.error(notice)
+        pendingReply?(failure(message)); pendingReply = nil
+        scheduleRelease()
+        restartAutomatic(id: id, notice: notice)
     }
     private func cancel() {
         captureReady = false

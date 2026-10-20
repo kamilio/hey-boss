@@ -11,7 +11,8 @@ shortcut's behavior; recordings started by clicking or the CLI only paste.
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to start recording, then press plain Enter to transcribe,
 paste, and submit. It starts listening again after submitting if an allowed
-input still has focus. Shift+Enter still inserts a newline. You can move between
+input still has focus. If no speech is detected, a brief notice appears and
+listening resumes. Shift+Enter still inserts a newline. You can move between
 allowed inputs while speaking: Enter chooses the destination. Leaving the inputs
 for more than two seconds discards the recording; shorter gaps keep it running.
 Escape or turning Auto off discards immediately. After Escape, leave and refocus

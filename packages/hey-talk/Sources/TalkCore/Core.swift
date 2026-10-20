@@ -25,7 +25,7 @@ public struct RecordingSession {
     }
     @discardableResult public mutating func finish(_ id: UInt64, text: String) -> Bool {
         guard id == generation, phase == .processing else { return false }
-        lastText = text
+        if !text.isEmpty { lastText = text }
         phase = .idle
         return true
     }

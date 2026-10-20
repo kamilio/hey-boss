@@ -23,6 +23,28 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try session.begin())
     }
 
+    func testEmptyAttemptPreservesLastTranscriptAndAllowsRecordingAgain() throws {
+        var session = RecordingSession()
+        let spoken = try session.begin()
+        try session.processing(spoken)
+        XCTAssertTrue(session.finish(spoken, text: "Keep this transcript"))
+
+        for _ in 0..<3 {
+            let silent = try session.begin()
+            try session.processing(silent)
+            XCTAssertTrue(session.finish(silent, text: ""))
+            XCTAssertEqual(session.phase, .idle)
+            XCTAssertEqual(session.lastText, "Keep this transcript")
+        }
+
+        let next = try session.begin()
+        XCTAssertFalse(session.finish(spoken, text: ""))
+        XCTAssertEqual(session.phase, .recording)
+        try session.processing(next)
+        XCTAssertTrue(session.finish(next, text: "Next utterance"))
+        XCTAssertEqual(session.lastText, "Next utterance")
+    }
+
     func testWaveformMatchesReferenceAndRejectsInvalidLevels() {
         XCTAssertEqual(Waveform.count, 11)
         XCTAssertEqual(Waveform.height(0), 4)

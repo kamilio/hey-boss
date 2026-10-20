@@ -30,7 +30,7 @@ struct AutoDictationSettings {
 
 /// A focus visit is consumed even when a manual recording or decode is in progress.
 /// Cancellation and failure do not reopen the microphone. A successful submit
-/// explicitly rearms the trigger for the next utterance.
+/// or an empty attempt explicitly rearms the trigger for the next utterance.
 struct FocusTrigger<T: Equatable> {
     private var previous: T?
     mutating func update(_ target: T?, available: Bool) -> Bool {
