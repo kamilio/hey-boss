@@ -108,7 +108,7 @@ const server=createServer(async(req,res)=>{
             if(touch){
               const box=await badge(number).boundingBox();assert(box.width>=44&&box.height>=44);
               await badge(number).tap();await card(number).waitFor({state:'visible'});
-              assert.equal(await page.locator('#owner-filter').inputValue(),'all');
+              assert.equal(await page.evaluate(() => model.route.owner),'all');
               await card(number).getByRole('link',{name:/Filter by/}).tap();
             }else{
               await badge(number).hover();await card(number).waitFor({state:'visible'});
@@ -116,7 +116,7 @@ const server=createServer(async(req,res)=>{
               await badge(number).click();
             }
             await page.waitForFunction(owner=>model.route.owner===owner&&model.issues.length>0,owner);
-            assert.equal(await page.locator('#owner-filter').inputValue(),owner);
+            assert.equal(await page.evaluate(() => model.route.owner),owner);
             assert(requests.some(op=>op.action==='list'&&op.assignee===owner));
             assert(!new URL(page.url()).hash.includes('issue='));
           }
@@ -188,7 +188,7 @@ const server=createServer(async(req,res)=>{
           await list();
           await page.locator('[data-issue-number="1"] .list-label-filter').click();
           await page.waitForFunction(()=>model.route.label==='needs-boss');
-          assert.equal(await page.locator('#label-filter').inputValue(),'needs-boss');
+          assert.equal(await page.evaluate(() => model.route.label),'needs-boss');
           await page.locator('[data-issue-number="1"] .issue-title').click();
           const detailTag=page.locator('.side-labels .list-label-filter');await detailTag.waitFor().catch(async e=>{throw Error(e.message+"\n"+await page.locator("#detail-view").innerText())});await detailTag.click();
           await page.waitForFunction(()=>!model.route.issue&&model.route.label==='needs-boss');

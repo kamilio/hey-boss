@@ -154,6 +154,11 @@ and light/dark themes. All web assets are embedded in the binary; no frontend
 build or separate service is needed. See the [web interface guide](docs/issues.md#web-interface)
 and [verification results](docs/issues-web-verification.md).
 
+Issue filters combine search, labels, assignment, and minimum agent launches. Quick
+filters offer **5+ agent launches** and **Assigned to boss** in every state, plus
+**On hold** in Blocked. Applied chips can be edited or removed individually; the
+URL and copied `hey-boss lookup` command preserve the complete filtered view.
+
 Use the same interface on your phone through private Tailscale HTTPS access,
 with `hey-boss issue web --mobile-origin https://mac.tailnet.ts.net:8443`.
 The database stays on its authoritative machine; no mobile replica or cloud hub

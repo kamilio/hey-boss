@@ -32,7 +32,7 @@ vm.runInContext(source.slice(source.indexOf('function routeHash('),source.indexO
 const hash=changes=>new URLSearchParams(context.routeHash({...context.model.route,...changes}).slice(1));
 assert.equal(hash({issue:2001}).get('page'),'3','Opening detail keeps list position');
 assert.equal(hash({notice:'notice-1001'}).get('inbox_page'),'2','Opening notice keeps Inbox position');
-for(const changes of [{state:'open'},{host:'remote'},{project:'named:Other'},{search:'needle'},{owner:'mine'},{label:'bug'},{blocked:'hold'}]) assert.equal(hash(changes).get('page'),null,'Issue filter change resets page');
+for(const changes of [{state:'open'},{host:'remote'},{project:'named:Other'},{search:'needle'},{owner:'mine'},{label:'bug'},{blocked:'hold'},{min_launches:'5'}]) assert.equal(hash(changes).get('page'),null,'Issue filter change resets page');
 for(const changes of [{inbox_state:'unread'},{inbox_project:'Other'},{inbox_search:'needle'}]) assert.equal(hash(changes).get('inbox_page'),null,'Inbox filter change resets page');
 assert.equal(hash({page:1}).get('page'),null,'First page keeps URLs clean');
 assert.equal(hash({page:2}).get('page'),'2');

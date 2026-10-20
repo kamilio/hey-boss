@@ -1,0 +1,65 @@
+.issue-filters { margin-bottom: 18px; }
+.issue-filter-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.issue-filter-toolbar .search-field { flex: 1 1 220px; max-width: 400px; min-height: 36px; border-radius: 9px; }
+.issue-filter-toolbar .search-field input { padding: 8px 0; }
+.issue-filter-add, .issue-filter-clear, .issue-filter-preset, .issue-filter-chip button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; font-size: 12px; white-space: nowrap; }
+.issue-filter-add { padding: 0 10px; border: 1px dashed color-mix(in srgb, var(--muted) 32%, transparent); border-radius: 8px; background: transparent; color: var(--muted); }
+.issue-filter-add:hover, .issue-filter-add[aria-expanded="true"] { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.issue-filter-add svg, .issue-filter-chip svg, .issue-filter-preset svg { width: 14px; height: 14px; flex-shrink: 0; }
+.issue-filter-toolbar > .refresh { margin-left: auto; flex-shrink: 0; width: 34px; height: 34px; }
+.applied-issue-filters, .active-issue-filters { display: contents; }
+.issue-filter-chip { display: inline-flex; align-items: stretch; max-width: 100%; border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line)); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.issue-filter-chip button { border-radius: 0; background: transparent; color: var(--text); padding: 0 8px; min-width: 0; }
+.issue-filter-chip button:first-child { min-width: 0; justify-content: flex-start; }
+.issue-filter-chip button:last-child { padding: 0 7px; flex-shrink: 0; border-left: 1px solid var(--line); color: var(--muted); }
+.issue-filter-chip button:hover { background: var(--accent-soft); color: var(--accent); }
+.filter-chip-key { color: var(--muted); font-size: 11px; padding-right: 7px; border-right: 1px solid var(--line); }
+.filter-chip-value { overflow: hidden; text-overflow: ellipsis; max-width: 220px; font-weight: 550; }
+.issue-filter-chip button > svg { color: var(--accent); }
+.issue-filter-clear { background: transparent; color: var(--muted); padding: 0 6px; }
+.issue-filter-clear:hover { color: var(--accent); }
+.issue-filter-shortcuts { display: flex; align-items: center; gap: 12px; margin-top: 12px; min-height: 30px; }
+.filter-shortcuts-label { color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .04em; white-space: nowrap; }
+.issue-filter-presets { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.issue-filter-preset { min-height: 30px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); padding: 0 8px; gap: 6px; }
+.issue-filter-preset:hover { background: var(--surface); border-color: var(--line); color: var(--text); }
+.issue-filter-preset[aria-pressed="true"] { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 26%, transparent); color: var(--accent); }
+.preset-check { display: inline-flex; width: 12px; visibility: hidden; }
+.preset-check svg { width: 12px; height: 12px; }
+.issue-filter-preset[aria-pressed="true"] .preset-check { visibility: visible; }
+.issue-filter-count { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.issue-filter-menu { position: fixed; inset: auto; margin: 0; padding: 0; width: 344px; max-width: calc(100vw - 24px); max-height: min(420px, calc(100dvh - 24px)); border: 1px solid var(--line); border-radius: 13px; background: var(--solid); color: var(--text); box-shadow: 0 16px 48px #15203d26, 0 2px 8px #15203d12; overflow: hidden; }
+.issue-filter-menu:popover-open { display: flex; flex-direction: column; }
+.issue-filter-menu-heading { display: flex; align-items: center; gap: 8px; padding: 13px 14px 9px; font-size: 12px; font-weight: 600; }
+.issue-filter-menu-heading .icon-button { width: 24px; height: 24px; min-height: 24px; }
+.issue-filter-menu .search-field { flex: none; width: auto; min-height: 34px; margin: 0 10px 8px; border-radius: 7px; background: var(--bg); }
+.issue-filter-menu .search-field input { padding: 8px 0; }
+.issue-filter-options { padding: 4px 6px 6px; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); min-height: 0; }
+.issue-filter-option { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 9px 10px; border-radius: 7px; background: transparent; color: var(--text); text-align: left; font-size: 12px; }
+.issue-filter-option > svg { width: 15px; height: 15px; color: var(--muted); flex-shrink: 0; }
+.issue-filter-option > span:not(.filter-option-check) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.issue-filter-option > svg:last-child { margin-left: auto; width: 12px; }
+.issue-filter-option small { display: block; margin-top: 3px; font-size: 10px; line-height: 1.4; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.issue-filter-option:hover, .issue-filter-option:focus-visible { background: var(--accent-soft); }
+.issue-filter-option[aria-pressed="true"] { color: var(--accent); }
+.filter-option-check { display: inline-flex; visibility: hidden; }
+.filter-option-check svg { width: 14px; height: 14px; }
+.issue-filter-option[aria-pressed="true"] .filter-option-check { visibility: visible; }
+.filter-option-group { margin: 12px 10px 4px; font-size: 10px; font-weight: 600; color: var(--faint); }
+.filter-no-results { margin: 22px 12px; color: var(--muted); font-size: 12px; text-align: center; }
+.issue-filter-menu-footer { margin: 0; padding: 9px 14px; border-top: 1px solid var(--line); color: var(--faint); font-size: 10px; }
+@media (max-width: 640px) {
+  .issue-filter-toolbar .search-field { max-width: none; width: auto; min-width: 0; flex: 1 1 0; }
+  .issue-filter-toolbar .search-field kbd { display: none; }
+  .issue-filter-add, .issue-filter-chip button, .issue-filter-clear, .issue-filter-toolbar > .refresh { min-height: 40px; }
+  .issue-filter-toolbar > .refresh { margin-left: 0; }
+  .applied-issue-filters { display: flex; flex-wrap: wrap; gap: 6px; flex-basis: 100%; order: 1; }
+  .filter-chip-key { display: none; }
+  .issue-filter-shortcuts { flex-wrap: wrap; gap: 4px 8px; }
+  .filter-shortcuts-label { display: none; }
+  .issue-filter-preset { min-height: 36px; font-size: 11px; padding: 0 6px; }
+  .issue-filter-presets { gap: 2px; }
+  .issue-filter-count { font-size: 10px; }
+  .issue-filter-option { min-height: 44px; }
+  .issue-filter-menu-footer { display: none; }
+}

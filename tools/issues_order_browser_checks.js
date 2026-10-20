@@ -41,8 +41,8 @@ async page => {
  await drag(5,6,'before');await expect([4,1,2,3,6,5],'Failed save preserves canonical order');
  await drag(5,6,'before');await expect([4,1,2,3,5,6],'Repeating failed drag recovers');
  check(retryIds.length===2&&retryIds[0]===retryIds[1],'Failed move retries with the same request ID');await page.context().unroute('**/api/action');
- await page.locator('#label-filter').selectOption('ready');await expect([1,3,5],'Filtered list uses saved order');await drag(5,1,'before');await expect([5,1,3],'Filtered drag persists relative move');
- await page.locator('#label-filter').selectOption('');await expect([4,5,1,2,3,6],'Filtered move preserves hidden issue order');
+ await page.evaluate(value => navigate({label:value}), 'ready');await expect([1,3,5],'Filtered list uses saved order');await drag(5,1,'before');await expect([5,1,3],'Filtered drag persists relative move');
+ await page.evaluate(value => navigate({label:value}), '');await expect([4,5,1,2,3,6],'Filtered move preserves hidden issue order');
  check(await page.locator('.issue-row[data-issue-number="3"] .issue-pr-link').count()===1,'PR link remains on reordered row');
  const record=await page.evaluate(async()=>api({action:'view',number:3},model.project.id));check(record.issue.body==='# Requirements\nPreserve markdown and PRs.','Reordering preserves markdown');
  await page.screenshot({path:'output/playwright/issue-order-desktop.png'});

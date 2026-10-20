@@ -18,6 +18,7 @@
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/filters.css" />
     <link rel="stylesheet" href="/pagination.css" />
     <link rel="stylesheet" href="/project-settings.css" />
     <link rel="stylesheet" href="/status.css" />
@@ -27,6 +28,7 @@
     <script src="/global-settings.js" defer></script>
     <script src="/subtasks.js" defer></script>
     <script src="/blockers.js" defer></script>
+    <script src="/filters.js" defer></script>
     <script src="/attachments.js" defer></script><script src="/artifacts.js" defer></script>
     <script src="/status.js" defer></script>
     <script src="/assignments.js" defer></script>
@@ -74,7 +76,8 @@
         </button>
       </div>
       <section id="list-view" aria-label="Project issues">
-        <div class="toolbar">
+        <div class="issue-filters" role="region" aria-label="Issue filters">
+        <div class="issue-filter-toolbar">
           <label class="search-field"
             ><span data-icon="search"></span
             ><input
@@ -85,20 +88,9 @@
               autocomplete="off"
             /><kbd>/</kbd></label
           >
-          <div class="filter-controls">
-            <label class="select-control"
-              ><span data-icon="tag"></span
-              ><select id="label-filter" aria-label="Filter by label">
-                <option value="">Labels</option>
-              </select></label
-            ><label class="select-control"
-              ><span data-icon="user"></span
-              ><select id="owner-filter" aria-label="Filter by assignment">
-                <option value="all">Assignment</option>
-                <option value="mine">Assigned to me</option>
-                <option value="unassigned">Unassigned</option>
-              </select></label
-            ><button
+          <div id="applied-issue-filters" class="applied-issue-filters" hidden><div id="active-issue-filters" class="active-issue-filters"></div><button id="clear-issue-filters" class="issue-filter-clear" type="button" hidden>Clear all</button></div>
+          <button id="add-issue-filter" class="issue-filter-add" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="issue-filter-menu"><span data-icon="plus"></span>Add filter</button>
+          <button
               class="icon-button refresh"
               id="refresh"
               aria-label="Refresh issues"
@@ -106,19 +98,19 @@
             >
               <span data-icon="refresh"></span>
             </button>
-          </div>
         </div>
-        <div id="blocked-filter-control" class="blocked-filter-control" hidden>
-          <label for="blocked-filter">Blocked reason</label>
-          <select id="blocked-filter" aria-label="Filter by blocked reason">
-            <option value="">All blocked issues</option>
-            <option value="hold">On hold</option>
-            <option value="dependencies">Waiting for dependencies</option>
-          </select>
+        <div class="issue-filter-shortcuts"><span class="filter-shortcuts-label">QUICK FILTERS</span><div id="issue-filter-presets" class="issue-filter-presets" role="group" aria-label="Quick filters"></div><span id="issue-filter-count" class="issue-filter-count" role="status" aria-live="polite"></span></div>
+        </div>
+        <div id="issue-filter-menu" class="issue-filter-menu" popover="auto" role="dialog" aria-label="Filter issues">
+          <div class="issue-filter-menu-heading"><button id="issue-filter-back" class="icon-button" type="button" aria-label="All filters" hidden><span data-icon="arrow-left"></span></button><span id="issue-filter-title">Add filter</span></div>
+          <label class="search-field"><span data-icon="search"></span><input id="issue-filter-search" type="search" placeholder="Search filters…" aria-label="Search filters" autocomplete="off"></label>
+          <div id="issue-filter-options" class="issue-filter-options"></div>
+          <p class="issue-filter-menu-footer">↑ ↓ to browse <span aria-hidden="true">·</span> Enter to select <span aria-hidden="true">·</span> Esc to close</p>
         </div>
         <div class="issue-panel glass">
           <div class="list-heading">
             <div class="state-tabs" role="tablist" aria-label="Issue state">
+              <button data-state="all" role="tab" aria-selected="false" tabindex="-1">All<span id="all-count" class="tab-count">0</span></button>
               <button
                 data-state="open"
                 class="selected"

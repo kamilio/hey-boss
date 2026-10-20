@@ -19,8 +19,8 @@ async page => {
  await page.waitForFunction(()=>document.querySelectorAll('.issue-row').length===125);checks.push('All 125 issues render despite a legacy page offset');
  if(await page.locator('#previous-page,#next-page').count())throw Error('Pagination remains');checks.push('No pagination controls');
  if(await page.locator('#list-summary').innerText()!=='125 issues')throw Error('Incorrect total');checks.push('Complete list total');
- await page.locator('#label-filter').selectOption('ready');await page.waitForFunction(()=>document.querySelectorAll('.issue-row').length===60);checks.push('All filtered issues render');
- await page.locator('#label-filter').selectOption('');await page.waitForFunction(()=>document.querySelectorAll('.issue-row').length===125);
+ await page.evaluate(value => navigate({label:value}), 'ready');await page.waitForFunction(()=>document.querySelectorAll('.issue-row').length===60);checks.push('All filtered issues render');
+ await page.evaluate(value => navigate({label:value}), '');await page.waitForFunction(()=>document.querySelectorAll('.issue-row').length===125);
  await page.locator('[data-move-issue="125"]').focus();await page.keyboard.press('ArrowUp');await page.waitForFunction(()=>!model.orderSaving&&model.issues[123].number===125);checks.push('Last issue can reorder on the same page');
  await page.reload();await page.waitForFunction(()=>model.issues.length===125&&model.issues[123].number===125);checks.push('Full list and bottom reorder persist');
  return {passed:checks.length,checks,project};

@@ -22,7 +22,7 @@ async (page) => {
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+': conversation fits viewport');
     await page.screenshot({path:'output/playwright/issue68/'+name+'-conversation.png',fullPage:true});
     await page.goBack();await trace().waitFor();
-    check(await page.locator('#owner-filter').inputValue()==='all',name+': returning preserves list without applying filter');
+    check(await page.evaluate(() => model.route.owner)==='all',name+': returning preserves list without applying filter');
   }
   await page.locator('[data-issue-number="1"] .list-assignee-filter').click();
   await page.waitForFunction(()=>model.route.owner==='codex:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'&&model.issues.length===1);

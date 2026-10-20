@@ -276,7 +276,7 @@ async function mutate(operation, project = model.project.id, host = model.route.
 }
 function routeHash(route) {
   route = { ...route };
-  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "label", "search", "blocked"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
+  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "label", "search", "blocked", "min_launches"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
     if (model.route && filters.some(filter => (route[filter] || "") !== (model.route[filter] || ""))) route[key] = 1;
     if (HeyBossPagination.number(route[key]) === 1) delete route[key];
   }
@@ -308,10 +308,10 @@ function parseRoute() {
     inbox_page: HeyBossPagination.number(params.get("inbox_page")),
     page: HeyBossPagination.number(params.get("page")),
     issue: resource?.entity === "issue" ? Number(resource.id) : null,
-    state: ["open", "blocked", "ready", "closed", "deleted"].includes(params.get("state"))
+    state: ["open", "blocked", "ready", "closed", "deleted", "all"].includes(params.get("state"))
       ? params.get("state")
       : "open",
-    blocked: params.get("state") === "blocked" && ["hold", "dependencies"].includes(params.get("blocked")) ? params.get("blocked") : "",
+    ...IssueFilters.read(params),
     search: params.get("search") || "",
     owner: params.get("owner") || "all",
     label: params.get("label") || "",
@@ -355,6 +355,7 @@ function updateHeader() {
   $("#copy-list-command").disabled = false;
   $("#heading-count").textContent = p.open;
   $("#open-count").textContent = p.open;
+  $("#all-count").textContent = (p.open || 0) + (p.blocked || 0) + (p.ready || 0) + (p.closed || 0);
   $("#blocked-count").textContent = p.blocked || 0;
   $("#ready-count").textContent = p.ready || 0;
   $('[data-state="ready"]').hidden = !p.prs_enabled && !p.ready && model.route.state !== "ready";
@@ -372,28 +373,8 @@ function updateHeader() {
     b.setAttribute("aria-selected", selected);
     b.tabIndex = selected ? 0 : -1;
   });
-  renderOwnerFilter();
   updateProfile();
-  renderLabelFilter();
-}
-function renderOwnerFilter() {
-  const selected = model.route.owner;
-  const ids = [
-    ...new Set([
-      "human:boss",
-      "watcher:github",
-      ...model.assignmentMachines.map(m => `machine:${m.id}`),
-      ...model.assignees,
-      ...(!["all", "mine", "unassigned"].includes(selected) ? [selected] : []),
-    ]),
-  ];
-  $("#owner-filter").innerHTML =
-    '<option value="all">Assignment</option>' +
-    `<option value="mine">Assigned to me (${esc(model.boss.name)})</option><option value="unassigned">Unassigned</option>` +
-    ids
-      .map((id) => `<option value="${esc(id)}">${esc(actorName(id))}</option>`)
-      .join("");
-  $("#owner-filter").value = selected;
+  IssueFilters.render();
 }
 function listLabel(name) {
   return `<a class="list-label-filter" href="${esc(routeHash({ ...model.route, issue: null, label: name }))}" aria-label="Filter by label ${esc(name)}">${label(name)}</a>`;
@@ -581,18 +562,8 @@ window.addEventListener('scroll', event => {
   if (assignmentCardContext && !assignmentCardContext.card.contains(event.target)) closeAssignmentCard(true);
 }, true);
 
-function renderLabelFilter() {
-  const selected = model.route.label;
-  const all = [
-    ...new Set([...model.labels, ...(selected ? [selected] : [])]),
-  ].sort();
-  $("#label-filter").innerHTML =
-    '<option value="">Labels</option>' +
-    all.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join("");
-  $("#label-filter").value = selected;
-}
 const projectPicker = new HeyBossUI.ProjectPicker({
-  onSelect(project) { navigate({project, issue:null, search:"", label:"", owner:"all", state:"open"}); },
+  onSelect(project) { navigate({project, issue:null, ...IssueFilters.empty, state:"open"}); },
   onVisibility(project) { setProjectVisibility(project); },
 });
 function projectOptions() { projectPicker.update(model.projects, model.project); }
@@ -620,6 +591,8 @@ async function setProjectVisibility(project) {
           search: "",
           label: "",
           owner: "all",
+          blocked: "",
+          min_launches: "",
           state: "open",
         });
     }
@@ -693,7 +666,7 @@ async function refineSearch(sequence, operation) {
 }
 function emptyState() {
   const filtered =
-    model.route.search || model.route.label || model.route.owner !== "all" || model.route.blocked;
+    model.route.search || IssueFilters.active(model.route).length;
   const state = model.route.state;
   const title = filtered
     ? "No matching issues"
@@ -893,10 +866,10 @@ function renderList(result) {
     createdHere &&
     creation.reveal &&
     !creation.filtersChecked &&
-    !result.issues.some((issue) => issue.number === creation.number)
+    !result.issues.some((issue) => issue.number === creation.number && IssueFilters.matches(issue, model.route))
   ) {
     creation.filtersChecked = true;
-    navigate({ state: "open", owner: "all", label: "", search: "" }, true);
+    navigate({ state: "open", ...IssueFilters.empty }, true);
     return;
   }
   const listContext = JSON.stringify([model.project.id, model.route.host]);
@@ -918,14 +891,15 @@ function renderList(result) {
   model.listContext = listContext;
   model.orderVersion = result.order_version;
   model.issues = result.issues;
-  if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; renderOwnerFilter(); }
+  if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; IssueFilters.render(); }
   model.signature = JSON.stringify(result.issues);
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
-  result = {...result, issues:result.issues.filter(issue => IssueBlockers.matches(issue, model.route.blocked))};
+  result = {...result, issues:result.issues.filter(issue => IssueFilters.matches(issue, model.route))};
   const createdIndex = createdHere && creation.reveal ? result.issues.findIndex(issue => issue.number === creation.number) : -1;
   const requestedPage = createdIndex < 0 ? model.route.page : Math.floor(createdIndex / HeyBossPagination.size) + 1;
   const page = HeyBossPagination.page(result.issues, requestedPage);
+  $("#issue-filter-count").textContent = `${page.total.toLocaleString()} ${page.total === 1 ? "issue" : "issues"}`;
   if (model.route.page !== page.current) {
     model.route.page = page.current;
     history.replaceState(null, "", routeHash(model.route));
@@ -1009,7 +983,7 @@ $("#issue-list").onclick = (e) => {
   const empty = e.target.closest("[data-empty]");
   if (empty?.dataset.empty === "create") openEditor();
   if (empty?.dataset.empty === "clear")
-    navigate({ search: "", label: "", owner: "all", blocked: "" });
+    navigate(IssueFilters.empty);
 };
 let prefetchTimer;
 $("#issue-list").addEventListener("pointerover", (e) => {
@@ -1039,12 +1013,7 @@ $("#issue-search").oninput = () => {
     160,
   );
 };
-$("#label-filter").onchange = () =>
-  navigate({ label: $("#label-filter").value, search: $("#issue-search").value });
-$("#blocked-filter").onchange = () =>
-  navigate({ blocked: $("#blocked-filter").value, search: $("#issue-search").value });
-$("#owner-filter").onchange = () =>
-  navigate({ owner: $("#owner-filter").value, search: $("#issue-search").value });
+IssueFilters.init();
 $$("[data-state]").forEach(
   (b) => (b.onclick = () => navigate({ state: b.dataset.state, blocked: "", search: $("#issue-search").value })),
 );
@@ -1063,6 +1032,7 @@ async function refreshProjects(project = model.project.id) {
   if (!$("#project-menu").hidden) projectOptions();
 }
 async function renderRoute() {
+  IssueFilters.close();
   closeAssignmentCard();
   closeListActions();
   closeIssueTagPicker();
@@ -1111,8 +1081,6 @@ async function renderRoute() {
   }
   clearTimeout(searchTimer);
   $("#issue-search").value = model.route.search;
-  $("#blocked-filter-control").hidden = model.route.state !== "blocked";
-  $("#blocked-filter").value = model.route.blocked;
   model.project = currentProject();
   model.detail = null;
   model.signature = "";
@@ -1485,7 +1453,7 @@ function renderDetail(value) {
       storage.set(draftKey("comment", destination.project.id, destination.number), draft);
       storage.remove(oldKey);
     }
-    navigate({project: destination.project.id, issue: destination.number, state: "open", owner: "all", label: "", search: ""}, true);
+    navigate({project: destination.project.id, issue: destination.number, state: "open", ...IssueFilters.empty}, true);
     toast("This issue moved to " + destination.project.name);
     return;
   }
@@ -2049,15 +2017,9 @@ $("#copy-create-command").onclick = () => copyIssueCommand(
   "Agent command copied. Replace the title and Markdown placeholders.",
 );
 $("#copy-list-command").onclick = () => {
-  const {state, owner, label} = model.route;
   // Include search input even during its route-update debounce.
-  const search = $("#issue-search").value;
-  let command = `hey-boss issue ${search ? "search " + shellQuote(search) : "list"} ${issueCommandScope()} --all --state ${state}`;
-  if (owner === "unassigned") command += " --unassigned";
-  // Web 'mine' is Boss, while CLI --mine would target the receiving agent.
-  else if (owner !== "all") command += ` --assignee ${shellQuote(owner === "mine" ? "human:boss" : owner)}`;
-  if (label) command += ` --label ${shellQuote(label)}`;
-  return copyIssueCommand(command, "Issue list command copied. Retrieves all matching issues.");
+  const url = new URL(routeHash({...model.route, issue:null, host:model.route.host || model.defaultHost || "", search:$("#issue-search").value}), location.href).href;
+  return copyIssueCommand(`hey-boss lookup ${shellQuote(url)}`, "Issue list command copied. Retrieves all matching issues.");
 };
 $("#editor-close").onclick = closeEditor;
 $("#editor-cancel").onclick = closeEditor;
@@ -2349,9 +2311,7 @@ $("#add-project").onclick = async () => {
     project: id,
     issue: null,
     state: "open",
-    search: "",
-    label: "",
-    owner: "all",
+    ...IssueFilters.empty,
   };
   model.project = currentProject();
   history.replaceState(null, "", routeHash(model.route));
