@@ -239,6 +239,99 @@ fn lookup_collections_preserve_blocked_and_all_state_filters() {
 }
 
 #[test]
+fn lookup_combines_launches_assignment_labels_search_and_blocked_reason() {
+    let f = Fixture::new("filter-presets");
+    for (title, labels) in [
+        ("Needs review at four", vec!["review"]),
+        ("Needs review at five", vec!["review"]),
+        ("Needs review at eight", vec!["review"]),
+        ("Other label at five", vec!["bug"]),
+        ("Waiting at six", vec!["review"]),
+        ("Mixed blockers at ten", vec!["review"]),
+    ] {
+        f.execute(json!({"action":"create","title":title,"body":"","labels":labels}));
+    }
+    let db = rusqlite::Connection::open(&f.db).unwrap();
+    for (number, count) in [(1, 4), (2, 5), (3, 8), (4, 5), (5, 6), (6, 10)] {
+        for launch in 0..count {
+            db.execute("INSERT INTO issue_agent_launches VALUES(?1,'github.com/poe-platform/poe-code',?2,1)", rusqlite::params![format!("launch-{number}-{launch}"), number]).unwrap();
+        }
+    }
+    f.execute(json!({"action":"assign","number":1,"target":"boss","if_version":1}));
+    f.execute(json!({"action":"assign","number":2,"target":"boss","if_version":1}));
+    f.execute(json!({"action":"assign","number":4,"target":"boss","if_version":1}));
+    let base = "http://localhost/#project=github.com%2Fpoe-platform%2Fpoe-code";
+    let numbers = |suffix: &str| {
+        let value = f.value(&format!("{base}{suffix}"));
+        let mut numbers: Vec<_> = value["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect();
+        assert_eq!(value["total"], numbers.len());
+        numbers.sort();
+        numbers
+    };
+    for owner in ["mine", "human%3Aboss"] {
+        assert_eq!(
+            numbers(&format!(
+                "&min_launches=5&owner={owner}&label=review&search=Needs"
+            )),
+            vec![2]
+        );
+    }
+    assert_eq!(
+        numbers("&min_launches=5&owner=unassigned&label=review"),
+        vec![3, 5, 6]
+    );
+    assert!(
+        f.value(&format!("{base}&search=Needs"))["search"].is_object(),
+        "Lookup uses the web search operation"
+    );
+    f.execute(json!({"action":"block","number":2,"comment":"Hold","force":false}));
+    f.execute(json!({"action":"set_blockers","number":5,"blockers":[3],"force":false}));
+    f.execute(json!({"action":"block","number":6,"comment":"Also on hold","force":false}));
+    f.execute(json!({"action":"set_blockers","number":6,"blockers":[3],"force":false}));
+    db.execute("UPDATE issues SET manual_blocked=1 WHERE number=6", [])
+        .unwrap();
+    assert_eq!(
+        numbers("&state=blocked&blocked=hold&min_launches=5"),
+        vec![2, 6]
+    );
+    assert_eq!(
+        numbers("&state=blocked&blocked=dependencies&min_launches=5"),
+        vec![5, 6]
+    );
+    assert_eq!(
+        numbers("&state=blocked&blocked=hold&min_launches=10"),
+        vec![6]
+    );
+    assert_eq!(numbers("&state=all&min_launches=5"), vec![2, 3, 4, 5, 6]);
+    assert_eq!(
+        numbers("&state=open&blocked=hold&min_launches=5"),
+        vec![3, 4],
+        "Inactive blocked reason does not hide open issues"
+    );
+    for invalid in ["-1", "5x", "05", "9007199254740992"] {
+        assert_eq!(
+            numbers(&format!("&state=all&min_launches={invalid}")),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+    }
+    let text = f.lookup(
+        &format!("{base}&state=blocked&blocked=hold&min_launches=10"),
+        false,
+    );
+    assert!(text.status.success());
+    assert!(
+        String::from_utf8(text.stdout)
+            .unwrap()
+            .contains("Mixed blockers at ten")
+    );
+}
+
+#[test]
 fn lookup_agent_links_load_real_saved_conversation_and_filter_overview() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;

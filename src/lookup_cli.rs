@@ -56,6 +56,90 @@ fn execute(route: &Route, options: &Options, operation: Operation) -> Result<Val
     }
     Ok(value)
 }
+
+fn issue_collection(route: &Route, options: &Options) -> Result<Value> {
+    let param = |name: &str| route.params.get(name).map(String::as_str).unwrap_or("");
+    let state = match param("state") {
+        state @ ("open" | "blocked" | "ready" | "closed" | "deleted" | "all") => state,
+        _ => "open",
+    };
+    let owner = param("owner");
+    let assignee = (!matches!(owner, "" | "all" | "unassigned"))
+        .then(|| if owner == "mine" { "human:boss" } else { owner }.to_owned());
+    let labels: Vec<String> = (!param("label").is_empty())
+        .then(|| param("label").to_owned())
+        .into_iter()
+        .collect();
+    let operation = if param("search").is_empty() {
+        Operation::List {
+            compact: false,
+            state: state.into(),
+            mine: false,
+            unassigned: owner == "unassigned",
+            assignee,
+            labels,
+            search: None,
+            limit: 50,
+            offset: 0,
+            all: true,
+        }
+    } else {
+        Operation::Search {
+            options: issues::search::Options {
+                query: param("search").into(),
+                state: state.into(),
+                mine: false,
+                unassigned: owner == "unassigned",
+                assignee,
+                labels,
+                compact: false,
+                semantic: true,
+                limit: 50,
+                offset: 0,
+                all: true,
+            },
+        }
+    };
+    let mut value = execute(route, options, operation)?;
+    // The browser refines the complete collection before counting and paging.
+    // Keep old/invalid URL values inert, just like IssueFilters.read.
+    let raw_min = param("min_launches");
+    let min = raw_min
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991 && n.to_string() == raw_min)
+        .unwrap_or(0);
+    let reason = if state == "blocked" {
+        param("blocked")
+    } else {
+        ""
+    };
+    if let Some(issues) = value["issues"].as_array_mut() {
+        issues.retain(|issue| {
+            if issue["agent_launch_count"].as_u64().unwrap_or(0) < min {
+                return false;
+            }
+            if !matches!(reason, "hold" | "dependencies") {
+                return true;
+            }
+            let attempt_hold = !issue["attempt_hold"].is_null() && issue["attempt_hold"] != false;
+            let blocked =
+                issue["deleted_at"].is_null() && (issue["state"] == "blocked" || attempt_hold);
+            blocked
+                && if reason == "hold" {
+                    issue["manual_blocked"] == true || attempt_hold
+                } else {
+                    issue["blocked_by"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+                }
+        });
+        let total = issues.len();
+        value["total"] = json!(total);
+        value["next_offset"] = Value::Null;
+    }
+    Ok(value)
+}
 pub fn run(options: &Options) -> Result<()> {
     let route = routes::resolve(&options.url)?;
     let mut value = match route.entity.as_str() {
@@ -66,50 +150,7 @@ pub fn run(options: &Options) -> Result<()> {
                 number: route.id.parse().unwrap(),
             },
         )?,
-        "issues" => {
-            let owner = route
-                .params
-                .get("owner")
-                .map(String::as_str)
-                .unwrap_or("all");
-            execute(
-                &route,
-                options,
-                Operation::List {
-                    compact: false,
-                    state: route
-                        .params
-                        .get("state")
-                        .filter(|v| {
-                            matches!(
-                                v.as_str(),
-                                "open" | "blocked" | "ready" | "closed" | "deleted" | "all"
-                            )
-                        })
-                        .cloned()
-                        .unwrap_or_else(|| "open".into()),
-                    mine: false,
-                    unassigned: owner == "unassigned",
-                    assignee: (!matches!(owner, "all" | "unassigned"))
-                        .then(|| if owner == "mine" { "human:boss" } else { owner }.into()),
-                    labels: route
-                        .params
-                        .get("label")
-                        .filter(|v| !v.is_empty())
-                        .cloned()
-                        .into_iter()
-                        .collect(),
-                    search: route
-                        .params
-                        .get("search")
-                        .filter(|v| !v.is_empty())
-                        .cloned(),
-                    limit: 50,
-                    offset: 0,
-                    all: true,
-                },
-            )?
-        }
+        "issues" => issue_collection(&route, options)?,
         "artifact" => execute(
             &route,
             options,
