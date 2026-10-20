@@ -2,6 +2,14 @@ import XCTest
 @testable import HeyTalk
 
 final class PasteTests: XCTestCase {
+    func testRecoveryNoticeNamesOriginalAppAndCorrectAction() {
+        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack"), "Return to Slack. Press ⌘V.")
+        XCTAssertEqual(PasteBlockReason.targetClosed.message(targetName: "Notes"), "Reopen Notes. Press ⌘V.")
+        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack", pasted: true), "Pasted in Slack. Press Enter there.")
+        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: nil), "Return to the original app. Press ⌘V.")
+        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "  "), "Return to the original app. Press ⌘V.")
+    }
+
     func testPasteOnlyNeverSchedulesEnter() {
         var keys: [CGKeyCode] = []
         Paste.send(pressEnter: false, check: { nil }, isCurrent: { true }, post: { key, _ in keys.append(key); return true }, afterPaste: { _ in
@@ -56,10 +64,10 @@ final class PasteTests: XCTestCase {
         }
     }
 
-    func testPermissionFailureExplainsStaleSettingsEntry() {
+    func testPermissionFailureExplainsTextIsPreserved() {
         let reason = PasteBlockReason.check(trusted: false, targetAlive: true, targetIsSelf: false, targetIsFrontmost: true)
         XCTAssertEqual(reason, .accessibility)
-        XCTAssertTrue(reason!.message.contains("Accessibility"))
+        XCTAssertEqual(reason!.message(), "Text copied. Allow automatic paste.")
     }
 
     func testNeverPastesIntoChangedOrMissingTarget() {

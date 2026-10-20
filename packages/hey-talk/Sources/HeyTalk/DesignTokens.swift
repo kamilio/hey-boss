@@ -3,6 +3,7 @@ import AppKit
 /// Native equivalents of --accent and --active in src/issues/web/components.css.
 enum TalkDesign {
     static let accent = adaptive(light: 0x4655b5, dark: 0xa1afff)
+    static let onAccent = adaptive(light: 0xffffff, dark: 0x18204c)
     static let active = adaptive(light: 0x168179, dark: 0x80cfca)
     static let idleSize = NSSize(width: 56, height: 36)
     static let recordingSize = NSSize(width: 104, height: 36)
@@ -23,7 +24,7 @@ class GlassFace: NSView {
     override var isOpaque: Bool { false }
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 0.75, dy: 0.75)
-        let radius = rect.height / 2
+        let radius = min(18, rect.height / 2)
         let outer = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
         NSGraphicsContext.saveGraphicsState()
         outer.addClip()

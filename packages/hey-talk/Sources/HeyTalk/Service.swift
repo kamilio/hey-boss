@@ -18,6 +18,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingReply: (([String: Any]) -> Void)?
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication?
+    private var targetName: String?
     private var paste = true
     private var pressEnter = false
     private var transcriptionSource = "microphone"
@@ -221,6 +222,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         pendingStartReply = reply
         error = nil; captureReady = false; self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
         target = NSWorkspace.shared.frontmostApplication
+        targetName = target?.localizedName
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
@@ -285,6 +287,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 // Detach this result before disk IO: a new recording may start while saving.
                 let reply = self.pendingReply; self.pendingReply = nil
                 let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
+                let targetName = self.targetName
                 self.history.save(entry) { saved in
                     let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
                         self.lastPasteBlock = reason
@@ -296,9 +299,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         reply?(response)
                         if self.session.generation == id {
                             self.scheduleRelease()
-                            if !saved { self.overlay?.error("History could not be saved. Copy your text from Dictation History before quitting.") }
+                            if !saved { self.overlay?.error("Not saved. Copy from History before quitting.") }
                             else if let reason {
-                                let message = delivery == "pasted" ? "Text was pasted, but Enter was skipped. Finish in the original app." : reason.message
+                                let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
                                 self.overlay?.error(message, accessibilityAction: reason == .accessibility)
                             }
                         }
@@ -323,7 +326,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         captureReady = false
         capture.cancel(); session.fail(session.generation); hotkey?.reset()
         maximumDuration?.cancel(); maximumDuration = nil
-        error = message; overlay?.update(.failed); overlay?.error(message)
+        error = message; overlay?.update(.failed); overlay?.error(OverlayNotice.concise(message))
         pendingStartReply?(failure(message)); pendingStartReply = nil
         pendingReply?(failure(message)); pendingReply = nil; scheduleRelease()
     }
