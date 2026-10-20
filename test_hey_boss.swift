@@ -65,6 +65,7 @@ func audit() {
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HTML_READER"] == "1" { auditHTMLReader(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_LIBRARY"] == "1" { auditArtifactLibrary(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_POE_CORPUS"] { auditPoeMarkdownCorpus(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NATIVE_READER"] == "1" {
@@ -3923,4 +3924,91 @@ func previewSubscriptionQuota(_ state: String) {
         window.close(); return
     }
     withExtendedLifetime((overview, window)) { app.run() }
+}
+
+func auditHTMLReader() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-html-native-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let fixture = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("tests/fixtures/html-render.md")
+    let source = (try! String(contentsOf: fixture, encoding: .utf8)) + "\n- [ ] Native checklist\n\n![Local image](pixel.png)\n"
+    let pixel = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    try! pixel.representation(using: .png, properties: [:])!.write(to: root.appendingPathComponent("pixel.png"))
+    let file = root.appendingPathComponent("HTML.md"); try! Data(source.utf8).write(to: file)
+    let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:HTML audit", file: file.path), journalRoot: root.appendingPathComponent("drafts"), cli: cli, present: false)
+    defer { editor.window.close() }
+    func wait(_ label: String, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(20)
+        while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(condition(), label)
+    }
+    func js(_ expression: String, frame: WKFrameInfo? = nil) -> Any? {
+        var result: Any?, done = false
+        editor.htmlReader.view.evaluateJavaScript(expression, in: frame, in: .page) { value in
+            switch value { case .success(let value): result = value; case .failure(let error): print("HTML audit JavaScript: \(error)") }
+            done = true
+        }
+        wait("JavaScript finished", { done }); return result
+    }
+    wait("Document opens", { editor.session.ready })
+    editor.window.makeKeyAndOrderFront(nil); editor.togglePreview()
+    wait("Web reader loads", { editor.htmlReader.loaded && editor.htmlReader.previewFrame != nil })
+    var ready = false
+    let deadline = Date().addingTimeInterval(20)
+    while !ready && Date() < deadline {
+        ready = js("document.querySelector('.html-preview')?.dataset.state") as? String == "ready"
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+    if !ready { print("HTML reader state: \(js("document.body.innerText") ?? "missing")") }
+    precondition(ready, "Native HTML frame renders")
+    wait("Native preview sizes to its content", { (js("document.querySelector('.html-preview iframe').clientHeight") as? Int ?? 0) > 250 })
+    let initialHeight = js("document.querySelector('.html-preview iframe').clientHeight") as! Int
+    _ = js("document.querySelector('#extra').style.height='2600px'; document.querySelector('#toggle').click()", frame: editor.htmlReader.previewFrame)
+    wait("Native preview grows without a height cap", { (js("document.querySelector('.html-preview iframe').clientHeight") as? Int ?? 0) > 2600 })
+    _ = js("document.querySelector('#toggle').click()", frame: editor.htmlReader.previewFrame)
+    wait("Native preview shrinks", { (js("document.querySelector('.html-preview iframe').clientHeight") as? Int ?? 0) <= initialHeight + 2 })
+    precondition(js("document.querySelector('details summary').textContent") as? String == "How this works")
+    precondition(js("document.querySelector('#counter').click(); document.querySelector('#counter').textContent", frame: editor.htmlReader.previewFrame) as? String == "1")
+    precondition(js("(() => { try { return !!parent.document.body } catch { return false } })()", frame: editor.htmlReader.previewFrame) as? Bool == false, "HTML cannot access the native reader")
+    precondition(js("(() => { try { return !!localStorage } catch { return false } })()", frame: editor.htmlReader.previewFrame) as? Bool == false, "HTML has no persistent storage")
+    precondition(js("window.exampleMustNotRun === undefined") as? Bool == true)
+    _ = editor.command("f", shift: false)
+    precondition(!editor.htmlReader.searchBar.isHidden, "Find remains available in the HTML reader")
+    editor.htmlReader.search.stringValue = "selectable"; editor.htmlReader.find()
+    precondition(editor.text.string == source && (try! String(contentsOf: file, encoding: .utf8)) == source, "Rendering preserves the saved Markdown")
+    wait("Local images still load", { js("document.querySelector('article img')?.naturalWidth") as? Int == 2 })
+    let taskLine = source.components(separatedBy: "\n").firstIndex(of: "- [ ] Native checklist")! + 1
+    _ = js("window.webkit.messageHandlers.artifactTask.postMessage({line:\(taskLine),checked:true}); true", frame: editor.htmlReader.previewFrame)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    precondition(editor.text.string == source, "Sandbox cannot invoke native task editing")
+    _ = js("document.querySelector('input[data-task-line]').click()")
+    wait("Native checklists remain editable", { editor.text.string.contains("- [x] Native checklist") })
+    _ = js("document.querySelector('input[data-task-line]').click()")
+    wait("Native checklist restores source", { editor.text.string == source })
+    if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"] {
+        try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        editor.htmlReader.closeFind()
+        var done = false
+        editor.htmlReader.view.takeSnapshot(with: nil) { image, error in
+            if let tiff = image?.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+                try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent("native-html.png"))
+            }
+            done = true
+        }
+        wait("Snapshot completes", { done })
+    }
+    editor.togglePreview()
+    precondition(editor.htmlReader.container.isHidden && editor.htmlReader.document == nil, "Leaving Read stops the HTML document")
+    let wholePage = try! String(contentsOf: fixture.deletingLastPathComponent().appendingPathComponent("html-page.html"), encoding: .utf8)
+    editor.text.setSelectedRange(NSRange(location: 0, length: (editor.text.string as NSString).length))
+    editor.text.insertText(wholePage, replacementRange: editor.text.selectedRange())
+    editor.togglePreview()
+    wait("Whole HTML document opens", { editor.htmlReader.loaded && editor.htmlReader.previewFrame != nil })
+    wait("Whole HTML document uses its full height", { (js("document.querySelector('iframe')?.clientHeight") as? Int ?? 0) > 2800 })
+    precondition(js("getComputedStyle(document.documentElement).overflowY", frame: editor.htmlReader.previewFrame) as? String == "hidden", "Only the surrounding page scrolls")
+    _ = js("document.querySelector('#toggle').click()", frame: editor.htmlReader.previewFrame)
+    wait("Whole HTML document shrinks", { (js("document.querySelector('iframe')?.clientHeight") as? Int ?? 0) < 500 })
+    precondition(editor.text.string == wholePage, "Whole HTML source survives reading")
+    print("PASS native HTML reader, whole pages, uncapped height, sandbox, scripts, images, checklists, source fidelity, Find and teardown")
 }

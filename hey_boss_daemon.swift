@@ -1491,6 +1491,12 @@ struct NativeMarkdownNode: Decodable {
     var lang: String?
     var align: [String]?
     var tokens: [NativeMarkdownToken]?
+    var web: ArtifactHTMLDocument?
+}
+struct ArtifactHTMLDocument: Decodable {
+    let document: String
+    let frame: String
+    let policy: String
 }
 struct NativeMarkdownToken: Decodable { let kind: String; let value: String }
 extension NSAttributedString.Key {
@@ -6507,6 +6513,129 @@ final class ArtifactLibraryView: NSView {
     }
 }
 
+/// One web-backed reading surface for HTML documents. The editing surface stays
+/// native. Author scripts live in the same opaque-origin frame used on the web.
+final class ArtifactHTMLScheme: NSObject, WKURLSchemeHandler, WKScriptMessageHandler {
+    weak var reader: ArtifactHTMLReader?
+    init(_ reader: ArtifactHTMLReader) { self.reader = reader }
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        guard let reader else { task.didFailWithError(URLError(.cancelled)); return }
+        reader.webView(webView, start: task)
+    }
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) { reader?.webView(webView, stop: task) }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, message.frameInfo.request.url?.scheme == "hey-boss-preview",
+              message.frameInfo.request.url?.host == "reader", let body = message.body as? [String: Any],
+              let line = body["line"] as? Int, line > 0, let checked = body["checked"] as? Bool else { return }
+        reader?.toggleTask(line, checked)
+    }
+}
+final class ArtifactHTMLReader: NSObject, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate {
+    let container = NSView()
+    let search = NSSearchField()
+    let searchBar = NSStackView()
+    var document: ArtifactHTMLDocument?
+    var loaded = false
+    var imageLoader: (String, @escaping (Data?) -> Void) -> Void = { _, reply in reply(nil) }
+    var failed: () -> Void = {}
+    var toggleTask: (Int, Bool) -> Void = { _, _ in }
+    var previewFrame: WKFrameInfo?
+    private var tasks = Set<ObjectIdentifier>()
+    private var built = false
+    lazy var view: WKWebView = {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let bridge = ArtifactHTMLScheme(self)
+        configuration.setURLSchemeHandler(bridge, forURLScheme: "hey-boss-preview")
+        configuration.userContentController.add(bridge, name: "artifactTask")
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = self; view.uiDelegate = self
+        view.setValue(false, forKey: "drawsBackground")
+        return view
+    }()
+    func load(_ document: ArtifactHTMLDocument) {
+        self.document = document; loaded = false; previewFrame = nil
+        if !built {
+            built = true
+            search.placeholderString = "Find in document"; search.delegate = self; search.target = self; search.action = #selector(findNext)
+            let previous = NSButton(title: "Previous", target: self, action: #selector(findPrevious))
+            let next = NSButton(title: "Next", target: self, action: #selector(findNext))
+            let close = NSButton(title: "Done", target: self, action: #selector(closeFind))
+            searchBar.orientation = .horizontal; searchBar.spacing = 8
+            searchBar.edgeInsets = NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+            [search, previous, next, close].forEach { searchBar.addArrangedSubview($0) }
+            search.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let stack = NSStackView(views: [searchBar, view]); stack.orientation = .vertical; stack.spacing = 0
+            stack.translatesAutoresizingMaskIntoConstraints = false; container.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: container.leadingAnchor), stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: container.topAnchor), stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                view.widthAnchor.constraint(equalTo: stack.widthAnchor), searchBar.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            ])
+            searchBar.isHidden = true
+        }
+        view.load(URLRequest(url: URL(string: "hey-boss-preview://reader/document?revision=" + UUID().uuidString)!))
+    }
+    func clear() {
+        document = nil; loaded = false; previewFrame = nil; container.isHidden = true
+        if built { view.stopLoading(); view.loadHTMLString("", baseURL: nil) }
+    }
+    func find(backwards: Bool = false, show: Bool = false) {
+        if show || search.stringValue.isEmpty { searchBar.isHidden = false; container.window?.makeFirstResponder(search); search.selectText(nil); return }
+        let configuration = WKFindConfiguration(); configuration.backwards = backwards; configuration.wraps = true
+        view.find(search.stringValue, configuration: configuration) { [weak self] result in
+            self?.search.toolTip = result.matchFound ? nil : "No matches"
+        }
+    }
+    @objc func findNext() { find() }
+    @objc func findPrevious() { find(backwards: true) }
+    @objc func closeFind() { searchBar.isHidden = true; container.window?.makeFirstResponder(view) }
+    func controlTextDidChange(_ notification: Notification) { if !search.stringValue.isEmpty { find() } }
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        guard let url = task.request.url, url.host == "reader", let document else { task.didFailWithError(URLError(.resourceUnavailable)); return }
+        let key = ObjectIdentifier(task as AnyObject); tasks.insert(key)
+        func reply(_ data: Data?, _ type: String, _ policy: String? = nil) {
+            guard tasks.remove(key) != nil else { return }
+            guard let data else { task.didFailWithError(URLError(.resourceUnavailable)); return }
+            var headers = ["Content-Type": type, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"]
+            if let policy { headers["Content-Security-Policy"] = policy }
+            task.didReceive(HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!)
+            task.didReceive(data); task.didFinish()
+        }
+        switch url.path {
+        case "/document": reply(Data(document.document.utf8), "text/html; charset=utf-8")
+        case "/html-preview": reply(Data(document.frame.utf8), "text/html; charset=utf-8", document.policy)
+        case "/image":
+            guard let source = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "source" })?.value else { reply(nil, "image/png"); return }
+            imageLoader(source) { data in onMain { reply(data, "image/png") } }
+        default: reply(nil, "text/plain")
+        }
+    }
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) { tasks.remove(ObjectIdentifier(task as AnyObject)) }
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = action.request.url else { decisionHandler(.cancel); return }
+        let internalURL = url.scheme == "hey-boss-preview" && url.host == "reader"
+        if action.targetFrame?.isMainFrame == false {
+            if internalURL && url.path == "/html-preview" { previewFrame = action.targetFrame; decisionHandler(.allow) }
+            else { decisionHandler(.cancel) }
+        } else if internalURL && url.path == "/document" || url.absoluteString == "about:blank" {
+            decisionHandler(.allow)
+        } else {
+            if action.navigationType == .linkActivated && ["http", "https", "mailto"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
+            decisionHandler(.cancel)
+        }
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = action.request.url, ["http", "https"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
+        return nil
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { loaded = document != nil }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failed() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code != NSURLErrorCancelled { failed() }
+    }
+}
+
 final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     let window: ArtifactEditorWindow
     let session: ArtifactEditingSession
@@ -6515,6 +6644,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let reader = NSTextView()
     let scroll = NSScrollView()
     let readerScroll = NSScrollView()
+    let htmlReader = ArtifactHTMLReader()
     let split = NSSplitView()
     let sidebar = NSVisualEffectView(frame: .zero)
     let paper = NSView()
@@ -6569,6 +6699,23 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         self.present = present
         window = ArtifactEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         super.init()
+        htmlReader.imageLoader = { [weak self] source, reply in self?.loadHTMLImage(source, reply: reply) }
+        htmlReader.toggleTask = { [weak self] line, checked in
+            guard let self, self.previewing, self.previewSource == self.text.string else { return }
+            let source = self.text.string as NSString
+            var offset = 0
+            for _ in 1..<line {
+                guard offset < source.length else { return }
+                offset = NSMaxRange(source.lineRange(for: NSRange(location: offset, length: 0)))
+            }
+            guard let marker = self.text.taskMarker(at: offset), (source.substring(with: NSRange(location: marker.location + 1, length: 1)) != " ") != checked else { return }
+            if self.text.toggleTask(at: offset) { self.previewSource = self.text.string }
+        }
+        htmlReader.failed = { [weak self] in
+            guard let self else { return }
+            self.htmlReader.clear(); self.readerScroll.isHidden = !self.previewing
+            self.reader.string = self.session.body; self.status.stringValue = "Preview unavailable · showing source"
+        }
         window.title = "Artifacts"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
         window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
@@ -6646,7 +6793,12 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         gallery.create.target = self; gallery.create.action = #selector(newDocument)
         gallery.retry.target = self; gallery.retry.action = #selector(retryLibrary)
         gallery.more.target = self; gallery.more.action = #selector(moreDocuments)
-        [scroll, readerScroll, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
+        [scroll, readerScroll, htmlReader.container, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
+        htmlReader.container.isHidden = true
+        NSLayoutConstraint.activate([
+            htmlReader.container.leadingAnchor.constraint(equalTo: readerScroll.leadingAnchor), htmlReader.container.trailingAnchor.constraint(equalTo: readerScroll.trailingAnchor),
+            htmlReader.container.topAnchor.constraint(equalTo: readerScroll.topAnchor), htmlReader.container.bottomAnchor.constraint(equalTo: readerScroll.bottomAnchor)
+        ])
         configureText(text, scroll: scroll); configureText(reader, scroll: readerScroll)
         text.isRichText = false; text.isEditable = false; text.allowsUndo = true; text.delegate = self
         text.registerForDraggedTypes([.fileURL, .png, .tiff])
@@ -7010,6 +7162,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         guard session.ready && gallery.isHidden else { return }; previewing.toggle()
         modeControl.selectedSegment = previewing ? 1 : 0
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
+        if !previewing { htmlReader.clear() }
         if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
     }
     func renderPreview() {
@@ -7040,6 +7193,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     func installPreview(_ node: NativeMarkdownNode, source: String) {
+        if let web = node.web {
+            readerScroll.isHidden = true; htmlReader.container.isHidden = !previewing
+            htmlReader.load(web); previewSource = source
+            if previewing { window.makeFirstResponder(htmlReader.view) }
+            return
+        }
+        htmlReader.clear(); readerScroll.isHidden = !previewing
         let rendered = NSMutableAttributedString(attributedString: NativeMarkdownRenderer.render(node, localImages: true))
         rendered.enumerateAttribute(.nativeTaskLine, in: NSRange(location: 0, length: rendered.length)) { value, range, _ in
             guard let line = value as? Int else { return }
@@ -7072,6 +7232,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         return true
     }
     func loadPreviewImages(generation: Int) {
+        if !htmlReader.container.isHidden { return }
         guard let storage = reader.textStorage else { return }
         if previewImages.count > 64 { previewImages.removeAll() }
         storage.enumerateAttribute(.nativeImageURL, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
@@ -7119,6 +7280,37 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             reader.layoutManager?.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
             reader.layoutManager?.invalidateDisplay(forCharacterRange: range)
         }
+    }
+    func loadHTMLImage(_ source: String, reply: @escaping (Data?) -> Void) {
+        guard let url = URL(string: source) else { reply(nil); return }
+        let finish: (Data?) -> Void = { data in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let data, data.count <= 10 * 1024 * 1024, let image = boundedIconImage(data, maximumPixelSize: 2000),
+                      let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { reply(nil); return }
+                reply(bitmap.representation(using: .png, properties: [:]))
+            }
+        }
+        if source.hasPrefix("/attachments/f-"), session.launch.file == nil {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-html-image-" + UUID().uuidString)
+            let output = directory.appendingPathComponent("image")
+            do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
+            catch { reply(nil); return }
+            backend.request(["download", url.lastPathComponent, "--output", output.path], command: "attachment") { result in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    defer { try? FileManager.default.removeItem(at: directory) }
+                    if case .success = result { finish(try? Data(contentsOf: output)) } else { reply(nil) }
+                }
+            }
+        } else if let file = session.launch.file, url.scheme == nil || url.isFileURL {
+            let resolved = url.isFileURL ? url : URL(string: source, relativeTo: URL(fileURLWithPath: file).deletingLastPathComponent().appendingPathComponent(""))!.absoluteURL
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let size = try? resolved.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 10 * 1024 * 1024 else { reply(nil); return }
+                finish(try? Data(contentsOf: resolved))
+            }
+        } else if ["https", "http"].contains(url.scheme ?? "") {
+            var request = URLRequest(url: url); request.timeoutInterval = 15
+            URLSession.shared.dataTask(with: request) { data, _, _ in finish(data) }.resume()
+        } else { reply(nil) }
     }
     func refreshProjects() {
         backend.request(["projects"], command: "issue") { [weak self] result in
@@ -7293,6 +7485,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case ("w", false): window.performClose(nil)
         case ("f", false), ("g", false), ("g", true):
             if !gallery.isHidden { if focusMode { toggleFocus() }; window.makeFirstResponder(search); search.selectText(nil); return true }
+            if previewing && !htmlReader.container.isHidden { htmlReader.find(backwards: shift, show: key == "f"); return true }
             let target = previewing ? reader : text
             window.makeFirstResponder(target)
             let item = NSMenuItem(); item.tag = key == "f" ? NSTextFinder.Action.showFindInterface.rawValue : shift ? NSTextFinder.Action.previousMatch.rawValue : NSTextFinder.Action.nextMatch.rawValue
@@ -7375,6 +7568,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func windowWillClose(_ notification: Notification) {
         window.saveFrame(usingName: "hey-boss-artifact-editor")
         closed = true
+        htmlReader.clear()
         if !session.dirty { session.timer?.invalidate() }
         searchTimer?.invalidate(); renderTimer?.invalidate(); renderGeneration += 1
         onClose()

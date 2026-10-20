@@ -15,3 +15,8 @@ The editor starts in focus mode with a native Liquid Glass window toolbar, an ed
 Changes save automatically after a brief typing pause and when the window loses focus or closes. The editor journals pending text and a stable request ID before sending a revision-checked write through the Rust artifact API. Closed notes continue syncing; unsent drafts reopen after an app restart. A conflicting external edit is preserved: export a copy or reload the saved version. Reload keeps the old draft in the private recovery directory.
 
 Artifact Markdown is limited to 1 MiB; local files support 64 MiB. Editing uses one native text storage with noncontiguous layout and visible-range syntax coloring. Preview parsing runs off the UI thread through the shared Rust Markdown renderer.
+
+Read mode uses the shared HTML renderer when a document contains HTML. Complete
+HTML pages and `html render` blocks expand to their content height without a
+nested scrollbar. Find, local images and Markdown checkboxes remain available;
+the editing surface and saved source stay native. See [HTML support](artifacts.md).
