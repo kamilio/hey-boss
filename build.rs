@@ -23,6 +23,7 @@ fn main() {
         "packages/hey-gh",
         "packages/hey-boss-http",
         "packages/hey-boss-sync",
+        "packages/hey-boss-secrets",
         "packages/hey-proxy",
         "tools/upgrade_hey_boss.py",
         "tools/drain_github_issues.py",
