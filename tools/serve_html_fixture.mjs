@@ -13,7 +13,8 @@ import {HubStore} from '../mobile/server/store.mjs';
 export async function startFixture(){
  const root=mkdtempSync(join(tmpdir(),'hb-html-'));
  const binary=join(root,'hey-boss');copyFileSync(resolve('target/debug/hey-boss'),binary);
- const env={...process.env,HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock')};delete env.HEY_BOSS_ISSUE_HOST;
+ const env={...process.env,HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_FLEET_STATE:root,HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock')};
+ for(const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR'])delete env[key];
  const project='named:HTML QA',body=readFileSync(new URL('../tests/fixtures/html-render.md',import.meta.url),'utf8');
  const cli=args=>JSON.parse(execFileSync(binary,args,{env,cwd:root,encoding:'utf8'}));
  let child,server,store,app,timer,inbox,closing=false;
@@ -36,14 +37,16 @@ export async function startFixture(){
    socket.resume();socket.on('end',()=>socket.end(JSON.stringify({status:'ok',result:JSON.stringify({tasks:[],unread:0})})));
   });
   await new Promise(resolve=>inbox.listen(env.HEY_BOSS_INBOX_SOCKET,resolve));
+  // Start the database owner before CLI writes, so no detached broker outlives
+  // the fixture and recreates its files during cleanup.
+  child=spawn(binary,['issue','web','--project',project,'--no-discovery','--port','0','--json'],{env,cwd:root,stdio:['ignore','pipe','inherit']});
+  const lines=createInterface({input:child.stdout});
+  const ready=await new Promise((resolve,reject)=>{lines.once('line',line=>resolve(JSON.parse(line)));child.once('exit',code=>reject(Error('Server exited '+code)));});
   cli(['project','init','--project','HTML QA','--prs','false','--worktree','false','--yes','--json']);
   const artifact=cli(['artifact','create','--project',project,'--title','HTML preview','--body',body,'--json']).artifact;
   const fullBody=readFileSync(new URL('../tests/fixtures/html-page.html',import.meta.url),'utf8');
   const full=cli(['artifact','create','--project',project,'--title','A complete HTML page','--body',fullBody,'--json']).artifact;
   const issue=cli(['issue','create','--project',project,'--title','HTML issue','--body',body,'--json']).issue;
-  child=spawn(binary,['issue','web','--project',project,'--no-discovery','--port','0','--json'],{env,cwd:root,stdio:['ignore','pipe','inherit']});
-  const lines=createInterface({input:child.stdout});
-  const ready=await new Promise((resolve,reject)=>{lines.once('line',line=>resolve(JSON.parse(line)));child.once('exit',code=>reject(Error('Server exited '+code)));});
   const native=ready.url.replace(/\/$/,''),boot=await json(native+'/api/bootstrap');
   store=new HubStore();store.setIssueProjects(boot.projects);
   server=createServer((req,res)=>app(req,res));await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));

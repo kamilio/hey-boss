@@ -23,10 +23,10 @@ pub struct Options {
 }
 #[derive(Args)]
 struct Text {
-    /// Markdown text, or '-' for stdin.
+    /// Markdown or HTML source, or '-' for stdin.
     #[arg(long, conflicts_with = "file")]
     body: Option<String>,
-    /// Import Markdown and rehost local linked files (relative to this file); '-' reads stdin.
+    /// Import UTF-8 Markdown or HTML; local Markdown links are rehosted. '-' reads stdin.
     #[arg(long, conflicts_with = "body")]
     file: Option<PathBuf>,
 }
@@ -46,7 +46,7 @@ impl Text {
                 .custom_flags(libc::O_NONBLOCK)
                 .open(path)?;
             if !file.metadata()?.is_file() {
-                return Err(Error::invalid("Markdown file must be a regular file"));
+                return Err(Error::invalid("Document must be a regular file"));
             }
             file.take(issues::BODY_LIMIT as u64 + 1)
                 .read_to_end(&mut bytes)?;
@@ -54,10 +54,10 @@ impl Text {
             return Ok(self.body.clone());
         }
         if bytes.len() > issues::BODY_LIMIT {
-            return Err(Error::invalid("Markdown exceeds 1 MiB"));
+            return Err(Error::invalid("Document exceeds 1 MiB"));
         }
         Ok(Some(
-            String::from_utf8(bytes).map_err(|_| Error::invalid("Markdown must be UTF-8"))?,
+            String::from_utf8(bytes).map_err(|_| Error::invalid("Document must be UTF-8"))?,
         ))
     }
 }
@@ -108,7 +108,7 @@ enum Action {
         /// Initial title for a new artifact.
         #[arg(long)]
         title: Option<String>,
-        /// Local Markdown file path to open in the native editor.
+        /// Local Markdown or HTML file path to open in the native editor.
         #[arg(long, conflicts_with_all = ["id", "new", "title", "issue", "node"])]
         file: Option<PathBuf>,
         #[command(flatten)]

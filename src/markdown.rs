@@ -46,7 +46,7 @@ fn html_preview_source(source: &str) -> String {
     )
 }
 
-fn is_html_document(source: &str) -> bool {
+pub(crate) fn is_html_document(source: &str) -> bool {
     let source = source.trim_start_matches('\u{feff}').trim_start();
     ["<!doctype html", "<html", "<head", "<body"]
         .iter()

@@ -134,10 +134,10 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
 
 #[derive(Args)]
 struct Body {
-    /// Markdown text; '-' reads UTF-8 from stdin (up to 1 MiB).
+    /// Markdown or HTML source; '-' reads UTF-8 from stdin (up to 1 MiB).
     #[arg(long, conflicts_with = "file")]
     body: Option<String>,
-    /// Copy a UTF-8 Markdown file into SQLite; '-' reads stdin.
+    /// Import a UTF-8 Markdown or HTML file; '-' reads stdin.
     #[arg(long, visible_alias = "markdown-file", conflicts_with = "body")]
     file: Option<PathBuf>,
 }
@@ -154,14 +154,14 @@ impl Body {
                 .custom_flags(libc::O_NONBLOCK)
                 .open(path)?;
             if !file.metadata()?.is_file() {
-                return Err(Error::invalid("Markdown path must be a regular file"));
+                return Err(Error::invalid("Document path must be a regular file"));
             }
             Some(read_text(file, issues::BODY_LIMIT)?)
         } else {
             self.body.clone()
         };
         if value.as_ref().is_some_and(|s| s.len() > issues::BODY_LIMIT) {
-            return Err(Error::invalid("Markdown exceeds 1 MiB"));
+            return Err(Error::invalid("Document exceeds 1 MiB"));
         }
         Ok(value)
     }

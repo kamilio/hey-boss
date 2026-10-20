@@ -318,7 +318,7 @@ const HeyBossArtifacts = (() => {
       mode("editor");
       document.title=`${doc?"Edit "+doc.title:"New artifact"} · Hey Boss`;
       $("#artifact-document").innerHTML=`<form id="artifact-editor" class="artifact-editor" data-version="${draft?.version||doc?.version||1}" data-request-id="${esc(draft?.requestID||HeyBossUI.requestId())}">
-        <header class="artifact-editor-toolbar"><button class="artifact-text-button" type="button" id="artifact-cancel">${icon("arrow-left")}Back</button><h1>${doc?"Edit artifact":"New artifact"}</h1><div class="artifact-editor-tools"><button class="button" type="button" id="artifact-preview" aria-pressed="false">Preview</button><button class="button artifact-import" type="button" id="artifact-import-open" title="Choose Markdown and its linked files together">Import</button><input id="artifact-import" type="file" multiple hidden><button class="button primary" type="submit">Save</button></div></header>
+        <header class="artifact-editor-toolbar"><button class="artifact-text-button" type="button" id="artifact-cancel">${icon("arrow-left")}Back</button><h1>${doc?"Edit artifact":"New artifact"}</h1><div class="artifact-editor-tools"><button class="button" type="button" id="artifact-preview" aria-pressed="false">Preview</button><button class="button artifact-import" type="button" id="artifact-import-open" title="Choose a Markdown or HTML document and its linked files together">Import</button><input id="artifact-import" type="file" multiple hidden><button class="button primary" type="submit">Save</button></div></header>
         <div class="artifact-editor-paper"><label class="artifact-title-label" for="artifact-title">Title</label><input id="artifact-title" aria-label="Title" required maxlength="512" placeholder="Untitled artifact" value="${esc(draft?.title??doc?.title??"")}"><div id="artifact-write"><label class="artifact-body-label" for="artifact-body">Markdown</label><textarea id="artifact-body" placeholder="Start writing in Markdown…" spellcheck="true">${esc(draft?.body??doc?.body??"")}</textarea></div><div class="markdown artifact-reading" id="artifact-edit-preview" hidden></div></div><div id="artifact-conflict" class="artifact-conflict"></div></form>`;
       let saving=false,pending=draft?.pending||null;
       $("#artifact-editor").dataset.importFiles=JSON.stringify(draft?.files||[]);
@@ -359,15 +359,23 @@ const HeyBossArtifacts = (() => {
       $("#artifact-import").onchange=async e=>{
         const selected=[...e.target.files],form=$("#artifact-editor");e.target.value="";
         if(!selected.length)return;
-        const markdown=selected.filter(file=>/\.(md|markdown)$/i.test(file.name));
-        if(markdown.length!==1){error(Error("Choose one Markdown document and its linked files together."));return;}
-        const file=markdown[0];if(file.size>1048576){error(Error("Markdown must be at most 1 MiB"));return;}
+        const documents=selected.filter(file=>/\.(md|markdown|html?)$/i.test(file.name));
+        const markdown=documents.filter(file=>/\.(md|markdown)$/i.test(file.name));
+        const file=documents.length===1?documents[0]:markdown.length===1?markdown[0]:null;
+        if(!file){error(Error("Choose one Markdown or HTML document and its linked files together."));return;}
+        const format=/\.html?$/i.test(file.name)?"HTML":"Markdown";
+        if(file.size>1048576){error(Error("Document must be at most 1 MiB"));return;}
         saving=true;form.querySelectorAll("button,input,textarea").forEach(el=>el.disabled=true);
         try {
-          const body=new TextDecoder("utf-8",{fatal:true}).decode(await file.arrayBuffer()),preview=await api(context,{command:"preview",body}),files=[];
+          const body=new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer()),preview=await api(context,{command:"preview",body}),files=[];
+          const basename=destination=>decodeURIComponent(destination.split(/[?#]/)[0]).split("/").pop();
+          if(documents.length>1){
+            const linked=new Set((preview.local_files||[]).map(basename));
+            if(documents.some(candidate=>candidate!==file&&!linked.has(candidate.name)))throw Error("Choose one Markdown or HTML document and its linked files together.");
+          }
           let total=0;
           for(const destination of preview.local_files||[]) {
-            const name=decodeURIComponent(destination.split(/[?#]/)[0]).split("/").pop();
+            const name=basename(destination);
             const matches=selected.filter(file=>file.name===name);
             if(matches.length!==1)throw Error("Select the linked file “"+name+"” with your Markdown document, then import again.");
             const attachment=matches[0];total+=attachment.size;
@@ -379,7 +387,7 @@ const HeyBossArtifacts = (() => {
           $("#artifact-error").hidden=true;
           form.dataset.importFiles=JSON.stringify(files);
           if(writingEditor)writingEditor.replace(body);else $("#artifact-body").value=body;
-          changed();keepDraft();status(files.length?"Imported Markdown and "+files.length+" linked files. Save to upload.":"Markdown imported. Save when ready.");
+          changed();keepDraft();status(files.length?"Imported "+format+" and "+files.length+" linked files. Save to upload.":format+" imported. Save when ready.");
         } catch(e){error(e);} finally {saving=false;if(form.isConnected)form.querySelectorAll("button,input,textarea").forEach(el=>el.disabled=false);}
       };
       $("#artifact-import-open").onclick=()=>$("#artifact-import").click();
