@@ -1,6 +1,28 @@
 "use strict";
 // Shared, dependency-free browser components. Page clients own data and mutations.
 const HeyBossUI = (() => {
+  // All dialogs share Escape's cancellation path, including save guards and drafts.
+  // Use closedby="none" for a dialog that requires an explicit decision.
+  let backdropPress = null;
+  function onBackdrop(event, dialog) {
+    if (!(dialog instanceof HTMLDialogElement) || !dialog.open || event.target !== dialog) return false;
+    const bounds = dialog.getBoundingClientRect();
+    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
+  }
+  document.addEventListener("pointerdown", event => {
+    backdropPress = event.button === 0 && onBackdrop(event, event.target) ? event.target : null;
+  }, true);
+  document.addEventListener("pointercancel", () => { backdropPress = null; }, true);
+  document.addEventListener("click", event => {
+    const dialog = event.target, pressed = backdropPress;
+    backdropPress = null;
+    if (!onBackdrop(event, dialog)) return;
+    // Own backdrop events so page-specific handlers cannot bypass cancellation.
+    event.stopImmediatePropagation();
+    if (dialog !== pressed || dialog.getAttribute("closedby") === "none") return;
+    if (dialog.requestClose) dialog.requestClose();
+    else if (dialog.dispatchEvent(new Event("cancel", {cancelable:true}))) dialog.close();
+  }, true);
   const actorModels = new Map();
   const validModel = value => typeof value === "string" && value.trim() && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : null;
   function rememberActors(value) {

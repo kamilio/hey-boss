@@ -811,7 +811,6 @@ if (typeof document !== 'undefined') (() => {
       const finish=ok=>{if(dialog.open)dialog.close();resolve(ok);};
       cancelBtn.onclick=()=>finish(false);
       submitBtn.onclick=()=>finish(true);
-      dialog.onclick=e=>{if(e.target===dialog)finish(false);};
       dialog.oncancel=e=>{e.preventDefault();finish(false);};
       dialog.showModal();
       cancelBtn.focus();

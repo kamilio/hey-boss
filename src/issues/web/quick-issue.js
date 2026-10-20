@@ -213,11 +213,6 @@ const HeyBossQuickIssue = (() => {
     input.addEventListener("compositionstart",() => { composing = true; hidePicker(); });
     input.addEventListener("compositionend",() => { composing = false; dismissed = false; updatePicker(); });
     dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-    dialog.addEventListener("click", event => {
-      if (event.target !== dialog) return;
-      const bounds = dialog.getBoundingClientRect();
-      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close();
-    });
     document.addEventListener("keydown", event => {
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "k") {
         event.preventDefault(); event.stopImmediatePropagation(); if (!event.repeat) open(); return;

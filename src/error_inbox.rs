@@ -343,11 +343,12 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         Ok(group)
     }
     /// Freeze before creating a task: a lost acknowledgement retries identical evidence.
-    pub fn snapshot(&mut self, project: &str, id: &str) -> Result<Value> {
+    pub fn snapshot(&mut self, project: &str, id: &str, prompt: &str) -> Result<Value> {
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let detail = Self::read_detail(&tx, project, id, now())?;
+        let mut detail = Self::read_detail(&tx, project, id, now())?;
+        detail["task_prompt"] = json!(prompt);
         let text = serde_json::to_string_pretty(&detail)?;
         tx.execute(
             "UPDATE error_groups SET snapshot=COALESCE(snapshot,?3) WHERE project=?1 AND id=?2",
