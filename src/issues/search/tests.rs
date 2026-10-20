@@ -244,6 +244,50 @@ fn long_threads_resume_after_restart_and_edits_reset_the_cursor() {
 }
 
 #[test]
+fn queued_edits_precede_backfill_and_failed_archives_do_not_block_it() {
+    let mut f = Fixture::new();
+    for _ in 0..9 {
+        f.add("Historical issue", "");
+    }
+    let db = Connection::open(f.root.join("issues.db")).unwrap();
+    let cache = index::open(&f.root.join("issues.db"), true).unwrap();
+    db.execute("UPDATE issue_search_dirty SET dirty=0", [])
+        .unwrap();
+    let edited = f.add("Current edit", "");
+    worker::enqueue_backfill(&db, &cache, "[]", || false).unwrap();
+    let pending = || {
+        db.query_collect(
+            "SELECT number FROM issue_search_dirty WHERE dirty=1 ORDER BY number",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(pending(), vec![edited]);
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key='backfill_cursor'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+
+    // An unavailable archive can remain queued while healthy backfill proceeds.
+    let excluded = serde_json::to_string(&vec![("named:Search", edited)]).unwrap();
+    worker::enqueue_backfill(&db, &cache, &excluded, || false).unwrap();
+    assert_eq!(pending(), vec![1, 2, 3, 4, 5, 6, 7, 8, edited]);
+    db.execute("UPDATE issue_search_dirty SET dirty=0", [])
+        .unwrap();
+    worker::enqueue_backfill(&db, &cache, "[]", || true).unwrap();
+    assert!(pending().is_empty());
+    worker::enqueue_backfill(&db, &cache, "[]", || false).unwrap();
+    assert_eq!(pending(), vec![9, edited]);
+}
+
+#[test]
 fn compact_vectors_preserve_cosine_and_keep_storage_bounded() {
     let mut q: Vec<f32> = (0..index::DIMENSIONS)
         .map(|i| ((i * 7 % 31) as f32 - 15.0) / 200.0)
