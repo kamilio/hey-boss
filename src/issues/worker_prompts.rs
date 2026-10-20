@@ -54,6 +54,7 @@ prompts! {
     (dependency_update, DEFAULT_DEPENDENCY_UPDATE_PROMPT, "Dependency updates", "Live dependency changes. Variable: {{instruction}}."),
     (prompt_update, DEFAULT_PROMPT_UPDATE_PROMPT, "Prompt updates", "Changed project instructions. Variable: {{instructions}}."),
     (goal_continue, DEFAULT_GOAL_CONTINUE_PROMPT, "Continue a goal", "A goal turn ends before a completion report."),
+    (error_task, DEFAULT_ERROR_TASK_PROMPT, "Error task", "Tasks created from Errors. Variable: {{command}} reads the error evidence."),
 }
 
 pub fn render(text: &str, mut value: impl FnMut(&str) -> Option<String>) -> String {
