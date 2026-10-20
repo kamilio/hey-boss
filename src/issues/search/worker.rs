@@ -135,7 +135,7 @@ pub(crate) fn start(path: PathBuf, stop: Arc<AtomicBool>, busy: Busy) -> JoinHan
                 continue;
             }
             let result = (|| -> Result<usize> {
-                let db = Connection::connect(&path)?;
+                let db = Connection::connect_background(&path)?;
                 let cache = index::open(&path, true)?;
                 failures.retain(|_, at| *at > crate::issues::worker::now());
                 let excluded = serde_json::to_string(&failures.keys().collect::<Vec<_>>())?;

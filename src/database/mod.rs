@@ -148,6 +148,7 @@ enum Backend {
 #[derive(Debug)]
 struct Remote {
     path: PathBuf,
+    recover: bool,
     stream: RefCell<Option<BufReader<UnixStream>>>,
     transaction: Cell<bool>,
     last_id: Cell<i64>,
@@ -208,15 +209,23 @@ impl Connection {
         }
     }
     pub fn connect(path: &Path) -> Result<Self> {
+        Self::connect_session(path, true)
+    }
+    /// Owner-owned work must not bootstrap or wait for the owner during shutdown.
+    pub(crate) fn connect_background(path: &Path) -> Result<Self> {
+        Self::connect_session(path, false)
+    }
+    fn connect_session(path: &Path, recover: bool) -> Result<Self> {
         let stream = UnixStream::connect(owner::socket_path(path)).map_err(connection_error)?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(60)))
+            .set_read_timeout(Some(Duration::from_secs(if recover { 60 } else { 2 })))
             .map_err(|e| error(e.to_string()))?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(15)))
+            .set_write_timeout(Some(Duration::from_secs(if recover { 15 } else { 2 })))
             .map_err(|e| error(e.to_string()))?;
         let remote = Remote {
             path: path.to_owned(),
+            recover,
             stream: RefCell::new(Some(BufReader::new(stream))),
             transaction: Cell::new(false),
             last_id: Cell::new(0),
@@ -464,6 +473,9 @@ impl Remote {
                 return Err(error(
                     "Database transaction lost its connection; its outcome cannot be replayed automatically",
                 ));
+            }
+            if !self.recover {
+                return Err(error("Background database session ended"));
             }
             owner::ensure(&self.path)?;
             let Backend::Remote(replacement) = Connection::connect(&self.path)?.backend else {
