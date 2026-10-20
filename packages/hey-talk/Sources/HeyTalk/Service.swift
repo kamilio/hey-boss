@@ -8,6 +8,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let inference = Inference()
     private let history = DictationHistory()
     private let enterExceptions = EnterExceptions()
+    private let vocabulary = Vocabulary()
     private let autoSettings = AutoDictationSettings()
     private let focusMonitor = InputFocusMonitor()
     private let autoSubmitKey = AutoSubmitKey()
@@ -249,6 +250,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showModeNotice() }
                 }
                 reply(["ok": true, "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready])
+            } catch { reply(failure(error.localizedDescription)) }
+        case "vocabulary":
+            do {
+                guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing vocabulary arguments") }
+                reply(["ok": true, "vocabulary": try vocabulary.command(arguments), "path": vocabulary.file.path])
             } catch { reply(failure(error.localizedDescription)) }
         case "enter-exceptions":
             do {

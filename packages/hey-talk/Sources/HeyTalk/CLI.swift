@@ -23,6 +23,7 @@ enum CLI {
     hey-talk input UID|default                  Select microphone
     hey-talk auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
+    hey-talk vocabulary [add|remove WORD…]     List or edit recognition hints; quote phrases
     hey-talk overlay show|hide                  Control the floating recording pill
     hey-talk permissions microphone|accessibility
     hey-talk warm                              Load Orukeet ahead of recording
@@ -45,13 +46,18 @@ enum CLI {
         let args = arguments.filter { !["--json", "--no-overlay", "--no-paste"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
-        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "enter-exceptions", "overlay", "permissions", "warm", "doctor", "quit"]
+        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
         guard known.contains(verb) else { throw TalkError("Unknown command: \(verb). Run hey-talk --help.") }
         let needsValue = ["transcribe", "input", "overlay", "permissions"].contains(verb)
-        if !["history", "enter-exceptions", "auto"].contains(verb) {
+        if !["history", "enter-exceptions", "auto", "vocabulary"].contains(verb) {
             guard args.count == (needsValue ? 2 : 1) else { throw TalkError("Unexpected arguments. Run hey-talk --help.") }
         }
         var request: [String: Any] = ["command": verb]
+        if verb == "vocabulary" {
+            let values = Array(args.dropFirst())
+            try Vocabulary.validate(values)
+            request["arguments"] = values
+        }
         if verb == "auto" {
             let values = Array(args.dropFirst())
             try AutoDictationSettings.validate(values)
@@ -80,7 +86,7 @@ enum CLI {
         if verb == "permissions" { request["kind"] = args[1] }
         if (try? ControlSocket.request(["command": "status"])) == nil {
             if ["status", "quit", "cancel"].contains(verb) { try output(["ok": true, "state": "stopped"], json: json); return }
-            try launch(headless: noOverlay || ["transcribe", "devices", "doctor", "input", "auto", "enter-exceptions", "permissions", "warm", "history", "last"].contains(verb))
+            try launch(headless: noOverlay || ["transcribe", "devices", "doctor", "input", "auto", "enter-exceptions", "vocabulary", "permissions", "warm", "history", "last"].contains(verb))
         }
         if verb == "record" {
             request["command"] = "start"
@@ -109,6 +115,9 @@ enum CLI {
             print("Auto mode: \(settings["enabled"] as? Bool == true ? "on" : "off") · Hyper+V to toggle")
             print("Allowed apps: \((settings["apps"] as? [String] ?? []).joined(separator: ", "))")
             if settings["enabled"] as? Bool == true, response["auto_ready"] as? Bool != true { print("Enable Accessibility with hey-talk permissions accessibility.") }
+        }
+        else if let words = response["vocabulary"] as? [String] {
+            print(words.isEmpty ? "No vocabulary hints." : words.joined(separator: "\n"))
         }
         else if let ids = response["enter_exceptions"] as? [String], response.count == 2 {
             print(ids.isEmpty ? "No Enter exceptions." : ids.joined(separator: "\n"))

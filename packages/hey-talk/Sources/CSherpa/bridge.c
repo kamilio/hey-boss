@@ -12,7 +12,7 @@ struct HTRecognizer {
     void *library;
     const SherpaOnnxOfflineRecognizer *recognizer;
     __typeof__(&SherpaOnnxDestroyOfflineRecognizer) destroy;
-    __typeof__(&SherpaOnnxCreateOfflineStream) stream;
+    __typeof__(&SherpaOnnxCreateOfflineStreamWithHotwords) stream;
     __typeof__(&SherpaOnnxDestroyOfflineStream) destroy_stream;
     __typeof__(&SherpaOnnxAcceptWaveformOffline) accept;
     __typeof__(&SherpaOnnxDecodeOfflineStream) decode;
@@ -34,17 +34,18 @@ HTRecognizer *ht_create(const char *library, const char *models, int threads) {
     __typeof__(&SherpaOnnxCreateOfflineRecognizer) create = dlsym(r->library, "SherpaOnnxCreateOfflineRecognizer");
     if (!create) { snprintf(last_error, sizeof(last_error), "Missing recognizer factory"); goto failed; }
     LOAD(destroy, SherpaOnnxDestroyOfflineRecognizer);
-    LOAD(stream, SherpaOnnxCreateOfflineStream);
+    LOAD(stream, SherpaOnnxCreateOfflineStreamWithHotwords);
     LOAD(destroy_stream, SherpaOnnxDestroyOfflineStream);
     LOAD(accept, SherpaOnnxAcceptWaveformOffline);
     LOAD(decode, SherpaOnnxDecodeOfflineStream);
     LOAD(result, SherpaOnnxGetOfflineStreamResult);
     LOAD(destroy_result, SherpaOnnxDestroyOfflineRecognizerResult);
-    char encoder[PATH_MAX], decoder[PATH_MAX], joiner[PATH_MAX], tokens[PATH_MAX];
+    char encoder[PATH_MAX], decoder[PATH_MAX], joiner[PATH_MAX], tokens[PATH_MAX], bpe[PATH_MAX];
     snprintf(encoder, sizeof(encoder), "%s/encoder.int8.onnx", models);
     snprintf(decoder, sizeof(decoder), "%s/decoder.int8.onnx", models);
     snprintf(joiner, sizeof(joiner), "%s/joiner.int8.onnx", models);
     snprintf(tokens, sizeof(tokens), "%s/tokens.txt", models);
+    snprintf(bpe, sizeof(bpe), "%s/bpe.vocab", models);
     SherpaOnnxOfflineRecognizerConfig config = {0};
     config.feat_config.sample_rate = 16000;
     config.feat_config.feature_dim = 80;
@@ -55,7 +56,11 @@ HTRecognizer *ht_create(const char *library, const char *models, int threads) {
     config.model_config.num_threads = threads;
     config.model_config.provider = "cpu";
     config.model_config.model_type = "nemo_transducer";
-    config.decoding_method = "greedy_search";
+    config.model_config.modeling_unit = "bpe";
+    config.model_config.bpe_vocab = bpe;
+    config.decoding_method = "modified_beam_search";
+    config.max_active_paths = 4;
+    config.hotwords_score = 1.5f;
     r->recognizer = create(&config);
     if (!r->recognizer) { snprintf(last_error, sizeof(last_error), "Cannot load Orukeet model"); goto failed; }
     return r;
@@ -63,8 +68,8 @@ failed:
     ht_destroy(r);
     return NULL;
 }
-char *ht_transcribe(HTRecognizer *r, const float *samples, int32_t count) {
-    const SherpaOnnxOfflineStream *s = r->stream(r->recognizer);
+char *ht_transcribe(HTRecognizer *r, const float *samples, int32_t count, const char *hotwords) {
+    const SherpaOnnxOfflineStream *s = r->stream(r->recognizer, hotwords);
     if (!s) return NULL;
     r->accept(s, 16000, samples, count);
     r->decode(r->recognizer, s);
