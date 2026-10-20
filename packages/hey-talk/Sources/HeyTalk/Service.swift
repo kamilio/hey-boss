@@ -20,7 +20,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var autoMenuItem: NSMenuItem?
     private var historyWindow: HistoryWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
-    private lazy var cues = AudioCues()
     private var session = RecordingSession()
     private var overlay: Overlay?
     private var hotkey: Hotkey?
@@ -354,9 +353,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.captureMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 self.captureReady = true
                 self.overlay?.update(.recording); self.hotkey?.captureEscape(true)
-                // NSSound can switch a Bluetooth headset's output profile and
-                // invalidate its microphone graph. The visible pill is the cue.
-                if !self.capture.usesBluetooth { self.cues.start() }
                 let limit = DispatchWorkItem { [weak self] in
                     guard let self, self.session.generation == id, self.session.phase == .recording else { return }
                     if self.autoTarget != nil {
@@ -399,7 +395,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let samples):
-                if !self.capture.usesBluetooth { self.cues.stop() }
                 guard samples.count >= 2400 else {
                     if self.autoTarget != nil { self.noSpeechDetected(id: id) } else { self.cancel() }
                     return
