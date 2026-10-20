@@ -53,7 +53,7 @@
   async function mutate(fn){if(busy)return;busy=true;alert('');document.querySelectorAll('#errors-main button').forEach(b=>b.disabled=true);try{await fn();}catch(e){alert(e.message);}finally{busy=false;document.querySelectorAll('#errors-main button').forEach(b=>b.disabled=false);}}
   async function load(){const seq=++generation;const result=await api('list');if(seq!==generation)return;rows=result.groups;enabled=result.enabled;render();}
   async function navigate(){
-    generation++;$('#error-dialog').close();alert('');project=new URLSearchParams(location.hash.slice(1)).get('project')||boot.project?.id||boot.projects[0]?.id;
+    generation++;$('#error-dialog').close();alert('');project=HeyBossUI.projectId(boot.project?.id||boot.projects[0]?.id);
     picker.update(boot.projects,boot.projects.find(p=>p.id===project)||{id:project,name:project});
     try{await load();}catch(e){alert(e.message);$('#errors-status').textContent='Could not load errors. Use Refresh to retry.';}
   }
