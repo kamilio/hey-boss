@@ -20,6 +20,7 @@ pub mod remote;
 mod reviewed_evidence;
 pub mod search;
 mod store;
+pub mod vocabulary;
 pub mod web;
 pub mod worker;
 mod worker_approvals;
@@ -283,6 +284,9 @@ pub enum Operation {
         task_kind: Option<String>,
     },
     GlobalSettings,
+    DictationVocabulary {
+        operation: vocabulary::Operation,
+    },
     RequestStatus {
         id: String,
     },
@@ -645,6 +649,9 @@ pub struct ProjectInitSettings {
 
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::DictationVocabulary { operation } = self {
+            return !matches!(operation, vocabulary::Operation::Show);
+        }
         if let Self::Job { operation } = self {
             return operation.writes();
         }
@@ -719,6 +726,7 @@ impl Operation {
             | Self::ControlWorker { .. }
             | Self::PreviewWorker { .. }
             | Self::GlobalSettings
+            | Self::DictationVocabulary { .. }
             | Self::RequestStatus { .. }
             | Self::ConfigureGlobal { .. }
             | Self::ProjectInit { .. }

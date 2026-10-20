@@ -24,6 +24,7 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("events", &["id"]),
     ("project_settings", &["project_id"]),
     ("global_settings", &["id"]),
+    ("dictation_vocabulary", &["source", "term"]),
     (
         "issue_pull_requests",
         &["project_id", "issue_number", "url"],

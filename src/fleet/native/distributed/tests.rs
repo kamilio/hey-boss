@@ -500,6 +500,122 @@ fn transfer(from: &hey_boss_sync::Engine, to: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn dictation_vocabulary_merges_offline_edits_and_late_imports() {
+    use crate::issues::vocabulary::{Operation as VocabularyOperation, execute};
+    use serde_json::json;
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = fa.db();
+    let b = fb.db();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        install(db, node).unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+    }
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    let edit = |db: &Connection, operation| {
+        let tx = db.unchecked_transaction().unwrap();
+        let result = execute(&tx, &operation).unwrap();
+        tx.commit().unwrap();
+        result
+    };
+    edit(
+        &a,
+        VocabularyOperation::Initialize {
+            words: vec!["Poe".into(), "Kamil".into()],
+        },
+    );
+    edit(
+        &a,
+        VocabularyOperation::Remove {
+            words: vec!["Poe".into()],
+        },
+    );
+    edit(
+        &a,
+        VocabularyOperation::Add {
+            words: vec!["ans".into()],
+        },
+    );
+    // The second Mac was offline during the removal and imports its old list.
+    edit(
+        &b,
+        VocabularyOperation::Initialize {
+            words: vec!["Poe".into(), "Kamil".into()],
+        },
+    );
+    edit(
+        &b,
+        VocabularyOperation::Add {
+            words: vec!["Vercel".into()],
+        },
+    );
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    transfer(&ea, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    for db in [&a, &b] {
+        assert_eq!(
+            execute(db, &VocabularyOperation::Show).unwrap()["vocabulary"],
+            json!(["Kamil", "Vercel", "ans"])
+        );
+    }
+    edit(
+        &b,
+        VocabularyOperation::Add {
+            words: vec!["POE".into()],
+        },
+    );
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        execute(&a, &VocabularyOperation::Show).unwrap()["vocabulary"],
+        json!(["Kamil", "POE", "Vercel", "ans"])
+    );
+}
+
+#[test]
+fn dictation_vocabulary_upgrades_capture_and_backfills_existing_peers() {
+    let fixture = Fixture::new();
+    let db = fixture.db();
+    install(&db, "a").unwrap();
+    for action in ["INSERT", "UPDATE", "DELETE"] {
+        db.execute_batch(&format!(
+            "DROP TRIGGER distributed_capture_dictation_vocabulary_{action}"
+        ))
+        .unwrap();
+    }
+    // A newer CLI can save words before the older background service restarts.
+    db.execute(
+        "INSERT INTO dictation_vocabulary VALUES(0,'ans','ans',1)",
+        [],
+    )
+    .unwrap();
+    install(&db, "a").unwrap();
+    db.execute(
+        "INSERT INTO dictation_vocabulary VALUES(1,'poe','Poe',1)",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM distributed_outbox WHERE table_name='dictation_vocabulary'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let mut engine = hey_boss_sync::Engine::open(&fixture.0.join("sync.db")).unwrap();
+    while !baseline(&db, &mut engine, false).unwrap() {}
+    assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name='dictation_vocabulary' AND complete=1", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
 fn archive_preparation_shares_one_page_budget_across_small_archives() {
     let f = Fixture::new();
     let db = f.db();

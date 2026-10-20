@@ -77,7 +77,9 @@ fn cached_response(
 ) -> Result<Option<Value>> {
     if matches!(
         request.operation,
-        Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
+        Operation::GlobalSettings
+            | Operation::ConfigureGlobal { .. }
+            | Operation::DictationVocabulary { .. }
     ) {
         return super::global_settings::cached_response(db, request, payload);
     }
@@ -987,6 +989,7 @@ fn request_project(db: &Connection, r: &Request) -> Result<Project> {
         Operation::ProjectInit { .. }
             | Operation::Projects { .. }
             | Operation::GlobalSettings
+            | Operation::DictationVocabulary { .. }
             | Operation::ConfigureGlobal { .. }
             | Operation::Whoami
             | Operation::Workers { .. }
@@ -1466,6 +1469,7 @@ impl Store {
             registry::migrate_runtime(&tx)?;
             tx.commit()?;
         }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dictation_vocabulary' AND type='table')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::vocabulary::SCHEMA)?; }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
         if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_row_local','fleet_outbox_retention','fleet_conflicts_pending') AND type='index'", [], |r|r.get::<_,i64>(0))? < 3 {
             db.execute_batch(super::fleet::INDEXES)?;
@@ -1880,6 +1884,7 @@ impl Store {
             && !matches!(
                 r.operation,
                 Operation::ConfigureGlobal { .. }
+                    | Operation::DictationVocabulary { .. }
                     | Operation::ControlWorker { .. }
                     | Operation::ConfigureWorker { .. }
             )
@@ -2004,7 +2009,9 @@ impl Store {
         let mut tx = begin()?;
         if matches!(
             r.operation,
-            Operation::GlobalSettings | Operation::ConfigureGlobal { .. }
+            Operation::GlobalSettings
+                | Operation::ConfigureGlobal { .. }
+                | Operation::DictationVocabulary { .. }
         ) {
             let result = super::global_settings::execute(&tx, r)?;
             tx.commit()?;
