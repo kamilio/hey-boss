@@ -137,6 +137,10 @@ pub(super) fn put(
 ) -> Result<()> {
     let parts = rank::chunks(text);
     db.execute(
+        "INSERT OR REPLACE INTO meta VALUES('embeddings_pending','1')",
+        [],
+    )?;
+    db.execute(
         "DELETE FROM passages WHERE project=?1 AND number=?2 AND field=?3 AND source=?4",
         params![project, number, field.name(), source],
     )?;
@@ -261,32 +265,42 @@ pub(crate) fn retrieve(
                     .copied()
                     .collect::<Vec<_>>(),
             )?;
-            for field in [Field::Description, Field::Comment] {
-                let mut sql=db.prepare("SELECT p.number,p.source,p.text,min(words.rank) AS best FROM words JOIN passages p ON p.id=words.rowid WHERE words MATCH ?1 AND p.project=?2 AND p.field=?3 AND p.number IN (SELECT value FROM json_each(?4)) GROUP BY p.number ORDER BY best,p.number LIMIT 300")?;
-                let rows =
-                    sql.query_map(params![expression, project, field.name(), selected], |r| {
-                        Ok((
-                            r.get::<_, i64>(0)?,
-                            r.get::<_, i64>(1)?,
-                            r.get::<_, String>(2)?,
-                        ))
-                    })?;
-                for row in rows {
-                    let (n, s, t) = row?;
-                    if !dirty.contains(&n) {
-                        record(&mut scores, n, field, s, &t, query, None);
-                    }
-                }
+            // SQLite's single min() keeps the ID of the best passage. Fetch
+            // large text only after reducing to distinct issue/field candidates.
+            let mut sql=db.prepare("WITH best AS MATERIALIZED (SELECT p.id,p.number,p.field,min(words.rank) AS strength FROM words JOIN passages p ON p.id=words.rowid WHERE words MATCH ?1 AND p.project=?2 AND p.field!='title' AND p.number IN (SELECT value FROM json_each(?3)) GROUP BY p.field,p.number), ranked AS (SELECT id,row_number() OVER(PARTITION BY field ORDER BY strength,number) AS place FROM best) SELECT p.number,p.field,p.source,p.text FROM ranked r JOIN passages p ON p.id=r.id WHERE r.place<=300")?;
+            let rows = sql.query_map(params![expression, project, selected], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (n, field, source, text) = row?;
+                record(
+                    &mut scores,
+                    n,
+                    Field::parse(&field),
+                    source,
+                    &text,
+                    query,
+                    None,
+                );
             }
         }
-        let pending:i64=db.query_row("SELECT count(*) FROM passages p WHERE p.project=?1 AND NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.hash=p.hash)",[project],|r|r.get(0))?;
+        let complete: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='embeddings_pending' AND value='0')",
+            [],
+            |r| r.get(0),
+        )?;
         let backfill: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key='backfill_done')",
             [],
             |r| r.get(0),
         )?;
-        status["pending"] = json!(pending);
-        status["indexing"] = json!(!backfill || pending > 0 || !dirty.is_empty());
+        status["pending"] = if complete { json!(0) } else { Value::Null };
+        status["indexing"] = json!(!backfill || !complete || !dirty.is_empty());
         let has_vectors:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM passages p JOIN embeddings e ON p.hash=e.hash WHERE p.project=?1)",[project],|r|r.get(0))?;
         if semantic
             && super::enabled(source)

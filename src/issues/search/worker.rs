@@ -262,6 +262,10 @@ fn embedding_loop(path: &Path, stop: &AtomicBool, busy: &Busy) {
             let cache = index::open(path, true)?;
             let todo=cache.prepare("SELECT p.hash,min(p.text) FROM passages p WHERE NOT EXISTS(SELECT 1 FROM embeddings e WHERE e.hash=p.hash) GROUP BY p.hash LIMIT 64")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
             if todo.is_empty() {
+                cache.execute(
+                    "INSERT OR REPLACE INTO meta VALUES('embeddings_pending','0')",
+                    [],
+                )?;
                 cache.execute("DELETE FROM embeddings WHERE hash IN (SELECT e.hash FROM embeddings e WHERE NOT EXISTS(SELECT 1 FROM passages p WHERE p.hash=e.hash) LIMIT 256)",[])?;
                 return Ok(0);
             }
