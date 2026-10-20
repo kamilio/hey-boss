@@ -334,7 +334,7 @@ pub fn prepare_native(home: &Path) -> Result<()> {
     generate.args([
         "--batch",
         "--pinentry-mode",
-        "error",
+        "loopback",
         "--passphrase",
         "",
         "--quick-generate-key",
