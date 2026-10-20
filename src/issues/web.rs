@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+#[path = "web/errors.rs"]
+mod errors;
 mod lan;
 #[cfg(test)]
 mod listener_tests;
@@ -662,7 +664,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     }
     if request.method() == &Method::Get {
         if path == "/api/secrets" {
-            let inventory = crate::secrets::open().and_then(|mut store| store.inventory())
+            let inventory = crate::secrets::open()
+                .and_then(|mut store| store.inventory())
                 .map_err(|e| Error::new("secrets_unavailable", e.to_string()))?;
             return json_response(serde_json::to_value(inventory)?);
         }
@@ -693,8 +696,23 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ));
         }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
-            "/secrets" => Some(("text/html; charset=utf-8", include_bytes!("web/secrets.html"))),
-            "/secrets.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/secrets.js"))),
+            "/errors" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/errors.html"),
+            )),
+            "/errors.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/errors.js"),
+            )),
+            "/errors.css" => Some(("text/css; charset=utf-8", include_bytes!("web/errors.css"))),
+            "/secrets" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/secrets.html"),
+            )),
+            "/secrets.js" => Some((
+                "text/javascript; charset=utf-8",
+                include_bytes!("web/secrets.js"),
+            )),
             "/secrets.css" => Some(("text/css; charset=utf-8", include_bytes!("web/secrets.css"))),
             "/skills" => Some((
                 "text/html; charset=utf-8",
@@ -879,13 +897,29 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/merged-prs"
                     | "/jobs"
                     | "/artifacts"
+                    | "/errors"
                     | "/skills"
                     | "/secrets"
                     | "/admin"
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
-                    .replace("<!--secrets-current-->", if path == "/secrets" { " aria-current=\"page\"" } else { "" })
+                    .replace(
+                        "<!--errors-current-->",
+                        if path == "/errors" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
+                    .replace(
+                        "<!--secrets-current-->",
+                        if path == "/secrets" {
+                            " aria-current=\"page\""
+                        } else {
+                            ""
+                        },
+                    )
                     .replace(
                         "<!--header-actions-->",
                         if issues {
@@ -1032,6 +1066,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     }
     if request.method() == &Method::Post
         && [
+            "/api/errors",
             "/api/action",
             "/api/jobs/runtime",
             "/api/preview",
@@ -1067,6 +1102,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/errors" {
+            return json_response(errors::act(&bytes, app)?);
         }
         if path == "/api/jobs/runtime" {
             return json_response(crate::jobs::web::runtime(serde_json::from_slice(&bytes)?)?);
