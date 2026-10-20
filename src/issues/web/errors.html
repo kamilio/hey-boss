@@ -7,6 +7,7 @@
     <title>Errors · Hey Boss</title>
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
+    <link rel="stylesheet" href="/app.css" />
     <link rel="stylesheet" href="/errors.css" />
     <script src="/components.js" defer></script>
     <script src="/quick-issue.js" defer></script>
@@ -18,25 +19,14 @@
       <header class="page-heading">
         <div>
           <p class="eyebrow">DIAGNOSTICS</p>
-          <h1>Errors</h1>
+          <h1>Errors <span id="families" class="heading-count"></span></h1>
           <p class="page-description">
-            Find the failures that keep happening. Keep the evidence close.
+            Error groups, ordered by frequency in the last 24 hours.
           </p>
         </div>
         <button id="collection" class="button">Loading…</button>
       </header>
       <p id="errors-alert" role="alert" hidden></p>
-      <section class="error-overview glass" aria-label="Collection summary">
-        <div>
-          <strong id="occurrences">—</strong><span>observed in 24 hours</span>
-        </div>
-        <div><strong id="families">—</strong><span>error groups</span></div>
-        <div><strong>30 days</strong><span>sample retention</span></div>
-        <p>
-          Collected logs can be sampled upstream.<br />Counts are observations,
-          not unique requests.
-        </p>
-      </section>
       <div class="toolbar">
         <label class="search-field"
           ><span data-icon="search"></span
@@ -46,29 +36,18 @@
             placeholder="Find an error…"
             aria-label="Find an error" /></label
         ><span class="error-sort">Most frequent · last 24 hours</span
-        ><button class="button small" id="refresh">Refresh</button>
+        ><button class="icon-button refresh" id="refresh" aria-label="Refresh errors" title="Refresh errors"><span data-icon="refresh"></span></button>
       </div>
-      <div class="error-workspace">
-        <section class="glass error-list" aria-label="Error groups">
-          <div id="error-rows"></div>
-          <p id="errors-status" role="status">Loading error inbox…</p>
-        </section>
-        <section
-          id="error-detail"
-          class="glass error-detail"
-          aria-label="Error evidence"
-        >
-          <div class="error-empty">
-            <span data-icon="search"></span>
-            <h2>Follow the evidence</h2>
-            <p>
-              Choose an error to see its samples, release and request reference.
-            </p>
-          </div>
-        </section>
-      </div>
+      <section class="issue-panel glass" aria-label="Error groups">
+        <div id="error-rows"></div>
+        <p id="errors-status" role="status">Loading error inbox…</p>
+      </section>
+      <dialog id="error-dialog" aria-labelledby="error-title">
+        <div class="dialog-heading"><div><span class="dialog-eyebrow">ERROR EVIDENCE</span><h2 id="error-title">Error details</h2></div><button type="button" class="icon-button" id="close-error" aria-label="Close error details"><span data-icon="x"></span></button></div>
+        <div id="error-detail" class="dialog-content error-detail" aria-live="polite"></div>
+      </dialog>
       <footer class="page-footer">
-        <span>Local collection · task evidence survives retention</span>
+        <span>Observed logs may be sampled upstream. Counts are not unique requests. · Samples kept for 30 days.</span>
       </footer>
     </main>
   </body>
