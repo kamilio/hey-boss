@@ -250,6 +250,8 @@ impl Backend for Pass {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&staging)
                 .map_err(|_| Error::StorageFailure)?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| Error::StorageFailure)?;
             file.sync_all().map_err(|_| Error::StorageFailure)?;
             std::fs::rename(&staging, &dest).map_err(|_| Error::StorageFailure)?;
             std::fs::File::open(dest.parent().unwrap())
