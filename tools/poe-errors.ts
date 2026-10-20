@@ -35,7 +35,7 @@ async function cli(args: string[], input?: unknown) {
     throw Error(result.error?.message ?? "Inbox operation failed");
   return result;
 }
-const who = await cli(["issue", "whoami", "--json"]);
+const who = await cli(["issue", "whoami", "--agent", "watcher:poe-errors", "--json"]);
 if (!who.store?.database) throw Error("Collector needs a local issue store");
 const directory = join(dirname(who.store.database), "poe-error-collector");
 await mkdir(directory, { recursive: true, mode: 0o700 });
