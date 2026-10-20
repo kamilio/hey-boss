@@ -2763,3 +2763,8 @@ fn conflicting_archive_does_not_block_other_tasks_and_retries_after_repair() {
         );
     }
 }
+
+#[test]
+fn secret_revisions_are_not_issue_revisions() {
+    assert!(archives::revision(r#"{"protocol":2,"kind":"secret_revision_v1","revision":{"encrypted":"synthetic"}}"#).unwrap().is_none());
+}

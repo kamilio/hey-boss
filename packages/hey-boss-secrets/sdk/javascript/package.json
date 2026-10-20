@@ -1,0 +1,9 @@
+{
+  "name": "@hey-boss/secrets",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./index.js",
+  "types": "./index.d.ts",
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test.mjs" }
+}

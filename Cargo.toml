@@ -11,17 +11,18 @@ description = "Native macOS notifications, Markdown updates, and agent questions
 readme = "README.md"
 keywords = ["macos", "notifications", "cli", "agents"]
 categories = ["command-line-utilities"]
-include = ["packages/hey-boss-sync/**", "packages/hey-proxy/**", "packages/hey-boss-http/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "tools/poe-markdown-tests/*.json", "tools/poe-markdown-tests/*.mjs", "tools/poe-markdown-tests/*.ts", "tools/poe-markdown-tests/.npmrc", "tools/poe-markdown-tests/upstream/**", "tools/poe-markdown-tests/frontmatter/**", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**", "!tools/poe-markdown-tests/node_modules/**", "!tools/poe-markdown-tests/captured/**", "!tools/poe-markdown-tests/report.json"]
+include = ["packages/hey-boss-secrets/**", "packages/hey-boss-sync/**", "packages/hey-proxy/**", "packages/hey-boss-http/**", "packages/hey-gh/**", "src/**", "tests/**", "docs/**", "tools/*.py", "tools/*.sh", "tools/*.js", "tools/poe-markdown-tests/*.json", "tools/poe-markdown-tests/*.mjs", "tools/poe-markdown-tests/*.ts", "tools/poe-markdown-tests/.npmrc", "tools/poe-markdown-tests/upstream/**", "tools/poe-markdown-tests/frontmatter/**", "Cargo.toml", "Cargo.lock", "build.rs", "README.md", "LICENSE", "CONTRIBUTING.md", "SECURITY.md", "hey_boss_daemon.swift", "package_hey_boss.swift", "assets/**", "install_hey_boss.swift", "setup_hey_boss.swift", "release_hey_boss.swift", "test_hey_boss.swift", "skills/**", "!tools/poe-markdown-tests/node_modules/**", "!tools/poe-markdown-tests/captured/**", "!tools/poe-markdown-tests/report.json"]
 
 [workspace]
 exclude = ["worker-tui"]
-members = ["packages/hey-proxy", "packages/hey-boss-http", "packages/hey-gh", "packages/hey-gh/bindings/node", "packages/hey-boss-sync"]
+members = ["packages/hey-proxy", "packages/hey-boss-http", "packages/hey-gh", "packages/hey-gh/bindings/node", "packages/hey-boss-sync", "packages/hey-boss-secrets"]
 default-members = ["packages/hey-proxy", ".", "packages/hey-gh", "packages/hey-boss-http"]
 resolver = "3"
 
 [dependencies]
 hey-gh = { version = "0.1.0", path = "packages/hey-gh" }
 hey-boss-sync = { path = "packages/hey-boss-sync" }
+hey-boss-secrets = { path = "packages/hey-boss-secrets" }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 crossterm = "0.28"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
