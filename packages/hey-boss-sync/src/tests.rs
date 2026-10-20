@@ -195,3 +195,31 @@ fn wire_rejects_oversized_truncated_and_invalid_payloads() {
             .is_none()
     );
 }
+
+#[test]
+fn tagged_projection_skips_unrelated_payloads_without_skipping_matching_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut engine = super::Engine::open(&dir.path().join("sync.db")).unwrap();
+    for i in 0..260 {
+        engine.put(&format!("unrelated-{i}")).unwrap();
+        engine.put(&format!("tag:{i}")).unwrap();
+    }
+    engine.put("unrelated-tail").unwrap();
+    let mut cursor = 0;
+    let mut matches = 0;
+    loop {
+        let (through, rows) = engine.pending_prefix(cursor, "tag:").unwrap();
+        if through == cursor {
+            break;
+        }
+        assert!(through > cursor);
+        assert!(rows.iter().all(|r| r.2.starts_with("tag:")));
+        matches += rows.len();
+        cursor = through;
+    }
+    assert_eq!(matches, 260);
+    assert_eq!(cursor, engine.head().unwrap());
+    engine.put("tag:after-cursor").unwrap();
+    let (_, rows) = engine.pending_prefix(cursor, "tag:").unwrap();
+    assert_eq!(rows.len(), 1);
+}

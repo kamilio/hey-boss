@@ -294,6 +294,37 @@ impl Engine {
         }
         Ok(result)
     }
+
+    /// Project a canonical tagged payload without copying unrelated large facts
+    /// into the caller. The cursor also advances across nonmatching records.
+    pub fn pending_prefix(
+        &self,
+        after: i64,
+        prefix: &str,
+    ) -> Result<(i64, Vec<(i64, String, String)>)> {
+        let head = self.head()?;
+        let mut statement=self.db.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 AND d.position<=?2 AND substr(r.payload,1,?3)=?4 ORDER BY d.position LIMIT 128")?;
+        let mut result = Vec::new();
+        let mut bytes = 0;
+        for row in statement.query_map(
+            params![after, head, prefix.chars().count() as i64, prefix],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)),
+        )? {
+            let row = row?;
+            if !result.is_empty() && bytes + row.2.len() > PAGE_BYTES {
+                let through: &(i64, String, String) = result.last().unwrap();
+                return Ok((through.0, result));
+            }
+            bytes += row.2.len();
+            result.push(row);
+        }
+        let through = if result.len() == 128 {
+            result.last().unwrap().0
+        } else {
+            head
+        };
+        Ok((through, result))
+    }
 }
 
 impl Drop for Engine {

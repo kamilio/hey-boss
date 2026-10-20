@@ -265,8 +265,10 @@ impl Store {
                 self.db
                     .query_row("SELECT position FROM cursor", [], |r| r.get(0)),
             )?;
-            let entries = storage(journal.pending(after))?;
-            if entries.is_empty() {
+            let (through, entries) = storage(
+                journal.pending_prefix(after, r#"{"protocol":2,"kind":"secret_revision_v1","#),
+            )?;
+            if through <= after {
                 break;
             }
             let tx = storage(self.db.transaction())?;
@@ -316,6 +318,7 @@ impl Store {
                 }
                 storage(tx.execute("UPDATE cursor SET position=max(position,?1)", [position]))?;
             }
+            storage(tx.execute("UPDATE cursor SET position=max(position,?1)", [through]))?;
             storage(tx.commit())?;
         }
         Ok(())
@@ -405,10 +408,10 @@ impl Store {
         let me = self.enrollment()?;
         let id = self.identity()?;
         let old = self.latest(name)?;
-        if let Some(expected) = expected {
-            if old.as_ref().map(|r| r.id()).transpose()?.as_deref() != Some(expected) {
-                return Err(Error::StaleRevision);
-            }
+        if let Some(expected) = expected
+            && old.as_ref().map(|r| r.id()).transpose()?.as_deref() != Some(expected)
+        {
+            return Err(Error::StaleRevision);
         }
         let access = if let Some(r) = &old {
             self.authorize(r)?;
