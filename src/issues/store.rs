@@ -31,6 +31,8 @@ mod mindmap;
 mod origin_reader;
 #[path = "worker_registry.rs"]
 mod registry;
+#[path = "search/execute.rs"]
+mod search_execute;
 #[path = "steering.rs"]
 mod steering;
 #[path = "subtasks.rs"]
@@ -437,6 +439,13 @@ fn list_query_projection(
     } else {
         COLUMNS.replacen("body,", "'' AS body,", 1)
     };
+    let predicate = list_predicate(search, owner, unassigned);
+    format!(
+        "SELECT {summary_columns},CASE WHEN archive_key IS NOT NULL THEN archived_comments ELSE (SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) END AS comment_count FROM issues WHERE {predicate} ORDER BY sort_order,number LIMIT ?7 OFFSET ?8"
+    )
+}
+
+fn list_predicate(search: bool, owner: Option<&str>, unassigned: bool) -> String {
     let body_search = if search {
         " OR instr(lower(body),lower(?5))>0"
     } else {
@@ -454,12 +463,11 @@ fn list_query_projection(
     } else {
         "?4=0"
     };
-    format!("SELECT {summary_columns},CASE WHEN archive_key IS NOT NULL THEN archived_comments ELSE (SELECT count(*) FROM comments c WHERE c.project_id=issues.project_id AND c.issue_number=issues.number) END AS comment_count FROM issues WHERE project_id=?1
+    format!("project_id=?1
         AND ((?2='deleted' AND deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM events e WHERE e.project_id=issues.project_id AND e.issue_number=issues.number AND e.action='moved_to')) OR (?2!='deleted' AND deleted_at IS NULL AND (?2='all' OR state=?2 OR (?2='active' AND state IN ('open','ready','blocked')))))
         AND {owner_filter} AND {unassigned_filter}
         AND (?5 IS NULL OR instr(lower(title),lower(?5))>0{body_search} OR number IN (SELECT value FROM json_each(?9)))
-        AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))
-        ORDER BY sort_order,number LIMIT ?7 OFFSET ?8")
+        AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted WHERE NOT EXISTS (SELECT 1 FROM json_each(issues.labels) existing WHERE existing.value=wanted.value))")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -607,6 +615,11 @@ fn page(limit: u32) -> Result<()> {
     Ok(())
 }
 fn validate(r: &Request) -> Result<()> {
+    if let Operation::Search { options } = &r.operation {
+        let mut list = r.clone();
+        list.operation = options.list(true);
+        return validate(&list);
+    }
     if let Operation::Create { attachments, .. } = &r.operation {
         crate::attachments::validate_new(attachments)?;
     }
@@ -1494,6 +1507,7 @@ impl Store {
             tx.execute_batch(SUMMARY_INDEX)?;
             tx.commit()?;
         }
+        super::search::install(&db)?;
         Ok(Self {
             db,
             attachment_root: path.with_extension("attachments"),
@@ -1560,6 +1574,29 @@ impl Store {
     }
 
     pub fn execute(&mut self, r: &Request) -> Result<Value> {
+        if let Operation::SearchIndex { enabled } = &r.operation {
+            validate(r)?;
+            let path = self.db.path().map(Path::new).ok_or_else(|| {
+                Error::invalid("Search indexing requires a persistent issue database")
+            })?;
+            return super::search::settings(path, *enabled);
+        }
+        if let Operation::Search { options } = &r.operation {
+            validate(r)?;
+            let path = self
+                .db
+                .path()
+                .map(Path::new)
+                .ok_or_else(|| Error::invalid("Search requires a persistent issue database"))?;
+            if !super::search::enabled(path) {
+                let mut literal = r.clone();
+                literal.operation = options.list(true);
+                let mut value = self.execute(&literal)?;
+                value["search"] = json!({"enabled":false,"mode":"literal","semantic":"disabled","indexing":false});
+                return Ok(value);
+            }
+            return self.execute_search(r, options);
+        }
         // Status must be durable at the authority before acknowledging it:
         // Ready bypasses the outbox and would make a delayed status ineligible.
         if matches!(
@@ -2036,6 +2073,9 @@ impl Store {
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
         let mut result = match &r.operation {
+            Operation::SearchIndex { .. } | Operation::Search { .. } => {
+                unreachable!("Search runs outside source transactions")
+            }
             Operation::Job { .. } => unreachable!("Jobs use their own guarded transaction"),
             Operation::ProjectInit { settings } => {
                 let operation = match settings {

@@ -280,10 +280,20 @@ enum Action {
         #[command(flatten)]
         filters: ListFilters,
     },
-    /// Search titles and descriptions of open, ready, and blocked issues.
+    /// Opt in to background search indexing on this machine; no key is requested.
+    SearchIndex {
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+    },
+    /// Find active issues; opt in with search-index --enable for ranked search.
     Search {
-        /// Literal substring; ignores ASCII case. Quote phrases containing spaces.
+        /// Words or a description of what you want to find.
         query: String,
+        /// Use the original literal title/body filter and queue order, without an API call.
+        #[arg(long)]
+        literal: bool,
         /// Active includes open, ready, and blocked; all also includes closed.
         #[arg(long, default_value = "active", value_parser = ["active", "open", "blocked", "ready", "closed", "all", "deleted"])]
         state: String,
@@ -978,11 +988,33 @@ impl Options {
                 search,
                 filters,
             } => filters.operation(state, search.as_deref()),
+            Action::SearchIndex { enable, disable } => Operation::SearchIndex {
+                enabled: if *enable {
+                    Some(true)
+                } else if *disable {
+                    Some(false)
+                } else {
+                    None
+                },
+            },
             Action::Search {
                 query,
                 state,
                 filters,
-            } => filters.operation(state, Some(query)),
+                literal,
+            } => {
+                if *literal {
+                    filters.operation(state, Some(query))
+                } else {
+                    let mut options = serde_json::to_value(filters.operation(state, None))?;
+                    options.as_object_mut().unwrap().remove("action");
+                    options.as_object_mut().unwrap().remove("search");
+                    options["query"] = json!(query);
+                    Operation::Search {
+                        options: serde_json::from_value(options)?,
+                    }
+                }
+            }
             Action::Move {
                 number,
                 before,
@@ -1564,6 +1596,46 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if let Some(index) = value.get("search_index") {
+        println!(
+            "Smart search on this machine: {}",
+            if index["enabled"] == true {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        if index["enabled"] == true {
+            println!(
+                "{} passages · {} awaiting embeddings. Indexing runs in the background through hey-proxy.",
+                index["passages"], index["pending"]
+            );
+        }
+        return;
+    }
+    if let Some(search) = value.get("search") {
+        if search["enabled"] == false {
+            eprintln!(
+                "Literal search. Opt in on this machine: hey-boss issue search-index --enable"
+            );
+        } else {
+            eprintln!(
+                "{}{}",
+                if search["mode"] == "hybrid" {
+                    "Smart search"
+                } else {
+                    "Keyword search"
+                },
+                if search["indexing"] == true {
+                    " · indexing in the background"
+                } else if search["semantic"] == "unavailable" {
+                    " · semantic search temporarily unavailable"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
     if let Some(warning) = value["ownership_warning"].as_str() {
         eprintln!("Warning: {}", line(&json!(warning)));
         if let Some(presence) = value["assignee_presence"].as_str() {
@@ -1822,6 +1894,18 @@ pub(crate) fn print_text(value: &Value) {
         }
         for issue in issues {
             print_issue_line(issue);
+            if let Some(matched) = issue.get("match") {
+                println!(
+                    "  {}{}: {}",
+                    line(&matched["field"]),
+                    if matched["kind"] == "semantic" {
+                        " · related meaning"
+                    } else {
+                        ""
+                    },
+                    line(&matched["excerpt"])
+                );
+            }
         }
     }
     if let Some(issue) = value.get("issue") {

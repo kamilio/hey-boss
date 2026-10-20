@@ -315,6 +315,21 @@ fn serve(
         }
     });
     let mut sessions = Vec::new();
+    // Library fixtures do not perform background provider requests.
+    let search_thread = if super::remote_enabled() && !cfg!(test) {
+        let search_writer = writer.clone();
+        let busy = Arc::new(move || {
+            !search_writer.waiters.lock().unwrap().is_empty()
+                || search_writer.activity.lock().unwrap().is_some()
+        });
+        Some(crate::issues::search::start(
+            path.clone(),
+            stop.clone(),
+            busy,
+        ))
+    } else {
+        None
+    };
     while !stop.load(Ordering::Acquire) {
         if !ownership.current() {
             eprintln!("Database owner runtime paths changed; draining existing transactions");
@@ -361,6 +376,9 @@ fn serve(
         let _ = thread.join();
     }
     let _ = archive_thread.join();
+    if let Some(search_thread) = search_thread {
+        let _ = search_thread.join();
+    }
     // Keep the listener present throughout draining so another election cannot
     // open a second writer while old sessions are still committing.
     drop(listener);
