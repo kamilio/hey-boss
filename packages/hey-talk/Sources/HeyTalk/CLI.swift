@@ -23,7 +23,7 @@ enum CLI {
     hey-talk input UID|default                  Select microphone
     hey-talk auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
-    hey-talk vocabulary [add|remove WORD…]     List or edit recognition hints; quote phrases
+    hey-talk vocabulary [add|remove WORD…]     Shared recognition hints; quote phrases
     hey-talk overlay show|hide                  Control the floating recording pill
     hey-talk permissions microphone|accessibility
     hey-talk warm                              Load Orukeet ahead of recording
@@ -55,8 +55,8 @@ enum CLI {
         var request: [String: Any] = ["command": verb]
         if verb == "vocabulary" {
             let values = Array(args.dropFirst())
-            try Vocabulary.validate(values)
-            request["arguments"] = values
+            try output(SharedVocabulary().command(values), json: json)
+            return
         }
         if verb == "auto" {
             let values = Array(args.dropFirst())
@@ -118,6 +118,10 @@ enum CLI {
         }
         else if let words = response["vocabulary"] as? [String] {
             print(words.isEmpty ? "No vocabulary hints." : words.joined(separator: "\n"))
+            if let error = response["sync_error"] as? String { fputs("Using saved vocabulary. \(error)\n", stderr) }
+            if let total = response["total"] as? Int, total > words.count {
+                fputs("Using the first 256 hints. Remove \(total - words.count) terms to include the whole list.\n", stderr)
+            }
         }
         else if let ids = response["enter_exceptions"] as? [String], response.count == 2 {
             print(ids.isEmpty ? "No Enter exceptions." : ids.joined(separator: "\n"))

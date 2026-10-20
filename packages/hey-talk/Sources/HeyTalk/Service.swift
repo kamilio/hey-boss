@@ -8,7 +8,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let inference = Inference()
     private let history = DictationHistory()
     private let enterExceptions = EnterExceptions()
-    private let vocabulary = Vocabulary()
+    private let vocabulary = SharedVocabulary()
+    private let vocabularyQueue = DispatchQueue(label: "hey-talk.vocabulary", qos: .utility)
+    private var vocabularyTimer: DispatchSourceTimer?
+    private var vocabularyRefreshPending = false
+    private var vocabularySync: [String: Any] = ["source": "pending"]
     private let autoSettings = AutoDictationSettings()
     private let focusMonitor = InputFocusMonitor()
     private let autoSubmitKey = AutoSubmitKey()
@@ -93,6 +97,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
             self.cancel(); self.overlay?.error("Auto paused. Focus the message field again.")
         }
         history.refresh()
+        let vocabularyTimer = DispatchSource.makeTimerSource(queue: .main)
+        vocabularyTimer.schedule(deadline: .now(), repeating: .seconds(15), leeway: .seconds(3))
+        vocabularyTimer.setEventHandler { [weak self] in self?.refreshVocabulary() }
+        vocabularyTimer.resume(); self.vocabularyTimer = vocabularyTimer
         if overlayEnabled { showOverlay(true) }
         applyAutoMode()
         if CommandLine.arguments.contains("--show-history") { showHistory() }
@@ -103,7 +111,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
     }
-    func applicationWillTerminate(_ notification: Notification) { focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -222,6 +230,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "bluetooth_input": capture.usesBluetooth,
             "microphone": permissionName, "accessibility": AXIsProcessTrusted(),
         ]
+        value["vocabulary_sync"] = vocabularySync
         if let pid = inference.pid { value["inference_pid"] = pid }
         if let error { value["last_error"] = error }
         if let reason = lastPasteBlock { value["last_paste_block"] = reason.rawValue }
@@ -234,6 +243,25 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case .restricted: return "restricted"
         case .notDetermined: return "not_determined"
         @unknown default: return "unknown"
+        }
+    }
+    private func refreshVocabulary(_ arguments: [String] = [], reply: (([String: Any]) -> Void)? = nil) {
+        let background = reply == nil
+        if background {
+            guard !vocabularyRefreshPending else { return }
+            vocabularyRefreshPending = true
+        }
+        vocabularyQueue.async { [weak self] in
+            guard let self else { return }
+            let result: [String: Any]
+            do { result = try self.vocabulary.command(arguments) }
+            catch { result = ["ok": false, "error": error.localizedDescription] }
+            DispatchQueue.main.async {
+                if background { self.vocabularyRefreshPending = false }
+                self.vocabularySync = ["source": result["source"] ?? "cache"]
+                if let error = result["sync_error"] ?? result["error"] { self.vocabularySync["error"] = error }
+                reply?(result)
+            }
         }
     }
     private func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
@@ -252,10 +280,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 reply(["ok": true, "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready])
             } catch { reply(failure(error.localizedDescription)) }
         case "vocabulary":
-            do {
-                guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing vocabulary arguments") }
-                reply(["ok": true, "vocabulary": try vocabulary.command(arguments), "path": vocabulary.file.path])
-            } catch { reply(failure(error.localizedDescription)) }
+            guard let arguments = request["arguments"] as? [String] else { reply(failure("Missing vocabulary arguments")); return }
+            refreshVocabulary(arguments, reply: reply)
         case "enter-exceptions":
             do {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
