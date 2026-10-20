@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const context = vm.createContext({});
+const context = vm.createContext({document:{addEventListener() {}}});
 vm.runInContext(fs.readFileSync('src/issues/web/blockers.js', 'utf8') + '\nthis.blockers = IssueBlockers;', context);
 const {kind, matches} = context.blockers;
 const hold = {state:'blocked', manual_blocked:true};

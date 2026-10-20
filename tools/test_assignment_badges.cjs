@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const app = fs.readFileSync('src/issues/web/app.js','utf8');
-const context = vm.createContext({URLSearchParams});
+const context = vm.createContext({URLSearchParams, document:{addEventListener() {}}});
 vm.runInContext(fs.readFileSync('src/issues/web/components.js','utf8') + '\nthis.HeyBossUI = HeyBossUI;', context);
 vm.runInContext(fs.readFileSync('src/issues/web/assignments.js','utf8'), context);
 vm.runInContext(`const model = {project:{id:'named:QA'},boss:{name:'Boss'},route:{host:'devbox',state:'open',search:'keep',label:'bug',owner:'all'}};
@@ -12,7 +12,7 @@ const icon = HeyBossUI.icon;
 const actorName = id => HeyBossUI.actorLabel(id, 'gpt-6-astra');
 const routeHash = route => '#' + new URLSearchParams(Object.entries(route).filter(([,v]) => v != null));
 const HeyBossOrigin = {conversation: () => null};
-${app.slice(app.indexOf('function traceLinkForOrigin('),app.indexOf('function renderLabelFilter(')) .split('let assignmentCardContext')[0]}
+${app.slice(app.indexOf('function traceLinkForOrigin('),app.indexOf('const projectPicker =')) .split('let assignmentCardContext')[0]}
 this.render = listAssignment;`, context);
 for (const [kind,owner,symbol] of [['boss','human:boss','hat'],['machine','machine:box','monitor'],['agent','codex:session','codex'],['github','watcher:github','pull-request']]) {
   test(`${kind} badge filters exact owner and moves details into a card`, () => {

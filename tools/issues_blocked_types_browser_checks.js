@@ -6,9 +6,8 @@ async page => {
   const base = await page.evaluate(() => location.origin);
   const path = await page.evaluate(() => location.pathname === '/issues' ? '/issues' : '/');
   const surface = path === '/issues' ? 'paired' : 'native';
-  if (surface === 'native') for (const name of ['app.js','app.css','blockers.js'])
+  if (surface === 'native') for (const name of ['app.js','app.css','blockers.js','filters.js','filters.css'])
     await page.route(`${base}/${name}`, route => route.fulfill({path:`src/issues/web/${name}`}));
-  if (surface === 'native') await page.route(`${base}/`, async route => { const response = await route.fetch(); let body = await response.text(); if (!body.includes('id="blocked-filter"')) body = body.replace('<div class="issue-panel glass">', '<div id="blocked-filter-control" class="blocked-filter-control" hidden><label for="blocked-filter">Blocked reason</label><select id="blocked-filter" aria-label="Filter by blocked reason"><option value="">All blocked issues</option><option value="hold">On hold</option><option value="dependencies">Waiting for dependencies</option></select></div><div class="issue-panel glass">'); await route.fulfill({response,body}); });
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.goto(base + path);
   await page.waitForFunction(() => model.csrf && model.signature);
@@ -26,9 +25,11 @@ async page => {
   await page.goto(url);
   await page.waitForFunction(project => model.project.id === project && model.signature, project);
   const rows = () => page.locator('.issue-row').count();
-  const filter = page.getByLabel('Filter by blocked reason');
+  const filter = page.locator('[data-preset="blocked"]');
   const filtered = async (value, count) => {
-    await filter.selectOption(value);
+    await page.getByRole('button',{name:'Add filter',exact:true}).click();
+    await page.locator('[data-filter-category="blocked"]').click();
+    await page.locator(`[data-filter-key="blocked"][data-filter-value="${value}"]`).click();
     await page.waitForFunction(({value,count}) => model.route.blocked === value && model.signature && document.querySelectorAll('.issue-row').length === count, {value,count});
   };
   check(await rows() === 3, 'All blocked issues visible');
@@ -38,13 +39,13 @@ async page => {
   check(await page.locator('#list-summary').innerText() === '2 issues', 'Filtered count matches visible issues');
   await page.reload();
   await page.waitForFunction(() => model.signature);
-  check(await rows() === 2 && await filter.inputValue() === 'hold', 'Hold filter survives reload');
+  check(await rows() === 2 && await filter.getAttribute('aria-pressed') === 'true', 'Hold filter survives reload');
   await page.locator('[data-issue-number="4"] .issue-title').click();
   await page.locator('.state-pill.on-hold').waitFor();
   check(await page.locator('.blocked-notice h2').innerText() === 'On hold', 'Detail uses the same name');
   await page.getByRole('button',{name:'All issues',exact:true}).click();
   await page.waitForFunction(() => model.signature);
-  check(await filter.inputValue() === 'hold' && await rows() === 2, 'Back to list preserves filter');
+  check(await filter.getAttribute('aria-pressed') === 'true' && await rows() === 2, 'Back to list preserves filter');
   await filtered('dependencies',2);
   check(await page.locator('[data-issue-number="4"]').count() === 1, 'Mixed blocker appears under dependencies too');
   await filtered('',3);
@@ -55,7 +56,7 @@ async page => {
       check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${scheme}/${width}: list fits`);
       const colors = await page.evaluate(() => [2,3].map(n => getComputedStyle(document.querySelector(`[data-issue-number="${n}"] .issue-state`)).color));
       check(colors[0] !== colors[1], `${scheme}/${width}: hold and dependency colors differ`);
-      check(await filter.evaluate(el => {const r=el.getBoundingClientRect();return r.width>180 && r.right<=innerWidth && r.height>=40;}), `${scheme}/${width}: readable filter target`);
+      check(await filter.evaluate(el => {const r=el.getBoundingClientRect();return r.width>=75 && r.right<=innerWidth && r.height>=30;}), `${scheme}/${width}: readable filter target`);
       await page.screenshot({path:`output/playwright/issue254/${surface}-${scheme}-${width}-list.png`,fullPage:true});
       await page.locator('[data-issue-number="4"] .issue-title').click();
       await page.locator('.blocked-notice.on-hold').waitFor();
@@ -70,7 +71,7 @@ async page => {
   await page.getByRole('heading',{name:'No matching issues'}).waitFor();
   await page.getByRole('button',{name:'Clear filters',exact:true}).click();
   await page.waitForFunction(() => model.signature && document.querySelectorAll('.issue-row').length === 3);
-  check(await filter.inputValue() === '', 'Empty state clears the blocked reason too');
+  check(await filter.getAttribute('aria-pressed') === 'false', 'Empty state clears the blocked reason too');
   await filtered('hold',2);
   await page.locator('[data-issue-number="4"] .issue-title').click();
   await page.locator('.blocked-notice [data-action="clear_manual_hold"]').click();

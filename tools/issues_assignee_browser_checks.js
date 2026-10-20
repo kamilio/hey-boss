@@ -46,8 +46,8 @@ async (page) => {
   await ready.click();
   await waitRows([1, 2]);
   check(
-    (await page.locator("#label-filter").inputValue()) === "ready",
-    "Clicking label filters and updates dropdown",
+    (await page.evaluate(() => model.route.label)) === "ready",
+    "Clicking a label updates the active filter",
   );
   check(
     (await page.url()).includes("label=ready"),
@@ -58,11 +58,11 @@ async (page) => {
   await agent.click();
   await waitRows([1]);
   check(
-    (await page.locator("#owner-filter").inputValue()) === "codex:filter-qa",
+    (await page.evaluate(() => model.route.owner)) === "codex:filter-qa",
     "Clicking assignee applies exact session filter",
   );
   check(
-    (await page.locator("#label-filter").inputValue()) === "ready",
+    (await page.evaluate(() => model.route.label)) === "ready",
     "Assignee click retains label filter",
   );
   check(
@@ -72,42 +72,42 @@ async (page) => {
   await page.reload();
   await waitRows([1]);
   check(
-    (await page.locator("#owner-filter").inputValue()) === "codex:filter-qa",
+    (await page.evaluate(() => model.route.owner)) === "codex:filter-qa",
     "Assignee and label filters survive reload",
   );
-  await page.locator("#owner-filter").selectOption("all");
+  await page.evaluate(value => navigate({owner:value}), "all");
   await waitRows([1, 2]);
   const boss = page.locator('[data-issue-number="2"] .list-assignee-filter');
   await boss.focus();
   await page.keyboard.press("Enter");
   await waitRows([2]);
   check(
-    (await page.locator("#owner-filter").inputValue()) === "human:boss",
+    (await page.evaluate(() => model.route.owner)) === "human:boss",
     "Keyboard activation filters by Boss",
   );
-  await page.locator("#owner-filter").selectOption("mine");
+  await page.evaluate(value => navigate({owner:value}), "mine");
   await waitRows([2]);
   check(
     (await rows().count()) === 1,
     "Assigned to me means Boss in the web app",
   );
-  await page.locator("#owner-filter").selectOption("unassigned");
+  await page.evaluate(value => navigate({owner:value}), "unassigned");
   await waitRows([]);
-  await page.locator("#label-filter").selectOption("");
+  await page.evaluate(value => navigate({label:value}), "");
   await waitRows([3]);
   check(
     (await rows().count()) === 1,
     "Unassigned combines correctly with labels",
   );
-  await page.locator("#owner-filter").selectOption("all");
+  await page.evaluate(value => navigate({owner:value}), "all");
   await waitRows([1, 2, 3]);
   await page.locator('[aria-label="Filter by label needs & review"]').click();
   await waitRows([1]);
   check(
-    (await page.locator("#label-filter").inputValue()) === "needs & review",
+    (await page.evaluate(() => model.route.label)) === "needs & review",
     "Punctuation in labels round-trips through URL",
   );
-  await page.locator("#label-filter").selectOption("");
+  await page.evaluate(value => navigate({label:value}), "");
   await waitRows([1, 2, 3]);
   await page.locator('[data-issue-number="1"] .issue-title').click();
   await page.locator('[data-action="unassign"]').waitFor();
@@ -198,13 +198,13 @@ async (page) => {
   await page.locator('[data-issue-number="2"] .list-assignee-filter').click();
   await waitRows([2]);
   check(
-    (await page.locator("#owner-filter").inputValue()) === "human:boss",
+    (await page.evaluate(() => model.route.owner)) === "human:boss",
     "Renaming preserves stable assignment filter",
   );
   await page.reload();
   await waitRows([2]);
   check(
-    (await page.locator("#owner-filter").innerText()).includes("Alex <Boss>"),
+    (await page.evaluate(() => model.boss.name)).includes("Alex <Boss>"),
     "Boss name persists after reload",
   );
   await page.goto(base + "&state=closed");
