@@ -14,6 +14,9 @@ use std::{
 
 pub(super) const MODEL: &str = "text-embedding-3-small";
 pub(super) const DIMENSIONS: usize = 512;
+fn identity() -> String {
+    format!("v2:{MODEL}:{DIMENSIONS}:int8:bytes1800-overlap160")
+}
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(project TEXT NOT NULL,number INTEGER NOT NULL,generation TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,after_comment INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(project,number));
@@ -49,22 +52,25 @@ pub(super) fn open(source: &Path, write: bool) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     db.busy_timeout(Duration::from_millis(40))?;
+    // Shared OS pages avoid a syscall and a cache miss for every vector.
+    db.pragma_update(None, "mmap_size", 256 * 1024 * 1024)?;
     if write {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.pragma_update(None, "cache_size", -4096)?;
         db.execute_batch(SCHEMA)?;
-        let identity = format!("v1:{MODEL}:{DIMENSIONS}:bytes1800-overlap160");
+        let identity = identity();
         let previous: Option<String> = db
             .query_row("SELECT value FROM meta WHERE key='identity'", [], |r| {
                 r.get(0)
             })
             .optional()?;
         if previous.as_ref().is_some_and(|p| p != &identity) {
-            return Err(Error::new(
-                "search_version",
-                "Search cache belongs to a different model; rebuild it with the matching version",
-            ));
+            // Only derived data changes. Keep consent; the durable backfill
+            // cursor restarts and marks existing source revisions dirty again.
+            let tx = db.unchecked_transaction()?;
+            tx.execute_batch("DELETE FROM passages; DELETE FROM documents; DELETE FROM embeddings; DELETE FROM queries; DELETE FROM meta WHERE key!='enabled';")?;
+            tx.commit()?;
         }
         db.execute(
             "INSERT OR IGNORE INTO meta VALUES('identity',?1)",
@@ -78,6 +84,34 @@ pub(super) fn hash(text: &str) -> String {
 }
 pub(super) fn bytes(vector: &[f32]) -> Vec<u8> {
     vector.iter().flat_map(|n| n.to_le_bytes()).collect()
+}
+/// Normalized int8 vectors retain direction with bounded quantization error,
+/// using a quarter of the I/O of float32. Queries keep their full precision.
+pub(super) fn compact(vector: &[f32]) -> Vec<u8> {
+    let mut bytes: Vec<u8> = vector
+        .iter()
+        .map(|v| (v * 127.0).round().clamp(-127.0, 127.0) as i8 as u8)
+        .collect();
+    let norm = bytes
+        .iter()
+        .map(|v| (*v as i8 as f32).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    bytes.extend_from_slice(&(1.0 / norm).to_le_bytes());
+    bytes
+}
+fn similarity(query: &[f32], vector: &[u8]) -> Option<f32> {
+    if vector.len() != DIMENSIONS + 4 {
+        return None;
+    }
+    let scale = f32::from_le_bytes(vector[DIMENSIONS..].try_into().ok()?);
+    let dot = query
+        .iter()
+        .zip(&vector[..DIMENSIONS])
+        .map(|(q, v)| q * (*v as i8 as f32))
+        .sum::<f32>()
+        * scale;
+    dot.is_finite().then_some(dot)
 }
 pub(super) fn vector(bytes: &[u8]) -> Option<Vec<f32>> {
     if bytes.len() != DIMENSIONS * 4 {
@@ -201,6 +235,16 @@ pub(crate) fn retrieve(
             return Ok(());
         }
         let db = open(source, false)?;
+        let format: String =
+            db.query_row("SELECT value FROM meta WHERE key='identity'", [], |r| {
+                r.get(0)
+            })?;
+        if format != identity() {
+            return Err(Error::new(
+                "search_version",
+                "Search index is being rebuilt",
+            ));
+        }
         let terms = rank::terms(query);
         if !terms.is_empty() {
             let expression = terms
@@ -217,8 +261,8 @@ pub(crate) fn retrieve(
                     .copied()
                     .collect::<Vec<_>>(),
             )?;
-            for field in [Field::Title, Field::Description, Field::Comment] {
-                let mut sql=db.prepare("WITH hits AS MATERIALIZED (SELECT p.id,p.number,bm25(words) AS rank FROM words JOIN passages p ON p.id=words.rowid WHERE words MATCH ?1 AND p.project=?2 AND p.field=?3 AND p.number IN (SELECT value FROM json_each(?4))), picked AS (SELECT number,min(rank) AS rank FROM hits GROUP BY number ORDER BY rank,number LIMIT 300), ranked AS (SELECT h.id,row_number() OVER(PARTITION BY h.number ORDER BY h.rank,h.id) AS place FROM hits h JOIN picked ON picked.number=h.number) SELECT p.number,p.source,p.text FROM ranked r JOIN passages p ON p.id=r.id WHERE r.place<=3")?;
+            for field in [Field::Description, Field::Comment] {
+                let mut sql=db.prepare("SELECT p.number,p.source,p.text,min(words.rank) AS best FROM words JOIN passages p ON p.id=words.rowid WHERE words MATCH ?1 AND p.project=?2 AND p.field=?3 AND p.number IN (SELECT value FROM json_each(?4)) GROUP BY p.number ORDER BY best,p.number LIMIT 300")?;
                 let rows =
                     sql.query_map(params![expression, project, field.name(), selected], |r| {
                         Ok((
@@ -283,14 +327,9 @@ pub(crate) fn retrieve(
                 let mut best = HashMap::<(i64, usize), (f32, i64)>::new();
                 while let Some(row) = rows.next()? {
                     let blob = row.get_ref(3)?.as_blob().map_err(rusqlite::Error::from)?;
-                    if blob.len() != DIMENSIONS * 4 {
+                    let Some(similarity) = similarity(&q, blob) else {
                         continue;
-                    }
-                    let similarity = q
-                        .iter()
-                        .zip(blob.chunks_exact(4))
-                        .map(|(a, b)| a * f32::from_le_bytes(b.try_into().unwrap()))
-                        .sum::<f32>();
+                    };
                     if similarity.is_finite() && similarity >= 0.3 {
                         let field =
                             Field::parse(row.get_ref(2)?.as_str().map_err(rusqlite::Error::from)?);
