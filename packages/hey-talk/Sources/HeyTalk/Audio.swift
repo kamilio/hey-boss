@@ -5,7 +5,7 @@ import CoreAudio
 import Accelerate
 import TalkCore
 
-struct InputDevice {
+struct InputDevice: Equatable {
     let id: AudioDeviceID
     let uid: String
     let name: String
@@ -13,8 +13,14 @@ struct InputDevice {
 }
 
 enum AudioDevices {
-    static func isBluetoothInput(uid: String?) -> Bool {
-        let device = uid.flatMap { selected in list().first(where: { $0.uid == selected })?.id } ?? defaultInput
+    static func input(uid: String?) throws -> InputDevice {
+        let devices = list(), defaultID = defaultInput
+        guard let device = devices.first(where: { device in uid.map { $0 == device.uid } ?? (device.id == defaultID) }) else {
+            throw TalkError("Microphone unavailable. Check the system input in Sound settings.")
+        }
+        return device
+    }
+    static func isBluetoothInput(_ device: AudioDeviceID) -> Bool {
         var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var transport: UInt32 = 0, size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return false }
@@ -49,126 +55,171 @@ enum AudioDevices {
     }
 }
 
-private final class CaptureReceiver: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
-    let receive: (CMSampleBuffer) -> Void
-    init(receive: @escaping (CMSampleBuffer) -> Void) { self.receive = receive }
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        receive(sampleBuffer)
-    }
-}
-
 final class AudioCapture {
-    private var captureSession: AVCaptureSession?
-    private var receiver: CaptureReceiver?
-    private var output: AVCaptureAudioDataOutput?
-    private var observers: [NSObjectProtocol] = []
-    private var watchdog: DispatchSourceTimer?
+    typealias StreamFactory = (InputDevice, DispatchQueue, @escaping (CMSampleBuffer) -> Void, @escaping (String) -> Void) throws -> MicrophoneStream
+    private let resolveInput: (String?) throws -> InputDevice
+    private let makeStream: StreamFactory
+    private let now: () -> TimeInterval
     private let control = DispatchQueue(label: "hey-talk.audio-control", qos: .userInitiated)
     private let processing = DispatchQueue(label: "hey-talk.audio", qos: .userInteractive)
+    private var stream: MicrophoneStream?
+    private var inputObserver: AudioInputObserver?
+    private var watchdog: DispatchSourceTimer?
+    // These fields belong to the control queue.
+    private var recordingToken: UInt64?
+    private var requestedUID: String?
+    private var recoveryStartedAt: TimeInterval?
+    private var recoveryReason = "Microphone unavailable. Check the system input in Sound settings."
+    private var nextAttemptAt: TimeInterval = 0
+    private var attempts = 0
     private let lock = NSLock()
+    // Audio callbacks and the UI share the following fields under the lock.
     private var samples: [Float] = []
     private var rms: Double = 0
     private var peak: Float = 0
     private var fault: String?
     private var token: UInt64 = 0
+    private var streamID: UInt64 = 0
     private var bluetooth = false
+    private var device: InputDevice?
+    private var ready = false
+    private var restarts = 0
     private var lastAudioAt: TimeInterval = 0
+    private var lastSignalAt: TimeInterval = 0
+    private var signalSince: TimeInterval?
     var onFailure: ((String) -> Void)?
+    var onReadinessChanged: ((Bool) -> Void)?
     var level: Double { lock.lock(); defer { lock.unlock() }; return rms }
     var sampleCount: Int { lock.lock(); defer { lock.unlock() }; return samples.count }
     var maximumLevel: Float { lock.lock(); defer { lock.unlock() }; return peak }
     var usesBluetooth: Bool { lock.lock(); defer { lock.unlock() }; return bluetooth }
+    var activeInput: InputDevice? { lock.lock(); defer { lock.unlock() }; return device }
+    var isReady: Bool { lock.lock(); defer { lock.unlock() }; return ready }
+    var restartCount: Int { lock.lock(); defer { lock.unlock() }; return restarts }
+
+    init(resolveInput: @escaping (String?) throws -> InputDevice = AudioDevices.input,
+         makeStream: @escaping StreamFactory = { try SystemMicrophoneStream(device: $0, queue: $1, receive: $2, interrupted: $3) },
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.resolveInput = resolveInput; self.makeStream = makeStream; self.now = now
+    }
 
     func start(uid: String?, completion: @escaping (Result<Void, Error>) -> Void) {
         lock.lock(); token &+= 1; let ticket = token; lock.unlock()
         control.async {
-            do {
-                try self.startSync(uid: uid, captureToken: ticket)
-                self.waitForAudio(token: ticket, deadline: ProcessInfo.processInfo.systemUptime + 5, completion: completion)
-            } catch { DispatchQueue.main.async { completion(.failure(error)) } }
+            guard self.isCurrent(ticket) else { DispatchQueue.main.async { completion(.failure(TalkError("Recording cancelled"))) }; return }
+            self.endCapture()
+            self.lock.lock()
+            self.samples = []; self.samples.reserveCapacity(PCMFrame.maxSamples)
+            self.rms = 0; self.peak = 0; self.fault = nil; self.ready = false; self.restarts = 0
+            self.lock.unlock()
+            self.recordingToken = ticket; self.requestedUID = uid
+            self.recoveryStartedAt = nil; self.nextAttemptAt = 0; self.attempts = 0
+            self.inputObserver = AudioInputObserver(queue: self.control) { [weak self] in self?.refresh() }
+            let timer = DispatchSource.makeTimerSource(queue: self.control)
+            timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+            timer.setEventHandler { [weak self] in self?.refreshSync() }
+            self.watchdog = timer; timer.resume()
+            self.refreshSync()
+            self.waitForAudio(token: ticket, deadline: self.now() + 12, completion: completion)
         }
     }
     func waitForAudio(token: UInt64, deadline: TimeInterval, completion: @escaping (Result<Void, Error>) -> Void) {
         lock.lock()
-        // The first valid buffer proves capture is live. The minimum utterance
-        // length is checked on stop; waiting for it here only delays feedback.
-        let current = self.token == token, ready = !samples.isEmpty, fault = self.fault
+        let current = self.token == token, ready = self.ready, fault = self.fault
         lock.unlock()
         let result: Result<Void, Error>
         if !current { result = .failure(TalkError("Recording cancelled")) }
         else if let fault { result = .failure(TalkError(fault)) }
         else if ready { result = .success(()) }
-        else if ProcessInfo.processInfo.systemUptime >= deadline {
-            result = .failure(TalkError("The microphone opened but sent no audio. Reconnect it or choose another input."))
+        else if now() >= deadline {
+            let message = "No sound from the microphone. Check its mute control and the system input in Sound settings."
+            fail(message, token: token)
+            result = .failure(TalkError(message))
         } else {
             control.asyncAfter(deadline: .now() + 0.02) { self.waitForAudio(token: token, deadline: deadline, completion: completion) }
             return
         }
         DispatchQueue.main.async { completion(result) }
     }
-    private func startSync(uid: String?, captureToken: UInt64) throws {
-        lock.lock(); let current = token == captureToken; lock.unlock()
-        guard current else { throw TalkError("Recording cancelled") }
-        guard captureSession == nil else { throw TalkError("Microphone already recording") }
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-            throw TalkError("Microphone access is required. Run hey-talk permissions microphone.")
-        }
-        // Capture-only sessions do not create an output audio graph. In particular,
-        // they avoid AVAudioEngine's stale Bluetooth output format after route changes.
-        let selectedUID = uid ?? AudioDevices.list().first(where: { $0.id == AudioDevices.defaultInput })?.uid
-        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone, .external], mediaType: .audio, position: .unspecified).devices
-        guard let device = selectedUID.flatMap({ selected in devices.first(where: { $0.uniqueID == selected }) }) else {
-            throw TalkError("Selected microphone is disconnected. Use hey-talk input default or select another device.")
-        }
-        let session = AVCaptureSession()
-        let input = try AVCaptureDeviceInput(device: device)
-        let output = AVCaptureAudioDataOutput()
-        output.audioSettings = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16_000,
-                                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 32,
-                                AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: false]
-        let receiver = CaptureReceiver { [weak self] buffer in self?.consume(buffer, token: captureToken) }
-        output.setSampleBufferDelegate(receiver, queue: processing)
-        session.beginConfiguration()
-        guard session.canAddInput(input), session.canAddOutput(output) else {
-            session.commitConfiguration(); throw TalkError("Cannot configure microphone capture")
-        }
-        session.addInput(input); session.addOutput(output); session.commitConfiguration()
-        let usesBluetooth = AudioDevices.isBluetoothInput(uid: selectedUID)
-        lock.lock()
-        guard token == captureToken else { lock.unlock(); throw TalkError("Recording cancelled") }
-        samples = []; samples.reserveCapacity(PCMFrame.maxSamples)
-        rms = 0; peak = 0; fault = nil; bluetooth = usesBluetooth
-        lastAudioAt = ProcessInfo.processInfo.systemUptime
-        lock.unlock()
-        captureSession = session; self.output = output; self.receiver = receiver
-        for name in [AVCaptureSession.runtimeErrorNotification, AVCaptureSession.wasInterruptedNotification] {
-            observers.append(NotificationCenter.default.addObserver(forName: name, object: session, queue: nil) { [weak self] notification in
-                let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
-                self?.fail(error?.localizedDescription ?? "Microphone capture was interrupted. Start a new recording.", token: captureToken)
-            })
-        }
-        session.startRunning()
-        lock.lock(); let cancelled = token != captureToken; lock.unlock()
-        if cancelled { _ = try? stopSync(); throw TalkError("Recording cancelled") }
-        guard session.isRunning else { _ = try? stopSync(); throw TalkError("Microphone could not start") }
-        let timer = DispatchSource.makeTimerSource(queue: control)
-        timer.schedule(deadline: .now() + 5, repeating: 0.5)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); let stale = self.token == captureToken && ProcessInfo.processInfo.systemUptime - self.lastAudioAt > 3; self.lock.unlock()
-            if stale { self.fail("The microphone stopped sending audio. Reconnect it or choose another input.", token: captureToken) }
-        }
-        watchdog = timer; timer.resume()
+    private func isCurrent(_ ticket: UInt64, stream: UInt64? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return token == ticket && (stream == nil || streamID == stream)
     }
-    func consume(_ buffer: CMSampleBuffer, token: UInt64) {
-        lock.lock(); let current = self.token == token && fault == nil; lock.unlock()
+    func refresh() { control.async { self.refreshSync() } }
+    private func refreshSync() {
+        guard let ticket = recordingToken, isCurrent(ticket) else { return }
+        let time = now()
+        lock.lock()
+        let failed = fault != nil
+        let healthy = signalSince.map { time - $0 >= 1 && time - lastAudioAt < 1 && time - lastSignalAt < 1 } ?? false
+        lock.unlock()
+        guard !failed else { return }
+        if stream != nil, healthy { recoveryStartedAt = nil }
+        if let began = recoveryStartedAt, time - began >= 12 {
+            fail(recoveryReason, token: ticket); return
+        }
+        do {
+            // Resolve the system default anew, including between retries. Never fall
+            // back to an unrelated device when an explicit input was selected.
+            let input = try resolveInput(requestedUID)
+            lock.lock()
+            let sameInput = device == input
+            let noBuffers = time - lastAudioAt >= 3
+            let noSignal = time - lastSignalAt >= 3
+            lock.unlock()
+            if stream != nil, sameInput {
+                if noBuffers || noSignal {
+                    beginRecovery(noBuffers ? "The microphone stopped sending audio. Check the system input in Sound settings."
+                                  : "No sound from the microphone. Check its mute control and the system input in Sound settings.", token: ticket)
+                } else { return }
+            } else if stream != nil {
+                beginRecovery("Microphone unavailable after the input changed. Check the system input in Sound settings.", token: ticket)
+                // A deliberate route change can open immediately.
+                nextAttemptAt = time
+            }
+            guard stream == nil, time >= nextAttemptAt else { return }
+            lock.lock()
+            streamID &+= 1; let epoch = streamID
+            device = input; ready = false; rms = 0
+            lastAudioAt = time; lastSignalAt = time; signalSince = nil
+            restarts = attempts; lock.unlock()
+            attempts += 1
+            let bluetooth = AudioDevices.isBluetoothInput(input.id)
+            lock.lock(); self.bluetooth = bluetooth; lock.unlock()
+            let opened = try makeStream(input, processing,
+                { [weak self] in self?.consume($0, token: ticket, stream: epoch) },
+                { [weak self] in self?.recover($0, token: ticket, stream: epoch) })
+            stream = opened
+            try opened.start()
+            if !isCurrent(ticket) { closeStream() }
+        } catch is MicrophoneAccessError {
+            fail(MicrophoneAccessError.denied.localizedDescription, token: ticket)
+        } catch {
+            beginRecovery(error.localizedDescription, token: ticket)
+        }
+    }
+    private func beginRecovery(_ message: String, token: UInt64) {
+        if recoveryStartedAt == nil { recoveryStartedAt = now() }
+        recoveryReason = message
+        closeStream()
+        nextAttemptAt = now() + 0.25
+        notifyReadiness(false, token: token)
+    }
+    private func recover(_ message: String, token: UInt64, stream: UInt64) {
+        control.async {
+            guard self.recordingToken == token, self.isCurrent(token, stream: stream) else { return }
+            self.beginRecovery(message, token: token)
+        }
+    }
+    func consume(_ buffer: CMSampleBuffer, token: UInt64, stream: UInt64 = 0) {
+        lock.lock(); let current = self.token == token && streamID == stream && fault == nil; lock.unlock()
         guard current, let description = CMSampleBufferGetFormatDescription(buffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description) else { return }
         let format = asbd.pointee
         guard format.mFormatID == kAudioFormatLinearPCM, format.mSampleRate == 16_000,
               format.mChannelsPerFrame == 1, format.mBitsPerChannel == 32,
               format.mFormatFlags & kAudioFormatFlagIsFloat != 0 else {
-            fail("Microphone returned an unsupported audio format", token: token); return
+            recover("Microphone returned an unsupported audio format", token: token, stream: stream); return
         }
         let count = CMSampleBufferGetNumSamples(buffer)
         guard count > 0, count <= PCMFrame.rate else { return }
@@ -177,51 +228,77 @@ final class AudioCapture {
             var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(raw.count), mData: raw.baseAddress))
             return CMSampleBufferCopyPCMDataIntoAudioBufferList(buffer, at: 0, frameCount: Int32(count), into: &list)
         }
-        guard status == noErr else { fail("Cannot read microphone samples", token: token); return }
+        guard status == noErr else { recover("Cannot read microphone samples", token: token, stream: stream); return }
         var level: Float = 0
         vDSP_rmsqv(values, 1, &level, vDSP_Length(count))
-        guard level.isFinite else { fail("Microphone returned invalid audio", token: token); return }
+        guard level.isFinite else { recover("Microphone returned invalid audio", token: token, stream: stream); return }
         lock.lock()
-        guard self.token == token else { lock.unlock(); return }
+        guard self.token == token, streamID == stream, fault == nil else { lock.unlock(); return }
         guard samples.count + count <= PCMFrame.maxSamples else {
             lock.unlock(); fail("Five-minute recording limit reached. Stop and start a new dictation.", token: token); return
         }
         samples.append(contentsOf: values); rms = Double(level); peak = max(peak, level)
-        lastAudioAt = ProcessInfo.processInfo.systemUptime
+        let time = now(), becameReady = !ready && level > 0
+        lastAudioAt = time
+        if level > 0 {
+            if signalSince == nil || time - lastSignalAt >= 1 { signalSince = time }
+            lastSignalAt = time; ready = true
+        } else if time - lastSignalAt >= 1 { signalSince = nil }
         lock.unlock()
+        if becameReady { notifyReadiness(true, token: token) }
+    }
+    private func notifyReadiness(_ ready: Bool, token: UInt64) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let current = self.token == token && self.ready == ready; self.lock.unlock()
+            if current { self.onReadinessChanged?(ready) }
+        }
     }
     private func fail(_ message: String, token: UInt64) {
         lock.lock()
         guard self.token == token, fault == nil else { lock.unlock(); return }
-        fault = message; lock.unlock()
+        fault = message; ready = false; lock.unlock()
+        control.async { if self.recordingToken == token { self.endCapture() } }
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); let current = self.token == token; self.lock.unlock()
-            if current { self.onFailure?(message) }
+            guard let self, self.isCurrent(token) else { return }
+            self.onFailure?(message)
         }
     }
+    private func closeStream() {
+        lock.lock(); streamID &+= 1; ready = false; rms = 0; device = nil; lock.unlock()
+        stream?.stop(); stream = nil
+        processing.sync {} // Reject and drain old-route callbacks before reopening.
+    }
+    private func endCapture() {
+        watchdog?.cancel(); watchdog = nil; inputObserver = nil
+        recordingToken = nil
+        closeStream()
+    }
     func stop(completion: @escaping (Result<[Float], Error>) -> Void) {
+        lock.lock(); let ticket = token; lock.unlock()
         control.async {
-            let result = Result { try self.stopSync() }
+            guard self.isCurrent(ticket) else {
+                DispatchQueue.main.async { completion(.failure(TalkError("Recording cancelled"))) }; return
+            }
+            self.endCapture()
+            self.lock.lock()
+            guard self.token == ticket else {
+                self.lock.unlock()
+                DispatchQueue.main.async { completion(.failure(TalkError("Recording cancelled"))) }; return
+            }
+            self.token &+= 1
+            let captured = self.samples, fault = self.fault
+            self.samples = []; self.rms = 0
+            self.lock.unlock()
+            let result: Result<[Float], Error> = fault.map { .failure(TalkError($0)) } ?? .success(captured)
             DispatchQueue.main.async { completion(result) }
         }
     }
-    private func stopSync() throws -> [Float] {
-        watchdog?.cancel(); watchdog = nil
-        observers.forEach(NotificationCenter.default.removeObserver); observers = []
-        captureSession?.stopRunning()
-        output?.setSampleBufferDelegate(nil, queue: nil)
-        processing.sync {} // Drain the final callbacks before decoding.
-        output = nil; receiver = nil; captureSession = nil
-        lock.lock(); defer { lock.unlock() }
-        let captured = samples; samples = []; rms = 0
-        if let fault { throw TalkError(fault) }
-        return captured
-    }
     func cancel() {
-        lock.lock(); token &+= 1; samples = []; rms = 0; lock.unlock()
-        control.async { _ = try? self.stopSync() }
+        lock.lock(); token &+= 1; samples = []; rms = 0; ready = false; lock.unlock()
+        control.async { self.endCapture() }
     }
+    deinit { watchdog?.cancel(); stream?.stop() }
 
     static func readFile(_ path: String) throws -> [Float] {
         let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))

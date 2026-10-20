@@ -54,6 +54,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
         capture.onFailure = { [weak self] message in self?.fail(message) }
+        capture.onReadinessChanged = { [weak self] ready in
+            guard let self, self.session.phase == .recording else { return }
+            if ready { self.overlay?.update(.recording) } else { self.overlay?.preparing() }
+        }
         hotkey = Hotkey()
         hotkey?.onAction = { [weak self] action in
             guard let self else { return }
@@ -226,11 +230,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
             "capture_start_ms": captureMilliseconds, "peak_rms": capture.maximumLevel,
-            "microphone_ready": captureReady,
+            "microphone_ready": captureReady && capture.isReady,
+            "capture_restarts": capture.restartCount,
             "bluetooth_input": capture.usesBluetooth,
             "microphone": permissionName, "accessibility": AXIsProcessTrusted(),
         ]
         value["vocabulary_sync"] = vocabularySync
+        if let input = capture.activeInput { value["active_input"] = input.json }
         if let pid = inference.pid { value["inference_pid"] = pid }
         if let error { value["last_error"] = error }
         if let reason = lastPasteBlock { value["last_paste_block"] = reason.rawValue }

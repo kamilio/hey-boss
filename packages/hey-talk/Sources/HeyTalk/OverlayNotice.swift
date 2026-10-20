@@ -66,6 +66,7 @@ final class OverlayNotice: NSView {
         let text = detail.lowercased()
         if text.contains("no speech") { return "No speech detected. Try again." }
         if text.contains("microphone access") { return "Allow microphone access in Settings." }
+        if text.contains("no sound from the microphone") { return "No microphone sound. Check mute and Sound settings." }
         if text.contains("microphone") { return "Microphone unavailable. Try reconnecting." }
         if text.contains("five-minute") { return "Recording limit reached. Start again." }
         if text.contains("orukeet is missing") { return "Speech model missing. Reinstall Hey Talk." }

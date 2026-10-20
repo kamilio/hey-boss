@@ -7,6 +7,7 @@ final class OverlayNoticeTests: XCTestCase {
         XCTAssertEqual(OverlayNotice.concise("No speech detected. Check your microphone with hey-talk devices."), "No speech detected. Try again.")
         XCTAssertEqual(OverlayNotice.concise("Microphone access is required. Run hey-talk permissions microphone."), "Allow microphone access in Settings.")
         XCTAssertEqual(OverlayNotice.concise("Selected microphone is disconnected."), "Microphone unavailable. Try reconnecting.")
+        XCTAssertEqual(OverlayNotice.concise("No sound from the microphone. Check its mute control and the system input in Sound settings."), "No microphone sound. Check mute and Sound settings.")
         XCTAssertEqual(OverlayNotice.concise("Five-minute recording limit reached."), "Recording limit reached. Start again.")
         XCTAssertEqual(OverlayNotice.concise("Orukeet is missing. Run the hey-talk installer."), "Speech model missing. Reinstall Hey Talk.")
         XCTAssertEqual(OverlayNotice.concise("An internal runtime error with implementation details"), "Couldn’t transcribe. Try again.")

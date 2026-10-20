@@ -180,8 +180,13 @@ from an app switch or a closed target. Quit OpenWhispr if it owns the same hotke
 
 The Swift desktop process owns capture, keyboard shortcuts, and AppKit UI.
 Microphone capture uses a capture-only `AVCaptureSession`, with no output audio
-graph to interfere with Bluetooth profile changes. Recording becomes ready only
-after audio arrives, and a watchdog detects a microphone that stops sending data.
+graph to interfere with Bluetooth profile changes. The default input follows macOS
+even during recording. Input changes, interruptions, and stalled or zero-filled
+streams reopen capture automatically while retaining audio already received.
+Recording becomes ready after the first nonzero audio buffer; a recovery that
+cannot restore sound fails visibly. `status --json` includes `active_input` and
+`capture_restarts`. An explicitly selected input stays selected.
+With the MacBook lid closed, choose an external microphone as the system input.
 A separate disposable process runs Orukeet v0.1.0 INT8 through sherpa-onnx and
 ONNX Runtime. Private pipes carry PCM; the CLI uses a same-user Unix socket
 with mode 0600. No network listener or inference network request is used.
@@ -192,7 +197,7 @@ The microphone closes when recording stops. Inference stays warm for ten
 minutes, then releases model memory. Waveform updates run only during visible
 recording. Bluetooth can take roughly two seconds to open its microphone profile
 on first use. Ten starts on the tested headset measured 50–325 ms, with a 57 ms
-median (previously 205 ms). Readiness now follows the first valid audio buffer;
+median (previously 205 ms). Readiness follows the first nonzero audio buffer;
 the waveform appears immediately, without the previous 660 ms reveal delay.
 Startup runs off the UI thread and remains cancellable.
 
@@ -215,6 +220,7 @@ swift test --sanitize=thread
 HEY_TALK_TEST_CLI="$HOME/.local/bin/hey-talk" ./test-integration.sh
 # Optional hardware check; captures and discards the selected microphone:
 ./test-microphone.sh
+./test-input-switching.sh # Requires two microphones; restores the system input
 ```
 
 Run integration tests while idle: they restart Hey Talk. They run 20 synthetic
