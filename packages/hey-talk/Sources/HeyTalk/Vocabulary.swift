@@ -2,6 +2,8 @@ import Foundation
 import TalkCore
 
 struct Vocabulary {
+    // Warmup and CLI edits share this process; serialize their read/modify/write.
+    private static let lock = NSLock()
     let file: URL
     private let defaults: URL?
 
@@ -41,6 +43,7 @@ struct Vocabulary {
     }
 
     func command(_ arguments: [String]) throws -> [String] {
+        Self.lock.lock(); defer { Self.lock.unlock() }
         try Self.validate(arguments)
         let previous = try words()
         var words = Dictionary(uniqueKeysWithValues: previous.map { ($0.lowercased(), $0) })

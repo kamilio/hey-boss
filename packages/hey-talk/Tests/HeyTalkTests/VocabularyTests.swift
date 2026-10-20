@@ -53,4 +53,17 @@ final class VocabularyTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: vocabulary.file), Data([0xff, 0xfe]))
         }
     }
+
+    func testFirstWarmupAndConcurrentEditsKeepEveryTerm() throws {
+        for _ in 0..<10 {
+            try withVocabulary { vocabulary, _ in
+                let operations = [[], ["add", "Cloudflare"], ["add", "Vercel"]]
+                DispatchQueue.concurrentPerform(iterations: operations.count) { index in
+                    do { _ = try vocabulary.command(operations[index]) }
+                    catch { XCTFail(error.localizedDescription) }
+                }
+                XCTAssertEqual(try vocabulary.words(), ["Cloudflare", "Kamil", "Poe", "Vercel"])
+            }
+        }
+    }
 }
