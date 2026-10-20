@@ -111,6 +111,57 @@ mod tests {
         assert_eq!(inbox.list("other", now).unwrap()["groups"], json!([]));
     }
     #[test]
+    fn hourly_activity_preserves_weights_boundaries_and_quiet_hours() {
+        let mut inbox = Inbox::memory();
+        let now = 1_800_000_123_456;
+        let hour = 3_600_000;
+        inbox.enable("p", true).unwrap();
+        inbox.enable("other", true).unwrap();
+        let mut weighted = event("weighted", "failed", now - 2 * hour);
+        weighted.count = 7;
+        let events = vec![
+            event("previous", "failed", now - DAY - 1),
+            event("start", "failed", now - DAY),
+            event("before-hour", "failed", now - DAY + hour - 1),
+            event("on-hour", "failed", now - DAY + hour),
+            weighted,
+            event("latest", "failed", now - hour - 1),
+            event("quiet", "quiet", now - 2 * DAY),
+            event("now", "current", now),
+            event("future", "current", now + 1),
+        ];
+        inbox.ingest("p", &events, now).unwrap();
+        inbox.ingest("p", &events, now).unwrap();
+        inbox.ingest("other", &events, now).unwrap();
+        let result = inbox.list("p", now).unwrap();
+        assert_eq!(result["observed_at"], now);
+        let groups = result["groups"].as_array().unwrap();
+        let failed = groups.iter().find(|g| g["title"] == "failed").unwrap();
+        let mut expected = vec![0; 24];
+        expected[0] = 2;
+        expected[1] = 1;
+        expected[22] = 8;
+        assert_eq!(failed["hourly_counts"], json!(expected));
+        assert_eq!(failed["count_24h"], 11);
+        assert_eq!(failed["previous_24h"], 1);
+        assert_eq!(failed["last_seen"], now - hour - 1);
+        assert_eq!(failed["total"], 12);
+        let quiet = groups.iter().find(|g| g["title"] == "quiet").unwrap();
+        assert_eq!(quiet["hourly_counts"], json!(vec![0; 24]));
+        let current = groups.iter().find(|g| g["title"] == "current").unwrap();
+        assert_eq!(current["hourly_counts"][23], 1);
+        assert_eq!(current["count_24h"], 1);
+        let later = inbox.list("p", now + DAY).unwrap();
+        let failed = later["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["title"] == "failed")
+            .unwrap();
+        assert_eq!(failed["hourly_counts"], json!(vec![0; 24]));
+        assert_eq!(failed["last_seen"], now - hour - 1);
+    }
+    #[test]
     fn batch_validation_is_atomic_and_stale_replays_are_rejected() {
         let mut inbox = Inbox::memory();
         let now = 1_800_000_000_000;
@@ -160,6 +211,7 @@ mod tests {
 }
 
 const DAY: i64 = 86_400_000;
+const HOUR: i64 = 3_600_000;
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -319,10 +371,43 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         Ok(json!({"ok":true,"accepted":accepted,"duplicates":events.len()-accepted}))
     }
     pub fn list(&self, project: &str, now: i64) -> Result<Value> {
-        let mut stmt=self.db.prepare("SELECT g.id,g.title,g.total,g.issue,COALESCE(SUM(CASE WHEN e.time>=?2 THEN e.count ELSE 0 END),0),MAX(e.time),COALESCE(SUM(CASE WHEN e.time>=?3 AND e.time<?2 THEN e.count ELSE 0 END),0) FROM error_groups g LEFT JOIN error_events e ON e.project=g.project AND e.group_id=g.id WHERE g.project=?1 GROUP BY g.id ORDER BY 5 DESC,6 DESC,g.id LIMIT 200")?;
-        let groups=stmt.query_map(params![project,now-DAY,now-2*DAY],|r|Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"issue":r.get::<_,Option<i64>>(3)?,"count_24h":r.get::<_,i64>(4)?,"last_seen":r.get::<_,Option<i64>>(5)?,"previous_24h":r.get::<_,i64>(6)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        // Keep the ranking and chart on one read snapshot while collectors ingest.
+        let _snapshot = self.db.unchecked_transaction()?;
+        let mut stmt=self.db.prepare("SELECT g.id,g.title,g.total,g.issue,COALESCE(SUM(CASE WHEN e.time>=?2 AND e.time<=?4 THEN e.count ELSE 0 END),0),MAX(e.time),COALESCE(SUM(CASE WHEN e.time>=?3 AND e.time<?2 THEN e.count ELSE 0 END),0) FROM error_groups g LEFT JOIN error_events e ON e.project=g.project AND e.group_id=g.id WHERE g.project=?1 GROUP BY g.id ORDER BY 5 DESC,6 DESC,g.id LIMIT 200")?;
+        let mut groups=stmt.query_map(params![project,now-DAY,now-2*DAY,now],|r|Ok(json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,String>(1)?,"total":r.get::<_,i64>(2)?,"issue":r.get::<_,Option<i64>>(3)?,"count_24h":r.get::<_,i64>(4)?,"last_seen":r.get::<_,Option<i64>>(5)?,"previous_24h":r.get::<_,i64>(6)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        let ids = groups.iter().map(|g| &g["id"]).collect::<Vec<_>>();
+        // Aggregate only the visible groups and last day, never the ten-sample preview.
+        // The final bucket includes an event exactly at the observation time.
+        let mut stmt = self.db.prepare(
+            "SELECT group_id,MIN((time-?2)/?4,23),SUM(count) FROM error_events
+             WHERE project=?1 AND time>=?2 AND time<=?3
+               AND group_id IN (SELECT value FROM json_each(?5))
+             GROUP BY group_id,2",
+        )?;
+        let buckets = stmt.query_map(
+            params![project, now - DAY, now, HOUR, json!(ids).to_string()],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, usize>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let mut hourly = std::collections::HashMap::<String, [i64; 24]>::new();
+        for bucket in buckets {
+            let (id, index, count) = bucket?;
+            hourly.entry(id).or_default()[index] = count;
+        }
+        for group in &mut groups {
+            group["hourly_counts"] = json!(
+                hourly
+                    .remove(group["id"].as_str().unwrap())
+                    .unwrap_or_default()
+            );
+        }
         Ok(
-            json!({"ok":true,"enabled":self.enabled(project)?,"groups":groups,"limit":200,"retention_days":30}),
+            json!({"ok":true,"enabled":self.enabled(project)?,"groups":groups,"observed_at":now,"limit":200,"retention_days":30}),
         )
     }
     pub fn detail(&self, project: &str, id: &str, now: i64) -> Result<Value> {

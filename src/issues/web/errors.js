@@ -1,10 +1,30 @@
 'use strict';
 (async()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  let boot,project,rows=[],enabled=false,generation=0,busy=false;
+  let boot,project,rows=[],observedAt=0,enabled=false,generation=0,busy=false;
   const drafts=new Map();
   const alert=message=>{$('#errors-alert').textContent=message;$('#errors-alert').hidden=!message;};
   const time=t=>t?new Date(t).toLocaleString():'No retained samples';
+  const dateTime=new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'long'});
+  const exactTime=t=>dateTime.format(t);
+  function age(t,reference){
+    const minutes=Math.floor(Math.abs(reference-t)/60000);
+    if(minutes<1)return 'just now';
+    const duration=minutes<60?`${minutes}m`:minutes<1440?`${Math.floor(minutes/60)}h ${minutes%60}m`:`${Math.floor(minutes/1440)}d ${Math.floor(minutes%1440/60)}h`;
+    return t>reference?`in ${duration}`:`${duration} ago`;
+  }
+  function lastEvent(t,reference){
+    if(!t)return '<div class="error-last-event">Last event · No retained samples</div>';
+    return `<div class="error-last-event"><span>Last event <strong>${esc(age(t,reference))}</strong></span><time datetime="${new Date(t).toISOString()}">${esc(exactTime(t))}</time></div>`;
+  }
+  function activity(row){
+    const counts=row.hourly_counts;
+    if(!counts)return '';
+    const peak=Math.max(1,...counts),start=observedAt-86400000;
+    const intervals=counts.map((count,i)=>`${exactTime(start+i*3600000)} – ${exactTime(start+(i+1)*3600000)}: ${count.toLocaleString()} observed`);
+    const label=`Observed events per hour over the last 24 hours, oldest to newest: ${counts.join(', ')}. Each chart scales to its own peak of ${Math.max(...counts).toLocaleString()} per hour.`;
+    return `<div class="error-activity"><svg class="error-hourly-chart" viewBox="0 0 144 36" role="img" tabindex="0" aria-label="${esc(label)}"><title>${esc(label)}</title>${counts.map((count,i)=>{const height=count?Math.max(2,count/peak*32):1;return `<rect x="${i*6}" y="${35-height}" width="4" height="${height}" rx="1" data-count="${count}"><title>${esc(intervals[i])}</title></rect>`;}).join('')}</svg><div class="error-activity-label" aria-hidden="true"><span>24h ago</span><span>per hour</span><span>now</span></div></div>`;
+  }
   const picker=new HeyBossUI.ProjectPicker({onSelect:id=>{location.hash=new URLSearchParams({project:id});}});
   async function api(action,extra={}){
     return HeyBossUI.post('/api/errors',{action,project,...extra},boot,{fallback:'Error inbox request failed'});
@@ -13,9 +33,10 @@
     const filtered=rows.filter(r=>r.title.toLowerCase().includes($('#error-search').value.toLowerCase()));
     $('#families').textContent=rows.length;
     $('#collection').textContent=enabled?'Collection on':'Enable collection';$('#collection').setAttribute('aria-pressed',String(enabled));
-    $('#error-rows').innerHTML=filtered.map(r=>`<article class="issue-row"><span class="issue-state" data-icon="code"></span><div class="issue-row-main"><div class="issue-title-line"><button class="issue-title error-title" data-id="${esc(r.id)}" aria-haspopup="dialog">${esc(r.title)}</button></div><div class="issue-meta"><span>Last seen ${esc(time(r.last_seen))}</span><span>${r.total.toLocaleString()} total</span>${r.issue?`<span>Task #${r.issue}</span>`:''}</div></div><span class="error-count" aria-label="${r.count_24h.toLocaleString()} observed in the last 24 hours">${r.count_24h.toLocaleString()}<small>last 24h</small></span>${r.issue?`<a class="button error-row-action" href="/#${esc(new URLSearchParams({project,issue:r.issue}))}">Open task</a>`:`<button type="button" class="button error-row-action" data-create="${esc(r.id)}" aria-haspopup="dialog">Create task</button>`}</article>`).join('');
+    $('#error-rows').innerHTML=filtered.map(r=>`<article class="issue-row"><span class="issue-state" data-icon="code"></span><div class="issue-row-main"><div class="issue-title-line"><button class="issue-title error-title" data-id="${esc(r.id)}" aria-haspopup="dialog">${esc(r.title)}</button></div>${lastEvent(r.last_seen,observedAt)}<div class="issue-meta"><span>${r.total.toLocaleString()} total</span>${r.issue?`<span>Task #${r.issue}</span>`:''}</div></div><div class="error-frequency">${activity(r)}<span class="error-count" aria-label="${r.count_24h.toLocaleString()} observed in the last 24 hours">${r.count_24h.toLocaleString()}<small>last 24h</small></span></div>${r.issue?`<a class="button error-row-action" href="/#${esc(new URLSearchParams({project,issue:r.issue}))}">Open task</a>`:`<button type="button" class="button error-row-action" data-create="${esc(r.id)}" aria-haspopup="dialog">Create task</button>`}</article>`).join('');
     HeyBossUI.icons();
     $('#errors-status').textContent=filtered.length?`Showing ${filtered.length} of up to 200 groups` : enabled?'No matching errors. The collector will send new observations here.':'Collection is off. Enable it for this project to accept events.';
+    $('#errors-updated').textContent=observedAt?`As of ${exactTime(observedAt)} · Refresh for new events.`:'';
     $('#error-rows').querySelectorAll('[data-id]').forEach(button=>button.onclick=()=>show(button.dataset.id));
     $('#error-rows').querySelectorAll('[data-create]').forEach(button=>button.onclick=()=>show(button.dataset.create,true));
   }
@@ -27,7 +48,7 @@
     try{
       const d=await api('detail',{id});if(seq!==generation||!$('#error-dialog').open)return;
       const group=rows.find(r=>r.id===id);
-      $('#error-detail').innerHTML=`<p class="error-meta">${(group?.count_24h??0).toLocaleString()} in the last 24 hours · ${(group?.previous_24h??0).toLocaleString()} in the previous 24 hours · ${d.total.toLocaleString()} total observed occurrences · ${d.samples.length} recent samples</p><div class="error-actions">${d.issue?`<a class="button primary" href="/#${esc(new URLSearchParams({project,issue:d.issue}))}">Open task #${d.issue}</a>`:`<div class="error-task-editor"><label class="field-label" for="error-task-prompt">Task prompt</label><textarea id="error-task-prompt" class="text-input" maxlength="32000" rows="3" spellcheck="false"></textarea><span class="error-task-settings">Default configurable in Project settings → Error task.</span></div><p id="error-task-status" role="alert" hidden></p><button class="button primary" id="promote">Create task</button>`}</div>${d.samples.map((s,i)=>`<details ${i===0?'open':''}><summary>${esc(s.source)} · ${esc(time(s.timestamp))}</summary><dl><dt>Release</dt><dd>${esc(s.release||'Unknown')}</dd><dt>Reference</dt><dd>${esc(s.request_ref||'Unavailable')}</dd><dt>Event</dt><dd>${esc(s.event_id)}</dd><dt>Occurrences</dt><dd>${s.count}</dd></dl><pre tabindex="0">${esc(s.message)}${s.stack?'\n\n'+esc(s.stack):''}</pre></details>`).join('')}`;
+      $('#error-detail').innerHTML=`${lastEvent(d.samples[0]?.timestamp,d.observed_at)}<p class="error-meta">${(group?.count_24h??0).toLocaleString()} in the last 24 hours · ${(group?.previous_24h??0).toLocaleString()} in the previous 24 hours · ${d.total.toLocaleString()} total observed occurrences · ${d.samples.length} recent samples</p><div class="error-actions">${d.issue?`<a class="button primary" href="/#${esc(new URLSearchParams({project,issue:d.issue}))}">Open task #${d.issue}</a>`:`<div class="error-task-editor"><label class="field-label" for="error-task-prompt">Task prompt</label><textarea id="error-task-prompt" class="text-input" maxlength="32000" rows="3" spellcheck="false"></textarea><span class="error-task-settings">Default configurable in Project settings → Error task.</span></div><p id="error-task-status" role="alert" hidden></p><button class="button primary" id="promote">Create task</button>`}</div>${d.samples.map((s,i)=>`<details ${i===0?'open':''}><summary>${esc(s.source)} · ${esc(time(s.timestamp))}</summary><dl><dt>Release</dt><dd>${esc(s.release||'Unknown')}</dd><dt>Reference</dt><dd>${esc(s.request_ref||'Unavailable')}</dd><dt>Event</dt><dd>${esc(s.event_id)}</dd><dt>Occurrences</dt><dd>${s.count}</dd></dl><pre tabindex="0">${esc(s.message)}${s.stack?'\n\n'+esc(s.stack):''}</pre></details>`).join('')}`;
       if($('#promote')){
         const key=project+':'+id, input=$('#error-task-prompt'), button=$('#promote');
         input.value=drafts.get(key)??d.task_prompt;
@@ -51,7 +72,7 @@
     }catch(e){if(seq===generation&&$('#error-dialog').open)$('#error-detail').textContent=e.message;}
   }
   async function mutate(fn){if(busy)return;busy=true;alert('');document.querySelectorAll('#errors-main button').forEach(b=>b.disabled=true);try{await fn();}catch(e){alert(e.message);}finally{busy=false;document.querySelectorAll('#errors-main button').forEach(b=>b.disabled=false);}}
-  async function load(){const seq=++generation;const result=await api('list');if(seq!==generation)return;rows=result.groups;enabled=result.enabled;render();}
+  async function load(){const seq=++generation;const result=await api('list');if(seq!==generation)return;rows=result.groups;observedAt=result.observed_at;enabled=result.enabled;render();}
   async function navigate(){
     generation++;$('#error-dialog').close();alert('');project=HeyBossUI.projectId(boot.project?.id||boot.projects[0]?.id);
     picker.update(boot.projects,boot.projects.find(p=>p.id===project)||{id:project,name:project});

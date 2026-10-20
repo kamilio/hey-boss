@@ -6,12 +6,14 @@
 | Collection | Separate Poe adapter, polling historical edge/store error logs every 30 seconds |
 | Grouping | Project + source + stable fingerprint; original samples remain available |
 | Replay | Same project/source/event ID counts once, including overlapping backfills |
-| Inbox | Most observed occurrences in the last 24 hours; previous day and lifetime context |
+| Inbox | Most observed occurrences in the last 24 hours; last-event timestamp and age, hourly activity, previous day and lifetime context |
 | Tasks | Create task from a row or its evidence dialog; editable prompt; retries reuse one task and frozen evidence |
 | Retention | SQLite samples: 30 days; JSONL: four files up to 8 MiB each |
 | Enablement | Off by default; explicitly enabled for `named:poe2-legacy` |
 
 Collection and inbox data are local to the collecting machine. Created tasks use the existing task store and fleet sync. The mobile companion does not expose the local inbox in this version. Counts describe collected observations, not unique failed requests; upstream sampling can omit events. Browser symptoms and server causes retain request references but are not automatically merged.
+
+Each row charts 24 one-hour intervals ending at the displayed observation time, with quiet hours kept visible. Hover a bar for its interval and count; each chart scales to its own peak. Refresh updates the counts, chart, and last-event age together. Last-event timestamps use the original occurrence time and the viewer's local timezone; groups without samples inside the 30-day retention window show “No retained samples.”
 
 ## Generic ingest
 
