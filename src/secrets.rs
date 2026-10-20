@@ -28,7 +28,19 @@ pub fn install() -> Result<()> {
     } else {
         "local".into()
     };
-    open()?.initialize(&label)?;
+    let initialized = open()?.initialize(&label);
+    #[cfg(target_os = "macos")]
+    let initialized = match initialized {
+        Err(Error::StoreUnavailable) => {
+            install_session::initialize(
+                &std::env::current_exe().map_err(|_| Error::StorageFailure)?,
+                &label,
+            )?;
+            open()?.enrollment()
+        }
+        result => result,
+    };
+    initialized?;
     let destination = home.join(".local/share/hey-boss/sdk/secrets");
     for (path, contents) in [
         (
@@ -59,3 +71,7 @@ pub fn install() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+#[path = "secrets_install_session.rs"]
+mod install_session;
