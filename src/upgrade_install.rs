@@ -344,6 +344,7 @@ fn publish_to(
             return Err(error("Installed CLI failed build verification"));
         }
         shortcut(binary)?;
+        output(Command::new(binary).args(["secrets", "install"]))?;
         // The running updater can be older than the staged skill bundle.
         let skill_source = snapshot.join("skills/hey-boss");
         let mut skill_files = Vec::new();
