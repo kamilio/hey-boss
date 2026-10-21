@@ -53,6 +53,13 @@ final class SpeechOverlay: NSObject {
     var containsPointer: Bool { panel.isVisible && panel.frame.insetBy(dx: -8, dy: -8).contains(NSEvent.mouseLocation) }
     var visible: Bool { panel.isVisible }
     var frame: CGRect { panel.frame }
+    func retainsHover(around target: SpeechTarget, point: CGPoint) -> Bool {
+        guard panel.isVisible else { return false }
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let control = CGRect(x: panel.frame.minX, y: top - panel.frame.maxY, width: panel.frame.width, height: panel.frame.height)
+        let paragraph = target.viewport.map { target.frame.intersection($0) } ?? target.frame
+        return Self.hoverRegion(paragraph: paragraph, control: control).contains(point)
+    }
 
     override init() {
         panel = SpeechPanel(contentRect: NSRect(x: 0, y: 0, width: 96, height: 36), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -119,7 +126,7 @@ final class SpeechOverlay: NSObject {
         let width: CGFloat = drawer ? min(max(360, target.frame.width + 32), min(680, screen.visibleFrame.width - 32)) : expanded ? 264 : 96
         let textHeight = snapshot?.boundingRect(with: CGSize(width: width - 32, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading]).height ?? target.frame.height
         let height: CGFloat = drawer ? min(320, max(140, textHeight + 78)) : expanded ? 42 : 36
-        var placement = Self.placement(anchor: rect, point: point, size: CGSize(width: width, height: height), visible: screen.visibleFrame)
+        var placement = Self.placement(anchor: rect, size: CGSize(width: width, height: height), visible: screen.visibleFrame)
         if drawer {
             let origin = pinnedOrigin ?? placement.origin
             placement.origin = origin
@@ -197,12 +204,15 @@ final class SpeechOverlay: NSObject {
             storage.addAttribute(.foregroundColor, value: NSColor.clear, range: next.range)
         }
     }
-    static func placement(anchor: CGRect, point: CGPoint, size: CGSize, visible: CGRect) -> CGRect {
-        // Follow the hovered line even when most of a tall paragraph is clipped.
+    static func hoverRegion(paragraph: CGRect, control: CGRect) -> CGRect {
+        paragraph.union(control).insetBy(dx: -12, dy: -8)
+    }
+    static func placement(anchor: CGRect, size: CGSize, visible: CGRect) -> CGRect {
+        // A paragraph owns one fixed button. Pointer motion must never chase it.
         let right = anchor.maxX + 8, left = anchor.minX - size.width - 8
-        let preferred = right + size.width <= visible.maxX - 8 ? right : left >= visible.minX + 8 ? left : point.x + 16
+        let preferred = right + size.width <= visible.maxX - 8 ? right : left >= visible.minX + 8 ? left : anchor.maxX - size.width
         let x = min(max(preferred, visible.minX + 8), visible.maxX - size.width - 8)
-        let y = min(max(point.y - size.height / 2, visible.minY + 8), visible.maxY - size.height - 8)
+        let y = min(max(anchor.maxY - size.height, visible.minY + 8), visible.maxY - size.height - 8)
         return CGRect(origin: CGPoint(x: x, y: y), size: size)
     }
     func hide() { panel.orderOut(nil); target = nil; pinnedOrigin = nil }

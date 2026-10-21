@@ -14,20 +14,25 @@ final class SpeechOverlayTests: XCTestCase {
     func testClippedParagraphControlsStayOnScreenIncludingSecondaryDisplay() {
         for visible in [CGRect(x: 0, y: 25, width: 1440, height: 875), CGRect(x: -1920, y: -300, width: 1920, height: 1080)] {
             for anchor in [CGRect(x: visible.minX + 400, y: visible.maxY - 30, width: 600, height: 220), CGRect(x: visible.minX + 400, y: visible.minY - 180, width: 600, height: 220)] {
-                let frame = SpeechOverlay.placement(anchor: anchor, point: CGPoint(x: anchor.midX, y: min(visible.maxY - 20, max(visible.minY + 20, anchor.midY))), size: CGSize(width: 264, height: 42), visible: visible)
+                let frame = SpeechOverlay.placement(anchor: anchor, size: CGSize(width: 264, height: 42), visible: visible)
                 XCTAssertTrue(visible.contains(frame), "\(frame) outside \(visible)")
             }
         }
     }
-    func testControlStaysBesideHoveredLineOfLongParagraph() {
+    func testControlIsAnchoredToParagraphAndBridgeKeepsItReachable() {
         let visible = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let anchor = CGRect(x: 200, y: -400, width: 600, height: 1800)
-        let right = SpeechOverlay.placement(anchor: anchor, point: CGPoint(x: 500, y: 380), size: CGSize(width: 96, height: 36), visible: visible)
-        XCTAssertEqual(right.minX, anchor.maxX + 8)
-        XCTAssertEqual(right.midY, 380)
-        let left = SpeechOverlay.placement(anchor: CGRect(x: 800, y: 100, width: 620, height: 400), point: CGPoint(x: 1000, y: 200), size: CGSize(width: 96, height: 36), visible: visible)
-        XCTAssertEqual(left.maxX, 792)
-        XCTAssertEqual(left.midY, 200)
+        let anchor = CGRect(x: 200, y: 300, width: 600, height: 200)
+        let control = SpeechOverlay.placement(anchor: anchor, size: CGSize(width: 96, height: 36), visible: visible)
+        XCTAssertEqual(control.minX, anchor.maxX + 8)
+        XCTAssertEqual(control.maxY, anchor.maxY)
+        let bridge = SpeechOverlay.hoverRegion(paragraph: anchor, control: control)
+        for x in stride(from: anchor.maxX - 20, through: control.midX, by: 2) {
+            XCTAssertTrue(bridge.contains(CGPoint(x: x, y: control.midY)), "No dead gap on the way to Listen")
+        }
+        XCTAssertFalse(bridge.contains(CGPoint(x: 100, y: 100)))
+        let tall = SpeechOverlay.placement(anchor: CGRect(x: 200, y: -400, width: 600, height: 1800), size: control.size, visible: visible)
+        XCTAssertTrue(visible.contains(tall))
+        XCTAssertEqual(tall.minX, control.minX)
     }
     @MainActor func testListenCapsuleFitsItsLabelAndCentersTheIconAndTextTogether() throws {
         let app = NSApplication.shared, overlay = SpeechOverlay()
