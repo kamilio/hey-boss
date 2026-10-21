@@ -96,7 +96,7 @@ final class SpeechPlayback {
         }
         return nil
     }
-    init(engine: SpeechEngine, output: SpeechOutput) { self.engine = engine; self.output = output }
+    init(engine: SpeechEngine, output: SpeechOutput) { self.engine = engine; self.output = output; output.rate = 1.25 }
     func start(_ text: String) throws {
         let parts = try SpeechText.segments(text)
         if active { stop() }
