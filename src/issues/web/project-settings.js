@@ -216,7 +216,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     await refreshProjects(projectSettingsProject);
     await renderRoute();
     updateHeader();
-    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : executionChanged ? "Settings saved. Worker execution changes apply to the next task." : "Settings saved");
+    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : executionChanged ? "Settings saved. Execution changes apply to the next task or scheduled run." : "Settings saved");
   } catch (error) {
     projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;

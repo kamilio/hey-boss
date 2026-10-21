@@ -114,7 +114,7 @@ impl ExecutionSettings {
         }
     }
 
-    pub(super) fn apply(&self, command: &mut Command, issue: &Value) {
+    pub(crate) fn apply(&self, command: &mut Command, issue: &Value) {
         match self.permissions(issue) {
             "auto" => {
                 crate::codex_permissions::apply(command);
@@ -136,7 +136,7 @@ impl ExecutionSettings {
         }
     }
 
-    pub(super) fn thread(&self, mut params: Value, issue: &Value) -> Value {
+    pub(crate) fn thread(&self, mut params: Value, issue: &Value) -> Value {
         params = match self.permissions(issue) {
             "auto" => crate::codex_permissions::thread(params),
             "yolo" => crate::codex_permissions::yolo_thread(params),
@@ -148,7 +148,7 @@ impl ExecutionSettings {
         params
     }
 
-    pub(super) fn turn(&self, mut params: Value) -> Value {
+    pub(crate) fn turn(&self, mut params: Value) -> Value {
         if !self.model.is_empty() {
             params["model"] = self.model.clone().into();
         }

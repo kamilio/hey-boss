@@ -5,6 +5,67 @@ const PROJECT: &str = "named:Scheduled";
 const MARKDOWN: &str = include_str!("../../jobs/fixtures/original.md");
 
 #[test]
+fn scheduled_jobs_follow_project_execution_on_new_and_resumed_runs() {
+    if isolated("scheduled_jobs_follow_project_execution_on_new_and_resumed_runs", &[("HEY_BOSS_FIXTURE_FRESH_THREADS", "1")]) {
+        return;
+    }
+    let mut f = Fixture::new();
+    let first = f.run("project-execution");
+    let mut definition = first.run.snapshot.definition.clone();
+    definition.thread_mode = crate::jobs::ThreadMode::Resume;
+    f.op(Operation::Edit { id: "project-execution".into(), if_revision: 1, definition, markdown: None });
+    let mut previous = None;
+    for (permissions, effort) in [("yolo", "high"), ("auto", "medium"), ("", "")] {
+        // Isolated test process: children see the expectation for this run.
+        unsafe {
+            std::env::set_var("HEY_BOSS_FIXTURE_PERMISSIONS", if permissions.is_empty() { "inherit" } else { permissions });
+            std::env::set_var("HEY_BOSS_FIXTURE_EFFORT", effort);
+        }
+        let d = if previous.is_none() { first.clone() } else {
+            let run = f.op(Operation::RunNow { id: "project-execution".into() })["run"]["id"].as_str().unwrap().to_owned();
+            f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+            f.store.job_dispatches(&f.ctx.node).unwrap().into_iter().find(|d| d.run.id == run).unwrap()
+        };
+        // A queued job must use the project choice current at launch time.
+        f.ctx.db().unwrap().execute("INSERT INTO project_settings(project_id,prompt,version,worker_execution) VALUES(?1,'',1,?2) ON CONFLICT(project_id) DO UPDATE SET worker_execution=excluded.worker_execution", params![PROJECT,json!({"model":"project-default","reasoning":effort,"permissions":permissions}).to_string()]).unwrap();
+        receive(&f.ctx, &d, MARKDOWN).unwrap();
+        execute(&f.ctx, &d).unwrap();
+        let report = f.report(&d);
+        assert_eq!(report.state, "succeeded", "{report:?}");
+        f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+        if let Some(session) = previous { assert_eq!(report.session_id, Some(session), "permissions and reasoning changes preserve the resumed thread"); }
+        previous = report.session_id;
+    }
+}
+
+#[test]
+fn scheduled_job_model_can_inherit_project_or_machine_configuration() {
+    if isolated("scheduled_job_model_can_inherit_project_or_machine_configuration", &[("HEY_BOSS_FIXTURE_FRESH_THREADS", "1")]) { return; }
+    let mut f = Fixture::new();
+    let first = f.run_model("inherited-model", "");
+    let mut definition = first.run.snapshot.definition.clone();
+    definition.thread_mode = crate::jobs::ThreadMode::Resume;
+    f.op(Operation::Edit { id: "inherited-model".into(), if_revision: 1, definition, markdown: None });
+    let mut previous = None;
+    for model in ["exact-model", ""] {
+        unsafe { std::env::set_var("HEY_BOSS_FIXTURE_EXPECT_MODEL", if model.is_empty() { "default-model" } else { model }); }
+        f.ctx.db().unwrap().execute("INSERT INTO project_settings(project_id,prompt,version,worker_execution) VALUES(?1,'',1,?2) ON CONFLICT(project_id) DO UPDATE SET worker_execution=excluded.worker_execution", params![PROJECT,json!({"model":model,"reasoning":"","permissions":"auto"}).to_string()]).unwrap();
+        let d = if previous.is_none() { first.clone() } else {
+            let run = f.op(Operation::RunNow { id: "inherited-model".into() })["run"]["id"].as_str().unwrap().to_owned();
+            f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+            f.store.job_dispatches(&f.ctx.node).unwrap().into_iter().find(|d| d.run.id == run).unwrap()
+        };
+        receive(&f.ctx, &d, MARKDOWN).unwrap();
+        execute(&f.ctx, &d).unwrap();
+        let report = f.report(&d);
+        assert_eq!(report.state, "succeeded", "{report:?}");
+        f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+        assert_ne!(report.session_id, previous, "A changed inherited model must start fresh instead of failing or keeping the old pin");
+        previous = report.session_id;
+    }
+}
+
+#[test]
 fn resumed_job_threads_are_local_terminal_and_provider_scoped() {
     let mut f = Fixture::new();
     let previous = f.run("resume-boundaries");
@@ -174,6 +235,9 @@ impl Fixture {
         self.store.execute(&request).unwrap()
     }
     fn run(&mut self, id: &str) -> Dispatch {
+        self.run_model(id, "exact-model")
+    }
+    fn run_model(&mut self, id: &str, model: &str) -> Dispatch {
         self.op(Operation::Create {
             id: id.into(),
             definition: Definition {
@@ -181,7 +245,7 @@ impl Fixture {
                 cron: "* * * * *".into(),
                 timezone: "UTC".into(),
                 harness: "codex".into(),
-                model: "exact-model".into(),
+                model: model.into(),
                 machines: Vec::new(),
                 all_machines: false,
                 each_machine: false,

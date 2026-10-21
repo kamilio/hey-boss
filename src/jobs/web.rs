@@ -53,6 +53,7 @@ pub(crate) fn runtime(value: Value) -> Result<Value> {
             .collect::<Vec<_>>();
         result["catalog"] = serde_json::to_value(AgentSession::discover_models(
             Launch {
+                codex_execution: Default::default(),
                 provider,
                 model: None,
                 binary: None,

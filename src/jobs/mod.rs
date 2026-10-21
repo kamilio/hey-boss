@@ -29,6 +29,8 @@ pub struct Definition {
     pub cron: String,
     pub timezone: String,
     pub harness: String,
+    /// Empty Codex model inherits the project's current execution settings.
+    #[serde(default)]
     pub model: String,
     #[serde(default, skip_serializing_if = "ThreadMode::is_new")]
     pub thread_mode: ThreadMode,
@@ -47,7 +49,9 @@ impl Definition {
     }
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
-        identifier(&self.model, "logical model", 256)?;
+        if !self.model.is_empty() || self.harness != "codex" {
+            identifier(&self.model, "logical model", 256)?;
+        }
         if self.all_machines && !self.machines.is_empty() {
             return Err(Error::invalid(
                 "All machines cannot be combined with an ordered machine list",

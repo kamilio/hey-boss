@@ -15,8 +15,11 @@ Organizers have a separate disclosure because they do not consume issue-agent sl
 reasoning level, and permissions for that project on every machine. Auto is the
 default permissions mode. Inherit leaves the machine's Codex configuration in
 control; YOLO disables the sandbox and approval requests. Changes apply to the
-next task. An issue's `yolo` label overrides project permissions and can also be
-added or removed through the CLI. Model and reasoning inherit when left unset.
+next task or scheduled Codex job run, including resumed threads. Jobs use the
+project model when their Model field is empty; an explicit job model overrides it.
+Changing a job's effective model starts a fresh thread. An issue's `yolo` label
+overrides project permissions and can also be added or removed through the CLI.
+Model and reasoning inherit when left unset.
 
 Use **Workers & settings** to find a saved worker, inspect its state, or edit its
 name, slot count, pickup mode, projects, and checkout paths. Review and save the

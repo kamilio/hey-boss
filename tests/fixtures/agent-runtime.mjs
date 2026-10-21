@@ -6,9 +6,17 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 const provider = process.env.HEY_BOSS_FIXTURE_PROVIDER;
 const args = process.argv.slice(2);
+const permissions = process.env.HEY_BOSS_FIXTURE_PERMISSIONS ?? 'auto';
+const permissionValues = permissions === 'yolo' ? ['never', 'user', 'danger-full-access'] : ['on-request', 'auto_review', 'workspace-write'];
 if (provider === 'codex') {
-  for (const setting of ['approval_policy="on-request"', 'approvals_reviewer="auto_review"', 'sandbox_mode="workspace-write"']) {
-    if (!args.some((arg, i) => arg === '-c' && args[i + 1] === setting)) throw new Error(`Missing hardcoded Auto permission setting: ${setting}`);
+  for (const [i, key] of ['approval_policy', 'approvals_reviewer', 'sandbox_mode'].entries()) {
+    const values = args.filter((arg, n) => args[n - 1] === '-c' && arg.startsWith(key + '='));
+    if (permissions === 'inherit' ? values.length !== 0 : values.length !== 1 || values[0] !== `${key}=${JSON.stringify(permissionValues[i])}`) throw new Error(`Incorrect ${permissions} process setting: ${key}`);
+  }
+  if ('HEY_BOSS_FIXTURE_EFFORT' in process.env) {
+    const expected = process.env.HEY_BOSS_FIXTURE_EFFORT;
+    const values = args.filter((arg, n) => args[n - 1] === '-c' && arg.startsWith('model_reasoning_effort='));
+    if (expected ? values[0] !== `model_reasoning_effort=${JSON.stringify(expected)}` : values.length) throw new Error('Incorrect process reasoning');
   }
 }
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
@@ -196,13 +204,16 @@ for await (const chunk of process.stdin) {
     let result = {};
     if (r.method === 'thread/start' || r.method === 'thread/resume') {
       if (process.env.HEY_BOSS_FIXTURE_FRESH_THREADS && r.method === 'thread/resume') session = p.threadId;
-      if (p.approvalPolicy !== 'on-request' || p.approvalsReviewer !== 'auto_review' || p.sandbox !== 'workspace-write') throw new Error('Thread must explicitly use Auto permissions, including on resume');
+      for (const [i, key] of ['approvalPolicy', 'approvalsReviewer', 'sandbox'].entries()) {
+        if (permissions === 'inherit' ? key in p : p[key] !== permissionValues[i]) throw new Error(`Incorrect ${permissions} thread setting: ${key}`);
+      }
       checkModel(p.model ?? 'default-model');
       if (modelFailure === 'reject') { send({id:r.id,error:{code:-32000,message:'Requested model unavailable'}}); continue; }
       selectedModel = modelFailure === 'ignore' ? 'default-model' : (p.model ?? 'default-model');
       result = {thread:{id:session},model:selectedModel};
     }
     if (r.method === 'turn/start') {
+      if ('HEY_BOSS_FIXTURE_EFFORT' in process.env && (p.effort ?? '') !== process.env.HEY_BOSS_FIXTURE_EFFORT) throw new Error('Incorrect turn reasoning');
       checkModel(p.model ?? 'default-model');
       turn = 'fixture-turn-' + (++turnNumber); result = {turn:{id:turn}};
       if (p.input[0].text === 'start before ack') send({method:'turn/started',params:{threadId:session,turn:{id:turn}}});

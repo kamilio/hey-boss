@@ -420,19 +420,26 @@ fn run_session(
     report.cwd = Some(cwd.to_string_lossy().into_owned());
     let provider: Provider = serde_json::from_value(json!(d.run.snapshot.definition.harness))?;
     let model = &d.run.snapshot.definition.model;
-    let model = if provider == Provider::Pi {
+    let model = if provider == Provider::Codex && model.is_empty() {
+        &config.execution.model
+    } else {
+        model
+    };
+    let model = if model.is_empty() {
+        None
+    } else if provider == Provider::Pi {
         let (route, id) = model
             .split_once('/')
             .ok_or_else(|| replica::invalid("Pi model requires the configured route/model ID"))?;
-        ModelSelection {
+        Some(ModelSelection {
             id: id.into(),
             route: Some(route.into()),
-        }
+        })
     } else {
-        ModelSelection {
+        Some(ModelSelection {
             id: model.clone(),
             route: None,
-        }
+        })
     };
     let instructions = Store::open(&ctx.path)?.job_instructions(&d.run.snapshot)?;
     let mut env = BTreeMap::new();
@@ -442,11 +449,13 @@ fn run_session(
         d.run.snapshot.project_id.clone().into(),
     );
     let launch = Launch {
+        codex_execution: config.execution.clone(),
         provider,
-        model: Some(model),
+        model: model.clone(),
         binary: None,
         cwd,
-        resume: previous_thread(ctx, d, provider)?,
+        // A changed model starts fresh; permission/reasoning changes can resume.
+        resume: previous_thread(ctx, d, provider)?.filter(|saved| saved.model == model),
         env,
         output_schema: None,
     };

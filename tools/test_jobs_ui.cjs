@@ -67,8 +67,10 @@ assert.equal(availability([machine],'p','claude',100000),false);
 assert.equal(availability([machine],'p','codex',200000),false);
 (async()=>{
  for(const crypto of [webcrypto,{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)}]){
-  const context=vm.createContext({crypto});
-  vm.runInContext(readFileSync('src/issues/web/components.js','utf8')+'\n'+readFileSync('src/issues/web/jobs.js','utf8')+'\nthis.Mutation=HeyBossJobs.Mutation;',context);
+  const context=vm.createContext({crypto,document:{addEventListener(){}}});
+  vm.runInContext(readFileSync('src/issues/web/components.js','utf8'),context);
+  delete context.document;
+  vm.runInContext(readFileSync('src/issues/web/jobs.js','utf8')+'\nthis.Mutation=HeyBossJobs.Mutation;',context);
   const sent=[],saved=[];
   let loseResponse=true;
   const mutation=new context.Mutation(async body=>{sent.push(body);if(loseResponse){loseResponse=false;throw Error('Lost response');}return {ok:true};},undefined,value=>saved.push(value&&JSON.stringify(value)));

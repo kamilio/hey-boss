@@ -16,6 +16,7 @@ fn launch(
 ) -> Launch {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     Launch {
+        codex_execution: Default::default(),
         provider,
         model: selection,
         binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
