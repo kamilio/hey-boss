@@ -37,8 +37,8 @@ struct Fields {
     timezone: String,
     #[arg(long, value_enum)]
     harness: hey_boss::agent_runtime::Provider,
-    /// Logical model name, preserved in every execution snapshot.
-    #[arg(long)]
+    /// Exact model override; omit for Codex to follow the project setting.
+    #[arg(long, default_value = "")]
     model: String,
     /// Start a new thread (default), or resume this job's previous thread on this machine.
     #[arg(long, value_enum, default_value = "new")]

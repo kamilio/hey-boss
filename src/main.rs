@@ -621,6 +621,7 @@ fn run() -> std::io::Result<()> {
                 .collect();
             let catalog = AgentSession::discover_models(
                 Launch {
+                    codex_execution: Default::default(),
                     provider: *provider,
                     model: None,
                     binary: None,

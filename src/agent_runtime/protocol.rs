@@ -1,11 +1,16 @@
 use super::*;
 
-pub(super) fn command(provider: Provider, binary: &Path, resume: Option<&SessionRef>) -> Command {
+pub(super) fn command(
+    provider: Provider,
+    binary: &Path,
+    resume: Option<&SessionRef>,
+    execution: &crate::issues::worker::ExecutionSettings,
+) -> Command {
     let mut command = Command::new(binary);
     match provider {
         Provider::Codex => {
+            execution.apply(&mut command, &Value::Null);
             command.args(["app-server", "--listen", "stdio://"]);
-            crate::codex_permissions::apply(&mut command);
         }
         Provider::Claude => {
             command.args([

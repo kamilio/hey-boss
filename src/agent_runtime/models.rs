@@ -66,7 +66,7 @@ impl AgentSession {
                 if let Some(model) = &self.model {
                     params["model"] = json!(model.id);
                 }
-                let result = self.rpc(method, crate::codex_permissions::thread(params))?;
+                let result = self.rpc(method, self.codex_execution.thread(params, &Value::Null))?;
                 self.verify_model(&result["model"], &Value::Null)?;
                 self.attach(required(&result["thread"], "id")?, None)?;
             }

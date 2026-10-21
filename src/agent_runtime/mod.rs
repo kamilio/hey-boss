@@ -134,6 +134,8 @@ pub struct SessionRef {
     pub model: Option<ModelSelection>,
 }
 pub struct Launch {
+    /// Project Codex execution policy; other providers retain their own settings.
+    pub codex_execution: crate::issues::worker::ExecutionSettings,
     /// Exact logical model; None preserves the saved pin or the harness default.
     pub model: Option<ModelSelection>,
     pub provider: Provider,
@@ -216,6 +218,7 @@ pub struct State {
 
 pub struct AgentSession {
     provider: Provider,
+    codex_execution: crate::issues::worker::ExecutionSettings,
     model: Option<ModelSelection>,
     model_catalog: Value,
     model_verified: bool,
@@ -262,6 +265,15 @@ impl AgentSession {
         record: Option<Box<dyn FnOnce(u32) -> io::Result<()> + '_>>,
     ) -> io::Result<Self> {
         models::resolve(&mut launch)?;
+        if launch.provider == Provider::Codex {
+            // The resolved selection includes explicit job overrides and resume pins.
+            launch.codex_execution.model = launch
+                .model
+                .as_ref()
+                .map(|m| m.id.clone())
+                .unwrap_or_default();
+            launch.codex_execution.validate().map_err(io::Error::other)?;
+        }
         if launch.output_schema.is_some() && !launch.provider.capabilities().structured_output {
             return Err(io::Error::other("Provider has no native output schema"));
         }
@@ -300,7 +312,12 @@ impl AgentSession {
             }
             None => launch.provider.binary()?,
         };
-        let mut command = protocol::command(launch.provider, &binary, launch.resume.as_ref());
+        let mut command = protocol::command(
+            launch.provider,
+            &binary,
+            launch.resume.as_ref(),
+            &launch.codex_execution,
+        );
         if launch.provider == Provider::Claude
             && let Some(model) = &launch.model
         {
@@ -348,6 +365,7 @@ impl AgentSession {
         };
         let mut client = Self {
             provider: launch.provider,
+            codex_execution: launch.codex_execution,
             model: launch.model,
             model_catalog: Value::Null,
             model_verified: false,
@@ -471,7 +489,7 @@ impl AgentSession {
                 if let Some(schema) = schema {
                     params["outputSchema"] = schema;
                 }
-                let result = self.rpc("turn/start", params)?;
+                let result = self.rpc("turn/start", self.codex_execution.turn(params))?;
                 turn = required(&result["turn"], "id").inspect_err(|_| self.uncertain = true)?;
             }
             Provider::Claude => {

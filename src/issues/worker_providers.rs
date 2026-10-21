@@ -38,6 +38,7 @@ pub(super) fn run(
     // Claude's native session ID arrives only after its first user message.
     store.worker_prepare_provider(job)?;
     let agent = AgentSession::launch(Launch {
+        codex_execution: Default::default(),
         model: None,
         provider,
         binary: None,
