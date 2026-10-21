@@ -68,16 +68,23 @@ failed:
     ht_destroy(r);
     return NULL;
 }
-char *ht_transcribe(HTRecognizer *r, const float *samples, int32_t count, const char *hotwords) {
+static char *decode(HTRecognizer *r, const float *samples, int32_t count, const char *hotwords, int json) {
     const SherpaOnnxOfflineStream *s = r->stream(r->recognizer, hotwords);
     if (!s) return NULL;
     r->accept(s, 16000, samples, count);
     r->decode(r->recognizer, s);
     const SherpaOnnxOfflineRecognizerResult *result = r->result(s);
-    char *text = result && result->text ? strdup(result->text) : NULL;
+    const char *value = result ? (json ? result->json : result->text) : NULL;
+    char *text = value ? strdup(value) : NULL;
     if (result) r->destroy_result(result);
     r->destroy_stream(s);
     return text;
+}
+char *ht_transcribe(HTRecognizer *r, const float *samples, int32_t count, const char *hotwords) {
+    return decode(r, samples, count, hotwords, 0);
+}
+char *ht_align(HTRecognizer *r, const float *samples, int32_t count) {
+    return decode(r, samples, count, "", 1);
 }
 void ht_free_text(char *text) { free(text); }
 void ht_destroy(HTRecognizer *r) {

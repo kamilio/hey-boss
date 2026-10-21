@@ -5,7 +5,7 @@
   Swift implementation replaces its web renderer. License: `Licenses/OpenWhispr.txt`.
 - [sherpa-onnx 1.13.8](https://github.com/k2-fsa/sherpa-onnx), Apache-2.0,
   copyright Xiaomi Corporation. The C API header is vendored unchanged;
-  the native no-TTS runtime is fetched by `build.sh`. License: `Licenses/sherpa-onnx.txt`.
+  the native runtime including TTS is fetched by `build.sh`. License: `Licenses/sherpa-onnx.txt`.
 - [ONNX Runtime 1.28.2](https://github.com/microsoft/onnxruntime), MIT,
   copyright Microsoft Corporation. License: `Licenses/onnxruntime.txt`.
 - [Orukeet v0.1.0](https://huggingface.co/oruk/orukeet), Oruk AI's multilingual
@@ -13,3 +13,11 @@
   CC BY-SA 4.0. `prepare-model.sh` preserves and verifies `LICENSE-WEIGHTS` and
   `NOTICE.md` alongside the model, including the upstream NVIDIA attribution.
   The model is not part of the source repository or app bundle.
+- [Supertonic 3](https://github.com/supertone-inc/supertonic), Supertone Inc.
+  The pinned sherpa-onnx INT8 model is downloaded separately by `prepare-speech.sh`.
+  Weights use OpenRAIL-M; code uses MIT. License: `Licenses/Supertonic.txt`,
+  also retained beside the model. No weights are included in the app bundle.
+- [espeak-ng](https://github.com/espeak-ng/espeak-ng), GPL-3.0-or-later,
+  included in the upstream sherpa-onnx TTS runtime (not used by Supertonic).
+  License: `Licenses/espeak-ng.txt`; source is available from the linked project
+  and the sherpa-onnx 1.13.8 build dependencies.

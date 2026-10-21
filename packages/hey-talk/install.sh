@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ./build.sh
 ./prepare-model.sh
+./prepare-speech.sh
 destination="$HOME/Applications/Hey Talk.app"
 mkdir -p "$HOME/Applications" "$HOME/.local/bin"
 if [ -e "$destination" ]; then

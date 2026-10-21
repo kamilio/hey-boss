@@ -3,13 +3,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p .build/vendor dist
 vendor="$PWD/.build/vendor"
-archive="$vendor/sherpa.tar.bz2"
-runtime="$vendor/sherpa-onnx-v1.13.8-osx-universal2-shared-no-tts"
+archive="$vendor/sherpa-tts.tar.bz2"
+runtime="$vendor/sherpa-onnx-v1.13.8-osx-universal2-shared"
 if [ ! -f "$archive" ]; then
-  curl -fL --retry 2 -o "$archive.tmp" 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-osx-universal2-shared-no-tts.tar.bz2'
+  curl -fL --retry 2 -o "$archive.tmp" 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-osx-universal2-shared.tar.bz2'
   mv "$archive.tmp" "$archive"
 fi
-printf '%s  %s\n' '636b439c75031d892636dfdd2000a0233e4a30a08b030697e91f8aa389431b83' "$archive" | shasum -a 256 -c -
+printf '%s  %s\n' '2249f97f10df7d828af1b0d10e3d1eeaa2198b60b9a999a7ed853c150181ccfd' "$archive" | shasum -a 256 -c -
 if [ ! -d "$runtime" ]; then tar -xjf "$archive" -C "$vendor"; fi
 swift build -c release
 app="$PWD/dist/Hey Talk.app"
