@@ -121,17 +121,17 @@ final class SpeechController {
             if active { stop() } else { candidate = nil; overlay.hide(); sourceHighlight.hide() }
             return
         }
-        if warmedApp != app.processIdentifier {
+        if AXIsProcessTrusted(), warmedApp != app.processIdentifier {
             warmedApp = app.processIdentifier; engine.warm(); scheduleRelease()
         }
         if active { refreshSourceHighlight(); return }
         guard canOffer() else { candidate = nil; overlay.hide(); sourceHighlight.hide(); return }
-        if overlay.containsPointer { lastHit = ProcessInfo.processInfo.systemUptime; return }
-        let now = ProcessInfo.processInfo.systemUptime, point = Self.pointer
-        if let candidate, overlay.retainsHover(around: candidate, point: point) {
+        let now = ProcessInfo.processInfo.systemUptime, pointer = Self.pointer
+        let overControl = overlay.containsPointer
+        let point = overControl ? candidate?.point ?? pointer : pointer
+        if overControl { lastHit = now }
+        if let candidate, overlay.retainsHover(around: candidate, point: pointer) {
             lastHit = now
-            // Keep the button and original capture point while crossing the gap.
-            if !candidate.frame.contains(point) { return }
         }
         if now - lastHit > 1.5 { overlay.hide(); sourceHighlight.hide(); candidate = nil }
         let interval = candidate?.frame.contains(point) == true ? 0.5 : 0.12
@@ -142,12 +142,16 @@ final class SpeechController {
             if case .success(let target) = result {
                 // Accept a result while the pointer moves within the same block;
                 // waiting for pixel-perfect stillness made ordinary hover flaky.
-                guard target.frame.insetBy(dx: -12, dy: -8).contains(Self.pointer) else { return }
+                guard target.frame.insetBy(dx: -12, dy: -8).contains(Self.pointer) || self.overlay.containsPointer else { return }
                 self.candidate = target; self.lastHit = ProcessInfo.processInfo.systemUptime
                 self.overlay.show(target: target, state: .idle, rate: self.playback.rate, fraction: 0, error: nil)
                 if let viewport = target.viewport { self.sourceHighlight.show(frame: target.frame, viewport: viewport, reading: false) }
                 else { self.sourceHighlight.hide() }
                 self.engine.warm(); self.scheduleRelease()
+            } else if case .failure(let error) = result, error is SpeechTargetFailure {
+                // The grace period is only a bridge through whitespace. It must
+                // never retain a stale target over an editor or another control.
+                self.candidate = nil; self.overlay.hide(); self.sourceHighlight.hide(); self.lastHit = 0
             } else if ProcessInfo.processInfo.systemUptime - self.lastHit > 1.5 {
                 self.candidate = nil; self.overlay.hide(); self.sourceHighlight.hide()
             }

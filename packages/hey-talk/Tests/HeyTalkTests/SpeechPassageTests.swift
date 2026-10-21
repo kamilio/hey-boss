@@ -3,12 +3,28 @@ import XCTest
 @testable import HeyTalk
 
 final class SpeechPassageTests: XCTestCase {
+    private struct Block {
+        let name: String
+        let role: String
+        var children: [Block] = []
+    }
+    func testNestedParagraphsAndListsFormOneGroupButControlsStopTraversal() throws {
+        let a = Block(name: "first", role: "AXGroup", children: [Block(name: "text", role: "AXStaticText")])
+        let b = Block(name: "second", role: "AXParagraph", children: [Block(name: "text", role: "AXStaticText")])
+        let list = Block(name: "list", role: "AXList", children: [Block(name: "item", role: "AXListItem", children: [Block(name: "bullet", role: "AXListMarker"), Block(name: "text", role: "AXStaticText")])])
+        let section = Block(name: "section", role: "AXGroup", children: [a, Block(name: "wrapper", role: "AXGroup", children: [b, list])])
+        func blocks(_ node: Block) -> [Block]? { SpeechPassageStructure.blocks(in: node, role: { $0.role }, subrole: { _ in "" }, children: { $0.children }) }
+        XCTAssertEqual(try XCTUnwrap(blocks(section)).map(\.name), ["first", "second", "item"])
+        let controls = Block(name: "message", role: "AXGroup", children: [section, Block(name: "copy", role: "AXButton")])
+        XCTAssertNil(blocks(controls), "A message with controls must be a boundary, not a readable wrapper")
+        XCTAssertNil(blocks(Block(name: "window", role: "AXWebArea", children: [section])))
+    }
     func testContinuationPreservesParagraphRangesAndRichTextWithUnicode() throws {
         let first = SpeechTarget(text: "Hello 🌍.", frame: CGRect(x: 10, y: 10, width: 200, height: 30), point: CGPoint(x: 20, y: 20), pid: 1, bundleID: "test", source: "paragraph")
         var second = first
         second = SpeechTarget(text: "Next paragraph.", frame: CGRect(x: 10, y: 50, width: 200, height: 30), point: first.point, pid: 1, bundleID: "test", source: "paragraph", attributed: NSAttributedString(string: "Next paragraph.", attributes: [.font: NSFont.boldSystemFont(ofSize: 16)]))
         let joined = SpeechPassage.join([first, second])
-        XCTAssertEqual(joined.text, "Hello 🌍.\n\nNext paragraph.")
+        XCTAssertEqual(joined.text, "Hello 🌍.\nNext paragraph.", "Paragraph spacing must not include an extra blank paragraph")
         XCTAssertEqual(joined.frame, first.frame, "The control stays anchored to the starting paragraph")
         XCTAssertEqual(joined.paragraphs.count, 2)
         let range = joined.paragraphs[1].range

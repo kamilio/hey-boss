@@ -12,7 +12,7 @@ final class SpeechWordLens: NSView {
         let surface: NSView
         if #available(macOS 26, *), !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
             let glass = NSGlassEffectView(); glass.style = .clear; glass.cornerRadius = 6
-            glass.tintColor = TalkDesign.accent.withAlphaComponent(word ? 0.12 : 0.035)
+            glass.tintColor = NSColor.white.withAlphaComponent(word ? 0.08 : 0.03)
             glass.contentView = ink; surface = glass
         } else {
             let background = NSView(); background.wantsLayer = true
@@ -23,7 +23,9 @@ final class SpeechWordLens: NSView {
         surface.frame = bounds; surface.autoresizingMask = [.width, .height]
         ink.frame = bounds; ink.autoresizingMask = [.width, .height]
         wantsLayer = true; layer?.cornerRadius = 6
-        layer?.borderWidth = 0.5; layer?.borderColor = TalkDesign.accent.withAlphaComponent(word ? 0.2 : 0.07).cgColor
+        layer?.borderWidth = 0.5; layer?.borderColor = NSColor.white.withAlphaComponent(word ? 0.75 : 0.35).cgColor
+        layer?.shadowColor = TalkDesign.accent.cgColor; layer?.shadowOpacity = word ? 0.09 : 0
+        layer?.shadowRadius = 2; layer?.shadowOffset = CGSize(width: 0, height: -0.5)
         addSubview(surface)
         setAccessibilityElement(false)
     }
