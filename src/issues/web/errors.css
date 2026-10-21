@@ -48,6 +48,8 @@
   color: var(--muted);
 }
 .error-sort { margin-left: auto; }
+.error-task-link { position: relative; z-index: 1; border-radius: 2px; }
+.error-task-link:hover { text-decoration: underline; }
 .error-row-action { position: relative; z-index: 1; flex: none; margin-left: 8px; white-space: nowrap; }
 #error-dialog {
   width: calc(100vw - 48px);
