@@ -35,7 +35,7 @@ private final class IdentityView: NSView {
 private final class ClickSurface: GlassFace {
     var onClick: (() -> Void)?
     var onHover: ((Bool) -> Void)?
-    var onOpenAccessibility: (() -> Void)?
+    var makeMenu: (() -> NSMenu)?
     private var start: NSPoint?
     private var origin: NSPoint?
     private var dragged = false
@@ -55,12 +55,10 @@ private final class ClickSurface: GlassFace {
     }
     override func mouseUp(with event: NSEvent) { if !dragged { onClick?() }; start = nil }
     override func rightMouseDown(with event: NSEvent) {
-        let menu = NSMenu()
-        let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
-        item.target = self; menu.addItem(item)
+        guard let menu = menu(for: event) else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
-    @objc private func openAccessibility() { onOpenAccessibility?() }
+    override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
     override func accessibilityPerformPress() -> Bool { onClick?(); return true }
 }
 
@@ -90,6 +88,9 @@ final class Overlay {
     var onToggle: (() -> Void)?
     var onCancel: (() -> Void)?
     var onOpenAccessibility: (() -> Void)?
+    var onToggleSpeech: (() -> Void)?
+    var onToggleAuto: (() -> Void)?
+    var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
     init() {
@@ -173,7 +174,7 @@ final class Overlay {
         pillContent.setAccessibilityLabel("Start dictation")
         updateModeAppearance()
         pillContent.onClick = { [weak self] in self?.onToggle?() }
-        pillContent.onOpenAccessibility = { [weak self] in self?.onOpenAccessibility?() }
+        pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
         pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }
         cancelButton.isBordered = false
         cancelButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Cancel dictation")
@@ -231,13 +232,30 @@ final class Overlay {
         autoHalo.isHidden = !enabled
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
+    func contextMenu() -> NSMenu {
+        let menu = NSMenu()
+        for (title, action, enabled) in [
+            ("Read Aloud · Hyper+T", #selector(toggleSpeechMode), speechEnabled()),
+            ("Auto Dictation · Hyper+V", #selector(toggleAutoMode), autoMode)
+        ] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
+        item.target = self; menu.addItem(item)
+        return menu
+    }
+    @objc private func openAccessibility() { onOpenAccessibility?() }
+    @objc private func toggleSpeechMode() { onToggleSpeech?() }
+    @objc private func toggleAutoMode() { onToggleAuto?() }
     private func updateModeAppearance() {
         pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
         wave.color = autoMode ? TalkDesign.automatic : TalkDesign.active
         pillContent.toolTip = autoMode
             ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
-            : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move"
+            : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
     }
     private func updateAccessibilityLabel() {
         let action = phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"

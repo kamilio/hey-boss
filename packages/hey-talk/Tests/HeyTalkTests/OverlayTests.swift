@@ -4,6 +4,28 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testBubbleMenuShowsCurrentModesAndShortcutsAndDispatchesTheRightAction() throws {
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        var speech = true, auto = false, dictationStarts = 0
+        overlay.speechEnabled = { speech }
+        overlay.onToggleSpeech = { speech.toggle() }
+        overlay.onToggleAuto = { auto.toggle(); overlay.setAutoMode(auto) }
+        overlay.onToggle = { dictationStarts += 1 }
+        let menu = overlay.contextMenu()
+        let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud · Hyper+T" })
+        let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation · Hyper+V" })
+        XCTAssertEqual(read.state, .on)
+        XCTAssertEqual(automatic.state, .off)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(read.action), to: read.target, from: read))
+        XCTAssertFalse(speech)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(automatic.action), to: automatic.target, from: automatic))
+        XCTAssertTrue(auto)
+        XCTAssertEqual(dictationStarts, 0, "Opening and using the menu must not start manual recording")
+        let refreshed = overlay.contextMenu()
+        XCTAssertEqual(refreshed.items.first { $0.title == read.title }?.state, .off)
+        XCTAssertEqual(refreshed.items.first { $0.title == automatic.title }?.state, .on)
+    }
     @MainActor func testCompactModeNoticeSurvivesCaptureStartingAndCloses() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))
