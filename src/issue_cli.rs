@@ -401,6 +401,9 @@ enum Action {
     },
     /// Create an open, unassigned issue. The body defaults to empty.
     Create {
+        /// Create in a paused project despite its pause reason; pickup stays paused.
+        #[arg(long)]
+        force: bool,
         /// Save files with the issue atomically (up to eight, 10 MiB total).
         #[arg(long = "attachment", value_name = "PATH")]
         attachments: Vec<PathBuf>,
@@ -652,6 +655,9 @@ enum SubtaskAction {
     /// Create and link a child issue atomically.
     #[command(after_help = SUBTASK_SCHEDULING_HELP)]
     Create {
+        /// Create in a paused project despite its pause reason; pickup stays paused.
+        #[arg(long)]
+        force: bool,
         number: i64,
         #[arg(long)]
         title: String,
@@ -737,6 +743,15 @@ enum PrAction {
 enum SettingsAction {
     Show,
     Set {
+        /// Stop new worker pickup for this project on every machine.
+        #[arg(long, conflicts_with = "resume")]
+        pause: bool,
+        /// Resume worker pickup for this project.
+        #[arg(long)]
+        resume: bool,
+        /// Explain the pause to agents creating issues (required when pausing).
+        #[arg(long, conflicts_with = "resume")]
+        reason: Option<String>,
         /// Legacy spelling; global profile settings own this value.
         #[arg(long, hide = true)]
         boss_name: Option<String>,
@@ -854,6 +869,7 @@ impl Options {
                     include_deleted: *all,
                 },
                 SubtaskAction::Create {
+                    force,
                     number,
                     title,
                     body,
@@ -862,6 +878,7 @@ impl Options {
                     blocked_by,
                     then_titles,
                 } => Operation::CreateSubtask {
+                    force: *force,
                     number: *number,
                     title: title.clone(),
                     body: body.read()?.unwrap_or_default(),
@@ -939,6 +956,9 @@ impl Options {
             Action::Settings { command } => match command {
                 SettingsAction::Show => Operation::ProjectSettings,
                 SettingsAction::Set {
+                    pause,
+                    resume,
+                    reason,
                     boss_name,
                     prompt,
                     prs_enabled,
@@ -953,6 +973,9 @@ impl Options {
                     no_mindmaps,
                 } => {
                     if boss_name.is_none()
+                        && !pause
+                        && !resume
+                        && reason.is_none()
                         && prompt.is_none()
                         && !worktree
                         && !no_worktree
@@ -970,6 +993,14 @@ impl Options {
                         ));
                     }
                     Operation::ConfigureProject {
+                        paused: if *pause {
+                            Some(true)
+                        } else if *resume {
+                            Some(false)
+                        } else {
+                            None
+                        },
+                        pause_reason: reason.clone(),
                         subtask_scheduling: None,
                         chief_enabled: None,
                         chief_prompt: None,
@@ -1121,6 +1152,7 @@ impl Options {
                 offset: *offset,
             },
             Action::Create {
+                force,
                 attachments,
                 at_top,
                 at_bottom: _,
@@ -1131,6 +1163,7 @@ impl Options {
                 blocked_by,
                 then_titles,
             } => Operation::Create {
+                force: *force,
                 attachments: attachments
                     .iter()
                     .map(|path| {
@@ -1845,6 +1878,12 @@ pub(crate) fn print_text(value: &Value) {
         if value[key] == true {
             println!("{label}: true");
         }
+    }
+    if value["paused"] == true {
+        println!(
+            "Project paused: {}",
+            value["pause_reason"].as_str().unwrap_or_default()
+        );
     }
     if value.get("prompt").is_some() {
         for (key, label) in [

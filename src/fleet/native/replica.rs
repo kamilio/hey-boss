@@ -211,6 +211,8 @@ impl<'a> RowWriter<'a> {
         }
         let defaults: &[(&str, Value)] = match table {
             "project_settings" => &[
+                ("paused", json!(0)),
+                ("pause_reason", json!("")),
                 ("drafts_enabled", json!(1)),
                 ("artifacts_enabled", json!(1)),
                 ("mindmaps_enabled", json!(1)),
@@ -4344,6 +4346,7 @@ mod tests {
                         model: None,
                     }),
                     operation: Operation::Create {
+                        force: false,
                         attachments: vec![],
                         title: "Original".into(),
                         body: "Requirements".into(),
@@ -6630,6 +6633,8 @@ mod tests {
         let mut legacy = expected.clone();
         for column in [
             "subtask_scheduling",
+            "paused",
+            "pause_reason",
             "drafts_enabled",
             "artifacts_enabled",
             "mindmaps_enabled",
@@ -6659,7 +6664,7 @@ mod tests {
         main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt) VALUES('named:Native fleet','Shared instructions',1,7,'Boss',0,'custom/{number}.md',1,'{\"main\":\"Ship {{number}}\"}',1,'Review the release')", []).unwrap();
         main.db
             .execute(
-                "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0",
+                "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for the next release'",
                 [],
             )
             .unwrap();
@@ -6684,20 +6689,20 @@ mod tests {
         let legacy = json!({"project_id":"named:Native fleet","prompt":"Instructions","prs_enabled":0,"version":1,"boss_name":"Boss"});
         put_row(&f.db, "project_settings", &legacy).unwrap();
         f.db.execute(
-            "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0",
+            "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for release'",
             [],
         )
         .unwrap();
         put_row(&f.db, "project_settings", &legacy).unwrap();
         let retained = rows(
             &f.db,
-            "SELECT artifacts_enabled,mindmaps_enabled FROM project_settings",
+            "SELECT artifacts_enabled,mindmaps_enabled,paused,pause_reason FROM project_settings",
             &[],
         )
         .unwrap();
         assert_eq!(
             retained[0],
-            json!({"artifacts_enabled":0,"mindmaps_enabled":0})
+            json!({"artifacts_enabled":0,"mindmaps_enabled":0,"paused":1,"pause_reason":"Waiting for release"})
         );
     }
 

@@ -349,6 +349,8 @@ function updateHeader() {
   const p = model.project;
   projectPicker.update(model.projects, p);
   $("#hidden-project-banner").hidden = !p.hidden_at;
+  $("#paused-project-banner").hidden = !p.paused || model.route.view === "inbox";
+  $("#paused-project-reason").textContent = p.pause_reason || "";
   $("#project-caption").textContent =
     p.id.startsWith("local:") || p.id.startsWith("named:") ? p.name : p.id;
   $("#copy-create-command").disabled = false;
@@ -1060,6 +1062,7 @@ async function renderRoute() {
       "#detail-view",
       "#issue-heading",
       "#hidden-project-banner",
+      "#paused-project-banner",
     ])
       $(selector).hidden = true;
     await renderInboxRoute(sequence);

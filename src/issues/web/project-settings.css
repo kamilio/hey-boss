@@ -168,6 +168,14 @@
 .configuration-card h3 { margin: 0 0 8px; }
 .configuration-card .draft-choice { margin: 20px 0 0; }
 .configuration-card .draft-choice > span { min-width: 0; }
+.project-pause-card { grid-column: 1 / -1; }
+.configuration-card.project-pause-card .draft-choice { margin-top: 0; }
+#project-pause-details { margin-top: 18px; }
+.project-pause-banner { align-items: center; gap: 16px; }
+.project-pause-banner > div { min-width: 0; }
+.project-pause-banner p { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-pause-banner span { font-size: 12px; color: var(--muted); }
+.project-pause-banner button { flex-shrink: 0; }
 @media (max-width: 800px) {
   .project-configuration-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 16px; }
   #project-settings-form .configuration-card { padding: 16px; }

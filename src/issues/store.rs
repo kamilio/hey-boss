@@ -189,6 +189,16 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "github_ack_event", "TEXT"),
     (
         "project_settings",
+        "paused",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1))",
+    ),
+    (
+        "project_settings",
+        "pause_reason",
+        "TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "project_settings",
         "subtask_scheduling",
         "TEXT NOT NULL DEFAULT 'explicit' CHECK(subtask_scheduling IN ('sequential','explicit'))",
     ),
@@ -1325,9 +1335,9 @@ impl Store {
                 .map_err(|e| migration_error(e, path))?
                 .is_empty()
                 || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?
-                || prior_readiness
-                    .as_ref()
-                    .is_none_or(|sql| !sql.contains("worker_retry_history")));
+                || prior_readiness.as_ref().is_none_or(|sql| {
+                    !sql.contains("worker_retry_history") || !sql.contains("project_pause")
+                }));
         if version < SCHEMA_VERSION || needs_repair {
             db.pragma_update(None, "foreign_keys", false)?;
             let mut migrate = || -> Result<()> {
@@ -2172,14 +2182,16 @@ impl Store {
                     EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.prs_enabled=1),
                     coalesce((SELECT s.artifacts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
                     coalesce((SELECT s.mindmaps_enabled FROM project_settings s WHERE s.project_id=p.id),1),
-                    coalesce((SELECT s.drafts_enabled FROM project_settings s WHERE s.project_id=p.id),1)
+                    coalesce((SELECT s.drafts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
+                    coalesce((SELECT s.paused FROM project_settings s WHERE s.project_id=p.id),0),
+                    coalesce((SELECT s.pause_reason FROM project_settings s WHERE s.project_id=p.id),'')
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE EXISTS(SELECT 1 FROM project_name_keys k WHERE k.project_id=p.id) AND (?1 OR p.hidden_at IS NULL) GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?,
-                    "artifacts_enabled":row.get::<_,bool>(12)?,"mindmaps_enabled":row.get::<_,bool>(13)?,"drafts_enabled":row.get::<_,bool>(14)?
+                    "artifacts_enabled":row.get::<_,bool>(12)?,"mindmaps_enabled":row.get::<_,bool>(13)?,"drafts_enabled":row.get::<_,bool>(14)?,"paused":row.get::<_,bool>(15)?,"pause_reason":row.get::<_,String>(16)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 // Discovery and read-only commands do not enroll a project in
                 // Builder. Explicit settings or saved work do, without deleting
@@ -2515,6 +2527,7 @@ impl Store {
                 now,
             )?,
             Operation::Create {
+                force,
                 draft,
                 labels,
                 then_titles,
@@ -2539,6 +2552,7 @@ impl Store {
                 let mut prev_number = issue.number;
                 for next_title in then_titles {
                     let next_op = Operation::Create {
+                        force: *force,
                         attachments: Vec::new(),
                         draft: *draft,
                         title: next_title.clone(),
@@ -2632,6 +2646,8 @@ impl Store {
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
         result["artifacts_enabled"] = project_settings["artifacts_enabled"].clone();
         result["mindmaps_enabled"] = project_settings["mindmaps_enabled"].clone();
+        result["paused"] = project_settings["paused"].clone();
+        result["pause_reason"] = project_settings["pause_reason"].clone();
         let settings = super::global_settings::read(&tx)?;
         result["boss"] =
             json!({"id":"human:boss","name":settings["boss_name"],"version":settings["version"]});
@@ -2834,8 +2850,9 @@ fn create_issue(
     operation: &Operation,
     now: i64,
 ) -> Result<Issue> {
-    let (title, body, labels, at_top, blockers) = match operation {
+    let (title, body, labels, at_top, blockers, force) = match operation {
         Operation::Create {
+            force,
             title,
             body,
             labels,
@@ -2844,15 +2861,17 @@ fn create_issue(
             ..
         }
         | Operation::CreateSubtask {
+            force,
             title,
             body,
             labels,
             at_top,
             blockers,
             ..
-        } => (title, body, labels, at_top, blockers),
+        } => (title, body, labels, at_top, blockers, force),
         _ => unreachable!(),
     };
+    super::project_pause::check_create(db, project, actor, *force)?;
     let (title, body) = title_content::split(title, body)?;
     let draft = matches!(operation, Operation::Create { draft: true, .. });
     if draft {

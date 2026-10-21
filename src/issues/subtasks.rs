@@ -60,6 +60,7 @@ pub(super) fn execute(
             Ok(json!({"ok":true,"project":project,"parent_issue":parent,"issues":issues}))
         }
         Operation::CreateSubtask {
+            force,
             if_version,
             labels,
             then_titles,
@@ -79,6 +80,7 @@ pub(super) fn execute(
             let mut prev_number = child.number;
             for next_title in then_titles {
                 let next_op = Operation::CreateSubtask {
+                    force: *force,
                     number,
                     title: next_title.clone(),
                     body: String::new(),

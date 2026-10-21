@@ -54,6 +54,10 @@
           Restore project
         </button>
       </div>
+      <div id="paused-project-banner" class="update-banner project-pause-banner" role="status" hidden>
+        <div><strong>Project paused</strong><p id="paused-project-reason"></p><span>New worker pickup is paused. Current agents can finish.</span></div>
+        <button id="paused-project-settings" type="button">Project settings</button>
+      </div>
       <div class="page-heading" id="issue-heading">
         <div>
           <div class="eyebrow">
@@ -363,6 +367,14 @@
         <div class="project-settings-body">
           <div id="settings-panel-configuration" role="tabpanel" aria-labelledby="settings-tab-configuration" tabindex="0">
             <div class="project-configuration-grid">
+              <section class="settings-section configuration-card project-pause-card">
+                <label class="draft-choice"><input type="checkbox" id="project-paused" aria-describedby="project-paused-help" /><span><strong>Pause project</strong><span id="project-paused-help">Stop new issue pickup on every machine. Agents already working can finish.</span></span></label>
+                <div id="project-pause-details" hidden>
+                  <label class="field-label" for="project-pause-reason">Pause reason</label>
+                  <textarea class="text-input" id="project-pause-reason" rows="2" maxlength="1000" aria-describedby="project-pause-reason-help"></textarea>
+                  <p class="field-help" id="project-pause-reason-help">Shown to agents when they try to create issues. They must explicitly override the pause to create one.</p>
+                </div>
+              </section>
               <section class="settings-section configuration-card"><h3>Workflow</h3><p class="field-help">Choose how this project handles code changes.</p>
                 <label class="draft-choice"><input type="checkbox" id="project-prs" aria-describedby="project-prs-help" /><span><strong>Use pull requests</strong><span id="project-prs-help">Use pull request instructions when delivering changes. When off, use the direct-push instructions in Workflow.</span></span></label>
                 <label class="draft-choice"><input type="checkbox" id="project-worktree" aria-describedby="project-worktree-help" /><span><strong>Allow worktrees</strong><span id="project-worktree-help">Workers use the existing checkout by default. Enable this to let workers choose a dedicated worktree for new tasks.</span></span></label>

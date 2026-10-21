@@ -105,6 +105,73 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn project_pause_cli_warns_agents_and_force_does_not_resume_workers() {
+    let f = Fixture::new();
+    f.init(&f.root);
+    let pause = f.json(
+        &f.root,
+        &[
+            "issue",
+            "--agent",
+            "human:qa",
+            "settings",
+            "set",
+            "--pause",
+            "--reason",
+            "Waiting for the next release",
+            "--json",
+        ],
+    );
+    assert_eq!(pause["paused"], true);
+    let args = [
+        "issue",
+        "--agent",
+        "codex:pause-test",
+        "create",
+        "--title",
+        "Queued for later",
+        "--then",
+        "Follow-up",
+    ];
+    let blocked = f.run(&f.root, &args);
+    assert!(!blocked.status.success());
+    let warning = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        warning.contains("Waiting for the next release"),
+        "{warning}"
+    );
+    assert!(warning.contains("--force"), "{warning}");
+    let mut forced = args.to_vec();
+    forced.extend(["--force", "--json"]);
+    let created = f.json(&f.root, &forced);
+    assert_eq!(created["created_chain"].as_array().unwrap().len(), 2);
+    assert_eq!(created["paused"], true);
+    let child_args = [
+        "issue",
+        "--agent",
+        "codex:pause-test",
+        "subtask",
+        "create",
+        "1",
+        "--title",
+        "Child",
+    ];
+    assert!(!f.run(&f.root, &child_args).status.success());
+    let mut child = child_args.to_vec();
+    child.extend(["--force", "--json"]);
+    assert_eq!(f.json(&f.root, &child)["paused"], true);
+    let resumed = f.json(
+        &f.root,
+        &[
+            "issue", "--agent", "human:qa", "settings", "set", "--resume", "--json",
+        ],
+    );
+    assert_eq!(resumed["paused"], false);
+    assert_eq!(resumed["pause_reason"], "");
+    assert!(f.run(&f.root, &args).status.success());
+}
+
+#[test]
 fn fixture_owns_an_empty_database_and_stops_it_before_removing_state() {
     for unwind in [false, true] {
         let f = Fixture::new();

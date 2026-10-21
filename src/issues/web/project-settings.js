@@ -89,6 +89,8 @@ $("#project-settings-form").addEventListener("invalid", event => {
 }, true);
 function projectSettingsDraft() {
   return {
+    paused: $("#project-paused").checked,
+    pause_reason: $("#project-paused").checked ? $("#project-pause-reason").value.trim() : "",
     prompt: $("#project-prompt").value,
     worktree_enabled: $("#project-worktree").checked,
     // The sequence has no editor; retain saved layouts in previews and unrelated edits.
@@ -100,6 +102,8 @@ function projectSettingsDraft() {
   };
 }
 function projectSettingsChanged() {
+  $("#project-pause-details").hidden = !$("#project-paused").checked;
+  $("#project-pause-reason").required = $("#project-paused").checked;
   const changed =
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
@@ -139,6 +143,8 @@ $("#project-settings-trigger").onclick = async () => {
     );
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
+    $("#project-paused").checked = value.paused === true;
+    $("#project-pause-reason").value = value.pause_reason || "";
     $("#project-prompt").value = value.prompt;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
@@ -164,6 +170,7 @@ $("#project-settings-trigger").onclick = async () => {
   }
 };
 $("#project-settings-close").onclick = closeProjectSettings;
+document.getElementById("paused-project-settings")?.addEventListener("click", () => $("#project-settings-trigger").click());
 $("#project-settings-cancel").onclick = closeProjectSettings;
 $("#project-settings-dialog").addEventListener("cancel", (event) => {
   event.preventDefault();
@@ -178,6 +185,7 @@ $("#project-settings-form").onsubmit = async (event) => {
   $("#project-settings-state").textContent = "Saving…";
   try {
     const draft = projectSettingsDraft();
+    const pauseChanged = draft.paused !== projectSettingsOriginal.paused;
     const promptsChanged = draft.prompt !== projectSettingsOriginal.prompt ||
       JSON.stringify(draft.prompt_overrides) !== JSON.stringify(projectSettingsOriginal.prompt_overrides);
     const value = await mutate(
@@ -197,7 +205,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     await refreshProjects(projectSettingsProject);
     await renderRoute();
     updateHeader();
-    toast(promptsChanged ? "Settings saved. Instruction updates queued for running agents." : "Settings saved");
+    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : "Settings saved");
   } catch (error) {
     projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;
@@ -273,6 +281,8 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 }
 
 for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).onchange = projectSettingsChanged;
+$("#project-paused").onchange = projectSettingsChanged;
+$("#project-pause-reason").oninput = projectSettingsChanged;
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;

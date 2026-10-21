@@ -608,6 +608,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
                 "conflict"
                 | "subtask_claim_conflict"
                 | "fleet_reserved"
+                | "project_paused"
                 | "fleet_allocation_missing"
                 | "fleet_allocation_expired" => 409,
                 "invalid_input" | "identity_unavailable" | "project_not_initialized" => 400,
