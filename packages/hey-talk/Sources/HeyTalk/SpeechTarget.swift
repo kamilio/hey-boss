@@ -83,7 +83,7 @@ final class SpeechTargetReader {
                   let frame = SpeechAX.frame(block), frame.insetBy(dx: -12, dy: -8).contains(point),
                   let range = SpeechAX.parameter(owner, "AXTextMarkerRangeForUIElement", block),
                   let passage = target(owner: owner, range: range, point: point, pid: pid, bundleID: bundleID, source: "paragraph", frame: frame) else { break }
-            return capture(passage, block: block, owner: owner, continuing: preferSelection)
+            return capture(passage, block: block, owner: owner)
         }
         var location = point
         if let locationValue = AXValueCreate(.cgPoint, &location),
@@ -91,7 +91,12 @@ final class SpeechTargetReader {
            let range = SpeechAX.parameter(owner, "AXParagraphTextMarkerRangeForTextMarker", marker),
            let paragraph = target(owner: owner, range: range, point: point, pid: pid, bundleID: bundleID, source: "paragraph"),
            paragraph.frame.insetBy(dx: -2, dy: -2).contains(point) {
-            return paragraph
+            let block = ancestors.prefix(8).first { element in
+                guard let range = SpeechAX.parameter(owner, "AXTextMarkerRangeForUIElement", element),
+                      let text = SpeechAX.parameter(owner, "AXStringForTextMarkerRange", range) as? String else { return false }
+                return text.trimmingCharacters(in: .whitespacesAndNewlines) == paragraph.text
+            } ?? hit
+            return capture(paragraph, block: block, owner: owner)
         }
         // Native apps may expose a whole paragraph as static text without text
         // markers. No recursive collection of a window or an entire conversation.
@@ -105,7 +110,7 @@ final class SpeechTargetReader {
         if let value = AXValueCreate(.cfRange, &nativeRange) {
             passage.attributed = SpeechAX.parameter(hit, "AXAttributedStringForRange", value) as? NSAttributedString
         }
-        return capture(passage, block: hit, owner: owner, continuing: preferSelection)
+        return capture(passage, block: hit, owner: owner)
     }
     private func nearbyParagraph(in element: AXUIElement, point: CGPoint, depth: Int) -> AXUIElement? {
         let role = SpeechAX.string(element, "AXRole")
@@ -121,43 +126,26 @@ final class SpeechTargetReader {
         }
         return nil
     }
-    private func capture(_ first: SpeechTarget, block: AXUIElement, owner: AXUIElement, continuing: Bool) -> SpeechTarget {
+    private func capture(_ first: SpeechTarget, block: AXUIElement, owner: AXUIElement) -> SpeechTarget {
         var first = first
         first.viewport = visibleViewport(of: block)
-        guard continuing else { return first }
         var passages = [first], elements = [block]
-        // Stay within the containing section. Never climb into the conversation
-        // or window to find another message, and stop at controls/unknown blocks.
-        var anchor = block
-        // Ignore layout-only wrappers around one paragraph. The first parent
-        // with siblings defines the section; never climb through that boundary.
-        for _ in 0..<3 {
-            guard let parent = SpeechAX.element(anchor, "AXParent"), SpeechAX.string(parent, "AXRole") == "AXGroup",
-                  let children = SpeechAX.value(parent, "AXChildren") as? [AXUIElement], children.count == 1 else { break }
-            anchor = parent
-        }
-        if let parent = SpeechAX.element(anchor, "AXParent"),
-           let siblings = SpeechAX.value(parent, "AXChildren") as? [AXUIElement], siblings.count <= 256,
-           let start = siblings.firstIndex(where: { CFEqual($0, anchor) }) {
-            var budget = first.text.utf16.count
-            let deadline = ProcessInfo.processInfo.systemUptime + 0.35
-            outer: for sibling in siblings.dropFirst(start + 1) {
-                guard ProcessInfo.processInfo.systemUptime < deadline,
-                      let blocks = SpeechPassageStructure.blocks(in: sibling, role: { SpeechAX.string($0, "AXRole") }, subrole: { SpeechAX.string($0, "AXSubrole") }, children: { SpeechAX.value($0, "AXChildren") as? [AXUIElement] ?? [] }), !blocks.isEmpty else { break }
-                for element in blocks {
-                    guard passages.count < 64, ProcessInfo.processInfo.systemUptime < deadline,
-                          let frame = SpeechAX.frame(element), frame.width > 0, frame.height > 0 else { break outer }
-                    let next: SpeechTarget?
-                    if let range = SpeechAX.parameter(owner, "AXTextMarkerRangeForUIElement", element) {
-                        next = target(owner: owner, range: range, point: first.point, pid: first.pid, bundleID: first.bundleID, source: "paragraph", frame: frame)
-                    } else if SpeechAX.string(element, "AXRole") == "AXStaticText" {
-                        let text = SpeechAX.string(element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines)
-                        next = text.isEmpty ? nil : SpeechTarget(text: text, frame: frame, point: first.point, pid: first.pid, bundleID: first.bundleID, source: "text")
-                    } else { next = nil }
-                    guard let next, budget + next.text.utf16.count + 2 <= 20_000 else { break outer }
-                    budget += next.text.utf16.count + 2; passages.append(next); elements.append(element)
-                }
-            }
+        let following = SpeechPassageStructure.following(after: block,
+            parent: { SpeechAX.element($0, "AXParent") }, role: { SpeechAX.string($0, "AXRole") },
+            subrole: { SpeechAX.string($0, "AXSubrole") }, children: { SpeechAX.value($0, "AXChildren") as? [AXUIElement] ?? [] },
+            same: { CFEqual($0, $1) })
+        var budget = first.text.utf16.count
+        for element in following {
+            guard let frame = SpeechAX.frame(element), frame.width > 0, frame.height > 0 else { break }
+            let next: SpeechTarget?
+            if let range = SpeechAX.parameter(owner, "AXTextMarkerRangeForUIElement", element) {
+                next = target(owner: owner, range: range, point: first.point, pid: first.pid, bundleID: first.bundleID, source: "paragraph", frame: frame)
+            } else if SpeechAX.string(element, "AXRole") == "AXStaticText" {
+                let text = SpeechAX.string(element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines)
+                next = text.isEmpty ? nil : SpeechTarget(text: text, frame: frame, point: first.point, pid: first.pid, bundleID: first.bundleID, source: "text")
+            } else { next = nil }
+            guard let next, budget + next.text.utf16.count + 1 <= 20_000 else { break }
+            budget += next.text.utf16.count + 1; passages.append(next); elements.append(element)
         }
         var result = SpeechPassage.join(passages)
         result.viewport = first.viewport
@@ -209,6 +197,34 @@ final class SpeechTargetReader {
 }
 
 enum SpeechPassageStructure {
+    static func following<Node>(after first: Node, parent: (Node) -> Node?, role: (Node) -> String, subrole: (Node) -> String, children: (Node) -> [Node], same: (Node, Node) -> Bool) -> [Node] {
+        var result: [Node] = [], anchor = first, budget = 512
+        for _ in 0..<12 {
+            guard let container = parent(anchor), structural(role(container)),
+                  !SpeechTargetReader.excluded(role: role(container), subrole: subrole(container)) else { break }
+            let siblings = children(container)
+            guard siblings.count <= 256, let start = siblings.firstIndex(where: { same($0, anchor) }) else { break }
+            // A headed body beside action controls is its own content region.
+            // Do not append sibling timestamps/captions outside that body.
+            if children(anchor).first.map({ role($0) == "AXHeading" }) == true,
+               siblings.contains(where: { SpeechTargetReader.excluded(role: role($0), subrole: subrole($0)) }) { break }
+            for sibling in siblings.dropFirst(start + 1) {
+                guard let next = blocks(in: sibling, role: role, subrole: subrole, children: children, budget: &budget) else { return result }
+                result += next
+                if result.count >= 63 { return Array(result.prefix(63)) }
+            }
+            // A list or nested prose wrapper is transparent. A message with
+            // controls is a boundary even when those controls precede the text.
+            for sibling in siblings.prefix(start) {
+                guard blocks(in: sibling, role: role, subrole: subrole, children: children, budget: &budget) != nil else { return result }
+            }
+            anchor = container
+        }
+        return result
+    }
+    private static func structural(_ role: String) -> Bool {
+        ["AXGroup", "AXParagraph", "AXHeading", "AXList", "AXListItem"].contains(role)
+    }
     static func interactiveRegion<Node>(ancestors: [Node], point: CGPoint, frame: (Node) -> CGRect?, interactive: (Node) -> Bool, children: (Node) -> [Node]) -> Bool {
         if ancestors.contains(where: interactive) { return true }
         // Web editors may place read-only placeholder text over a sibling text
@@ -224,15 +240,20 @@ enum SpeechPassageStructure {
     }
     static func blocks<Node>(in root: Node, role: (Node) -> String, subrole: (Node) -> String, children: (Node) -> [Node]) -> [Node]? {
         var budget = 256
+        return blocks(in: root, role: role, subrole: subrole, children: children, budget: &budget)
+    }
+    private static func blocks<Node>(in root: Node, role: (Node) -> String, subrole: (Node) -> String, children: (Node) -> [Node], budget: inout Int) -> [Node]? {
         func visit(_ node: Node, depth: Int) -> [Node]? {
             budget -= 1
             guard budget >= 0, depth < 6 else { return nil }
             let kind = role(node)
+            if kind == "AXListMarker" { return [] }
             if kind == "AXStaticText" { return [node] }
             guard !SpeechTargetReader.excluded(role: kind, subrole: subrole(node)),
-                  ["AXGroup", "AXParagraph", "AXHeading", "AXList", "AXListItem"].contains(kind) else { return nil }
+                  structural(kind) else { return nil }
             let items = children(node)
-            guard !items.isEmpty, items.count <= 64 else { return nil }
+            if items.isEmpty { return kind == "AXGroup" ? [] : nil }
+            guard items.count <= 64 else { return nil }
             if items.allSatisfy({ inline(role: role($0), subrole: subrole($0)) }) { return [node] }
             var result: [Node] = []
             for item in items {

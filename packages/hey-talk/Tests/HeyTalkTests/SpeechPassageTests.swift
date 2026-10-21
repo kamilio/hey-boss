@@ -8,6 +8,43 @@ final class SpeechPassageTests: XCTestCase {
         let role: String
         var children: [Block] = []
     }
+    private func following(_ name: String, in root: Block) -> [String] {
+        var parents: [String: Block] = [:], nodes: [String: Block] = [:]
+        func index(_ block: Block) {
+            nodes[block.name] = block
+            for child in block.children { parents[child.name] = block; index(child) }
+        }
+        index(root)
+        return SpeechPassageStructure.following(after: nodes[name]!, parent: { parents[$0.name] },
+            role: { $0.role }, subrole: { _ in "" }, children: { $0.children }, same: { $0.name == $1.name }).map(\.name)
+    }
+    func testReadingFromInsideAListContinuesIntoTheFollowingParagraphsButNotTheNextMessage() {
+        let first = Block(name: "first", role: "AXParagraph", children: [Block(name: "first-text", role: "AXStaticText")])
+        let second = Block(name: "second", role: "AXParagraph", children: [Block(name: "second-text", role: "AXStaticText")])
+        let item = Block(name: "item", role: "AXListItem", children: [Block(name: "bullet", role: "AXListMarker"), first, second])
+        let list = Block(name: "list", role: "AXList", children: [item])
+        let after = Block(name: "after", role: "AXParagraph", children: [Block(name: "after-text", role: "AXStaticText")])
+        let message = Block(name: "message", role: "AXGroup", children: [list, Block(name: "spacer", role: "AXGroup"), after, Block(name: "copy", role: "AXButton")])
+        let thread = Block(name: "thread", role: "AXGroup", children: [message, Block(name: "unrelated", role: "AXStaticText")])
+        XCTAssertEqual(following("first", in: thread), ["second", "after"])
+        XCTAssertEqual(following("second", in: thread), ["after"])
+        XCTAssertEqual(following("after", in: thread), [])
+    }
+    func testNestedSectionsContinueInOrderAndAControlBeforeTheStartStillPreventsLeavingTheMessage() {
+        let a = Block(name: "a", role: "AXStaticText"), b = Block(name: "b", role: "AXStaticText")
+        let nested = Block(name: "nested", role: "AXGroup", children: [a, Block(name: "spacer", role: "AXGroup"), b])
+        let message = Block(name: "message", role: "AXGroup", children: [Block(name: "menu", role: "AXButton"), nested, Block(name: "c", role: "AXStaticText")])
+        let root = Block(name: "root", role: "AXGroup", children: [message, Block(name: "other-message", role: "AXStaticText")])
+        XCTAssertEqual(following("a", in: root), ["b", "c"])
+    }
+    func testHeadedMessageBodyDoesNotReadItsSiblingTimestampOrNextMessage() {
+        let body = Block(name: "body", role: "AXGroup", children: [
+            Block(name: "speaker", role: "AXHeading", children: [Block(name: "name", role: "AXStaticText")]),
+            Block(name: "first", role: "AXStaticText"), Block(name: "second", role: "AXStaticText")])
+        let message = Block(name: "message", role: "AXGroup", children: [body,
+            Block(name: "timestamp", role: "AXStaticText"), Block(name: "copy", role: "AXButton")])
+        XCTAssertEqual(following("first", in: message), ["second"])
+    }
     func testNestedParagraphsAndListsFormOneGroupButControlsStopTraversal() throws {
         let a = Block(name: "first", role: "AXGroup", children: [Block(name: "text", role: "AXStaticText")])
         let b = Block(name: "second", role: "AXParagraph", children: [Block(name: "text", role: "AXStaticText")])

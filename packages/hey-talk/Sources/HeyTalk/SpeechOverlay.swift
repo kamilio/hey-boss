@@ -140,7 +140,8 @@ final class SpeechOverlay: NSObject {
         guard let screen else { return }
         let drawer = expanded && drawerOpen && snapshot != nil
         face.drawer = drawer
-        let width: CGFloat = drawer ? min(max(360, target.frame.width + 32), min(680, screen.visibleFrame.width - 32)) : expanded ? 264 : 96
+        updateLabel()
+        let width: CGFloat = drawer ? min(max(360, target.frame.width + 32), min(680, screen.visibleFrame.width - 32)) : expanded ? 264 : max(96, ceil(label.fittingSize.width) + 48)
         let textHeight = snapshot?.boundingRect(with: CGSize(width: width - 32, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading]).height ?? target.frame.height
         let height: CGFloat = drawer ? min(320, max(140, textHeight + 78)) : expanded ? 42 : 36
         var placement = Self.placement(anchor: rect, size: CGSize(width: width, height: height), visible: screen.visibleFrame)
@@ -160,7 +161,7 @@ final class SpeechOverlay: NSObject {
         play.title = ""
         play.font = .systemFont(ofSize: 12, weight: .medium)
         play.image = expanded ? NSImage(systemSymbolName: state == .playing ? "pause.fill" : "play.fill", accessibilityDescription: nil) : nil
-        play.setAccessibilityLabel(state == .playing ? "Pause reading" : state == .paused ? "Resume reading" : "Read paragraph")
+        play.setAccessibilityLabel(state == .playing ? "Pause reading" : state == .paused ? "Resume reading" : target.paragraphs.count > 1 ? "Read \(target.paragraphs.count) paragraphs" : "Read paragraph")
         play.toolTip = "Read aloud · Hyper+S\n" + String(target.text.prefix(160))
         idleIcon.isHidden = expanded
         label.textColor = expanded ? .labelColor : TalkDesign.accent
@@ -227,7 +228,7 @@ final class SpeechOverlay: NSObject {
     private func updateLabel() {
         let title = lastState == .idle ? "Listen" : lastState == .loading ? "Preparing…" : lastState == .paused ? "Paused" : lastState == .failed ? "Try again" : "Reading"
         let count = target?.paragraphs.count ?? 0
-        label.stringValue = lastState.isActive && count > 1 ? "\(title) \(paragraphIndex + 1) of \(count)" : title
+        label.stringValue = lastState == .idle && count > 1 ? "Listen · \(count) paragraphs" : lastState.isActive && count > 1 ? "\(title) \(paragraphIndex + 1) of \(count)" : title
     }
     static func hoverRegion(paragraph: CGRect, control: CGRect) -> CGRect {
         paragraph.union(control).insetBy(dx: -12, dy: -8)
