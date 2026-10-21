@@ -1,5 +1,4 @@
-//! Auto is the default. Only Boss's issue-level web control grants YOLO
-//! for a worker attempt; new and resumed threads use the same explicit policy.
+//! Explicit Auto and YOLO policies. Workers can also inherit the harness configuration.
 use serde_json::Value;
 use std::process::Command;
 

@@ -529,11 +529,11 @@ fn connected_tunnel_guards_drafts_and_reopen_without_reverse_ssh() {
                 "--label",
                 "yolo",
                 "--request-id",
-                "forbidden"
+                "enable-yolo"
             ],
-            1
-        )["error"]["code"],
-        "forbidden"
+            0
+        )["issue"]["labels"],
+        json!(["yolo"])
     );
     assert_eq!(
         f.sql(

@@ -13,6 +13,7 @@ pub(super) const PR_ORIGIN_INDEX: &str = "CREATE INDEX IF NOT EXISTS issue_pr_or
     CREATE INDEX IF NOT EXISTS issue_pr_origin_url ON events(project_id,issue_number,CAST(json_extract(data,'$.url') AS TEXT),id DESC) WHERE action='pr_attached' AND json_valid(data);";
 
 const CAPTURE_COLUMNS: &[(&str, &str, &[&str])] = &[
+    ("project_settings", "project_id", &["worker_execution"]),
     ("issues", "project_id", &["attempt_hold"]),
     (
         "issue_pull_requests",
@@ -105,6 +106,7 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 struct ProjectSettingsRow {
+    execution: String,
     paused: bool,
     pause_reason: String,
     prompt: String,
@@ -118,9 +120,10 @@ struct ProjectSettingsRow {
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason,worker_execution FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
+            execution: r.get(10)?,
             paused: r.get(8)?, pause_reason: r.get(9)?,
             artifacts_enabled: r.get(6)?, mindmaps_enabled: r.get(7)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
@@ -129,6 +132,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         }),
     ).optional()?;
     let ProjectSettingsRow {
+        execution,
         paused,
         pause_reason,
         prompt,
@@ -140,6 +144,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
+        execution: "{}".into(),
         paused: false,
         pause_reason: String::new(),
         prompt: worker::DEFAULT_PROMPT.into(),
@@ -152,10 +157,11 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         overrides: "{}".into(),
     });
     let prompt_overrides: worker::PromptOverrides = serde_json::from_str(&overrides)?;
+    let execution: worker::ExecutionSettings = serde_json::from_str(&execution)?;
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -240,6 +246,17 @@ impl Store {
 
 fn configured_runtime(c: &Settings, defaults: &Value, cwd: String) -> Result<ProjectConfig> {
     Ok(ProjectConfig {
+        execution: worker::ExecutionSettings {
+            model: defaults["worker_model"].as_str().unwrap_or_default().into(),
+            reasoning: defaults["worker_reasoning"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            permissions: defaults["worker_permissions"]
+                .as_str()
+                .unwrap_or("auto")
+                .into(),
+        },
         provider: c.provider,
         prompt: c
             .prompt
@@ -824,6 +841,9 @@ pub(super) fn execute(
         }
         Operation::ProjectSettings => project_settings(db, p),
         Operation::ConfigureProject {
+            worker_model,
+            worker_reasoning,
+            worker_permissions,
             paused,
             pause_reason,
             subtask_scheduling,
@@ -843,6 +863,22 @@ pub(super) fn execute(
                 return Err(Error::invalid("Chief has been retired; use Jobs"));
             }
             let defaults = project_settings(db, p)?;
+            let execution = worker::ExecutionSettings {
+                model: worker_model
+                    .as_deref()
+                    .unwrap_or(defaults["worker_model"].as_str().unwrap())
+                    .trim()
+                    .into(),
+                reasoning: worker_reasoning
+                    .as_deref()
+                    .unwrap_or(defaults["worker_reasoning"].as_str().unwrap())
+                    .into(),
+                permissions: worker_permissions
+                    .as_deref()
+                    .unwrap_or(defaults["worker_permissions"].as_str().unwrap())
+                    .into(),
+            };
+            execution.validate()?;
             let paused = paused.unwrap_or(defaults["paused"] == true);
             let pause_reason = pause_reason
                 .as_deref()
@@ -894,7 +930,7 @@ pub(super) fn execute(
                 crate::issues::global_settings::configure(db, name, None)?;
             }
             db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,mindmaps_enabled=excluded.mindmaps_enabled,paused=excluded.paused,pause_reason=excluded.pause_reason",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,mindmaps_enabled,paused,pause_reason])?;
-            db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit' WHERE project_id=?1", [&p.id])?;
+            db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit',worker_execution=?2 WHERE project_id=?1", params![p.id,serde_json::to_string(&execution)?])?;
             project_settings(db, p)
         }
         Operation::Commits { number } => {

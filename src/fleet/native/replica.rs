@@ -211,6 +211,7 @@ impl<'a> RowWriter<'a> {
         }
         let defaults: &[(&str, Value)] = match table {
             "project_settings" => &[
+                ("worker_execution", json!("{}")),
                 ("paused", json!(0)),
                 ("pause_reason", json!("")),
                 ("drafts_enabled", json!(1)),
@@ -6633,6 +6634,7 @@ mod tests {
         let mut legacy = expected.clone();
         for column in [
             "subtask_scheduling",
+            "worker_execution",
             "paused",
             "pause_reason",
             "drafts_enabled",
@@ -6664,6 +6666,12 @@ mod tests {
         main.db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,plan_template,worktree_enabled,prompt_overrides,chief_enabled,chief_prompt) VALUES('named:Native fleet','Shared instructions',1,7,'Boss',0,'custom/{number}.md',1,'{\"main\":\"Ship {{number}}\"}',1,'Review the release')", []).unwrap();
         main.db
             .execute(
+                "UPDATE project_settings SET worker_execution=?1",
+                [r#"{"model":"custom-model","reasoning":"high","permissions":"yolo"}"#],
+            )
+            .unwrap();
+        main.db
+            .execute(
                 "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for the next release'",
                 [],
             )
@@ -6688,12 +6696,25 @@ mod tests {
         let f = Fixture::new();
         let legacy = json!({"project_id":"named:Native fleet","prompt":"Instructions","prs_enabled":0,"version":1,"boss_name":"Boss"});
         put_row(&f.db, "project_settings", &legacy).unwrap();
+        let execution = r#"{"model":"custom-model","reasoning":"high","permissions":""}"#;
+        f.db.execute(
+            "UPDATE project_settings SET worker_execution=?1",
+            [execution],
+        )
+        .unwrap();
         f.db.execute(
             "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for release'",
             [],
         )
         .unwrap();
         put_row(&f.db, "project_settings", &legacy).unwrap();
+        assert_eq!(
+            f.db.query_row("SELECT worker_execution FROM project_settings", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            execution
+        );
         let retained = rows(
             &f.db,
             "SELECT artifacts_enabled,mindmaps_enabled,paused,pause_reason FROM project_settings",

@@ -16,10 +16,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "worker_execution.rs"]
+mod execution;
 #[path = "worker_prompts.rs"]
 mod prompts;
 #[path = "worker_providers.rs"]
 mod providers;
+pub use execution::ExecutionSettings;
 pub use prompts::*;
 pub const DEFAULT_PROMPT: &str = include_str!("prompts/worker.md").trim_ascii_end();
 /// Stored as ordinary labels so task intent uses the existing durable fleet wire format.
@@ -190,6 +193,7 @@ pub(super) fn checkout_matches_project(path: &Path, project: &str) -> Result<boo
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
+    pub execution: ExecutionSettings,
     pub provider: crate::agent_runtime::Provider,
     pub prompt: String,
     pub cwd: String,
@@ -204,6 +208,7 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            execution: ExecutionSettings::default(),
             provider: Default::default(),
             prompt: DEFAULT_PROMPT.into(),
             cwd: String::new(),
@@ -255,6 +260,7 @@ pub(crate) fn random_id() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 pub fn validate_config(c: &ProjectConfig, p: &Project) -> Result<()> {
+    c.execution.validate()?;
     c.prompt_overrides.validate()?;
     if c.prompt.trim().is_empty() || c.prompt.len() > 32_000 {
         return Err(Error::invalid("Worker prompt must contain 1–32000 bytes"));
@@ -787,11 +793,7 @@ impl Codex {
             &std::env::var_os("PATH").unwrap_or_default(),
         ));
         let mut command = Command::new(binary);
-        if yolo(&job.issue) {
-            crate::codex_permissions::apply_yolo(&mut command);
-        } else {
-            crate::codex_permissions::apply(&mut command);
-        }
+        job.config.execution.apply(&mut command, &job.issue);
         command
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(&job.config.cwd)
@@ -861,6 +863,11 @@ impl Codex {
         job: &Job,
         stop: &AtomicBool,
     ) -> Result<Value> {
+        let params = if method == "turn/start" {
+            job.config.execution.turn(params)
+        } else {
+            params
+        };
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({"id":id,"method":method,"params":params}))?;
@@ -1469,11 +1476,6 @@ fn strip_goal(text: &str) -> Option<&str> {
 fn turn_params(session: &str, text: &str) -> Value {
     json!({"threadId":session,"input":[{"type":"text","text":text}],"outputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["completed","blocked"]},"summary":{"type":"string"}},"required":["status","summary"],"additionalProperties":false}})
 }
-fn yolo(issue: &Value) -> bool {
-    issue["labels"]
-        .as_array()
-        .is_some_and(|labels| labels.iter().any(|label| label.as_str() == Some("yolo")))
-}
 
 fn run_codex(
     path: &Path,
@@ -1491,7 +1493,7 @@ fn run_codex(
         store.worker_process(&job.id, c.process.pid())?;
         store.worker_event(
             &job.id,
-            if yolo(&job.issue) {
+            if job.config.execution.permissions(&job.issue) == "yolo" {
                 "Launching Codex in YOLO mode (no sandbox or approvals)"
             } else {
                 "Launching Codex"
@@ -1556,11 +1558,7 @@ fn run_thread(
     let params = json!({"cwd":job.config.cwd,"ephemeral":false});
     let result = c.rpc(
         "thread/start",
-        if yolo(&job.issue) {
-            crate::codex_permissions::yolo_thread(params)
-        } else {
-            crate::codex_permissions::thread(params)
-        },
+        job.config.execution.thread(params, &job.issue),
         store,
         job,
         stop,

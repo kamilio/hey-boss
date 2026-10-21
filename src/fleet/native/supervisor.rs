@@ -3473,8 +3473,13 @@ done"#
             );
         }
         let edit = json!({"action":"edit","number":2,"if_version":3,"add_labels":["yolo"]});
-        assert_eq!(route(edit, Some("unsafe")).unwrap_err().code, "forbidden");
-        let edit = json!({"action":"edit","number":2,"if_version":3,"body":"Correct guidance"});
+        assert!(
+            route(edit, Some("yolo")).unwrap()["issue"]["labels"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("yolo"))
+        );
+        let edit = json!({"action":"edit","number":2,"if_version":4,"body":"Correct guidance"});
         assert_eq!(route(edit.clone(), None).unwrap_err().code, "invalid_input");
         assert_eq!(
             route(edit, Some("body")).unwrap()["issue"]["body"],

@@ -743,6 +743,15 @@ enum PrAction {
 enum SettingsAction {
     Show,
     Set {
+        /// Codex model ID; an empty value inherits the machine's configuration.
+        #[arg(long)]
+        worker_model: Option<String>,
+        /// Codex reasoning level; an empty value inherits the machine's configuration.
+        #[arg(long)]
+        worker_reasoning: Option<String>,
+        /// Codex permissions: auto, yolo, or an empty value to inherit.
+        #[arg(long)]
+        worker_permissions: Option<String>,
         /// Stop new worker pickup for this project on every machine.
         #[arg(long, conflicts_with = "resume")]
         pause: bool,
@@ -956,6 +965,9 @@ impl Options {
             Action::Settings { command } => match command {
                 SettingsAction::Show => Operation::ProjectSettings,
                 SettingsAction::Set {
+                    worker_model,
+                    worker_reasoning,
+                    worker_permissions,
                     pause,
                     resume,
                     reason,
@@ -973,6 +985,9 @@ impl Options {
                     no_mindmaps,
                 } => {
                     if boss_name.is_none()
+                        && worker_model.is_none()
+                        && worker_reasoning.is_none()
+                        && worker_permissions.is_none()
                         && !pause
                         && !resume
                         && reason.is_none()
@@ -993,6 +1008,9 @@ impl Options {
                         ));
                     }
                     Operation::ConfigureProject {
+                        worker_model: worker_model.clone(),
+                        worker_reasoning: worker_reasoning.clone(),
+                        worker_permissions: worker_permissions.clone(),
                         paused: if *pause {
                             Some(true)
                         } else if *resume {
@@ -1886,6 +1904,22 @@ pub(crate) fn print_text(value: &Value) {
         );
     }
     if value.get("prompt").is_some() {
+        for (key, label) in [
+            ("worker_model", "Worker model"),
+            ("worker_reasoning", "Worker reasoning"),
+            ("worker_permissions", "Worker permissions"),
+        ] {
+            if let Some(setting) = value[key].as_str() {
+                println!(
+                    "{label}: {}",
+                    if setting.is_empty() {
+                        "inherit"
+                    } else {
+                        setting
+                    }
+                );
+            }
+        }
         for (key, label) in [
             ("drafts_enabled", "Drafts enabled"),
             ("artifacts_enabled", "Artifacts enabled"),

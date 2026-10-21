@@ -11,6 +11,13 @@ Shared workers and their capacity are counted once.
 Offline machines show last-known activity and contribute no available capacity.
 Organizers have a separate disclosure because they do not consume issue-agent slots.
 
+**Project settings → Configuration → Worker execution** sets the Codex model,
+reasoning level, and permissions for that project on every machine. Auto is the
+default permissions mode. Inherit leaves the machine's Codex configuration in
+control; YOLO disables the sandbox and approval requests. Changes apply to the
+next task. An issue's `yolo` label overrides project permissions and can also be
+added or removed through the CLI. Model and reasoning inherit when left unset.
+
 Use **Workers & settings** to find a saved worker, inspect its state, or edit its
 name, slot count, pickup mode, projects, and checkout paths. Review and save the
 changes directly to the supervisor's YAML. Other settings are preserved; structured

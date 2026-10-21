@@ -833,6 +833,70 @@ fn unfinished_unassigned_issues_are_reserved_again_after_retry_delay() {
     }
 }
 #[test]
+fn project_execution_choices_apply_on_next_task_and_can_inherit_again() {
+    let f = Fixture::new("project-execution");
+    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    f.setup(&[]);
+    for (model, reasoning, permissions) in [
+        ("gpt-6-astra", "high", "yolo"),
+        ("gpt-6-sol", "low", "auto"),
+        ("", "", ""),
+    ] {
+        f.cli(&[
+            "settings",
+            "set",
+            "--worker-model",
+            model,
+            "--worker-reasoning",
+            reasoning,
+            "--worker-permissions",
+            permissions,
+        ]);
+        let mut worker = f.worker();
+        f.wait(|s| s["runs"][0]["finished_at"].is_null() && s["runs"][0]["claimed_at"].is_number());
+        worker.stop();
+        let protocol = f.transcript();
+        let thread = protocol
+            .iter()
+            .rev()
+            .find(|v| v["method"] == "thread/start")
+            .unwrap();
+        let turn = protocol
+            .iter()
+            .rev()
+            .find(|v| v["method"] == "turn/start")
+            .unwrap();
+        if permissions.is_empty() {
+            for key in ["model", "approvalPolicy", "approvalsReviewer", "sandbox"] {
+                assert!(thread["params"].get(key).is_none(), "{key}");
+            }
+            assert!(turn["params"].get("model").is_none());
+            assert!(turn["params"].get("effort").is_none());
+        } else {
+            assert_eq!(thread["params"]["model"], model);
+            assert_eq!(turn["params"]["model"], model);
+            assert_eq!(turn["params"]["effort"], reasoning);
+            assert_eq!(
+                thread["params"]["approvalPolicy"],
+                if permissions == "yolo" {
+                    "never"
+                } else {
+                    "on-request"
+                }
+            );
+            assert_eq!(
+                thread["params"]["sandbox"],
+                if permissions == "yolo" {
+                    "danger-full-access"
+                } else {
+                    "workspace-write"
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn yolo_applies_to_fresh_attempts_and_can_be_revoked() {
     let f = Fixture::new("yolo-policy");
     fs::write(f.root.join("mode.txt"), "delay").unwrap();
@@ -840,7 +904,7 @@ fn yolo_applies_to_fresh_attempts_and_can_be_revoked() {
     let db = rusqlite::Connection::open(&f.db).unwrap();
     let mut session = Value::Null;
     for enabled in [true, true, false] {
-        // Seed Boss-authorized state; no agent or CLI can grant this label.
+        // Issue-level YOLO overrides the project's default Auto mode.
         db.execute(
             "UPDATE issues SET labels=?1",
             [if enabled { "[\"yolo\"]" } else { "[]" }],
