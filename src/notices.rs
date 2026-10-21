@@ -98,6 +98,8 @@ pub enum Action {
         node: Option<String>,
         #[serde(default)]
         file: Option<String>,
+        #[serde(default)]
+        skill_session: Option<String>,
     },
 }
 impl Action {
@@ -169,6 +171,7 @@ impl Action {
                 issue,
                 node,
                 file,
+                skill_session,
             } => {
                 crate::issues::identifier(project, "artifact project", 8192)?;
                 if let Some(id) = id.as_deref().filter(|s| !s.is_empty()) {
@@ -209,6 +212,7 @@ impl Action {
                     "issue": issue,
                     "node": node.as_deref().filter(|s| !s.is_empty()),
                     "file": file.as_deref().filter(|s| !s.is_empty()),
+                    "skillSession": skill_session,
                 }))?);
             }
             _ => {}

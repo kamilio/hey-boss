@@ -103,7 +103,7 @@ try{
   await page.route('**/api/skills',async route=>{
     if(route.request().method()==='POST')await route.abort('failed');else await route.continue();
   });
-  await page.locator('[data-save-markdown="local"]').click();
+  await page.locator('[data-save-markdown="distribute"]').click();
   await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
   await page.unroute('**/api/skills');await page.reload();
   assert.match(await page.locator('.cm-content').innerText(),/Unsaved browser draft/);
@@ -113,9 +113,9 @@ try{
       const response=await route.fetch();received();await gate;await route.fulfill({response});
     }else await route.continue();
   });
-  await page.locator('[data-save-markdown="local"]').click();await sent;
+  await page.locator('[data-save-markdown="distribute"]').click();await sent;
   await edit(draft+'Typed while saving\n');release();
-  await page.waitForFunction(()=>!document.querySelector('[data-save-markdown="local"]')?.disabled);
+  await page.waitForFunction(()=>!document.querySelector('[data-save-markdown="distribute"]')?.disabled);
   assert.match(await page.locator('.cm-content').innerText(),/Typed while saving/);
   await page.unroute('**/api/skills');await page.reload();
   assert.match(await page.locator('.cm-content').innerText(),/Typed while saving/);
@@ -161,9 +161,9 @@ try{
   }
   // A rejected save must preserve the editable draft.
   await page.reload();await page.locator('[data-toggle-editor]').click();await edit(text('rename-taken'));
-  await page.locator('[data-save-markdown="local"]').click();
+  await page.locator('[data-save-markdown="distribute"]').click();
   await page.waitForFunction(()=>!document.querySelector('#skills-error').hidden);
-  assert.equal(await page.locator('[data-save-markdown="local"]').count(),1);
+  assert.equal(await page.locator('[data-save-markdown="distribute"]').count(),1);
   assert.match(await page.locator('.cm-content, #skill-markdown-textarea:visible').first().textContent().catch(()=>''),/rename-taken/);
   await page.reload();
   assert.match(await page.locator('.cm-content').innerText(),/rename-taken/,'Rejected saves survive reload');
@@ -177,14 +177,14 @@ try{
   await post({action:'save_file',skill:'rename-final',file_path:'SKILL.md',content:updated+'External save\n',base_digest:report.choices['rename-final'],distribute:true});
   await idle();await page.reload();
   assert.match(await page.locator('.cm-content').innerText(),/Browser draft before external save/);
-  await page.locator('[data-save-markdown="local"]').click();
+  await page.locator('[data-save-markdown="distribute"]').click();
   await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
   await page.locator('[data-rebase-draft]').click();
-  await page.locator('[data-save-markdown="local"]').click();
+  await page.locator('[data-save-markdown="distribute"]').click();
   await page.waitForFunction(()=>!document.querySelector('[data-save-markdown]'));
   assert.match(await readFile(join(local,'.codex/skills/rename-final/SKILL.md'),'utf8'),/Browser draft before external save/);
-  await page.locator('[data-toggle-editor]').click();await edit(text('rename-taken'));
-  await page.locator('[data-save-markdown="local"]').click();
+  await idle();await page.reload();await page.locator('[data-toggle-editor]').click();await edit(text('rename-taken'));
+  await page.locator('[data-save-markdown="distribute"]').click();
   await page.waitForFunction(()=>document.querySelector('[data-editor-status]')?.textContent.includes('Could not save'));
   await page.setViewportSize({width:390,height:844});
   const card=await page.locator('.skill-markdown-editor-card').boundingBox();

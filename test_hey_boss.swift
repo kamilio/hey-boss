@@ -12,6 +12,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SKILL_EDITOR"] { auditSkillEditor(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_IMAGES"] == "1" { auditImageNotifications(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_VISUAL"] { previewSubscriptionQuota(state); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REPLAY"] == "1" { auditNotificationReplay(); return }
@@ -4023,4 +4024,38 @@ func auditHTMLReader() {
         imported.window.close()
     }
     print("PASS native HTML reader, whole pages, uncapped height, sandbox, scripts, images, checklists, source fidelity, Find and teardown")
+}
+
+func auditSkillEditor(_ path: String) {
+    let launch = try! JSONDecoder().decode(ArtifactLaunch.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+    let root = URL(fileURLWithPath: path).deletingLastPathComponent()
+    let editor = NativeArtifactEditor(launch: launch, journalRoot: root.appendingPathComponent("native-drafts"))
+    editor.show()
+    func wait(_ condition: () -> Bool) {
+        let until = Date().addingTimeInterval(45)
+        while !condition(), Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(condition(), "Native editor did not settle: \(editor.status.stringValue)")
+    }
+    wait { editor.session.ready && !editor.loading }
+    precondition(editor.session.launch.skillSession == launch.skillSession)
+    let body = editor.text.string + "\nNative / edit 🦀\n"
+    editor.text.string = body
+    editor.textDidChange(Notification(name: NSText.didChangeNotification, object: editor.text))
+    wait { !editor.session.dirty && !editor.session.saving }
+    precondition(editor.session.failure == nil, editor.status.stringValue)
+    precondition(editor.status.stringValue.contains("Synced everywhere"))
+    if let output = ProcessInfo.processInfo.environment["SKILLS_SCREENSHOTS"], !output.isEmpty {
+        for (name, width, appearance) in [("native-light", 1000.0, NSAppearance.Name.aqua), ("native-dark", 1000.0, .darkAqua), ("native-compact", 620.0, .aqua)] {
+            editor.window.appearance = NSAppearance(named: appearance)
+            editor.window.setContentSize(NSSize(width: width, height: 720))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            editor.window.contentView!.layoutSubtreeIfNeeded()
+            let view = editor.window.contentView!.superview!
+            let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: output).appendingPathComponent(name + ".png"))
+        }
+    }
+    editor.window.close()
+    print("PASS native skill editor opens, autosaves through Rust, syncs the fleet and reports success")
 }

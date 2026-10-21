@@ -1,7 +1,9 @@
 //! Fleet-wide inventory and explicitly chosen skill versions. Network work never blocks page reads.
 use super::{atomic_write, is_valid_skill_name};
+mod native;
 use crate::issues::{Error, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
+pub use native::save as save_native;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
@@ -471,6 +473,7 @@ fn wait_until_idle() -> Result<Value> {
 
 pub fn scan_blocking() -> Result<Value> {
     let _ = act(Action {
+        source: None,
         action: "scan".into(),
         revision: 0,
         selected: vec![],
@@ -487,6 +490,7 @@ pub fn scan_blocking() -> Result<Value> {
 
 pub fn delete_blocking(skill: &str) -> Result<Value> {
     let _ = act(Action {
+        source: None,
         action: "delete".into(),
         revision: 0,
         selected: vec![],
@@ -584,6 +588,7 @@ pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Valu
         String::new()
     };
     let _ = act(Action {
+        source: None,
         action: "distribute".into(),
         revision: rev,
         selected: selected_set.into_iter().collect(),
@@ -601,6 +606,8 @@ pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Valu
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
+    #[serde(skip)]
+    source: Option<Value>,
     action: String,
     #[serde(default)]
     revision: u64,
@@ -861,9 +868,18 @@ pub fn act(action: Action) -> Result<Value> {
     }
 
     if action.action == "open_dir" || action.action == "open_editor" {
-        let (dir, default_file) =
-            materialize_local_skill(&home, &state, &action.skill, &action.base_digest)?;
-        let target_file = if action.file_path.is_empty()
+        let native = if action.action == "open_editor" {
+            Some(native::prepare(&home, &state, &action)?)
+        } else {
+            None
+        };
+        let (dir, default_file) = if let Some((_, file)) = &native {
+            (file.parent().unwrap().to_path_buf(), file.clone())
+        } else {
+            materialize_local_skill(&home, &state, &action.skill, &action.base_digest)?
+        };
+        let target_file = if native.is_some()
+            || action.file_path.is_empty()
             || (action.skill == "AGENTS.md" && action.file_path == "AGENTS.md")
         {
             default_file
@@ -887,7 +903,7 @@ pub fn act(action: Action) -> Result<Value> {
             }
             state.message = format!("Opened {} in file manager.", dir.display());
         } else {
-            let _ = crate::notices::execute(&crate::notices::Action::OpenArtifact {
+            crate::notices::execute(&crate::notices::Action::OpenArtifact {
                 project: "global".into(),
                 id: None,
                 host: None,
@@ -903,8 +919,12 @@ pub fn act(action: Action) -> Result<Value> {
                 issue: None,
                 node: None,
                 file: Some(target_file.to_string_lossy().into_owned()),
-            });
-            state.message = format!("Opened {} in Markdown editor.", target_file.display());
+                skill_session: native.map(|(id, _)| id),
+            })?;
+            state.message = format!(
+                "Opened {} in the native editor. Saves sync everywhere; previous versions are kept.",
+                action.skill
+            );
         }
         let mut report = public_report(&state, super::selected_skills(&home));
         report["opened_dir"] = json!(dir.to_string_lossy());
@@ -918,8 +938,11 @@ pub fn act(action: Action) -> Result<Value> {
         }
         let name =
             super::manager_rename::edited_name(&action.skill, &action.file_path, &action.content)?;
-        let base =
-            find_source_copy(&state, &action.skill, &action.base_digest).ok_or_else(|| {
+        let base = action
+            .source
+            .clone()
+            .or_else(|| find_source_copy(&state, &action.skill, &action.base_digest))
+            .ok_or_else(|| {
                 Error::conflict("Skill version is unavailable. Scan again before saving.")
             })?;
         if !action.base_digest.is_empty() && base["digest"] != action.base_digest {
@@ -950,7 +973,7 @@ pub fn act(action: Action) -> Result<Value> {
             let scan = transport(
                 &home,
                 "local",
-                &json!({"action":"rename","source":source,"previous_names":[action.skill],"expected":expected}),
+                &json!({"action":"rename","source":source,"previous_names":[action.skill],"expected":expected,"overwrite":action.distribute}),
             )?;
             // Remember each remote's old name, including across local-only saves and restarts.
             for host in rename_hosts.into_iter().filter(|h| h != "local") {
@@ -1000,7 +1023,7 @@ pub fn act(action: Action) -> Result<Value> {
             let scan = transport(
                 &home,
                 "local",
-                &json!({"action":"apply_copy","source":source,"expected":expected}),
+                &json!({"action":"apply_copy","source":source,"expected":expected,"overwrite":action.distribute}),
             )?;
             json!({"scan":scan,"source":source})
         };
@@ -1045,7 +1068,7 @@ pub fn act(action: Action) -> Result<Value> {
         std::thread::spawn(move || {
             let _lock = lock;
             let outcome = std::panic::catch_unwind(|| {
-                run(&home, &hosts, &snapshot, &[source], true);
+                run(&home, &hosts, &snapshot, &[source], true, true);
             });
             let mut current = self::state().lock().unwrap();
             current.busy = false;
@@ -1182,6 +1205,7 @@ pub fn act(action: Action) -> Result<Value> {
                 &snapshot,
                 &sources,
                 action.action == "distribute",
+                false,
             )
         });
         let mut current = self::state().lock().unwrap();
@@ -1267,7 +1291,14 @@ fn install(home: &Path, host: &str, input: &Value) -> Result<Value> {
     }
 }
 
-fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distribute: bool) {
+fn run(
+    home: &Path,
+    hosts: &[String],
+    snapshot: &State,
+    sources: &[Value],
+    distribute: bool,
+    overwrite: bool,
+) {
     for batch in hosts.chunks(4) {
         std::thread::scope(|scope| {
             let handles: Vec<_> = batch.iter().map(|host| scope.spawn(move || {
@@ -1275,7 +1306,7 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                 let expected = previous.map(|m| m["copies"].clone()).unwrap_or(json!([]));
                 // Never overwrite an unseen machine. First scan its copies for review.
                 let input = if distribute {
-                    if previous.is_none() { return (host.clone(), Err(Error::conflict("New machine: scan before distributing"))); }
+                    if previous.is_none() && !overwrite { return (host.clone(), Err(Error::conflict("New machine: scan before distributing"))); }
                     let mut sources = sources.to_vec();
                     if let Some(pending) = snapshot.pending_renames.get(host) {
                         for source in &mut sources {
@@ -1284,7 +1315,7 @@ fn run(home: &Path, hosts: &[String], snapshot: &State, sources: &[Value], distr
                             }
                         }
                     }
-                    json!({"action":"install","sources":sources,"expected":expected})
+                    json!({"action":"install","sources":sources,"expected":expected,"overwrite":overwrite})
                 } else { json!({"action":"scan", "project": if host == "local" { std::env::current_dir().ok() } else { None }}) };
                 (host.clone(), if distribute { install(home, host, &input) } else { transport(home, host, &input) })
             })).collect();

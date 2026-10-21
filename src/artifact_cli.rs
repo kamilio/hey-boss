@@ -242,6 +242,7 @@ pub fn run(options: &Options) -> Result<()> {
             issue,
             node,
             file: file_path,
+            skill_session: None,
         })?;
         if options.json {
             println!("{}", serde_json::to_string(&value)?);

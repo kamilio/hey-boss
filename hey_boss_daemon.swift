@@ -6001,6 +6001,7 @@ struct ArtifactLaunch: Codable {
     var issue: Int? = nil
     var node: String? = nil
     var file: String? = nil
+    var skillSession: String? = nil
     var recoveryID: String? = nil
 }
 struct ArtifactDocument: Codable {
@@ -6139,14 +6140,14 @@ final class ArtifactBackend {
                 let stdin = try FileHandle(forReadingFrom: input), stdout = try FileHandle(forWritingTo: output)
                 defer { try? stdin.close(); try? stdout.close() }
                 let process = Process(); process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = [command, "--json", "--agent", "human:boss", "--project", context.project] + (context.host.map { ["--host", $0] } ?? []) + arguments
+                process.arguments = command == "skill" ? ["skill", "--json"] + arguments : [command, "--json", "--agent", "human:boss", "--project", context.project] + (context.host.map { ["--host", $0] } ?? []) + arguments
                 process.currentDirectoryURL = root
                 var env = ProcessInfo.processInfo.environment
                 for key in ["HEY_BOSS_ISSUE_HOST", "HEY_BOSS_ISSUE_PROJECT", "HEY_BOSS_AGENT_ID", "CODEX_THREAD_ID"] { env.removeValue(forKey: key) }
                 process.environment = env; process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
                 let done = DispatchSemaphore(value: 0); process.terminationHandler = { _ in done.signal() }
                 try process.run()
-                if done.wait(timeout: .now() + 30) != .success {
+                if done.wait(timeout: .now() + (command == "skill" ? 660 : 30)) != .success {
                     process.terminate()
                     if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
                     throw StorageError(description: "Connection timed out. Draft is preserved; retrying…")
@@ -6905,7 +6906,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                     onMain {
                         guard let self else { return }; self.originalFile = data
                         self.session.launch.file = url.path
-                        self.session.adopt(ArtifactDocument(id: "", title: url.deletingPathExtension().lastPathComponent, body: body, version: 0)); self.loaded()
+                        self.session.adopt(ArtifactDocument(id: "", title: self.session.launch.skillSession != nil ? (self.session.launch.title ?? url.deletingPathExtension().lastPathComponent) : url.deletingPathExtension().lastPathComponent, body: body, version: 0)); self.loaded()
                     }
                 } catch { onMain { self?.showFailure(error) } }
             }
@@ -6939,6 +6940,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     func write(_ request: ArtifactSave, completion: @escaping (Result<ArtifactDocument, Error>) -> Void) {
+        if let skillSession = session.launch.skillSession {
+            do {
+                let body = String(decoding: try JSONSerialization.data(withJSONObject: ["content": request.body, "request_id": request.requestID]), as: UTF8.self)
+                backend.request(["editor-save", skillSession], body: body, command: "skill") { result in
+                    completion(result.map { _ in ArtifactDocument(id: "", title: request.title, body: request.body, version: request.version + 1) })
+                }
+            } catch { completion(.failure(error)) }
+            return
+        }
         if let file = session.launch.file {
             let baseline = originalFile ?? Data(session.savedBody.utf8)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -6970,7 +6980,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         if let failure = imageFailure ?? session.failure { status.stringValue = failure; status.textColor = .systemRed }
         else {
             status.textColor = .tertiaryLabelColor
-            status.stringValue = !imageQueue.isEmpty ? "Attaching image…" : loading ? "Loading…" : session.saving || session.dirty ? "Saving…" : "Saved"
+            status.stringValue = !imageQueue.isEmpty ? "Attaching image…" : loading ? "Loading…" : session.saving || session.dirty ? (session.launch.skillSession == nil ? "Saving…" : "Saving & syncing…") : (session.launch.skillSession == nil ? "Saved" : session.version > 0 ? "Synced everywhere · previous versions kept" : "Edits sync everywhere · previous versions kept")
         }
         status.toolTip = status.stringValue
         if closed, !session.dirty, !session.saving { onClose() }
