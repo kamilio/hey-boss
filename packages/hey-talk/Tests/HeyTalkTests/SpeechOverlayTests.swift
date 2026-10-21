@@ -97,6 +97,10 @@ final class SpeechOverlayTests: XCTestCase {
         func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
         let label = try XCTUnwrap(views(try XCTUnwrap(panel.contentView)).compactMap { $0 as? NSTextField }.first { $0.superview is GlassFace })
         XCTAssertEqual(label.stringValue, "Reading 2 of 2")
+        overlay.show(target: target, state: .idle, rate: 1.25, fraction: 0, error: nil)
+        XCTAssertEqual(label.stringValue, "Listen · 2 paragraphs")
+        XCTAssertGreaterThanOrEqual(label.frame.minX, 18)
+        XCTAssertLessThanOrEqual(label.frame.maxX, panel.frame.width - 12, "The paragraph count must fit inside the hover capsule")
     }
     @MainActor func testCapturedFormattingSurvivesHighlightAndDrawerNeverTakesFocus() throws {
         let app = NSApplication.shared
