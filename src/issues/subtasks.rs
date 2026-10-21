@@ -16,7 +16,7 @@ pub(super) fn migrate_sync(db: &Connection) -> Result<()> {
         .unwrap()
         .0;
     db.execute_batch(&format!("CREATE TRIGGER{triggers}"))?;
-    db.execute_batch(include_str!("subtask-readiness.sql"))?;
+    crate::issues::worker_retry::install_readiness(db)?;
     Ok(())
 }
 

@@ -1391,7 +1391,7 @@ impl Store {
                     );
                     tx.execute_batch(prior_readiness.as_deref().unwrap_or(&fallback))?;
                 } else {
-                    tx.execute_batch(include_str!("subtask-readiness.sql"))?;
+                    super::worker_retry::install_readiness(&tx)?;
                 }
                 // Legacy receipts have no reliable creation timestamp. Start
                 // their grace period here rather than guessing from a response.
@@ -1479,7 +1479,7 @@ impl Store {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute("UPDATE project_settings SET subtask_scheduling='explicit',version=version+1 WHERE subtask_scheduling<>'explicit'", [])?;
             super::blockers::reconcile_upgrade(&tx)?;
-            tx.execute_batch(include_str!("subtask-readiness.sql"))?;
+            super::worker_retry::install_readiness(&tx)?;
             tx.commit()?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_list_summary' AND type='index' AND instr(sql,'attempt_hold')>0 AND instr(sql,'assignment_target')>0 AND instr(sql,'archived_comments')>0 AND instr(sql,'job_run_id')>0)", [], |r| r.get::<_,bool>(0))? {
