@@ -36,9 +36,10 @@ final class SpeechTargetReader {
             AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             attached = pid
         }
-        var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &hit) == .success,
-              let hit else { throw TalkError("Hover over a text paragraph") }
+        var found: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &found) == .success,
+              let found else { throw TalkError("Hover over a text paragraph") }
+        let hit = nearbyParagraph(in: found, point: point, depth: 0) ?? found
         var hitPID: pid_t = 0
         guard AXUIElementGetPid(hit, &hitPID) == .success, hitPID == pid else { throw TalkError("Hover over an allowed app") }
         var ancestors: [AXUIElement] = []
@@ -71,7 +72,7 @@ final class SpeechTargetReader {
             let children = SpeechAX.value(block, "AXChildren") as? [AXUIElement] ?? []
             guard !children.isEmpty, children.count <= 256,
                   children.allSatisfy({ SpeechPassageStructure.inline(role: SpeechAX.string($0, "AXRole"), subrole: SpeechAX.string($0, "AXSubrole")) }),
-                  let frame = SpeechAX.frame(block), frame.insetBy(dx: -2, dy: -2).contains(point),
+                  let frame = SpeechAX.frame(block), frame.insetBy(dx: -12, dy: -8).contains(point),
                   let range = SpeechAX.parameter(owner, "AXTextMarkerRangeForUIElement", block),
                   let passage = target(owner: owner, range: range, point: point, pid: pid, bundleID: bundleID, source: "paragraph", frame: frame) else { break }
             return capture(passage, block: block, owner: owner, continuing: preferSelection)
@@ -97,6 +98,20 @@ final class SpeechTargetReader {
             passage.attributed = SpeechAX.parameter(hit, "AXAttributedStringForRange", value) as? NSAttributedString
         }
         return capture(passage, block: hit, owner: owner, continuing: preferSelection)
+    }
+    private func nearbyParagraph(in element: AXUIElement, point: CGPoint, depth: Int) -> AXUIElement? {
+        let role = SpeechAX.string(element, "AXRole")
+        guard depth < 3, ["AXGroup", "AXParagraph", "AXHeading", "AXListItem", "AXList"].contains(role),
+              let frame = SpeechAX.frame(element), frame.insetBy(dx: -12, dy: -8).contains(point) else { return nil }
+        let children = SpeechAX.value(element, "AXChildren") as? [AXUIElement] ?? []
+        guard !children.isEmpty, children.count <= 64 else { return nil }
+        if children.allSatisfy({ SpeechPassageStructure.inline(role: SpeechAX.string($0, "AXRole"), subrole: SpeechAX.string($0, "AXSubrole")) }) { return element }
+        // Whitespace hits a container instead of a glyph. Search only its nearby
+        // bounded text blocks, never adjacent controls or the whole document.
+        for child in children {
+            if let block = nearbyParagraph(in: child, point: point, depth: depth + 1) { return block }
+        }
+        return nil
     }
     private func capture(_ first: SpeechTarget, block: AXUIElement, owner: AXUIElement, continuing: Bool) -> SpeechTarget {
         var first = first

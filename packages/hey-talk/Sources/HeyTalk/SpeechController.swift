@@ -20,8 +20,6 @@ final class SpeechController {
     private var reading: SpeechTarget?
     private var pending = 0
     private var revision: UInt64 = 0
-    private var lastPoint = CGPoint.zero
-    private var lastMove: TimeInterval = 0
     private var lastRead: TimeInterval = 0
     private var lastHit: TimeInterval = 0
     private var release: DispatchWorkItem?
@@ -130,25 +128,27 @@ final class SpeechController {
         guard canOffer() else { candidate = nil; overlay.hide(); sourceHighlight.hide(); return }
         if overlay.containsPointer { lastHit = ProcessInfo.processInfo.systemUptime; return }
         let now = ProcessInfo.processInfo.systemUptime, point = Self.pointer
-        if hypot(point.x - lastPoint.x, point.y - lastPoint.y) > 3 {
-            lastMove = now; lastPoint = point
-            if var target = candidate, target.frame.contains(point), overlay.visible {
-                target.point = point; candidate = target
-                overlay.show(target: target, state: .idle, rate: playback.rate, fraction: 0, error: nil)
-            } else { sourceHighlight.hide() }
+        if let candidate, overlay.retainsHover(around: candidate, point: point) {
+            lastHit = now
+            // Keep the button and original capture point while crossing the gap.
+            if !candidate.frame.contains(point) { return }
         }
-        if now - lastHit > 0.8 { overlay.hide(); sourceHighlight.hide() }
-        guard now - lastMove >= 0.15, now - lastRead >= 0.4, pending == 0 else { return }
+        if now - lastHit > 1.5 { overlay.hide(); sourceHighlight.hide(); candidate = nil }
+        let interval = candidate?.frame.contains(point) == true ? 0.5 : 0.12
+        guard now - lastRead >= interval, pending == 0 else { return }
         lastRead = now
         resolve(point: point, preferSelection: false) { [weak self] result in
-            guard let self, !self.active, self.canOffer(), hypot(Self.pointer.x - point.x, Self.pointer.y - point.y) < 4 else { return }
+            guard let self, !self.active, self.canOffer() else { return }
             if case .success(let target) = result {
+                // Accept a result while the pointer moves within the same block;
+                // waiting for pixel-perfect stillness made ordinary hover flaky.
+                guard target.frame.insetBy(dx: -12, dy: -8).contains(Self.pointer) else { return }
                 self.candidate = target; self.lastHit = ProcessInfo.processInfo.systemUptime
                 self.overlay.show(target: target, state: .idle, rate: self.playback.rate, fraction: 0, error: nil)
                 if let viewport = target.viewport { self.sourceHighlight.show(frame: target.frame, viewport: viewport, reading: false) }
                 else { self.sourceHighlight.hide() }
                 self.engine.warm(); self.scheduleRelease()
-            } else if ProcessInfo.processInfo.systemUptime - self.lastHit > 0.8 {
+            } else if ProcessInfo.processInfo.systemUptime - self.lastHit > 1.5 {
                 self.candidate = nil; self.overlay.hide(); self.sourceHighlight.hide()
             }
         }

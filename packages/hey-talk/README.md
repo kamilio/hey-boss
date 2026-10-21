@@ -39,8 +39,10 @@ indicators.
 ## Read aloud
 
 In T3, hover over a paragraph for a faint glass outline and a small **Listen**
-capsule beside the hovered line. The whole capsule is clickable and brightens
-under the pointer. **Hyper+S**
+capsule fixed beside the paragraph. The whole capsule is clickable and brightens
+under the pointer. A generous hover area bridges the paragraph and capsule, with
+a 1.5-second grace period when leaving it. Pointer motion does not move the
+button or require holding still. **Hyper+S**
 plays or pauses it; selected text takes priority. **Hyper+T** turns the feature
 on or off. Both shortcuts belong to allowlisted apps only, initially T3.
 Escape stops playback. Editors, buttons, toolbars and password fields are excluded.
