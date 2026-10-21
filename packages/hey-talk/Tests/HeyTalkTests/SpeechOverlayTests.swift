@@ -3,6 +3,25 @@ import XCTest
 @testable import HeyTalk
 
 final class SpeechOverlayTests: XCTestCase {
+    func testPlaceholderOverAnEditorIsExcludedButAdjacentParagraphIsReadable() {
+        struct Node {
+            var frame: CGRect
+            var interactive = false
+            var children: [Node] = []
+        }
+        let editor = Node(frame: CGRect(x: 100, y: 300, width: 700, height: 80), interactive: true)
+        let placeholder = Node(frame: CGRect(x: 104, y: 304, width: 692, height: 72))
+        let paragraph = Node(frame: CGRect(x: 100, y: 200, width: 700, height: 60))
+        let wrapper = Node(frame: editor.frame, children: [editor, placeholder])
+        let section = Node(frame: CGRect(x: 100, y: 200, width: 700, height: 180), children: [paragraph, wrapper])
+        func excluded(_ ancestors: [Node], _ point: CGPoint) -> Bool {
+            SpeechPassageStructure.interactiveRegion(ancestors: ancestors, point: point,
+                frame: { $0.frame }, interactive: { $0.interactive }, children: { $0.children })
+        }
+        XCTAssertTrue(excluded([placeholder, wrapper, section], CGPoint(x: 120, y: 310)))
+        XCTAssertTrue(excluded([placeholder, wrapper, section], CGPoint(x: 450, y: 350)), "Empty editor space is still interactive")
+        XCTAssertFalse(excluded([paragraph, section], CGPoint(x: 450, y: 230)))
+    }
     func testInlineStylesBelongToTheContainingPassageButContainersAndControlsDoNot() {
         for (role, subrole) in [("AXStaticText", ""), ("AXLink", ""), ("AXGroup", "AXStrongStyleGroup"), ("AXGroup", "AXEmphasisStyleGroup"), ("AXGroup", "AXCodeStyleGroup")] {
             XCTAssertTrue(SpeechPassageStructure.inline(role: role, subrole: subrole))
@@ -67,6 +86,18 @@ final class SpeechOverlayTests: XCTestCase {
         XCTAssertFalse(panel.canBecomeKey)
         XCTAssertFalse(panel.canBecomeMain)
     }
+    @MainActor func testDrawerShowsCurrentParagraphInTheGroup() throws {
+        let first = SpeechTarget(text: "First paragraph.", frame: CGRect(x: 200, y: 200, width: 600, height: 30), point: CGPoint(x: 220, y: 210), pid: 1, bundleID: "test", source: "paragraph")
+        let second = SpeechTarget(text: "Second paragraph.", frame: CGRect(x: 200, y: 250, width: 600, height: 30), point: first.point, pid: 1, bundleID: "test", source: "paragraph")
+        let target = SpeechPassage.join([first, second]), overlay = SpeechOverlay()
+        defer { overlay.hide() }
+        overlay.show(target: target, state: .playing, rate: 1.25, fraction: 0, error: nil)
+        overlay.highlight((target.paragraphs[1].range, false))
+        let panel = try XCTUnwrap(NSApplication.shared.windows.last { $0.title == "Hey Talk — Read Aloud" })
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        let label = try XCTUnwrap(views(try XCTUnwrap(panel.contentView)).compactMap { $0 as? NSTextField }.first { $0.superview is GlassFace })
+        XCTAssertEqual(label.stringValue, "Reading 2 of 2")
+    }
     @MainActor func testCapturedFormattingSurvivesHighlightAndDrawerNeverTakesFocus() throws {
         let app = NSApplication.shared
         let raw = NSMutableAttributedString(string: "Plain bold code link.")
@@ -103,5 +134,7 @@ final class SpeechOverlayTests: XCTestCase {
         }
         XCTAssertTrue(SpeechTargetReader.excluded(role: "AXGroup", subrole: "AXSecureTextField"))
         XCTAssertFalse(SpeechTargetReader.excluded(role: "AXStaticText", subrole: ""))
+        XCTAssertTrue(SpeechTargetReader.excluded(role: "AXGroup", subrole: "AXEmptyGroup", valueSettable: true))
+        XCTAssertTrue(SpeechTargetReader.excluded(role: "AXStaticText", subrole: "", editableAncestor: true))
     }
 }

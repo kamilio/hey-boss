@@ -1,6 +1,11 @@
 import AppKit
 import TalkCore
 
+enum SpeechTargetFailure: LocalizedError {
+    case interactive
+    var errorDescription: String? { "Hover over a read-only paragraph, outside the editor" }
+}
+
 struct SpeechTarget: Equatable {
     let text: String
     let frame: CGRect // Accessibility coordinates: origin at top left of primary screen.
@@ -39,6 +44,7 @@ final class SpeechTargetReader {
         var found: AXUIElement?
         guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &found) == .success,
               let found else { throw TalkError("Hover over a text paragraph") }
+        guard !SpeechAX.interactive(found) else { throw SpeechTargetFailure.interactive }
         let hit = nearbyParagraph(in: found, point: point, depth: 0) ?? found
         var hitPID: pid_t = 0
         guard AXUIElementGetPid(hit, &hitPID) == .success, hitPID == pid else { throw TalkError("Hover over an allowed app") }
@@ -52,8 +58,10 @@ final class SpeechTargetReader {
             next = SpeechAX.element(current, "AXParent")
         }
         // Never offer speech over buttons, editors, or password fields.
-        guard !ancestors.contains(where: { Self.excluded(role: SpeechAX.string($0, "AXRole"), subrole: SpeechAX.string($0, "AXSubrole")) }) else {
-            throw TalkError("Hover over a text paragraph")
+        guard !SpeechPassageStructure.interactiveRegion(ancestors: ancestors, point: point,
+            frame: SpeechAX.frame, interactive: SpeechAX.interactive,
+            children: { SpeechAX.value($0, "AXChildren") as? [AXUIElement] ?? [] }) else {
+            throw SpeechTargetFailure.interactive
         }
         let document = ancestors.last(where: { SpeechAX.string($0,"AXRole") == "AXWebArea" })
         let owner = document ?? hit
@@ -120,14 +128,22 @@ final class SpeechTargetReader {
         var passages = [first], elements = [block]
         // Stay within the containing section. Never climb into the conversation
         // or window to find another message, and stop at controls/unknown blocks.
-        if let parent = SpeechAX.element(block, "AXParent"),
+        var anchor = block
+        // Ignore layout-only wrappers around one paragraph. The first parent
+        // with siblings defines the section; never climb through that boundary.
+        for _ in 0..<3 {
+            guard let parent = SpeechAX.element(anchor, "AXParent"), SpeechAX.string(parent, "AXRole") == "AXGroup",
+                  let children = SpeechAX.value(parent, "AXChildren") as? [AXUIElement], children.count == 1 else { break }
+            anchor = parent
+        }
+        if let parent = SpeechAX.element(anchor, "AXParent"),
            let siblings = SpeechAX.value(parent, "AXChildren") as? [AXUIElement], siblings.count <= 256,
-           let start = siblings.firstIndex(where: { CFEqual($0, block) }) {
+           let start = siblings.firstIndex(where: { CFEqual($0, anchor) }) {
             var budget = first.text.utf16.count
             let deadline = ProcessInfo.processInfo.systemUptime + 0.35
             outer: for sibling in siblings.dropFirst(start + 1) {
                 guard ProcessInfo.processInfo.systemUptime < deadline,
-                      let blocks = readableBlocks(sibling, depth: 0), !blocks.isEmpty else { break }
+                      let blocks = SpeechPassageStructure.blocks(in: sibling, role: { SpeechAX.string($0, "AXRole") }, subrole: { SpeechAX.string($0, "AXSubrole") }, children: { SpeechAX.value($0, "AXChildren") as? [AXUIElement] ?? [] }), !blocks.isEmpty else { break }
                 for element in blocks {
                     guard passages.count < 64, ProcessInfo.processInfo.systemUptime < deadline,
                           let frame = SpeechAX.frame(element), frame.width > 0, frame.height > 0 else { break outer }
@@ -147,25 +163,6 @@ final class SpeechTargetReader {
         result.viewport = first.viewport
         let id = UUID(); result.captureID = id; captureID = id
         captured = zip(elements, passages).map { ($0.0, $0.1.text) }; capturedOwner = owner
-        return result
-    }
-    private func readableBlocks(_ element: AXUIElement, depth: Int) -> [AXUIElement]? {
-        guard depth < 4 else { return nil }
-        let role = SpeechAX.string(element, "AXRole")
-        if role == "AXStaticText" { return [element] }
-        guard ["AXGroup", "AXParagraph", "AXHeading", "AXList", "AXListItem"].contains(role) else { return nil }
-        let children = SpeechAX.value(element, "AXChildren") as? [AXUIElement] ?? []
-        guard !children.isEmpty, children.count <= 64 else { return nil }
-        if children.allSatisfy({ SpeechPassageStructure.inline(role: SpeechAX.string($0, "AXRole"), subrole: SpeechAX.string($0, "AXSubrole")) }) { return [element] }
-        // Only lists may contain further block structure. Generic groups can be
-        // entire messages or application chrome and must not be traversed.
-        guard role == "AXList" || role == "AXListItem" else { return nil }
-        var result: [AXUIElement] = []
-        for child in children {
-            if SpeechAX.string(child, "AXRole") == "AXListMarker" { continue }
-            guard let blocks = readableBlocks(child, depth: depth + 1) else { return nil }
-            result += blocks
-        }
         return result
     }
     func geometry(for target: SpeechTarget, location: Int) -> (frame: CGRect, viewport: CGRect)? {
@@ -193,8 +190,8 @@ final class SpeechTargetReader {
         guard !viewport.isNull, !viewport.isInfinite else { return nil }
         return viewport
     }
-    static func excluded(role: String, subrole: String) -> Bool {
-        subrole == "AXSecureTextField" || ["AXButton", "AXPopUpButton", "AXMenuItem", "AXTextField", "AXTextArea", "AXComboBox", "AXToolbar"].contains(role)
+    static func excluded(role: String, subrole: String, valueSettable: Bool = false, editableAncestor: Bool = false) -> Bool {
+        valueSettable || editableAncestor || subrole == "AXSecureTextField" || ["AXButton", "AXPopUpButton", "AXMenuItem", "AXTextField", "AXTextArea", "AXComboBox", "AXToolbar"].contains(role)
     }
     private func target(owner: AXUIElement, range: CFTypeRef, point: CGPoint, pid: pid_t, bundleID: String, source: String, frame suppliedFrame: CGRect? = nil) -> SpeechTarget? {
         guard let text = SpeechAX.parameter(owner, "AXStringForTextMarkerRange", range) as? String,
@@ -212,6 +209,42 @@ final class SpeechTargetReader {
 }
 
 enum SpeechPassageStructure {
+    static func interactiveRegion<Node>(ancestors: [Node], point: CGPoint, frame: (Node) -> CGRect?, interactive: (Node) -> Bool, children: (Node) -> [Node]) -> Bool {
+        if ancestors.contains(where: interactive) { return true }
+        // Web editors may place read-only placeholder text over a sibling text
+        // area. Reject the overlapping control, without excluding nearby prose.
+        var budget = 128
+        for ancestor in ancestors.prefix(8) {
+            let siblings = children(ancestor)
+            guard siblings.count <= budget else { break }
+            budget -= siblings.count
+            if siblings.contains(where: { frame($0)?.contains(point) == true && interactive($0) }) { return true }
+        }
+        return false
+    }
+    static func blocks<Node>(in root: Node, role: (Node) -> String, subrole: (Node) -> String, children: (Node) -> [Node]) -> [Node]? {
+        var budget = 256
+        func visit(_ node: Node, depth: Int) -> [Node]? {
+            budget -= 1
+            guard budget >= 0, depth < 6 else { return nil }
+            let kind = role(node)
+            if kind == "AXStaticText" { return [node] }
+            guard !SpeechTargetReader.excluded(role: kind, subrole: subrole(node)),
+                  ["AXGroup", "AXParagraph", "AXHeading", "AXList", "AXListItem"].contains(kind) else { return nil }
+            let items = children(node)
+            guard !items.isEmpty, items.count <= 64 else { return nil }
+            if items.allSatisfy({ inline(role: role($0), subrole: subrole($0)) }) { return [node] }
+            var result: [Node] = []
+            for item in items {
+                if role(item) == "AXListMarker" { continue }
+                guard let nested = visit(item, depth: depth + 1) else { return nil }
+                result += nested
+                guard result.count <= 64 else { return nil }
+            }
+            return result
+        }
+        return visit(root, depth: 0)
+    }
     static func inline(role: String, subrole: String) -> Bool {
         role == "AXStaticText" || role == "AXListMarker" || role == "AXLink" || (role == "AXGroup" && [
             "AXStrongStyleGroup", "AXEmphasisStyleGroup", "AXCodeStyleGroup",
@@ -222,6 +255,12 @@ enum SpeechPassageStructure {
 }
 
 enum SpeechAX {
+    static func interactive(_ element: AXUIElement) -> Bool {
+        if SpeechTargetReader.excluded(role: string(element, "AXRole"), subrole: string(element, "AXSubrole")) { return true }
+        var writable = DarwinBoolean(false)
+        AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &writable)
+        return writable.boolValue || self.element(element, "AXEditableAncestor") != nil
+    }
     static func value(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(e, name as CFString, &value) == .success ? value : nil

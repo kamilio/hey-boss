@@ -9,6 +9,7 @@ private final class SpeechButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 private final class SpeechFace: GlassFace {
+    var drawer = false { didSet { needsDisplay = true } }
     var reading = false { didSet { emphasized = reading || hovered } }
     private var hovered = false
     override func updateTrackingAreas() {
@@ -18,6 +19,21 @@ private final class SpeechFace: GlassFace {
     }
     override func mouseEntered(with event: NSEvent) { hovered = true; emphasized = true }
     override func mouseExited(with event: NSEvent) { hovered = false; emphasized = reading }
+    override func draw(_ dirtyRect: NSRect) {
+        guard drawer else { super.draw(dirtyRect); return }
+        let edge = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.75, dy: 0.75), xRadius: 18, yRadius: 18)
+        NSColor.white.withAlphaComponent(0.5).setStroke(); edge.lineWidth = 0.75; edge.stroke()
+    }
+}
+private final class SpeechProgress: NSView {
+    var fraction: Double = 0 { didSet { needsDisplay = true } }
+    override func draw(_ dirtyRect: NSRect) {
+        TalkDesign.accent.withAlphaComponent(0.07).setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 1, yRadius: 1).fill()
+        TalkDesign.accent.withAlphaComponent(0.45).setFill()
+        NSBezierPath(roundedRect: CGRect(x: 0, y: 0, width: bounds.width * min(1, max(0, fraction)), height: bounds.height), xRadius: 1, yRadius: 1).fill()
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 private final class SpeechLabel: NSTextField {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -32,7 +48,7 @@ final class SpeechOverlay: NSObject {
     private let play = SpeechButton(), stop = SpeechButton(), speed = SpeechButton(), disclosure = SpeechButton()
     private let label = SpeechLabel(labelWithString: "Listen")
     private let idleIcon = SpeechIcon()
-    private let progress = NSProgressIndicator()
+    private let progress = SpeechProgress()
     private let scroll = NSScrollView()
     private let textView = NSTextView()
     private let glass: NSView
@@ -41,6 +57,7 @@ final class SpeechOverlay: NSObject {
     private var snapshotText: String?
     private var highlighted: NSRange?
     private var highlightedWord = false
+    private var paragraphIndex = 0
     private var drawerOpen = true
     private var lastState: SpeechState = .idle
     private var lastRate: Float = 1
@@ -96,8 +113,7 @@ final class SpeechOverlay: NSObject {
         idleIcon.contentTintColor = TalkDesign.accent
         idleIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         face.addSubview(idleIcon)
-        progress.style = .bar; progress.isIndeterminate = false; progress.minValue = 0; progress.maxValue = 1
-        progress.controlSize = .mini; face.addSubview(progress)
+        face.addSubview(progress)
         textView.isEditable = false; textView.isSelectable = false; textView.drawsBackground = false
         textView.isRichText = true; textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.isVerticallyResizable = true; textView.isHorizontallyResizable = false
@@ -114,7 +130,7 @@ final class SpeechOverlay: NSObject {
             textView.subviews.filter { $0 is SpeechWordLens }.forEach { $0.removeFromSuperview() }
             snapshot = SpeechFormatting.captured(target); snapshotText = target.text
             textView.textStorage?.setAttributedString(snapshot!)
-            highlighted = nil; drawerOpen = true; pinnedOrigin = nil
+            highlighted = nil; paragraphIndex = 0; drawerOpen = true; pinnedOrigin = nil
         }
         self.target = target; lastState = state; lastRate = rate; lastFraction = fraction; lastError = error
         let top = NSScreen.screens.first?.frame.maxY ?? 0
@@ -123,6 +139,7 @@ final class SpeechOverlay: NSObject {
         let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main
         guard let screen else { return }
         let drawer = expanded && drawerOpen && snapshot != nil
+        face.drawer = drawer
         let width: CGFloat = drawer ? min(max(360, target.frame.width + 32), min(680, screen.visibleFrame.width - 32)) : expanded ? 264 : 96
         let textHeight = snapshot?.boundingRect(with: CGSize(width: width - 32, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading]).height ?? target.frame.height
         let height: CGFloat = drawer ? min(320, max(140, textHeight + 78)) : expanded ? 42 : 36
@@ -147,7 +164,7 @@ final class SpeechOverlay: NSObject {
         play.toolTip = "Read aloud · Hyper+S\n" + String(target.text.prefix(160))
         idleIcon.isHidden = expanded
         label.textColor = expanded ? .labelColor : TalkDesign.accent
-        label.stringValue = !expanded ? "Listen" : state == .loading ? "Preparing…" : state == .paused ? "Paused" : state == .failed ? "Try again" : "Reading"
+        updateLabel()
         if expanded {
             label.frame = CGRect(x: 40, y: rowY + 11, width: width - 160, height: 17)
         } else {
@@ -163,8 +180,8 @@ final class SpeechOverlay: NSObject {
         speed.frame = CGRect(x: width - 76, y: rowY + 4, width: 40, height: 28)
         speed.title = String(format: "%g×", rate); speed.isHidden = !active
         stop.frame = CGRect(x: width - 33, y: rowY + 4, width: 26, height: 28); stop.isHidden = !expanded
-        progress.frame = CGRect(x: 41, y: rowY + 5, width: width - 160, height: 3)
-        progress.doubleValue = fraction; progress.isHidden = !active
+        progress.frame = CGRect(x: 41, y: rowY + 5, width: width - 160, height: 2)
+        progress.fraction = fraction; progress.isHidden = !active
         scroll.isHidden = !drawer
         if drawer {
             scroll.frame = CGRect(x: 16, y: 14, width: width - 32, height: height - 58)
@@ -179,6 +196,9 @@ final class SpeechOverlay: NSObject {
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
     func highlight(_ next: (range: NSRange, word: Bool)?) {
+        if let next, let index = target?.paragraphs.firstIndex(where: { NSLocationInRange(next.range.location, $0.range) }), index != paragraphIndex {
+            paragraphIndex = index; updateLabel()
+        }
         guard drawerOpen, let snapshot, let storage = textView.textStorage,
               highlighted != next?.range || highlightedWord != (next?.word ?? false) else { return }
         textView.subviews.filter { $0 is SpeechWordLens }.forEach { $0.removeFromSuperview() }
@@ -203,6 +223,11 @@ final class SpeechOverlay: NSObject {
             }
             storage.addAttribute(.foregroundColor, value: NSColor.clear, range: next.range)
         }
+    }
+    private func updateLabel() {
+        let title = lastState == .idle ? "Listen" : lastState == .loading ? "Preparing…" : lastState == .paused ? "Paused" : lastState == .failed ? "Try again" : "Reading"
+        let count = target?.paragraphs.count ?? 0
+        label.stringValue = lastState.isActive && count > 1 ? "\(title) \(paragraphIndex + 1) of \(count)" : title
     }
     static func hoverRegion(paragraph: CGRect, control: CGRect) -> CGRect {
         paragraph.union(control).insetBy(dx: -12, dy: -8)

@@ -11,7 +11,7 @@ enum SpeechPassage {
         let rich = NSMutableAttributedString(string: "")
         var paragraphs: [SpeechParagraph] = []
         for passage in passages.prefix(64) {
-            let separator = rich.length == 0 ? "" : "\n\n"
+            let separator = rich.length == 0 ? "" : "\n"
             guard rich.length + separator.utf16.count + passage.text.utf16.count <= 20_000 else { break }
             rich.append(NSAttributedString(string: separator))
             let range = NSRange(location: rich.length, length: passage.text.utf16.count)

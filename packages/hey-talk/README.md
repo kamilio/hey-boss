@@ -47,7 +47,8 @@ plays or pauses it; selected text takes priority. **Hyper+T** turns the feature
 on or off. Both shortcuts belong to allowlisted apps only, initially T3.
 Escape stops playback. Editors, buttons, toolbars and password fields are excluded.
 
-Playback continues through subsequent readable paragraphs in the same section,
+Playback continues through subsequent readable paragraphs, nested text blocks,
+and lists in the same section,
 stopping at controls or unrelated containers (up to 64 paragraphs / 20,000 UTF-16
 units). Selected text is read on its own. Capture uses shared macOS Accessibility
 capabilities, without T3-specific selectors.
@@ -56,17 +57,20 @@ Playback opens a movable, nonactivating glass drawer beside the starting paragra
 with a frozen copy of the passage. Scrolling does not change the snapshot.
 A click-through glass outline follows the current source paragraph; it clips to
 the visible area and disappears when the source is off-screen or changes.
-The spoken word gets a subtle glass lens with 3.5% enlargement inside the drawer,
+The drawer shows the current paragraph number within the group. The spoken word
+gets a subtle glass lens with 3.5% enlargement inside the drawer,
 without reflowing the text. Reduce Motion disables enlargement; Reduce Transparency
 uses a solid highlight. The drawer retains the font,
 bold, italic and color attributes supplied by Accessibility; it cannot reproduce
 CSS details that T3 does not expose. Use the disclosure button to collapse it,
-or the speed button to cycle from 0.75× to 2×.
+or the speed button to cycle from 0.75× to 2×. Playback starts at 1.25×.
 
 Supertonic 3 generates short English audio chunks locally while earlier chunks
 play. Only two chunks are queued. The model warms when entering an allowed app
 and is released after ten idle minutes. Recognition supplies word timings after
-audio starts; unmatched numbers or code terms use a softer phrase highlight.
+audio starts; its model loads in the background so it cannot delay first audio
+or the next chunk. The first chunks may use a soft phrase lens until word timing
+is ready. Unmatched numbers or code terms also use that softer phrase highlight.
 Leaving the allowlist, turning the feature off, or starting manual dictation
 stops playback. Auto dictation pauses during reading.
 
