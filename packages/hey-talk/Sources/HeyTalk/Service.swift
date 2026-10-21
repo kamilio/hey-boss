@@ -168,6 +168,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let view = Overlay()
             view.onToggle = { [weak self] in self?.toggle() }
             view.onCancel = { [weak self] in self?.cancel() }
+            view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
+            view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
+            view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
             view.onOpenAccessibility = { [weak self] in
                 self?.accessibilitySetup.show()
                 self?.accessibilitySetup.openSettings()

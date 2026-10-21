@@ -46,9 +46,12 @@ button or require holding still. **Hyper+S**
 plays or pauses it; selected text takes priority. **Hyper+T** turns the feature
 on or off. Both shortcuts belong to allowlisted apps only, initially T3.
 Escape stops playback. Editors, buttons, toolbars and password fields are excluded.
+Right-click the main waveform bubble to toggle **Read Aloud · Hyper+T** or
+**Auto Dictation · Hyper+V**. Checkmarks show the current modes.
 
-Playback continues through subsequent readable paragraphs, nested text blocks,
-and lists in the same section,
+The Listen capsule shows how many paragraphs will be read. Playback continues
+through subsequent readable paragraphs, including paragraphs after a list or
+nested text block in the same section,
 stopping at controls or unrelated containers (up to 64 paragraphs / 20,000 UTF-16
 units). Selected text is read on its own. Capture uses shared macOS Accessibility
 capabilities, without T3-specific selectors.
