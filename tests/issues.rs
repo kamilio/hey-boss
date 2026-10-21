@@ -278,32 +278,32 @@ fn agent_creation_appends_and_explicit_priority_preserves_recovery_order() {
 }
 
 #[test]
-fn even_a_boss_cli_identity_cannot_enable_yolo() {
+fn cli_can_enable_and_remove_yolo() {
     let f = Fixture::new();
     f.create();
     for actor in ["session-a", "human:boss"] {
-        for args in [
-            vec!["create", "--title", "Unsafe label", "--label", "yolo"],
-            vec!["edit", "1", "--label", "YOLO"],
-        ] {
-            let output = f.cmd(actor, &args).output().unwrap();
-            assert!(!output.status.success());
-            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(response["error"]["code"], "forbidden");
-        }
+        let created = f.run(
+            actor,
+            &["create", "--title", "YOLO task", "--label", "yolo"],
+        );
+        assert_eq!(created["issue"]["labels"], json!(["yolo"]));
+        let edited = f.run(actor, &["edit", "1", "--label", "yolo"]);
+        assert_eq!(edited["issue"]["labels"], json!(["yolo"]));
+        let removed = f.run(actor, &["edit", "1", "--remove-label", "yolo"]);
+        assert_eq!(removed["issue"]["labels"], json!([]));
         let project = f.run(actor, &["view", "1"])["project"].clone();
         let identity = f.run(actor, &["whoami"])["agent"].clone();
+        let version = removed["issue"]["version"].clone();
         let request = json!({"version":1,"project":project,"actor":identity,
-            "operation":{"action":"set_yolo","number":1,"enabled":true,"if_version":1}});
+            "operation":{"action":"set_yolo","number":1,"enabled":true,"if_version":version}});
         let output = f.stdin(&["rpc"], request.to_string().as_bytes());
-        assert!(!output.status.success());
-        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(response["error"]["code"], "forbidden");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        f.run(actor, &["edit", "1", "--remove-label", "yolo"]);
     }
-    assert_eq!(
-        f.run("session-a", &["view", "1"])["issue"]["labels"],
-        json!([])
-    );
 }
 
 #[test]

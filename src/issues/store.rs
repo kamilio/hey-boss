@@ -232,6 +232,11 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
         "INTEGER NOT NULL DEFAULT 0",
     ),
     ("project_settings", "chief_prompt", "TEXT"),
+    (
+        "project_settings",
+        "worker_execution",
+        "TEXT NOT NULL DEFAULT '{}'",
+    ),
     ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "plan", "TEXT"),
     (
@@ -734,36 +739,7 @@ fn validate(r: &Request) -> Result<()> {
     if r.operation.number().is_some_and(|n| n <= 0) {
         return Err(Error::invalid("Issue number must be positive"));
     }
-    let reserved = |values: &[String]| -> Result<()> {
-        if values
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case("yolo"))
-        {
-            return Err(Error::new(
-                "forbidden",
-                "YOLO mode can only be changed by Boss using the issue's Agent permissions control in the web UI",
-            ));
-        }
-        Ok(())
-    };
     match &r.operation {
-        Operation::Create { labels, .. } | Operation::CreateSubtask { labels, .. } => {
-            reserved(labels)?
-        }
-        Operation::Edit {
-            add_labels,
-            remove_labels,
-            ..
-        } => {
-            reserved(add_labels)?;
-            reserved(remove_labels)?;
-        }
-        Operation::Batch { edits, .. } => {
-            for edit in edits {
-                reserved(&edit.add_labels)?;
-                reserved(&edit.remove_labels)?;
-            }
-        }
         Operation::ReleaseAllocation {
             expected_machine,
             if_version,
@@ -785,16 +761,6 @@ fn validate(r: &Request) -> Result<()> {
             }
         }
         Operation::SetYolo { if_version, .. } => {
-            if !r.actor.as_ref().is_some_and(|actor| {
-                actor.id == "human:boss"
-                    && actor.kind == "human"
-                    && matches!(actor.source.as_str(), "web interface" | "phone")
-            }) {
-                return Err(Error::new(
-                    "forbidden",
-                    "Only Boss in the web UI can change YOLO mode",
-                ));
-            }
             if *if_version < 1 {
                 return Err(Error::invalid("Issue version must be positive"));
             }

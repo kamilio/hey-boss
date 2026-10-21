@@ -312,6 +312,12 @@ pub enum Operation {
     ProjectSettings,
     ConfigureProject {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_reasoning: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_permissions: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         paused: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pause_reason: Option<String>,

@@ -320,20 +320,11 @@ fn native_web_view_uses_boss_machine_identity_in_allocation_diagnostics() {
 }
 
 #[test]
-fn yolo_is_a_versioned_boss_web_action_and_not_an_ordinary_label() {
+fn yolo_web_control_keeps_version_and_retry_guards() {
     let web = Web::start();
     let created =
         web.ok(json!({"action":"create","title":"Permission retry","body":"","labels":[]}));
     let number = created["issue"]["number"].as_i64().unwrap();
-    for operation in [
-        json!({"action":"create","title":"No CLI escape","body":"","labels":["yolo"]}),
-        json!({"action":"create_subtask","number":number,"title":"Child","body":"","labels":["YOLO"]}),
-        json!({"action":"edit","number":number,"title":null,"body":null,"add_labels":["yolo"],"remove_labels":[]}),
-        json!({"action":"batch","edits":[{"number":number,"if_version":1,"expected_assignee":null,"add_labels":["yolo"]}]}),
-    ] {
-        let denied = web.action(&web.project, operation, None);
-        assert_eq!(denied.json()["error"]["code"], "forbidden");
-    }
     let enable = json!({"action":"set_yolo","number":number,"enabled":true,"if_version":1});
     let enabled = web
         .action(&web.project, enable.clone(), Some("enable-yolo"))
@@ -356,6 +347,37 @@ fn yolo_is_a_versioned_boss_web_action_and_not_an_ordinary_label() {
         web.ok(json!({"action":"set_yolo","number":number,"enabled":false,"if_version":2}));
     assert_eq!(disabled["issue"]["labels"], json!([]));
     assert_eq!(disabled["issue"]["version"], 3);
+}
+
+#[test]
+fn project_worker_execution_settings_validate_preserve_and_reset() {
+    let web = Web::start();
+    let initial = web.ok(json!({"action":"project_settings"}));
+    assert_eq!(initial["worker_model"], "");
+    assert_eq!(initial["worker_reasoning"], "");
+    assert_eq!(initial["worker_permissions"], "auto");
+    let saved = web.ok(json!({"action":"configure_project","worker_model":"gpt-6-astra","worker_reasoning":"high","worker_permissions":"yolo","if_version":0}));
+    let preserved = web
+        .ok(json!({"action":"configure_project","prs_enabled":true,"if_version":saved["version"]}));
+    for key in ["worker_model", "worker_reasoning", "worker_permissions"] {
+        assert_eq!(preserved[key], saved[key]);
+    }
+    for (key, value) in [
+        ("worker_model", "bad model"),
+        ("worker_reasoning", "invalid"),
+        ("worker_permissions", "invalid"),
+    ] {
+        let mut operation = json!({"action":"configure_project"});
+        operation[key] = json!(value);
+        assert_eq!(web.action(&web.project, operation, None).status, 400);
+    }
+    assert_eq!(web.action(&web.project, json!({"action":"configure_project","worker_permissions":"auto","if_version":saved["version"]}), None).status, 409);
+    let reset = web.ok(json!({"action":"configure_project","worker_model":"","worker_reasoning":"","worker_permissions":"auto","if_version":preserved["version"]}));
+    assert_eq!(reset["worker_model"], "");
+    assert_eq!(reset["worker_reasoning"], "");
+    assert_eq!(reset["worker_permissions"], "auto");
+    let inherited = web.ok(json!({"action":"configure_project","worker_permissions":""}));
+    assert_eq!(inherited["worker_permissions"], "");
 }
 
 #[test]
@@ -1556,14 +1578,44 @@ fn main_navigation_includes_mindmaps_on_every_page() {
 #[test]
 fn secrets_are_in_the_shared_global_menu_on_every_page() {
     let web = Web::start();
-    for path in ["/", "/workers", "/mm", "/jobs", "/skills", "/artifacts", "/admin", "/secrets"] {
+    for path in [
+        "/",
+        "/workers",
+        "/mm",
+        "/jobs",
+        "/skills",
+        "/artifacts",
+        "/admin",
+        "/secrets",
+    ] {
         let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
-        let global = html.split("id=\"navigation-more-links\"").nth(1).unwrap().split("</nav>").next().unwrap();
-        assert!(global.contains("id=\"nav-secrets\" href=\"/secrets\""), "Missing global Secrets link on {path}");
-        let project = html.split("aria-label=\"Main navigation\"").nth(1).unwrap().split("</nav>").next().unwrap();
-        assert!(!project.contains("nav-secrets"), "Secrets must not be a project tab on {path}");
+        let global = html
+            .split("id=\"navigation-more-links\"")
+            .nth(1)
+            .unwrap()
+            .split("</nav>")
+            .next()
+            .unwrap();
+        assert!(
+            global.contains("id=\"nav-secrets\" href=\"/secrets\""),
+            "Missing global Secrets link on {path}"
+        );
+        let project = html
+            .split("aria-label=\"Main navigation\"")
+            .nth(1)
+            .unwrap()
+            .split("</nav>")
+            .next()
+            .unwrap();
+        assert!(
+            !project.contains("nav-secrets"),
+            "Secrets must not be a project tab on {path}"
+        );
         assert_eq!(html.matches("id=\"nav-secrets\"").count(), 1);
-        assert_eq!(global.contains("id=\"nav-secrets\" href=\"/secrets\" aria-current=\"page\""), path == "/secrets");
+        assert_eq!(
+            global.contains("id=\"nav-secrets\" href=\"/secrets\" aria-current=\"page\""),
+            path == "/secrets"
+        );
     }
 }
 

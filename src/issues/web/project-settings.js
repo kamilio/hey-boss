@@ -89,6 +89,9 @@ $("#project-settings-form").addEventListener("invalid", event => {
 }, true);
 function projectSettingsDraft() {
   return {
+    worker_model: $("#project-worker-model").value.trim(),
+    worker_reasoning: $("#project-worker-reasoning").value,
+    worker_permissions: $("#project-worker-permissions").value,
     paused: $("#project-paused").checked,
     pause_reason: $("#project-paused").checked ? $("#project-pause-reason").value.trim() : "",
     prompt: $("#project-prompt").value,
@@ -102,6 +105,10 @@ function projectSettingsDraft() {
   };
 }
 function projectSettingsChanged() {
+  $("#project-worker-model-inherit").hidden = !$("#project-worker-model").value;
+  const permissions = $("#project-worker-permissions").value;
+  $("#project-worker-permissions-help").textContent = permissions === "yolo" ? "Full access. No sandbox or approval requests." : permissions === "auto" ? "Sandboxed, with automatic approval review." : "Use this machine’s configured permissions.";
+  $("#project-worker-permissions-help").classList.toggle("execution-yolo", permissions === "yolo");
   $("#project-pause-details").hidden = !$("#project-paused").checked;
   $("#project-pause-reason").required = $("#project-paused").checked;
   const changed =
@@ -143,6 +150,9 @@ $("#project-settings-trigger").onclick = async () => {
     );
     if (sequence !== projectSettingsSequence) return;
     projectSettingsVersion = value.version;
+    $("#project-worker-model").value = value.worker_model ?? "";
+    $("#project-worker-reasoning").value = value.worker_reasoning ?? "";
+    $("#project-worker-permissions").value = value.worker_permissions ?? "auto";
     $("#project-paused").checked = value.paused === true;
     $("#project-pause-reason").value = value.pause_reason || "";
     $("#project-prompt").value = value.prompt;
@@ -186,6 +196,7 @@ $("#project-settings-form").onsubmit = async (event) => {
   try {
     const draft = projectSettingsDraft();
     const pauseChanged = draft.paused !== projectSettingsOriginal.paused;
+    const executionChanged = ["worker_model", "worker_reasoning", "worker_permissions"].some(key => draft[key] !== projectSettingsOriginal[key]);
     const promptsChanged = draft.prompt !== projectSettingsOriginal.prompt ||
       JSON.stringify(draft.prompt_overrides) !== JSON.stringify(projectSettingsOriginal.prompt_overrides);
     const value = await mutate(
@@ -205,7 +216,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     await refreshProjects(projectSettingsProject);
     await renderRoute();
     updateHeader();
-    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : "Settings saved");
+    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : executionChanged ? "Settings saved. Worker execution changes apply to the next task." : "Settings saved");
   } catch (error) {
     projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;
@@ -283,10 +294,16 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
 for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).onchange = projectSettingsChanged;
 $("#project-paused").onchange = projectSettingsChanged;
 $("#project-pause-reason").oninput = projectSettingsChanged;
+for (const field of ["model", "reasoning", "permissions"]) $("#project-worker-" + field).addEventListener("input", projectSettingsChanged);
+$("#project-worker-model-inherit").onclick = () => {
+  $("#project-worker-model").value = "";
+  projectSettingsChanged();
+  $("#project-worker-model").focus();
+};
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
-  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, [data-reset-prompt]")) input.disabled = disabled;
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, #project-settings-form select, #project-worker-model-inherit, [data-reset-prompt]")) input.disabled = disabled;
   $("#project-preview-workspace").disabled = disabled;
 }
 function updateWorkflowBranches() {
