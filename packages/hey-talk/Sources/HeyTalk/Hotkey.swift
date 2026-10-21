@@ -6,11 +6,15 @@ final class Hotkey {
     private var handler: EventHandlerRef?
     private var shortcuts: [EventHotKeyRef] = []
     private var escape: EventHotKeyRef?
+    private var speech: EventHotKeyRef?
+    private var speechMode: EventHotKeyRef?
     private var state = HotkeyState()
     var onAction: ((HotkeyAction) -> Void)?
     private(set) var registered = false
     private(set) var escapeRegistered = false
     private(set) var eventsReceived = 0
+    var speechRegistered: Bool { speech != nil }
+    var speechModeRegistered: Bool { speechMode != nil }
     init() {
         var types = [EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)), EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, user in
@@ -42,10 +46,24 @@ final class Hotkey {
             escapeRegistered = RegisterEventHotKey(53, 0, EventHotKeyID(signature: 0x48544C4B, id: 2), GetApplicationEventTarget(), 0, &escape) == noErr
         } else if !capture, let escape { UnregisterEventHotKey(escape); self.escape = nil; escapeRegistered = false }
     }
+    func enableSpeech(_ enabled: Bool) {
+        if enabled, speech == nil {
+            var ref: EventHotKeyRef?
+            if RegisterEventHotKey(1, UInt32(controlKey | cmdKey | optionKey | shiftKey), EventHotKeyID(signature: 0x48544C4B, id: 1), GetApplicationEventTarget(), 0, &ref) == noErr { speech = ref }
+        } else if !enabled, let speech { UnregisterEventHotKey(speech); self.speech = nil; _ = state.keyUp(code: 1) }
+    }
+    func enableSpeechMode(_ allowed: Bool) {
+        if allowed, speechMode == nil {
+            var ref: EventHotKeyRef?
+            if RegisterEventHotKey(17, UInt32(controlKey | cmdKey | optionKey | shiftKey), EventHotKeyID(signature: 0x48544C4B, id: 17), GetApplicationEventTarget(), 0, &ref) == noErr { speechMode = ref }
+        } else if !allowed, let speechMode { UnregisterEventHotKey(speechMode); self.speechMode = nil; _ = state.keyUp(code: 17) }
+    }
     func reset() { captureEscape(false) }
     deinit {
         for shortcut in shortcuts { UnregisterEventHotKey(shortcut) }
         if let escape { UnregisterEventHotKey(escape) }
+        if let speech { UnregisterEventHotKey(speech) }
+        if let speechMode { UnregisterEventHotKey(speechMode) }
         if let handler { RemoveEventHandler(handler) }
     }
 }

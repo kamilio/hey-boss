@@ -36,6 +36,53 @@ macOS 15–25 uses a native translucent surface. There is no web renderer or acc
 Recording is silent on every microphone. The capsule provides the start and stop
 indicators.
 
+## Read aloud
+
+In T3, hover over a paragraph for a faint glass outline and a small **Listen**
+capsule beside the hovered line. The whole capsule is clickable and brightens
+under the pointer. **Hyper+S**
+plays or pauses it; selected text takes priority. **Hyper+T** turns the feature
+on or off. Both shortcuts belong to allowlisted apps only, initially T3.
+Escape stops playback. Editors, buttons, toolbars and password fields are excluded.
+
+Playback continues through subsequent readable paragraphs in the same section,
+stopping at controls or unrelated containers (up to 64 paragraphs / 20,000 UTF-16
+units). Selected text is read on its own. Capture uses shared macOS Accessibility
+capabilities, without T3-specific selectors.
+
+Playback opens a movable, nonactivating glass drawer beside the starting paragraph
+with a frozen copy of the passage. Scrolling does not change the snapshot.
+A click-through glass outline follows the current source paragraph; it clips to
+the visible area and disappears when the source is off-screen or changes.
+The spoken word gets a subtle glass lens with 3.5% enlargement inside the drawer,
+without reflowing the text. Reduce Motion disables enlargement; Reduce Transparency
+uses a solid highlight. The drawer retains the font,
+bold, italic and color attributes supplied by Accessibility; it cannot reproduce
+CSS details that T3 does not expose. Use the disclosure button to collapse it,
+or the speed button to cycle from 0.75× to 2×.
+
+Supertonic 3 generates short English audio chunks locally while earlier chunks
+play. Only two chunks are queued. The model warms when entering an allowed app
+and is released after ten idle minutes. Recognition supplies word timings after
+audio starts; unmatched numbers or code terms use a softer phrase highlight.
+Leaving the allowlist, turning the feature off, or starting manual dictation
+stops playback. Auto dictation pauses during reading.
+
+```sh
+hey-talk speech                          # State and allowed apps
+hey-talk speech on                       # Or off
+hey-talk speech add com.example.Reader
+hey-talk speech remove com.example.Reader
+hey-talk speech target --json             # Explicitly inspect selected/hovered text
+hey-talk speech play                      # Same play/pause behavior as Hyper+S
+hey-talk speech pause
+hey-talk speech stop
+```
+
+Routine status and logs do not contain captured text. Speech and timings stay
+on this Mac. The engine interface supports a future remote provider; no remote
+provider or network inference is configured in this build.
+
 ## Build and run
 
 Requires macOS 15+ and the Xcode 26 toolchain (Swift 6.2+). Build on the Mac that
@@ -216,6 +263,7 @@ swift test
 swift test --sanitize=thread
 ./test-integration.sh
 ./test-vocabulary.sh # Separate worker: vocabulary reload, speech, silence, speed
+./test-speech.sh # Real synthesis, recognition, word timing and playback state
 # To test the installed app instead:
 HEY_TALK_TEST_CLI="$HOME/.local/bin/hey-talk" ./test-integration.sh
 # Optional hardware check; captures and discards the selected microphone:
