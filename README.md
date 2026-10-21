@@ -168,6 +168,13 @@ Projects appear automatically from running agents and first CLI use, ordered by
 recent activity. Hide projects you no longer want in the switcher, then restore
 them from **Hidden projects** at any time; their issues and history remain intact.
 
+Use **Project settings → Configuration → Pause project** to stop new worker pickup
+on every machine. Add a reason; current agents can finish. Agents trying to create
+issues or subtasks see that reason and must use `--force` to create them anyway.
+Forced creation leaves pickup paused. Turn off **Pause project** to resume, or use
+`hey-boss issue settings set --pause --reason 'Waiting for the next release'`
+and `hey-boss issue settings set --resume`.
+
 Codex workers launch from the CLI: `hey-boss worker run --concurrency 2 --tag ready`.
 Each worker owns its concurrency and filters, uses its current directory, and
 shows only that worker, with prominent availability and busy/free slot counts.

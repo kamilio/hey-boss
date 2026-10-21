@@ -105,6 +105,8 @@ fn read_settings(db: &Connection, id: &str) -> Result<(Settings, i64, String)> {
     Ok((serde_json::from_str(&s)?, v, k))
 }
 struct ProjectSettingsRow {
+    paused: bool,
+    pause_reason: String,
     prompt: String,
     prs: bool,
     version: i64,
@@ -116,9 +118,10 @@ struct ProjectSettingsRow {
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
+            paused: r.get(8)?, pause_reason: r.get(9)?,
             artifacts_enabled: r.get(6)?, mindmaps_enabled: r.get(7)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?,
@@ -126,6 +129,8 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         }),
     ).optional()?;
     let ProjectSettingsRow {
+        paused,
+        pause_reason,
         prompt,
         prs,
         version,
@@ -135,6 +140,8 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
+        paused: false,
+        pause_reason: String::new(),
         prompt: worker::DEFAULT_PROMPT.into(),
         prs: false,
         version: 0,
@@ -148,7 +155,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -454,6 +461,7 @@ fn project_pickup_candidates(db: &Connection, c: &Settings) -> Result<Vec<(Proje
             ORDER BY i.sort_order,i.created_at,i.number LIMIT 1
          )
          WHERE p.hidden_at IS NULL {scope}
+         AND NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.paused=1)
          ORDER BY chosen.sort_order,chosen.created_at,p.id,chosen.number"
     ))?;
     Ok(query
@@ -816,6 +824,8 @@ pub(super) fn execute(
         }
         Operation::ProjectSettings => project_settings(db, p),
         Operation::ConfigureProject {
+            paused,
+            pause_reason,
             subtask_scheduling,
             prompt,
             chief_enabled,
@@ -833,6 +843,17 @@ pub(super) fn execute(
                 return Err(Error::invalid("Chief has been retired; use Jobs"));
             }
             let defaults = project_settings(db, p)?;
+            let paused = paused.unwrap_or(defaults["paused"] == true);
+            let pause_reason = pause_reason
+                .as_deref()
+                .unwrap_or_else(|| defaults["pause_reason"].as_str().unwrap())
+                .trim();
+            if paused && (pause_reason.is_empty() || pause_reason.len() > 1000) {
+                return Err(Error::invalid(
+                    "A paused project needs a reason of 1–1000 bytes",
+                ));
+            }
+            let pause_reason = if paused { pause_reason } else { "" };
             // Accept explicit from older clients, but never restore implicit scheduling.
             if subtask_scheduling
                 .as_deref()
@@ -872,7 +893,7 @@ pub(super) fn execute(
             if let Some(name) = boss_name {
                 crate::issues::global_settings::configure(db, name, None)?;
             }
-            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,mindmaps_enabled=excluded.mindmaps_enabled",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,mindmaps_enabled])?;
+            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,mindmaps_enabled=excluded.mindmaps_enabled,paused=excluded.paused,pause_reason=excluded.pause_reason",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,mindmaps_enabled,paused,pause_reason])?;
             db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit' WHERE project_id=?1", [&p.id])?;
             project_settings(db, p)
         }
@@ -1012,6 +1033,13 @@ pub(super) fn claim_lock(
     actor: &Actor,
     force: bool,
 ) -> Result<()> {
+    let paused_reservation: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs r JOIN project_settings s ON s.project_id=r.project_id WHERE r.project_id=?1 AND r.issue_number=?2 AND r.actor_id=?3 AND r.finished_at IS NULL AND r.claimed_at IS NULL AND s.paused=1)",params![p.id,n,actor.id],|r|r.get(0))?;
+    if paused_reservation {
+        return Err(Error::new(
+            "project_paused",
+            "Project is paused; workers cannot claim new issues until it is resumed",
+        ));
+    }
     crate::issues::fleet::check_claim(db, &p.id, n, &actor.machine, force)?;
     if !force && crate::issues::allocations::enabled(db)? {
         let valid: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM worker_runs r JOIN worker_allocations a ON a.id=r.id WHERE r.project_id=?1 AND r.issue_number=?2 AND r.actor_id=?3 AND r.finished_at IS NULL AND (a.launched IS NULL OR a.released<>0 OR NOT EXISTS(SELECT 1 FROM worker_allocation_winners w WHERE w.id=a.id)))",params![p.id,n,actor.id],|r|r.get(0))?;
@@ -1352,6 +1380,207 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_pause_preserves_queue_and_requires_explicit_creation_override() {
+        let root = std::env::temp_dir().join(format!("hb-project-pause-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Paused','Paused',1),('named:Active','Active',1)").unwrap();
+            let request = |project: &str, human: bool, operation: Value| -> Request {
+                serde_json::from_value(json!({"version":1,
+                    "project":{"id":format!("named:{project}"),"name":project},
+                    "actor":{"id":if human {"human:boss"} else {"codex:test"},"kind":if human {"human"} else {"codex"},"machine":"unit","host":"test","cwd":root,"source":"test"},
+                    "operation":operation})).unwrap()
+            };
+            let create = json!({"action":"create","title":"Queued task","body":"","labels":[]});
+            for project in ["Paused", "Active"] {
+                store
+                    .execute(&request(project, false, create.clone()))
+                    .unwrap();
+            }
+            let settings = store
+                .execute(&request(
+                    "Paused",
+                    true,
+                    json!({"action":"project_settings"}),
+                ))
+                .unwrap();
+            assert_eq!(settings["paused"], false, "Existing projects stay active");
+            for reason in ["".to_owned(), "  ".to_owned(), "x".repeat(1001)] {
+                assert!(store.execute(&request("Paused", true, json!({"action":"configure_project","paused":true,"pause_reason":reason}))).is_err());
+            }
+            let pause = json!({"action":"configure_project","paused":true,"pause_reason":"  Waiting for the next release  ","if_version":0});
+            let settings = store
+                .execute(&request("Paused", true, pause.clone()))
+                .unwrap();
+            assert_eq!(settings["pause_reason"], "Waiting for the next release");
+            let listed = store
+                .execute(&request(
+                    "Paused",
+                    true,
+                    json!({"action":"projects","include_hidden":false}),
+                ))
+                .unwrap();
+            let paused = listed["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "named:Paused")
+                .unwrap();
+            assert_eq!(paused["paused"], true);
+            assert_eq!(paused["pause_reason"], settings["pause_reason"]);
+            assert!(
+                store.execute(&request("Paused", true, pause)).is_err(),
+                "Stale settings must not overwrite a pause"
+            );
+            let scoped = Settings {
+                projects: vec!["named:Paused".into()],
+                ..Settings::default()
+            };
+            assert!(candidates(&store.db, &scoped, 10).unwrap().is_empty());
+            assert!(
+                project_pickup_candidates(&store.db, &scoped)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(worker_queue(&store.db, &scoped).unwrap()["eligible"], 0);
+            let shared = Settings::default();
+            assert_eq!(
+                candidates(&store.db, &shared, 10)
+                    .unwrap()
+                    .iter()
+                    .map(|(p, _)| p.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["named:Active"]
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM issue_pickup_ready WHERE project_id='named:Paused'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            let error = store
+                .execute(&request("Paused", false, create.clone()))
+                .unwrap_err();
+            assert_eq!(error.code, "project_paused");
+            assert_eq!(error.exit_code(), 4);
+            assert!(error.message.contains("Waiting for the next release"));
+            assert!(error.message.contains("--force"));
+            let subtask =
+                json!({"action":"create_subtask","number":1,"title":"Child","body":"","labels":[]});
+            assert_eq!(
+                store
+                    .execute(&request("Paused", false, subtask.clone()))
+                    .unwrap_err()
+                    .code,
+                "project_paused"
+            );
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT next_number FROM projects WHERE id='named:Paused'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                2,
+                "Rejected creation must not consume numbers"
+            );
+            for mut operation in [create.clone(), subtask] {
+                operation["force"] = json!(true);
+                operation["then_titles"] = json!(["Follow-up"]);
+                let created = store.execute(&request("Paused", false, operation)).unwrap();
+                assert_eq!(created["created_chain"].as_array().unwrap().len(), 2);
+            }
+            store
+                .execute(&request("Paused", true, create.clone()))
+                .unwrap();
+            let settings = store
+                .execute(&request(
+                    "Paused",
+                    true,
+                    json!({"action":"configure_project","prs_enabled":true}),
+                ))
+                .unwrap();
+            assert_eq!(settings["paused"], true, "Unrelated edits preserve pause");
+            assert_eq!(settings["pause_reason"], "Waiting for the next release");
+            assert_eq!(
+                worker_queue(&store.db, &scoped).unwrap()["eligible"],
+                0,
+                "Force creates work without resuming pickup"
+            );
+            drop(store);
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            assert_eq!(
+                store
+                    .execute(&request(
+                        "Paused",
+                        true,
+                        json!({"action":"project_settings"})
+                    ))
+                    .unwrap()["paused"],
+                true
+            );
+            store
+                .execute(&request(
+                    "Paused",
+                    true,
+                    json!({"action":"configure_project","paused":false}),
+                ))
+                .unwrap();
+            assert!(!candidates(&store.db, &scoped, 10).unwrap().is_empty());
+            store.execute(&request("Paused", false, create)).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_pause_migration_keeps_existing_projects_active() {
+        let root = std::env::temp_dir().join(format!("hb-pause-upgrade-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Upgrade','Upgrade',1);
+                INSERT INTO project_settings(project_id,prompt,version,prs_enabled) VALUES('named:Upgrade','Saved instructions',3,1);
+                DROP VIEW issue_pickup_ready;
+                CREATE VIEW issue_pickup_ready AS SELECT project_id,number FROM issues;
+                ALTER TABLE project_settings DROP COLUMN paused;
+                ALTER TABLE project_settings DROP COLUMN pause_reason;").unwrap();
+        }
+        {
+            let store = Store::open(&path).unwrap();
+            let project = Project {
+                id: "named:Upgrade".into(),
+                name: "Upgrade".into(),
+            };
+            let settings = project_settings(&store.db, &project).unwrap();
+            assert_eq!(settings["paused"], false);
+            assert_eq!(settings["pause_reason"], "");
+            assert_eq!(settings["prompt"], "Saved instructions");
+            assert_eq!(settings["prs_enabled"], true);
+            assert!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE name='issue_pickup_ready'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap()
+                    .contains("project_pause")
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn fleet_activity_reads_are_batched_across_selected_workers() {

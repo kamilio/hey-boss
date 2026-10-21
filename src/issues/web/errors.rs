@@ -73,6 +73,7 @@ pub(super) fn act(bytes: &[u8], app: &App) -> Result<Value> {
             }
             let evidence = inbox.snapshot(&project, &id, &prompt)?;
             let operation = Operation::Create {
+                force: false,
                 title: format!(
                     "Fix: {}",
                     evidence["title"]

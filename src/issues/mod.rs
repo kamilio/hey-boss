@@ -15,6 +15,7 @@ mod global_settings;
 pub mod identity;
 pub(crate) mod model_recovery;
 pub(crate) mod project_features;
+mod project_pause;
 pub(crate) mod provenance;
 pub mod remote;
 mod reviewed_evidence;
@@ -95,6 +96,7 @@ impl Error {
             "invalid_input" | "identity_unavailable" | "comment_too_long" => 2,
             "not_found" => 3,
             "conflict"
+            | "project_paused"
             | "subtask_claim_conflict"
             | "fleet_reserved"
             | "fleet_allocation_missing"
@@ -310,6 +312,10 @@ pub enum Operation {
     ProjectSettings,
     ConfigureProject {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pause_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         subtask_scheduling: Option<String>,
         prompt: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -469,6 +475,8 @@ pub enum Operation {
         include_deleted: bool,
     },
     CreateSubtask {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
         number: i64,
         title: String,
         body: String,
@@ -511,6 +519,8 @@ pub enum Operation {
         sort: CommentSort,
     },
     Create {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<crate::attachments::NewAttachment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

@@ -5,6 +5,8 @@ CREATE VIEW issue_pickup_ready AS
  -- explicit_dependencies_only: grouping does not imply sibling dependencies.
  SELECT i.project_id,i.number FROM issues i JOIN projects p ON p.id=i.project_id
  WHERE i.job_run_id IS NULL AND i.attempt_hold IS NULL AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL
+ -- project_pause: applies to every worker and fleet allocation path.
+ AND NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=i.project_id AND s.paused=1)
  AND (NOT EXISTS(SELECT 1 FROM fleet_deferred_subtasks pending WHERE pending.project_id=i.project_id) OR NOT EXISTS(
   WITH RECURSIVE family(number) AS (
    SELECT i.number UNION

@@ -483,8 +483,11 @@ impl Store {
             return Ok(true);
         }
         if claimed.is_none() {
-            return Ok(state != "open"
-                || (assignee.is_some() && assignee.as_deref() != Some(&job.actor.id)));
+            return Ok(
+                crate::issues::project_pause::reason(&self.db, &job.project.id)?.is_some()
+                    || state != "open"
+                    || (assignee.is_some() && assignee.as_deref() != Some(&job.actor.id)),
+            );
         }
         if assignee.as_deref() == Some(&job.actor.id)
             || (state == "closed" && closed_by.as_deref() == Some(&job.actor.id))
@@ -496,6 +499,12 @@ impl Store {
         Ok(!own_pr_handoff(&self.db, job, &issue)?)
     }
     pub(crate) fn worker_launch_wait(&self, job: &Job) -> Result<Option<Duration>> {
+        if crate::issues::project_pause::reason(&self.db, &job.project.id)?.is_some() {
+            return Err(Error::new(
+                "cancelled",
+                "Project is paused; new worker launches are stopped",
+            ));
+        }
         crate::issues::allocations::launch(&self.db, &job.id)
     }
     pub(crate) fn worker_event(
@@ -1247,6 +1256,42 @@ mod tests {
         });
         assert_eq!(retry_count(&f.store.db, &f.job).unwrap(), 1);
         assert!(f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=1)", [&f.job.project.id], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn project_pause_keeps_claimed_work_and_cancels_unclaimed_reservations() {
+        let mut f = HandoffFixture::new(false);
+        f.apply(serde_json::from_value(json!({"action":"configure_project","paused":true,"pause_reason":"Waiting for review"})).unwrap());
+        assert!(
+            !f.store.worker_cancelled(&f.job).unwrap(),
+            "Claimed work can finish"
+        );
+        f.store
+            .db
+            .execute(
+                "UPDATE worker_runs SET claimed_at=NULL,reservation_expires=?1",
+                [now() + 60_000],
+            )
+            .unwrap();
+        assert!(
+            f.store.worker_cancelled(&f.job).unwrap(),
+            "Unclaimed work stops before pickup"
+        );
+        assert_eq!(
+            f.store.worker_launch_wait(&f.job).unwrap_err().code,
+            "cancelled"
+        );
+        for force in [false, true] {
+            assert!(
+                registry::claim_lock(&f.store.db, &f.job.project, 1, &f.job.actor, force).is_err(),
+                "Creation overrides do not allow worker pickup"
+            );
+        }
+        f.apply(
+            serde_json::from_value(json!({"action":"configure_project","paused":false})).unwrap(),
+        );
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        registry::claim_lock(&f.store.db, &f.job.project, 1, &f.job.actor, false).unwrap();
     }
 
     #[test]

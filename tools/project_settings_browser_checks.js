@@ -18,6 +18,9 @@ async (page) => {
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
   check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Configuration selected initially');
   check(!await page.locator('.settings-preview').isVisible(), 'Configuration has no prompt preview');
+  check(!await page.locator('#project-paused').isChecked(), 'Projects start active');
+  await page.locator('#project-paused').check();
+  await page.locator('#project-pause-reason').fill('Waiting for the next release');
   for (const id of ['prs', 'worktree', 'drafts', 'artifacts', 'mindmaps']) {
     check(await page.locator('#project-' + id).isVisible(), id + ' is in Configuration');
   }
@@ -57,9 +60,12 @@ async (page) => {
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
   check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && !('plan_template' in saved[0])), 'Save includes all tab edits');
   check(await page.evaluate(() => !saved[0].drafts_enabled && !saved[0].artifacts_enabled && !saved[0].mindmaps_enabled), 'Save includes all resource switches');
+  check(await page.evaluate(() => saved[0].paused && saved[0].pause_reason === 'Waiting for the next release'), 'Pause and reason saved together');
   check(await page.evaluate(() => !('chief_enabled' in saved[0]) && !('chief_prompt' in saved[0])), 'Saving settings never restores retired configuration');
   check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');
   await open();
+  check(await page.locator('#project-paused').isChecked(), 'Pause persists on reopen');
+  check(await page.locator('#project-pause-reason').inputValue() === 'Waiting for the next release', 'Pause reason persists on reopen');
   check(await page.locator('#project-prompt-layout, [data-reset-prompt="layout"]').count() === 0, 'Reopening does not recreate the sequence editor');
   for (const id of ['drafts', 'artifacts', 'mindmaps']) check(!await page.locator('#project-' + id).isChecked(), id + ' persists on reopen');
   await tab('Instructions').click();
