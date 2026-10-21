@@ -151,7 +151,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
             source.setEventHandler { NSApp.terminate(nil) }; source.resume(); signals.append(source)
         }
-        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel(keepMicrophoneWarm: false) }
     }
     func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -272,6 +272,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "sample_count": capture.sampleCount, "rms": capture.level,
             "capture_start_ms": captureMilliseconds, "peak_rms": capture.maximumLevel,
             "microphone_ready": captureReady && capture.isReady,
+            "microphone_keepalive": capture.isKeepingAlive,
             "capture_restarts": capture.restartCount,
             "bluetooth_input": capture.usesBluetooth,
             "microphone": permissionName, "accessibility": AXIsProcessTrusted(),
@@ -405,6 +406,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let uid = request["uid"] as? String, uid == "default" || AudioDevices.list().contains(where: { $0.uid == uid }) else { reply(failure("Unknown microphone UID; run hey-talk devices")); return }
             if uid == "default" { UserDefaults.standard.removeObject(forKey: "inputUID") }
             else { UserDefaults.standard.set(uid, forKey: "inputUID") }
+            capture.cancel()
             reply(status())
         case "overlay": showOverlay(request["visible"] as? Bool ?? true); reply(status())
         case "warm":
@@ -565,7 +567,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func noSpeechDetected(id: UInt64) {
         let message = "No speech detected. Check your microphone with hey-talk devices."
-        guard autoTarget != nil else { fail(message); return }
+        guard autoTarget != nil else { fail(message, keepMicrophoneWarm: true); return }
         guard session.finish(id, text: "") else { return }
         // Keep the destination through the restart delay so a second Enter can
         // pass through immediately, even before the microphone reopens.
@@ -578,18 +580,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
         scheduleRelease()
         restartAutomatic(id: id, notice: notice)
     }
-    private func cancel() {
+    private func cancel(keepMicrophoneWarm: Bool = true) {
         captureReady = false
         clearAutomatic()
         session.cancel(); maximumDuration?.cancel(); maximumDuration = nil
-        capture.cancel(); inference.cancel(); hotkey?.reset(); overlay?.update(.idle)
+        capture.cancel(keepWarm: keepMicrophoneWarm); inference.cancel(); hotkey?.reset(); overlay?.update(.idle)
         pendingStartReply?(failure("Cancelled")); pendingStartReply = nil
         pendingReply?(failure("Cancelled")); pendingReply = nil
     }
-    private func fail(_ message: String) {
+    private func fail(_ message: String, keepMicrophoneWarm: Bool = false) {
         captureReady = false
         clearAutomatic()
-        capture.cancel(); session.fail(session.generation); hotkey?.reset()
+        capture.cancel(keepWarm: keepMicrophoneWarm); session.fail(session.generation); hotkey?.reset()
         maximumDuration?.cancel(); maximumDuration = nil
         error = message; overlay?.update(.failed); overlay?.error(OverlayNotice.concise(message))
         pendingStartReply?(failure(message)); pendingStartReply = nil

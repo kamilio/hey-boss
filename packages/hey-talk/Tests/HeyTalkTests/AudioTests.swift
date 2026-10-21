@@ -4,6 +4,94 @@ import TalkCore
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
+    func testStoppedMicrophoneIsReusedForFiveMinutesWithoutKeepingIdleAudio() throws {
+        let rig = try CaptureRig(buffer: firstBuffer()), idle = try firstBuffer(value: 0.75)
+        let capture = rig.capture()
+        defer { capture.cancel() }
+        start(capture)
+        let stream = try XCTUnwrap(rig.streams.first)
+        let stopped = expectation(description: "Recording stops while the connection stays open")
+        capture.stop { result in
+            XCTAssertEqual(try? result.get(), Array(repeating: Float(0.25), count: 160))
+            stopped.fulfill()
+        }
+        wait(for: [stopped], timeout: 2)
+        XCTAssertFalse(stream.stopped)
+        for _ in 0..<10 { stream.receive(idle) }
+        XCTAssertEqual(capture.sampleCount, 0)
+        XCTAssertEqual(capture.level, 0)
+        XCTAssertFalse(capture.isReady)
+        rig.advance(299)
+        stream.receive(idle)
+        capture.refresh()
+        resume(capture, feeding: stream, buffer: try firstBuffer(value: 0.5))
+        XCTAssertEqual(rig.streams.count, 1, "A second dictation must not reconnect the microphone")
+        let resumed = expectation(description: "Only new recording audio is returned")
+        capture.stop { result in
+            let samples = try? result.get()
+            XCTAssertFalse(samples?.isEmpty ?? true)
+            XCTAssertTrue(samples?.allSatisfy { $0 == 0.5 } ?? false)
+            resumed.fulfill()
+        }
+        wait(for: [resumed], timeout: 2)
+        rig.advance(299); stream.receive(idle); capture.refresh()
+        XCTAssertFalse(stream.stopped, "Each recording renews the five-minute window")
+        rig.advance(2); capture.refresh()
+        eventually { stream.stopped }
+        start(capture)
+        XCTAssertEqual(rig.streams.count, 2)
+    }
+
+    func testIdleConnectionClosesOnRouteChangeOrInterruptionWithoutOpeningAnotherMicrophone() throws {
+        for routeChange in [false, true] {
+            let rig = try CaptureRig(buffer: firstBuffer()), capture = rig.capture()
+            defer { capture.cancel() }
+            start(capture)
+            let stream = rig.streams[0], stopped = expectation(description: "Stopped")
+            capture.stop { _ in stopped.fulfill() }
+            wait(for: [stopped], timeout: 2)
+            XCTAssertFalse(stream.stopped)
+            if routeChange { rig.input = CaptureRig.builtIn; capture.refresh() }
+            else { stream.interrupted("Bluetooth disconnected") }
+            eventually { stream.stopped }
+            XCTAssertEqual(rig.streams.count, 1)
+            XCTAssertEqual(capture.sampleCount, 0)
+            start(capture)
+            XCTAssertEqual(rig.streams.count, 2)
+        }
+    }
+    func testCancellationKeepsTheConnectionButShutdownReleasesIt() throws {
+        let rig = try CaptureRig(buffer: firstBuffer()), capture = rig.capture()
+        start(capture)
+        let stream = rig.streams[0]
+        capture.cancel(keepWarm: true)
+        eventually { capture.isKeepingAlive }
+        stream.receive(try firstBuffer(value: 0.75))
+        XCTAssertEqual(capture.sampleCount, 0)
+        resume(capture, feeding: stream, buffer: try firstBuffer(value: 0.5))
+        XCTAssertEqual(rig.streams.count, 1)
+        capture.cancel()
+        eventually { stream.stopped }
+        XCTAssertFalse(capture.isKeepingAlive)
+        XCTAssertEqual(capture.sampleCount, 0)
+    }
+
+    private func resume(_ capture: AudioCapture, feeding stream: TestMicrophoneStream, buffer: CMSampleBuffer) {
+        let resumed = expectation(description: "Fresh audio arrives on the warm connection")
+        var done = false
+        capture.start(uid: nil) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            done = true; resumed.fulfill()
+        }
+        func feed() {
+            guard !done else { return }
+            stream.receive(buffer)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02, execute: feed)
+        }
+        DispatchQueue.main.async(execute: feed)
+        wait(for: [resumed], timeout: 2)
+        done = true
+    }
     func testFirstTenMillisecondsOfAudioAreReadyWithoutLosingSamples() throws {
         let capture = AudioCapture()
         capture.consume(try firstBuffer(), token: 0)
@@ -200,6 +288,9 @@ final class AudioTests: XCTestCase {
         defer { capture.cancel() }
         start(capture)
         let stopping = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        // A stale stream must close instead of entering keepalive. Exercise the
+        // cancellation race while that physical close is still in progress.
+        rig.advance(3.1)
         rig.streams[0].onStop = { stopping.signal(); _ = release.wait(timeout: .now() + 2) }
         let stopped = expectation(description: "Old stop completes")
         capture.stop { _ in stopped.fulfill() }
