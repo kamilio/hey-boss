@@ -186,6 +186,7 @@ pub fn run(action: &Action) -> Result<(), String> {
                     "packages/hey-gh",
                     "packages/hey-boss-http",
                     "packages/hey-boss-sync",
+                    "packages/hey-boss-secrets",
                     "packages/hey-proxy",
                     "README.md",
                     "LICENSE",
@@ -211,6 +212,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 command -v cargo >/dev/null || { echo 'Install Rust on the server first.' >&2; exit 1; }
 cargo test --locked --manifest-path "$stage/Cargo.toml" --bin hey-boss --test secret_cli -- --test-threads=1
 cargo build --locked --release --manifest-path "$stage/Cargo.toml"
+if [ "$(uname -s)" = Darwin ]; then
+/usr/bin/swift "$stage/package_hey_boss.swift" --cli "$stage/target/release/hey-boss"
+fi
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/hey-boss" "$HOME/.codex/skills/hey-boss"
 chmod 700 "$HOME/.local/share/hey-boss"
 for name in hey-gh hey-proxy; do

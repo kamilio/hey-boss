@@ -436,6 +436,13 @@ hey-boss notif hide '<task_id>'
 
 The installer builds both executables and registers a launch agent. macOS starts the daemon at login so its menu-bar item is available, and can also start it when a command connects. Keep `hey-boss.state` beside the installed CLI; it records the chosen state directory. Re-run the installer to upgrade. Companion connections and overview require protocol-version metadata from the current installer and a matching daemon handshake; older installations report an upgrade error before new commands are sent. Update the server companion too so remote stale-socket cleanup is available. `cargo install` alone does not install the daemon.
 
+macOS installers sign the CLI, desktop app, and temporary upgrade CLI with the
+pinned local certificate so App Management grants survive rebuilds. Restore that
+certificate with `packages/hey-talk/setup-signing.sh` on each Mac before installing;
+a missing certificate stops installation. Moving from an older ad-hoc CLI signature
+may require one new grant. Plain `cargo build` or `cargo install` does not apply this
+certificate; use the installer or `hey-boss upgrade` for installed copies.
+
 Notifications, questions, secret requests, and the Inbox are grouped under `hey-boss notif`.
 Run `hey-boss notif --help` to see them. Existing root forms such as `hey-boss alert`
 remain accepted as hidden compatibility aliases.

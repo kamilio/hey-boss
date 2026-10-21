@@ -29,6 +29,7 @@ func installHeyBoss() -> [String: String] {
     try! files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path)
     let staging = root.appendingPathComponent("out/hey-boss-daemon")
     run("/usr/bin/env", ["cargo", "build", "--locked", "--release", "--manifest-path", root.appendingPathComponent("Cargo.toml").path])
+    run("/usr/bin/swift", [root.appendingPathComponent("package_hey_boss.swift").path, "--cli", root.appendingPathComponent("target/release/hey-boss").path])
     run("/usr/bin/xcrun", ["swiftc", "-target", nativeTarget, "-O", "-whole-module-optimization", "-parse-as-library", root.appendingPathComponent("hey_boss_daemon.swift").path, "-o", staging.path])
     let binary = binaries.appendingPathComponent("hey-boss")
     let app = state.appendingPathComponent("Hey Boss.app")

@@ -1,12 +1,16 @@
 import Foundation
 
+func require(_ condition: Bool, _ message: String) {
+    guard condition else {
+        FileHandle.standardError.write(Data("\(message)\n".utf8))
+        exit(1)
+    }
+}
+
 // Give Launch Services a real application identity, including before the first
 // window opens. A runtime NSApplication icon on a bare executable is not enough.
-precondition(CommandLine.arguments.count == 3, "Usage: swift package_hey_boss.swift DAEMON OUTPUT.app")
+precondition(CommandLine.arguments.count == 3, "Usage: swift package_hey_boss.swift DAEMON OUTPUT.app | --cli BINARY")
 let files = FileManager.default
-let source = URL(fileURLWithPath: CommandLine.arguments[1])
-let app = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
-precondition(app.pathExtension == "app")
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 // Keep the certificate stable across builds so macOS retains app permissions.
 // Restore the shared local identity with packages/hey-talk/setup-signing.sh.
@@ -21,8 +25,28 @@ identities.standardOutput = identityOutput
 try identities.run()
 let available = String(decoding: identityOutput.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
 identities.waitUntilExit()
-precondition(identities.terminationStatus == 0 && available.contains(identity),
+require(identities.terminationStatus == 0 && available.contains(identity),
     "Restore the persistent signing identity with packages/hey-talk/setup-signing.sh before packaging Hey Boss")
+func sign(_ path: URL, identifier: String) throws {
+    let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    sign.arguments = ["--force", "--sign", identity, "--identifier", identifier, "--timestamp=none", path.path]
+    try sign.run(); sign.waitUntilExit()
+    require(sign.terminationStatus == 0, "Could not sign \(path.path) with the pinned identity")
+    let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    verify.arguments = ["--verify", "--deep", "--strict", "-R",
+        "=identifier \"\(identifier)\" and certificate leaf = H\"\(identity)\"", path.path]
+    try verify.run(); verify.waitUntilExit()
+    require(verify.terminationStatus == 0, "Signing verification failed for \(path.path)")
+}
+// The installed CLI and temporary upgrade guard perform App Management work.
+// Their identity must survive both rebuilds and changes to the executable name.
+if CommandLine.arguments[1] == "--cli" {
+    try sign(URL(fileURLWithPath: CommandLine.arguments[2]), identifier: "local.hey-boss.cli")
+    exit(0)
+}
+let source = URL(fileURLWithPath: CommandLine.arguments[1])
+let app = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+precondition(app.pathExtension == "app")
 let contents = app.appendingPathComponent("Contents", isDirectory: true)
 let executables = contents.appendingPathComponent("MacOS", isDirectory: true)
 let resources = contents.appendingPathComponent("Resources", isDirectory: true)
@@ -58,11 +82,5 @@ let info: [String: Any] = [
 try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
     .write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
 try Data("APPL????".utf8).write(to: contents.appendingPathComponent("PkgInfo"), options: .atomic)
-let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-sign.arguments = ["--force", "--sign", identity, "--timestamp=none", app.path]
-try sign.run(); sign.waitUntilExit(); precondition(sign.terminationStatus == 0)
-let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-verify.arguments = ["--verify", "--deep", "--strict", "-R",
-    "=identifier \"local.hey-boss.desktop\" and certificate leaf = H\"\(identity)\"", app.path]
-try verify.run(); verify.waitUntilExit(); precondition(verify.terminationStatus == 0)
+try sign(app, identifier: "local.hey-boss.desktop")
 print(app.path)
