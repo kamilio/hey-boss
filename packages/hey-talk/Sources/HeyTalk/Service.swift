@@ -6,6 +6,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let server = CommandServer()
     private let capture = AudioCapture()
     private let inference = Inference()
+    private let speech = SpeechController()
+    private var speechWasActive = false
     private let history = DictationHistory()
     private let enterExceptions = EnterExceptions()
     private let vocabulary = SharedVocabulary()
@@ -64,10 +66,46 @@ final class TalkService: NSObject, NSApplicationDelegate {
             switch action {
             case .toggle(let shortcut): self.toggleDictation(shortcut: shortcut)
             case .toggleAuto: self.toggleAutoMode()
-            case .cancel: if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
+            case .toggleSpeech: self.speech.toggle()
+            case .toggleSpeechMode: self.speech.toggleEnabled()
+            case .cancel:
+                if self.speech.active { self.speech.stop() }
+                else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
             case .none: break
             }
         }
+        speech.canOffer = { [weak self] in
+            guard let self else { return false }
+            return self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil)
+        }
+        speech.willPlay = { [weak self] in
+            guard let self else { return false }
+            guard self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil) else {
+                self.overlay?.error("Finish dictating before reading aloud."); return false
+            }
+            if self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
+            return true
+        }
+        speech.onAllowedChanged = { [weak self] allowed in
+            guard let self else { return }
+            self.hotkey?.enableSpeechMode(allowed)
+            self.hotkey?.enableSpeech(allowed && self.speech.settings.enabled)
+        }
+        speech.onNotice = { [weak self] message in self?.showOverlay(true); self?.overlay?.error(message) }
+        speech.onActivityChanged = { [weak self] active in
+            guard let self else { return }
+            self.hotkey?.captureEscape(active || self.session.phase == .recording || self.session.phase == .processing)
+            let ended = self.speechWasActive && !active
+            self.speechWasActive = active
+            if ended {
+                self.focusTrigger.reset()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    guard let self, !self.speech.active else { return }
+                    self.focusedInputChanged(FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs))
+                }
+            }
+        }
+        speech.start()
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
@@ -115,7 +153,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel() }
     }
-    func applicationWillTerminate(_ notification: Notification) { vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -179,7 +217,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 }
             }
         }
-        let available = autoSettings.enabled && autoTarget == nil && autoRestart == nil && (session.phase == .idle || session.phase == .failed)
+        let available = !speech.active && autoSettings.enabled && autoTarget == nil && autoRestart == nil && (session.phase == .idle || session.phase == .failed)
         guard focusTrigger.update(input, available: available), let input, autoSubmitKey.start() else { return }
         start(showOverlay: true, paste: true, focusedInput: input) { [weak self] result in
             if result["ok"] as? Bool == true, let notice { self?.overlay?.error(notice) }
@@ -236,6 +274,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "microphone": permissionName, "accessibility": AXIsProcessTrusted(),
         ]
         value["vocabulary_sync"] = vocabularySync
+        value["speech"] = speech.status
+        value["speech_hotkey_registered"] = hotkey?.speechRegistered ?? false
+        value["speech_mode_hotkey_registered"] = hotkey?.speechModeRegistered ?? false
         if let input = capture.activeInput { value["active_input"] = input.json }
         if let pid = inference.pid { value["inference_pid"] = pid }
         if let error { value["last_error"] = error }
@@ -273,6 +314,36 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let command = request["command"] as? String ?? ""
         switch command {
+        case "speech":
+            do {
+                guard let args = request["arguments"] as? [String] else { throw TalkError("Missing speech arguments") }
+                try SpeechSettings.validate(args)
+                switch args.first {
+                case "target":
+                    speech.target { result in
+                        switch result {
+                        case .success(let target): var value = target.json; value["ok"] = true; reply(value)
+                        case .failure(let error): reply(self.failure(error.localizedDescription))
+                        }
+                    }
+                    return
+                case "play":
+                    speech.toggle { result in
+                        switch result {
+                        case .success: reply(["ok": true, "speech": self.speech.status])
+                        case .failure(let error): reply(self.failure(error.localizedDescription))
+                        }
+                    }
+                    return
+                case "pause": speech.pause()
+                case "stop": speech.stop()
+                default:
+                    let wasEnabled = speech.settings.enabled, apps = speech.settings.bundleIDs
+                    try speech.settings.command(args)
+                    if wasEnabled != speech.settings.enabled || apps != speech.settings.bundleIDs { speech.settingsChanged() }
+                }
+                reply(["ok": true, "speech": speech.status])
+            } catch { reply(failure(error.localizedDescription)) }
         case "status", "doctor": reply(status())
         case "auto":
             do {
@@ -371,6 +442,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                        reply: @escaping ([String: Any]) -> Void) {
         let id: UInt64
         do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
+        speech.stop()
         pendingStartReply = reply
         error = nil; captureReady = false; self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
         clearAutomatic()

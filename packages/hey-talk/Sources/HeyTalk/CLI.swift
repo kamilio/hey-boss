@@ -22,6 +22,9 @@ enum CLI {
     hey-talk devices                           List microphone names and UIDs
     hey-talk input UID|default                  Select microphone
     hey-talk auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
+    hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
+    hey-talk speech target [--json]           Inspect the selected/hovered paragraph
+    hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
     hey-talk vocabulary [add|remove WORD…]     Shared recognition hints; quote phrases
     hey-talk overlay show|hide                  Control the floating recording pill
@@ -46,13 +49,18 @@ enum CLI {
         let args = arguments.filter { !["--json", "--no-overlay", "--no-paste"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
-        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
+        let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "speech", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
         guard known.contains(verb) else { throw TalkError("Unknown command: \(verb). Run hey-talk --help.") }
         let needsValue = ["transcribe", "input", "overlay", "permissions"].contains(verb)
-        if !["history", "enter-exceptions", "auto", "vocabulary"].contains(verb) {
+        if !["history", "enter-exceptions", "auto", "vocabulary", "speech"].contains(verb) {
             guard args.count == (needsValue ? 2 : 1) else { throw TalkError("Unexpected arguments. Run hey-talk --help.") }
         }
         var request: [String: Any] = ["command": verb]
+        if verb == "speech" {
+            let values = Array(args.dropFirst())
+            try SpeechSettings.validate(values)
+            request["arguments"] = values
+        }
         if verb == "vocabulary" {
             let values = Array(args.dropFirst())
             try output(SharedVocabulary().command(values), json: json)
@@ -111,6 +119,11 @@ enum CLI {
             let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
             print(String(decoding: data, as: UTF8.self))
         } else if let text = response["text"] as? String { print(text) }
+        else if let settings = response["speech"] as? [String: Any], response.count == 2 {
+            print("Read aloud: \(settings["enabled"] as? Bool == true ? "on" : "off") · Hyper+T to toggle · Hyper+S to play/pause")
+            print("Playback: \(settings["state"] ?? "idle") · Allowed apps: \((settings["apps"] as? [String] ?? []).joined(separator: ", "))")
+            if let error = settings["error"] as? String { print(error) }
+        }
         else if let settings = response["auto"] as? [String: Any], response.count == 3 {
             print("Auto mode: \(settings["enabled"] as? Bool == true ? "on" : "off") · Hyper+V to toggle")
             print("Allowed apps: \((settings["apps"] as? [String] ?? []).joined(separator: ", "))")
