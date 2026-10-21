@@ -382,8 +382,8 @@ if(typeof document!=='undefined') (()=>{
         <h2>${esc(skill.name)}</h2>
       </div>
       <div class="skill-header-actions">
-        <button type="button" class="button small" data-toggle-editor="${esc(currentFileObj.path)}" ${pending||data.busy?'disabled':''}>${icon('edit')||''}Edit Markdown</button>
-        <button type="button" class="button small" data-open-native-editor="${esc(currentFileObj.path)}" title="Open in Hey Boss native Markdown editor" ${pending||data.busy?'disabled':''}>Native editor</button>
+        <button type="button" class="button small primary" data-open-native-editor="${esc(currentFileObj.path)}" title="Open in Hey Boss native Markdown editor" ${pending||data.busy?'disabled':''}>Edit</button>
+        <button type="button" class="button small" data-toggle-editor="${esc(currentFileObj.path)}" ${pending||data.busy?'disabled':''}>Edit in browser</button>
         <button type="button" class="button small" data-open-dir="${esc(skill.name)}" title="Open directory in Finder" ${pending||data.busy?'disabled':''}>${icon('folder')||''}Open folder</button>
         ${canDelete?`<button type="button" class="button small danger" data-delete-prompt="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Delete skill</button>`:''}
       </div>
@@ -451,7 +451,7 @@ if(typeof document!=='undefined') (()=>{
     <section class="skill-section skill-files-section">
       <div class="skill-section-title">
         <h3>Markdown files <span>${mdFiles.length}</span></h3>
-        <span>Open or edit with the Markdown editor</span>
+        <span>Saves sync everywhere · previous versions kept</span>
       </div>
       ${mdFiles.length > 1 ? `<div class="skill-md-tabs" role="tablist" aria-label="Skill Markdown files">
         ${mdFiles.map(f=>`<button type="button" role="tab" class="skill-md-tab ${f.path===currentFileObj.path?'is-active':''}" aria-selected="${f.path===currentFileObj.path}" data-md-file="${esc(f.path)}">${icon('docs')||icon('code')}<span>${esc(f.path)}${readDraft(draftKey(skill.key,f.path))?' · Draft':''}</span></button>`).join('')}
@@ -462,8 +462,7 @@ if(typeof document!=='undefined') (()=>{
           <strong>Editing <code>${esc(currentFileObj.path)}</code></strong>
           <div class="skill-markdown-editor-actions">
             <button type="button" class="button small" data-cancel-editor>Close editor</button>
-            <button type="button" class="button small" data-save-markdown="local" ${pending||data.busy?'disabled':''}>Save</button>
-            <button type="button" class="button small primary" data-save-markdown="distribute" ${pending||data.busy?'disabled':''}>Save &amp; unify everywhere</button>
+            <button type="button" class="button small primary" data-save-markdown="distribute" ${pending||data.busy?'disabled':''}>Save &amp; sync everywhere</button>
           </div>
         </div>
         ${skill.name!=='AGENTS.md'&&currentFileObj.path==='SKILL.md'?'<p class="skill-edit-hint">Changing the frontmatter <code>name</code> also renames the skill folder when you save.</p>':''}
@@ -576,7 +575,7 @@ if(typeof document!=='undefined') (()=>{
     }
     if(saveMd){
       const content=currentEditorContent();
-      const distribute=saveMd.dataset.saveMarkdown==='distribute';
+      const distribute=true;
       const previewCopy=skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0];
       keepDraft();
       await action('save_file',{skill:skill.name,file_path:activeFile||'SKILL.md',content,base_digest:editorContext?.baseDigest||previewCopy?.digest||'',distribute});
@@ -656,7 +655,7 @@ if(typeof document!=='undefined') (()=>{
     finally{pending=false;render();}
   }
   $('#skills-scan').onclick=()=>action('scan');$('#skills-distribute').onclick=()=>action('distribute');
-  document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.metaKey&&!e.ctrlKey&&!/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)){e.preventDefault();$('#skills-search').focus();}});
+  document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.defaultPrevented&&!e.isComposing&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.composedPath().some(el=>el instanceof Element&&(el.matches('input,textarea,select')||el.isContentEditable))){e.preventDefault();$('#skills-search').focus();}});
   window.addEventListener('pagehide',keepDraft);
   window.addEventListener('beforeunload',e=>{keepDraft();if(dirty||editingMarkdown){e.preventDefault();e.returnValue='';}});
   async function start(){

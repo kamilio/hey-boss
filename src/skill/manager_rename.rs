@@ -134,6 +134,8 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
             } else {
                 json!({"action":"apply_copy","source":source,"expected":input["expected"]})
             };
+            let mut request = request;
+            request["overwrite"] = input["overwrite"].clone();
             scan = Some(apply(home, &request)?);
         }
         return scan
@@ -247,7 +249,9 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
             path.display()
         )));
     }
-    if signatures(&current["copies"], &previous) != signatures(&input["expected"], &previous) {
+    if input["overwrite"] != true
+        && signatures(&current["copies"], &previous) != signatures(&input["expected"], &previous)
+    {
         return Err(Error::conflict(
             "Skill changed since scanning. Scan again and review before saving.",
         ));
@@ -342,6 +346,39 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_save_overwrites_drift_and_keeps_the_previous_version() {
+        let (temp, scan, _) = fixture();
+        let path = temp.0.join(".codex/skills/before/SKILL.md");
+        fs::write(&path, "Changed after scanning").unwrap();
+        let source = renamed_source(
+            &scan["copies"][0],
+            "before",
+            "---\nname: before\n---\nSaved / path\n",
+        )
+        .unwrap();
+        let request = json!({"action":"apply_copies","sources":[source.clone()],"expected":scan["copies"],"overwrite":true});
+        let saved = apply(&temp.0, &request).unwrap();
+        assert!(
+            saved["copies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["digest"] == source["digest"])
+        );
+        let backups = temp.0.join(".hey-boss/skill-backups");
+        assert!(fs::read_dir(&backups).unwrap().flatten().any(|e| {
+            fs::read_to_string(e.path().join(".codex/skills/before/SKILL.md"))
+                .is_ok_and(|s| s == "Changed after scanning")
+        }));
+        let count = fs::read_dir(&backups).unwrap().count();
+        apply(&temp.0, &request).unwrap();
+        assert_eq!(
+            fs::read_dir(backups).unwrap().count(),
+            count,
+            "Retries do not create duplicate revisions"
+        );
+    }
     fn fixture() -> (crate::admin::Temporary, Value, Value) {
         let temp = crate::admin::Temporary::new().unwrap();
         let dir = temp.0.join(".codex/skills/before");

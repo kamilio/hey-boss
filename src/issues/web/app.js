@@ -2346,9 +2346,7 @@ document.addEventListener("keydown", (e) => {
     closeEditor();
     return;
   }
-  const typing = e.target.matches(
-    "input,textarea,select,[contenteditable=true]",
-  );
+  const typing = e.composedPath().some(el => el instanceof Element && (el.matches("input,textarea,select") || el.isContentEditable));
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     if (model.route.view === "inbox") {
       const form = e.target.closest("form");

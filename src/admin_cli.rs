@@ -49,6 +49,8 @@ pub enum SkillAction {
     ApplyRename,
     #[command(hide = true)]
     ApplyCopy,
+    #[command(hide = true)]
+    EditorSave { session: String },
     /// Print the canonical Markdown skill.
     Show,
     /// Install the bundled skill and sync selected skills for Codex, Agents and Claude Code.
@@ -104,6 +106,18 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
     let home_os = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing"))?;
     let home = Path::new(&home_os);
     match &options.action {
+        SkillAction::EditorSave { session } => {
+            let mut bytes = Vec::new();
+            io::stdin().take(6 * 1024 * 1024).read_to_end(&mut bytes)?;
+            let result = hey_boss::skill::manager::save_native(session, &bytes);
+            match result {
+                Ok(value) => println!("{value}"),
+                Err(error) => {
+                    println!("{}", json!({"ok":false,"error":error}));
+                    return Err(io::Error::other(error.to_string()));
+                }
+            }
+        }
         SkillAction::ApplyRename | SkillAction::ApplyCopy => {
             let mut bytes = Vec::new();
             io::stdin()
