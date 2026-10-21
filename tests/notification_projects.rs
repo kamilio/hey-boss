@@ -156,6 +156,17 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[test]
+fn paging_reaches_the_daemon_without_changing_normal_notifications() {
+    let f = Fixture::new();
+    f.register(None);
+    let ordinary = f.notify(&mut f.alert(&f.cwd));
+    assert!(ordinary.get("page").is_none());
+    let paged = f.notify(f.alert(&f.cwd).arg("--page"));
+    assert_eq!(paged["page"], true);
+    assert_eq!(paged["command"], "alert");
+}
+
+#[test]
 fn notifications_reuse_registered_identities_without_enrolling_empty_builder_projects() {
     let f = Fixture::new();
     f.register(None);

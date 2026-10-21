@@ -47,6 +47,7 @@ func audit() {
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGENTS"] == "1" { auditNotificationAgents(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUIET_HOURS"] == "1" { auditQuietHours(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PAGING"] == "1" { auditPaging(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ACTIVE_AGENTS_ONLY"] == "1" { auditActiveAgentFilter(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WEB_INBOX_ONLY"] == "1" {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-web-inbox-"+UUID().uuidString)
@@ -131,6 +132,7 @@ func audit() {
     auditIssuesShortcut()
     auditSecretInput()
     auditNotificationReplay()
+    auditPaging()
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
     auditNativeMindmap()
@@ -1796,7 +1798,7 @@ func auditNotificationReplay() {
     auditCompanionNotificationReplay()
 }
 
-func auditCompanionNotificationReplay() {
+func auditCompanionNotificationReplay(page: Bool = false) {
     // Keep Unix socket paths below Darwin's 104-byte limit.
     let root = URL(fileURLWithPath: "/tmp/hb-replay-" + UUID().uuidString)
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1838,7 +1840,7 @@ func auditCompanionNotificationReplay() {
     }
     for kind in ["alert", "update", "ask"] {
         let fd = socketAt("daemon.sock"); precondition(fd >= 0)
-        write(fd, ["command":kind, "project":"Replay test", "title":kind.capitalized + " recovered", "question":"Synthetic lost acknowledgement", "description":"One notification after reconnect", "sync":false])
+        write(fd, ["command":kind, "project":"Replay test", "title":kind.capitalized + " recovered", "question":"Synthetic lost acknowledgement", "description":"One notification after reconnect", "sync":false, "page":page])
         let response = try! JSONSerialization.jsonObject(with: readRequest(fd)) as! [String: Any]
         Darwin.close(fd)
         precondition(response["task_id"] != nil && response["status"] as? String != "error")
@@ -1847,6 +1849,7 @@ func auditCompanionNotificationReplay() {
     defer { Darwin.close(listener) }
     let path = root.appendingPathComponent("history.db").path
     var store = try! Store(path)
+    store.notificationsMuted = { page }
     var shown: [Record] = []
     store.show = { shown.append($0) }
     var accepted: [String: String] = [:], attempts: [String: Int] = [:]
@@ -1874,6 +1877,7 @@ func auditCompanionNotificationReplay() {
                 Darwin.close(fd)
                 // Reopen the actual native DB before the broker's reconnect/retry.
                 store = try! Store(path); store.show = { shown.append($0) }
+                store.notificationsMuted = { page }
                 continue
             }
             precondition(id == accepted[key], "Broker retry created another native record")
@@ -1882,6 +1886,7 @@ func auditCompanionNotificationReplay() {
     }
     precondition(attempts.count == 3 && attempts.values.allSatisfy { $0 == 2 })
     precondition(shown.count == 3 && Set(shown.map(\.taskID)).count == 3)
+    precondition(shown.allSatisfy { ($0.page == true) == page })
     precondition((try! store.database.inboxRows()).count == 3)
     print("Passed: real companion → native Store, lost ack, reconnect and receiver restart: three commands, three rows, three presentations")
     auditReplayPresentation(shown, store: store)
@@ -1890,6 +1895,7 @@ func auditCompanionNotificationReplay() {
 func auditReplayPresentation(_ rows: [Record], store: Store) {
     let directory = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SNAPSHOT_DIR"]
     let ui = Interface(present: false)
+    ui.notificationsMuted = { rows.allSatisfy { $0.page == true } }
     defer { ui.stack.orderOut(nil); ui.question.orderOut(nil) }
     ui.onComplete = { id, answer in try! store.finish(id, answer); ui.remove(id) }
     ui.onPresented = { store.presented($0, $1) }
@@ -1936,7 +1942,8 @@ func auditReplayPresentation(_ rows: [Record], store: Store) {
     RunLoop.main.run(until: Date().addingTimeInterval(0.15))
     precondition(ui.current == nil)
     precondition((try! store.database.get(rows.last!.taskID)).result == "Synthetic answer")
-    let approval = Record(taskID: "visual-approval", kind: "approval", question: "Choose the synthetic test result", project: "Replay test", title: "Reconnected question", description: "Only one approval is shown", options: ["Continue", "Cancel"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    var approval = Record(taskID: "visual-approval", kind: "approval", question: "Choose the synthetic test result", project: "Replay test", title: "Reconnected question", description: "Only one approval is shown", options: ["Continue", "Cancel"], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    approval.page = rows.first?.page
     try! store.database.save(approval); ui.add(approval)
     for dark in [false, true] {
         ui.question.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -3612,6 +3619,49 @@ func auditArtifactEditor() {
     third.window.close()
     nextOpen.window.close()
     print("PASS focus, quick switch, find, undo/redo, automatic disk save and external-edit protection")
+}
+
+func auditPaging() {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-page-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let path = root.appendingPathComponent("history.db").path
+    let store = try! Store(path)
+    var quiet = true, shown = [String](), removed = [String]()
+    store.notificationsMuted = { quiet }
+    store.show = { shown.append($0.taskID) }
+    store.removeMany = { removed += $0 }
+    func call(_ payload: [String: Any]) -> [String: Any] {
+        let request = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: payload.merging(["sync": false]) { a, _ in a }))
+        var fds: [Int32] = [0, 0]; precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+        store.handle(request, Reply(fds[1]))
+        return try! JSONSerialization.jsonObject(with: FileHandle(fileDescriptor: fds[0], closeOnDealloc: true).readDataToEndOfFile()) as! [String: Any]
+    }
+    let origin: [String: Any] = ["cwd":"/tmp", "pid":123, "executable":"/bin/hey-boss", "launchers":[], "agent":["id":"paged-agent", "kind":"codex", "machine":"mac", "host":"mac.local"]]
+    func send(_ command: String, page: Bool) -> Record {
+        let response = call(["command":command, "project":"Synthetic", "title":"Paging test", "question":"Synthetic", "description":"", "origin":origin, "page":page])
+        return try! store.database.get(response["task_id"] as! String)
+    }
+    let ordinary = send("alert", page: false)
+    _ = call(["command":"inbox_mute_agent", "task_id":ordinary.taskID, "muted":true])
+    let pages = ["alert", "update", "ask"].map { send($0, page: true) }
+    precondition(shown == pages.map(\.taskID), "Pages must bypass quiet hours and muted senders")
+    quiet = false; store.mutePendingNotifications(); quiet = true; store.mutePendingNotifications()
+    _ = call(["command":"inbox_mute_agent", "task_id":ordinary.taskID, "muted":true])
+    precondition(pages.allSatisfy { !removed.contains($0.taskID) }, "Settings changes must not hide pages")
+    let restarted = try! Store(path)
+    restarted.notificationsMuted = { true }
+    var restored = [String](); restarted.show = { restored.append($0.taskID) }; restarted.restore()
+    precondition(Set(restored) == Set(pages.map(\.taskID)), "Paging must survive persistence and restart")
+    let ui = Interface(present: false); ui.notificationsMuted = { true }
+    ui.add(ordinary)
+    for page in pages { ui.add(page) }
+    ui.layout()
+    precondition(ui.cards.count == 2 && ui.current?.taskID == pages[2].taskID, "Native cards and questions must bypass quiet hours")
+    _ = call(["command":"hide", "task_id":pages[0].taskID])
+    precondition(try! store.database.get(pages[0].taskID).status == "ok", "Pages still support explicit dismissal")
+    print("PASS paging: delivery, settings changes, restart, native cards/questions, dismissal")
+    auditCompanionNotificationReplay(page: true)
 }
 
 func auditQuietHours() {

@@ -127,6 +127,9 @@ struct Metadata {
         help = "Short title describing this update or question; required"
     )]
     title: String,
+    /// Page now, bypassing quiet hours and muted senders.
+    #[arg(long)]
+    page: bool,
     #[arg(
         long,
         value_enum,
@@ -971,6 +974,42 @@ mod tests {
             });
             let _ = std::fs::remove_dir_all(root);
             result
+        }
+    }
+
+    #[test]
+    fn paging_is_explicit_and_survives_the_notification_wire_format() {
+        for args in [
+            vec!["alert", "Ready"],
+            vec!["update", "Ready", "# Report"],
+            vec!["ask", "Proceed?", "Details", "--async"],
+            vec!["prompt", "Name?", "Details"],
+            vec!["approval", "Proceed?", "Details"],
+        ] {
+            for page in [false, true] {
+                let mut argv = vec!["hey-boss", "notif"];
+                argv.extend(&args);
+                argv.extend(["--title", "Review"]);
+                if page {
+                    argv.push("--page");
+                }
+                let (request, _) = Cli::try_parse_from(argv)
+                    .unwrap()
+                    .into_request_with_project(|_| {
+                        Ok(hey_boss::issues::Project {
+                            id: "named:Review".into(),
+                            name: "Review".into(),
+                        })
+                    })
+                    .unwrap();
+                let wire = serde_json::to_value(request).unwrap();
+                assert_eq!(
+                    wire.get("page"),
+                    page.then_some(&serde_json::Value::Bool(true))
+                );
+                let decoded: Request = serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            }
         }
     }
 

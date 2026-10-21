@@ -92,6 +92,7 @@ struct Request: Codable {
     let source_host: String?
     let origin: LaunchOrigin?
     let muted: Bool?
+    let page: Bool?
     let severity: String?
     let icon: String?
     let icon_path: String?
@@ -262,6 +263,7 @@ struct Record: Codable {
     var bannerHidden: Bool?
     var quietHoursMuted: Bool?
     var agentMuted: Bool?
+    var page: Bool?
     var issue: IssueReference?
 
     var isLocalSource: Bool { sourceHost == "This Mac" }
@@ -540,7 +542,7 @@ final class Store {
         quietHoursWereActive = active
         guard active else { return }
         do {
-            let pending = try database.pending()
+            let pending = try database.pending().filter { $0.page != true }
             try database.transaction {
                 for var row in pending where row.quietHoursMuted != true { row.quietHoursMuted = true; try database.save(row) }
             }
@@ -554,9 +556,11 @@ final class Store {
             for var row in try database.pending() {
                 if let expiry = row.expiresAt, expiry <= Date().timeIntervalSince1970 { complete(row.taskID, nil) }
                 else {
-                    if muted { row.quietHoursMuted = true; try database.save(row) }
-                    if row.quietHoursMuted == true || row.agentMuted == true { continue }
-                    if try database.agentMuted(row.origin?.agent) { continue }
+                    if row.page != true {
+                        if muted { row.quietHoursMuted = true; try database.save(row) }
+                        if row.quietHoursMuted == true || row.agentMuted == true { continue }
+                        if try database.agentMuted(row.origin?.agent) { continue }
+                    }
                     if row.bannerHidden == true { row.bannerHidden = false; try database.save(row) }
                     show(row)
                 }
@@ -595,8 +599,9 @@ final class Store {
                 row.sourceHost = request.source_host
                 row.severity = request.severity; row.icon = request.icon
                 row.iconData = request.icon_path.flatMap(snapshotIcon)
-                row.quietHoursMuted = notificationsMuted()
-                row.agentMuted = try database.agentMuted(row.origin?.agent)
+                row.page = request.page
+                row.quietHoursMuted = row.page != true && notificationsMuted()
+                row.agentMuted = try row.page != true && database.agentMuted(row.origin?.agent)
                 try database.save(row)
                 if let receipt { try database.saveReceipt(receipt, taskID: row.taskID) }
                 stored = row; created = true
@@ -695,7 +700,7 @@ final class Store {
             try database.transaction {
                 try database.muteAgent(agent, muted: muted)
                 if muted {
-                    for var pending in try database.pending() where pending.origin?.agent?.key == agent.key {
+                    for var pending in try database.pending() where pending.origin?.agent?.key == agent.key && pending.page != true {
                         pending.agentMuted = true
                         try database.save(pending)
                         hidden.append(pending.taskID)
@@ -2807,7 +2812,7 @@ final class Interface {
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.layout() }
     }
     func add(_ row: Record) {
-        guard !notificationsMuted() else { return }
+        guard row.page == true || !notificationsMuted() else { return }
         guard pendingCompletions[row.taskID] == nil, !cards.contains(where: { $0.row.taskID == row.taskID }), !questions.contains(where: { $0.taskID == row.taskID }), current?.taskID != row.taskID else { return }
         stackHiddenByUser = false
         if row.kind == "alert" || row.kind == "update" {
@@ -2999,7 +3004,7 @@ final class Interface {
         }
         scroll.contentView.scroll(to: NSPoint(x: 0, y: max(0, total - height - max(0, oldTop))))
         scroll.reflectScrolledClipView(scroll.contentView)
-        if present && !stackHiddenByUser && !notificationsMuted() { stack.orderFrontRegardless() }
+        if present && !stackHiddenByUser && (cards.contains { $0.row.page == true } || !notificationsMuted()) { stack.orderFrontRegardless() }
     }
     func presentQuestion(_ row: Record) {
         add(row)
@@ -3017,9 +3022,13 @@ final class Interface {
     }
     var notificationsMuted: () -> Bool = { false }
     func nextQuestion() {
-        if notificationsMuted() { return }
         if current != nil || questions.isEmpty { return }
-        let row = questions.removeFirst()
+        let index: Int
+        if notificationsMuted() {
+            guard let paged = questions.firstIndex(where: { $0.page == true }) else { return }
+            index = paged
+        } else { index = 0 }
+        let row = questions.remove(at: index)
         current = row
         question.title = row.heading
         buttons = []

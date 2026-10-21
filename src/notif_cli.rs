@@ -214,7 +214,7 @@ impl Action {
         let invalid =
             |message: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
         let mut issue = None;
-        let (project, title, severity, icon, icon_path) = match &self {
+        let (project, title, severity, icon, icon_path, page) = match &self {
             Action::Update { metadata, .. }
             | Action::Image { metadata, .. }
             | Action::Alert { metadata, .. }
@@ -258,11 +258,12 @@ impl Action {
                     metadata.severity,
                     metadata.icon.clone(),
                     metadata.icon_file.clone(),
+                    metadata.page,
                 )
             }
             Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
             Action::Hide { .. } | Action::Status { .. } | Action::Wait { .. } => {
-                (None, None, None, None, None)
+                (None, None, None, None, None, false)
             }
         };
         let mut request = Request {
@@ -278,6 +279,7 @@ impl Action {
             link_label: None,
             task_id: None,
             sync: false,
+            page,
             comments_enabled: false,
             attachment: None,
             document_name: None,
