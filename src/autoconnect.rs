@@ -310,12 +310,13 @@ fn install_companion_service() -> Result<(), String> {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>local.hey-boss-companion</string>
+{association}
 <key>ProgramArguments</key><array><string>{}</string><string>companion</string><string>auto</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>ThrottleInterval</key><integer>60</integer>
 <key>ExitTimeOut</key><integer>20</integer>
 <key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string>
-</dict></plist>"#, xml(&executable.to_string_lossy()), xml(&log.to_string_lossy()), xml(&log.to_string_lossy()))).map_err(|e| e.to_string())?;
+</dict></plist>"#, xml(&executable.to_string_lossy()), xml(&log.to_string_lossy()), xml(&log.to_string_lossy()), association = hey_boss::desktop_identity::association(&home))).map_err(|e| e.to_string())?;
     bootstrap_agent(std::path::Path::new("/bin/launchctl"), &domain, &agent)?;
     Ok(())
 }

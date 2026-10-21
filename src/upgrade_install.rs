@@ -2,34 +2,23 @@
 use super::*;
 
 fn desktop_app() -> io::Result<Option<PathBuf>> {
-    if !cfg!(target_os = "macos") {
-        return Ok(None);
+    hey_boss::desktop_identity::desktop_app(&home()?)
+}
+
+fn desktop_is_current(snapshot: &Path, app: &Path) -> io::Result<bool> {
+    let check = Command::new("/usr/bin/swift")
+        .arg(snapshot.join("package_hey_boss.swift"))
+        .arg("--check-desktop")
+        .arg(app)
+        .output()?;
+    match check.status.code() {
+        Some(0) => Ok(true),
+        Some(3) => Ok(false),
+        _ => Err(error(format!(
+            "Could not check desktop build: {}",
+            String::from_utf8_lossy(&check.stderr)
+        ))),
     }
-    let plist = home()?.join("Library/LaunchAgents/local.hey-boss.plist");
-    if !plist.exists() {
-        return Ok(None);
-    }
-    let bytes = output(
-        Command::new("/usr/bin/plutil")
-            .args(["-extract", "ProgramArguments.0", "raw", "-o", "-"])
-            .arg(plist),
-    )?;
-    let daemon = PathBuf::from(String::from_utf8_lossy(&bytes).trim());
-    let app = daemon
-        .ancestors()
-        .nth(3)
-        .ok_or_else(|| error("Invalid desktop installation"))?;
-    if daemon
-        .parent()
-        .and_then(Path::file_name)
-        .is_none_or(|s| s != "MacOS")
-        || app.extension().is_none_or(|s| s != "app")
-    {
-        return Err(error(
-            "Desktop installation needs reinstalling before upgrading",
-        ));
-    }
-    Ok(Some(app.to_owned()))
 }
 fn restart_companion_processes() {
     let _ = Command::new("/usr/bin/pkill")
@@ -65,6 +54,7 @@ fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()
     Ok(())
 }
 fn restart_desktop(binary: &Path) -> io::Result<()> {
+    hey_boss::desktop_identity::refresh(&home()?)?;
     restart_companion_processes();
     refresh_fleet_controller(
         binary,
@@ -75,12 +65,19 @@ fn restart_desktop(binary: &Path) -> io::Result<()> {
         &home()?.join("Library/LaunchAgents/local.hey-boss.plist"),
         "local.hey-boss",
     )?;
+    let connector = home()?.join("Library/LaunchAgents/local.hey-boss-companion.plist");
+    if connector.try_exists()? {
+        reload_registration(
+            Path::new("/bin/launchctl"),
+            &connector,
+            "local.hey-boss-companion",
+        )?;
+    }
     Ok(())
 }
 fn reload_registration(launchctl: &Path, registration: &Path, label: &str) -> io::Result<()> {
     let domain = format!("gui/{}", unsafe { libc::getuid() });
-    // An atomically replaced ad-hoc signed app needs a fresh launch registration.
-    // kickstart retains launchd's old constraints and can reject the new bundle.
+    // Reload changed app attribution and launch constraints after an atomic update.
     // The job may already be unloaded after a failed upgrade; still bootstrap it.
     let _ = Command::new(launchctl)
         .args(["bootout", &format!("{domain}/{label}")])
@@ -113,6 +110,7 @@ fn reload_registration(launchctl: &Path, registration: &Path, label: &str) -> io
 fn restart_companion() -> io::Result<()> {
     restart_companion_processes();
     if cfg!(target_os = "macos") {
+        hey_boss::desktop_identity::refresh(&home()?)?;
         reload_registration(
             Path::new("/bin/launchctl"),
             &home()?.join("Library/LaunchAgents/local.hey-boss-broker.plist"),
@@ -224,6 +222,14 @@ fn publish_to(
         harvester,
     } = services;
     let companion = *companion;
+    let has_desktop = app.is_some();
+    // Most upgrades only change the CLI. Preserve the signed app and its UUID
+    // unless desktop inputs changed or signature verification fails.
+    let update_app = match app {
+        Some(app) if !desktop_is_current(snapshot, app)? => Some(app.clone()),
+        _ => None,
+    };
+    let app = &update_app;
     let temp = Temp::new()?;
     let staged_app = temp.0.join("Hey Boss.app");
     if app.is_some() {
@@ -325,6 +331,8 @@ fn publish_to(
                 return Err(e);
             }
             replaced_app = true;
+        }
+        if has_desktop {
             restart_desktop(binary)?;
             let mut healthy = false;
             for _ in 0..10 {
@@ -385,6 +393,8 @@ fn publish_to(
             fs::remove_dir_all(app)?;
             fs::rename(app_backup.as_ref().unwrap(), app)?;
             let _ = restart_desktop(binary);
+        } else if has_desktop && replaced_binary {
+            let _ = restart_desktop(binary);
         } else if companion && replaced_binary {
             let _ = restart_companion();
         }
@@ -412,6 +422,29 @@ fn publish_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_check_errors_do_not_authorize_app_replacement() {
+        let temp = Temp::new().unwrap();
+        for code in [0, 3, 1] {
+            fs::write(
+                temp.0.join("package_hey_boss.swift"),
+                format!("import Foundation\nexit({code})\n"),
+            )
+            .unwrap();
+            let result = desktop_is_current(&temp.0, Path::new("unused.app"));
+            match code {
+                0 => assert!(result.unwrap()),
+                3 => assert!(!result.unwrap()),
+                _ => assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Could not check desktop build")
+                ),
+            }
+        }
+    }
     #[test]
     fn shared_api_upgrade_only_restarts_managed_owners() {
         let temp = Temp::new().unwrap();

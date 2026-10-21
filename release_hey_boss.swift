@@ -65,6 +65,7 @@ func releaseHeyBoss(_ version: String, _ repository: String) {
         (libexec/"bin/hey-boss.setup").chmod 0600
         (prefix/"local.hey-boss.plist").atomic_write({
           "Label"                  => "local.hey-boss",
+          "AssociatedBundleIdentifiers" => ["local.hey-boss.desktop"],
           "ProgramArguments"       => [(opt_libexec/"Hey Boss.app/Contents/MacOS/hey-boss-daemon").to_s],
           "EnvironmentVariables"   => { "HEY_BOSS_STATE_DIR" => state.to_s, "HEY_BOSS_CLI_PATH" => (opt_libexec/"bin/hey-boss").to_s },
           "LimitLoadToSessionType" => "Aqua",

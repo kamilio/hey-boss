@@ -40,6 +40,21 @@ fi
 test "$before" = "$(shasum -a 256 "$cli")"
 printf 'PASS: missing certificate leaves the input unchanged\n'
 swift package_hey_boss.swift /usr/bin/true "$app"
+# CLI-only changes must not require another write to a protected app bundle.
+swift package_hey_boss.swift --check-desktop "$app"
+mkdir -p "$stage/source/assets" "$stage/source/src"
+cp package_hey_boss.swift hey_boss_daemon.swift Cargo.toml "$stage/source/"
+cp assets/hey-boss.icns assets/signing-identity.sha1 "$stage/source/assets/"
+printf '// Changed CLI source\n' > "$stage/source/src/main.rs"
+swift "$stage/source/package_hey_boss.swift" --check-desktop "$app"
+printf '\n// Changed desktop source\n' >> "$stage/source/hey_boss_daemon.swift"
+if swift "$stage/source/package_hey_boss.swift" --check-desktop "$app"; then
+  printf 'FAIL: changed desktop source was treated as installed\n' >&2
+  exit 1
+else
+  test "$?" = 3
+fi
+printf 'PASS: CLI-only changes preserve the desktop; changed desktop inputs require replacement\n'
 requirement=$(codesign -dr - "$app" 2>&1 | sed -n 's/^designated => //p')
 case "$requirement" in
   *'certificate leaf = H'*) ;;
@@ -54,6 +69,12 @@ test "$old_hash" != "$new_hash"
 test "$requirement" = "$new_requirement"
 codesign --verify --deep --strict -R "=$requirement" "$app"
 codesign --force --sign - "$app"
+if swift package_hey_boss.swift --check-desktop "$app"; then
+  printf 'FAIL: ad-hoc app was treated as current\n' >&2
+  exit 1
+else
+  test "$?" = 3
+fi
 if codesign --verify --strict -R "=$requirement" "$app" 2>/dev/null; then
   printf 'FAIL: ad-hoc replacement satisfied the certificate requirement\n' >&2
   exit 1
