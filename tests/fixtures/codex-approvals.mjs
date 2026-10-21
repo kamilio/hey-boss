@@ -46,6 +46,9 @@ for await (const line of readline.createInterface({input:process.stdin})) {
       } else if (mode.startsWith('signin')) {
         method = 'mcpServer/elicitation/request';
         Object.assign(params,{mode:'url',serverName:'Okta',message:'Sign in to continue.',url:'https://login.example.invalid/authorize?state=synthetic',elicitationId:'login-1'});
+      } else if (mode.startsWith('mcp-confirm')) {
+        method = 'mcpServer/elicitation/request';
+        Object.assign(params,{mode:mode==='mcp-confirm-openai'?'openai/form':'form',serverName:'cua_repl',message:'Allow Computer Use to use "Skill Audit"?',requestedSchema:{type:'object',properties:{}}});
       } else if (mode.startsWith('connector')) {
         method = mode==='connector-item' ? 'item/tool/requestUserInput' : 'tool/requestUserInput';
         params.questions=[{id:'okta-approval',question:'Allow the requested Okta action?',options:[{label:'Accept',description:'Run this action once.'},{label:'Decline',description:'Do not run this action.'},{label:'Cancel',description:'Stop here.'}]}];

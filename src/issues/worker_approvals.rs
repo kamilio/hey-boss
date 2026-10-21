@@ -13,10 +13,59 @@ struct Prompt {
     link: Option<String>,
 }
 
+fn confirmation_schema(params: &Value) -> bool {
+    if params
+        .get("mode")
+        .is_some_and(|mode| !matches!(mode.as_str(), Some("form" | "openai/form")))
+    {
+        return false;
+    }
+    let Some(schema) = params["requestedSchema"].as_object() else {
+        return false;
+    };
+    // An empty form asks only for a decision. Reject fields, defaults and
+    // unrecognized constraints rather than guessing or collecting their values.
+    schema.get("type").is_some_and(|value| value == "object")
+        && schema
+            .get("properties")
+            .is_some_and(|value| value.as_object().is_some_and(|fields| fields.is_empty()))
+        && schema.iter().all(|(key, value)| match key.as_str() {
+            "type" | "properties" => true,
+            "required" => value.as_array().is_some_and(|fields| fields.is_empty()),
+            "additionalProperties" => value.is_boolean(),
+            "$schema" | "title" | "description" => value.is_string(),
+            _ => false,
+        })
+}
+
 fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
     if method == "mcpServer/elicitation/request" {
-        // Never collect form values (which may be credentials) in Inbox. An
-        // explicit skip cancels only this tool request, preserving the session.
+        if confirmation_schema(params)
+            && let Some(message) = params["message"]
+                .as_str()
+                .filter(|message| !message.trim().is_empty())
+        {
+            let server = params["serverName"].as_str().unwrap_or("MCP server");
+            return Ok(Some(Prompt {
+                answer_key: None,
+                question: message.into(),
+                description: format!(
+                    "Approval applies only to this request. Codex will continue in the same session after your decision.\n\n**Server**\n\n{}",
+                    code(server)
+                ),
+                choices: vec![
+                    (
+                        "Approve once".into(),
+                        json!({"action":"accept","content":{}}),
+                    ),
+                    ("Decline".into(), json!({"action":"decline","content":null})),
+                    ("Cancel".into(), json!({"action":"cancel","content":null})),
+                ],
+                link: None,
+            }));
+        }
+        // Forms with fields may collect credentials. An explicit skip cancels
+        // only this tool request, preserving the session.
         if params["mode"] != "url" {
             let server = params["serverName"].as_str().unwrap_or("MCP server");
             let message = params["message"]
@@ -729,6 +778,107 @@ mod tests {
                 )
                 .is_err(),
                 "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_empty_forms_offer_explicit_request_scoped_approval() {
+        // Computer Use's createElicitation defaults to this empty schema.
+        for mode in [None, Some("form"), Some("openai/form")] {
+            let mut params = json!({
+                "serverName":"cua_repl",
+                "message":"Allow Computer Use to use \"Skill Audit\"?",
+                "requestedSchema":{"type":"object","properties":{}}
+            });
+            if let Some(mode) = mode {
+                params["mode"] = json!(mode);
+            }
+            let p = prompt("mcpServer/elicitation/request", &params)
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.question, params["message"].as_str().unwrap());
+            assert!(p.description.contains("cua_repl"));
+            assert!(p.link.is_none());
+            assert_eq!(
+                p.choices,
+                vec![
+                    (
+                        "Approve once".into(),
+                        json!({"action":"accept","content":{}})
+                    ),
+                    ("Decline".into(), json!({"action":"decline","content":null})),
+                    ("Cancel".into(), json!({"action":"cancel","content":null})),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_empty_form_annotations_do_not_change_the_response() {
+        let p = prompt(
+            "mcpServer/elicitation/request",
+            &json!({
+                "mode":"form", "message":"Allow access?",
+                "requestedSchema":{
+                    "type":"object", "properties":{}, "required":[],
+                    "additionalProperties":false, "title":"Access", "description":"Permission",
+                    "$schema":"https://json-schema.org/draft/2020-12/schema"
+                }
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(p.choices[0].1, json!({"action":"accept","content":{}}));
+    }
+
+    #[test]
+    fn mcp_forms_with_fields_or_unknown_constraints_never_offer_approval() {
+        for schema in [
+            Value::Null,
+            json!({}),
+            json!({"type":"object"}),
+            json!({"type":"object","properties":null}),
+            json!({"type":"array","properties":{}}),
+            json!({"type":"object","properties":{"approved":{"type":"boolean"}}}),
+            json!({"type":"object","properties":{},"required":["password"]}),
+            json!({"type":"object","properties":{},"required":null}),
+            json!({"type":"object","properties":{},"minProperties":1}),
+            json!({"type":"object","properties":{},"additionalProperties":{"type":"string"}}),
+            json!({"type":"object","properties":{},"allOf":[{"required":["token"]}]}),
+            json!({"type":"object","properties":{},"$ref":"#/definitions/credentials"}),
+            json!({"type":"object","properties":{},"default":{"token":"synthetic-secret"}}),
+        ] {
+            let p = prompt(
+                "mcpServer/elicitation/request",
+                &json!({
+                    "mode":"form", "message":"Allow access?", "requestedSchema":schema
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                p.choices
+                    .iter()
+                    .all(|(_, value)| value["action"] != "accept"),
+                "{schema}"
+            );
+            assert!(!p.description.contains("synthetic-secret"));
+        }
+        for (mode, message) in [("unknown", "Allow access?"), ("form", "  ")] {
+            let p = prompt(
+                "mcpServer/elicitation/request",
+                &json!({
+                    "mode":mode, "message":message,
+                    "requestedSchema":{"type":"object","properties":{}}
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                p.choices
+                    .iter()
+                    .all(|(_, value)| value["action"] != "accept")
             );
         }
     }

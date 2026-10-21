@@ -35,8 +35,13 @@ page**, its destination host, and instructions to return afterward. The URL must
 be HTTPS without embedded credentials. Opening it never answers the request.
 **I've finished signing in** explicitly returns `action: accept, content: null`
 to the original callback; Decline and Cancel return their corresponding actions.
-Credentials stay on the external sign-in page. Schema/form elicitations remain
-unsupported because they can collect sensitive input.
+Credentials stay on the external sign-in page. Empty-object form elicitations,
+including Computer Use app-access requests, show the server's question with
+**Approve once**, **Decline**, and **Cancel**. Approval returns `action: accept`
+with empty `content`; it does not request persistent permission. Forms with
+fields, defaults, or unsupported schema constraints remain unsupported because
+they can collect sensitive input. **Continue without this tool** cancels only
+that tool request; **Cancel** stops the worker for explicit retry.
 
 It does not intercept approvals from independently launched terminal
 or desktop sessions, which have their own controlling client. Existing blocked

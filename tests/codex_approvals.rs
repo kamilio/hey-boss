@@ -217,6 +217,75 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn mcp_confirmation_answers_reach_the_original_request() {
+    for (mode, answer, expected) in [
+        (
+            "mcp-confirm",
+            "Approve once",
+            json!({"action":"accept","content":{}}),
+        ),
+        (
+            "mcp-confirm-openai",
+            "Approve once",
+            json!({"action":"accept","content":{}}),
+        ),
+        (
+            "mcp-confirm",
+            "Decline",
+            json!({"action":"decline","content":null}),
+        ),
+    ] {
+        let f = Fixture::new(mode);
+        f.wait(|| f.tasks.lock().unwrap().len() == 1);
+        f.pause_pickup();
+        let task = f.tasks.lock().unwrap()["notice-1"].clone();
+        assert_eq!(
+            task["question"],
+            "Allow Computer Use to use \"Skill Audit\"?"
+        );
+        assert_eq!(
+            task["options"],
+            json!(["Approve once", "Decline", "Cancel"])
+        );
+        assert_eq!(
+            task["issue"],
+            json!({"project":"named:Approval QA","number":1})
+        );
+        assert!(
+            f.replies().is_empty(),
+            "Displaying approval never grants access"
+        );
+        f.answer("notice-1", answer);
+        f.wait(|| f.finished());
+        assert_eq!(
+            f.replies(),
+            vec![json!({"id":"approval-0","result":expected})]
+        );
+        assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "failed");
+    }
+}
+
+#[test]
+fn mcp_confirmation_cancel_dismissal_and_unadvertised_answers_never_approve() {
+    for answer in [None, Some("Cancel"), Some("yes")] {
+        let f = Fixture::new("mcp-confirm");
+        f.wait(|| f.tasks.lock().unwrap().len() == 1);
+        if let Some(answer) = answer {
+            f.answer("notice-1", answer);
+        } else {
+            f.tasks.lock().unwrap().get_mut("notice-1").unwrap()["status"] = json!("cancelled");
+        }
+        f.wait(|| f.finished());
+        assert_eq!(
+            f.replies(),
+            vec![json!({"id":"approval-0","result":{"action":"cancel","content":null}})]
+        );
+        assert_eq!(f.cli(&["worker", "status"])["runs"][0]["state"], "blocked");
+        assert_eq!(f.cli(&["worker", "status"])["eligible"], 0);
+    }
+}
+
+#[test]
 fn connector_and_sign_in_answers_continue_the_original_session() {
     for (mode, answer, expected) in [
         (
