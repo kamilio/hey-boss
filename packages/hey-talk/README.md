@@ -249,11 +249,16 @@ with mode 0600. No network listener or inference network request is used.
 An inference crash retries once without restarting the recording service.
 
 Audio is bounded to five minutes, held only in memory, and discarded on cancel.
-The microphone closes when recording stops. Inference stays warm for ten
-minutes, then releases model memory. Waveform updates run only during visible
-recording. Bluetooth can take roughly two seconds to open its microphone profile
-on first use. Ten starts on the tested headset measured 50–325 ms, with a 57 ms
-median (previously 205 ms). Readiness follows the first nonzero audio buffer;
+The microphone connection stays open for five minutes after a recording stops
+or is cancelled, so repeated dictations can reuse the Bluetooth connection.
+Idle audio is discarded before metering, buffering, or transcription. The macOS
+microphone indicator stays lit while the connection is warm. Sleep, input changes,
+disconnects, and expiry close it; idle capture never opens a replacement device.
+`status --json` reports this as `microphone_keepalive`.
+Inference stays warm for ten minutes, then releases model memory. Waveform updates
+run only during visible recording. Bluetooth can still take roughly two seconds
+to open its microphone profile on first use. Readiness requires fresh audio from
+the new recording, not cached idle samples;
 the waveform appears immediately, without the previous 660 ms reveal delay.
 Startup runs off the UI thread and remains cancellable.
 
