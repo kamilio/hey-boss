@@ -44,7 +44,13 @@ final class SpeechInferenceTests: XCTestCase {
         var first: [Float] = []
         var alignedSentences = 0
         let sentences = ["Hello there. This paragraph can now be read aloud.", "The quick brown fox jumps over the lazy dog.", "Speech stays on this computer."]
-        for text in sentences + sentences {
+        var generated = 0
+        // Alignment warms independently and can take longer under CPU pressure.
+        // Keep proving audio works while waiting, with a bounded readiness check.
+        let alignmentDeadline = ProcessInfo.processInfo.systemUptime + 30
+        while generated < 6 || (alignedSentences == 0 && ProcessInfo.processInfo.systemUptime < alignmentDeadline) {
+            let text = sentences[generated % sentences.count]
+            generated += 1
             let start = ProcessInfo.processInfo.systemUptime
             try Wire.write(Wire.json(["text": text]), to: input.fileHandleForWriting.fileDescriptor)
             let response = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
