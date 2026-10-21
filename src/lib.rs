@@ -13,6 +13,8 @@ pub(crate) mod codex_permissions;
 #[doc(hidden)]
 pub mod database;
 pub mod document;
+#[doc(hidden)]
+pub mod desktop_identity;
 pub mod environment;
 pub mod error_inbox;
 pub mod fleet;

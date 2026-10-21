@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CoreServices
 
 func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: String, _ daemonPath: String) {
     precondition(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15)
@@ -29,6 +30,7 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
     if files.fileExists(atPath: plist.path) { launchctl(["bootout", domain, plist.path]) }
     let content: [String: Any] = [
         "Label": "local.hey-boss",
+        "AssociatedBundleIdentifiers": ["local.hey-boss.desktop"],
         "ProgramArguments": [daemonPath],
         "EnvironmentVariables": ["HEY_BOSS_STATE_DIR": state.path, "HEY_BOSS_CLI_PATH": binaries.appendingPathComponent("hey-boss").path],
         "LimitLoadToSessionType": "Aqua",
@@ -41,6 +43,8 @@ func setupHeyBoss(_ statePath: String, _ binaryPath: String, _ agentsPath: Strin
     try! PropertyListSerialization.data(fromPropertyList: content, format: .xml, options: 0).write(to: plist, options: .atomic)
     try! files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path)
     try! Data("1".utf8).write(to: state.appendingPathComponent("protocol-version"), options: .atomic)
+    let app = URL(fileURLWithPath: daemonPath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    precondition(LSRegisterURL(app as CFURL, true) == noErr, "Could not register Hey Boss with Launch Services")
     launchctl(["bootstrap", domain, plist.path])
 }
 

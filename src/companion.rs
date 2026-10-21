@@ -258,6 +258,12 @@ home=pathlib.Path.home()
 content={"Label":"local.hey-boss-broker","ProgramArguments":[str(home/".local/bin/hey-boss"),"companion","serve","--state",str(home/".local/share/hey-boss")],"RunAtLoad":True,"KeepAlive":True,"ThrottleInterval":60,"StandardOutPath":str(home/".local/share/hey-boss/broker.log"),"StandardErrorPath":str(home/".local/share/hey-boss/broker.log")}
 (home/"Library/LaunchAgents/local.hey-boss-broker.plist").write_bytes(plistlib.dumps(content))
 BROKER_PLIST
+if test -f "$HOME/Library/LaunchAgents/local.hey-boss.plist"; then
+desktop_daemon=$(/usr/bin/plutil -extract ProgramArguments.0 raw -o - "$HOME/Library/LaunchAgents/local.hey-boss.plist")
+if test -f "$desktop_daemon"; then
+/usr/bin/plutil -replace AssociatedBundleIdentifiers -json '["local.hey-boss.desktop"]' "$HOME/Library/LaunchAgents/local.hey-boss-broker.plist"
+fi
+fi
 domain="gui/$(id -u)"
 launchctl bootout "$domain/local.hey-boss-broker" >/dev/null 2>&1 || true
 launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/local.hey-boss-broker.plist"

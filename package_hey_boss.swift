@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 func require(_ condition: Bool, _ message: String) {
     guard condition else {
@@ -9,7 +10,7 @@ func require(_ condition: Bool, _ message: String) {
 
 // Give Launch Services a real application identity, including before the first
 // window opens. A runtime NSApplication icon on a bare executable is not enough.
-precondition(CommandLine.arguments.count == 3, "Usage: swift package_hey_boss.swift DAEMON OUTPUT.app | --cli BINARY")
+precondition(CommandLine.arguments.count == 3, "Usage: swift package_hey_boss.swift DAEMON OUTPUT.app | --cli BINARY | --check-desktop APP")
 let files = FileManager.default
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 // Keep the certificate stable across builds so macOS retains app permissions.
@@ -17,6 +18,32 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let identity = try String(contentsOf: root.appendingPathComponent("assets/signing-identity.sha1"), encoding: .utf8)
     .trimmingCharacters(in: .whitespacesAndNewlines)
 precondition(identity.count == 40 && identity.allSatisfy { $0.isHexDigit }, "Invalid pinned signing identity")
+func desktopBuild() throws -> String {
+    var hash = SHA256()
+    // CLI changes must not rewrite the app. Include every desktop packaging input.
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/signing-identity.sha1"] {
+        hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
+        hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
+        hash.update(data: Data([0]))
+    }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+}
+func verify(_ path: URL, identifier: String) throws -> Bool {
+    let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+    verify.arguments = ["--verify", "--deep", "--strict", "-R",
+        "=identifier \"\(identifier)\" and certificate leaf = H\"\(identity)\"", path.path]
+    verify.standardError = FileHandle.nullDevice
+    try verify.run(); verify.waitUntilExit()
+    return verify.terminationStatus == 0
+}
+if CommandLine.arguments[1] == "--check-desktop" {
+    let app = URL(fileURLWithPath: CommandLine.arguments[2])
+    let expected = try desktopBuild()
+    let info = (try? Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")))
+        .flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+    guard info?["HeyBossDesktopBuild"] as? String == expected else { exit(3) }
+    exit(try verify(app, identifier: "local.hey-boss.desktop") ? 0 : 3)
+}
 let identities = Process()
 let identityOutput = Pipe()
 identities.executableURL = URL(fileURLWithPath: "/usr/bin/security")
@@ -32,11 +59,7 @@ func sign(_ path: URL, identifier: String) throws {
     sign.arguments = ["--force", "--sign", identity, "--identifier", identifier, "--timestamp=none", path.path]
     try sign.run(); sign.waitUntilExit()
     require(sign.terminationStatus == 0, "Could not sign \(path.path) with the pinned identity")
-    let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-    verify.arguments = ["--verify", "--deep", "--strict", "-R",
-        "=identifier \"\(identifier)\" and certificate leaf = H\"\(identity)\"", path.path]
-    try verify.run(); verify.waitUntilExit()
-    require(verify.terminationStatus == 0, "Signing verification failed for \(path.path)")
+    require(try verify(path, identifier: identifier), "Signing verification failed for \(path.path)")
 }
 // The installed CLI and temporary upgrade guard perform App Management work.
 // Their identity must survive both rebuilds and changes to the executable name.
@@ -69,6 +92,7 @@ let info: [String: Any] = [
     "CFBundleInfoDictionaryVersion": "6.0",
     "CFBundleShortVersionString": version,
     "CFBundleVersion": version,
+    "HeyBossDesktopBuild": try desktopBuild(),
     "CFBundleIconFile": "hey-boss.icns",
     "LSMinimumSystemVersion": "15.0",
     "NSHighResolutionCapable": true,
