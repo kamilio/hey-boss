@@ -58,6 +58,9 @@ pub struct Request {
     pub link_label: Option<String>,
     pub task_id: Option<String>,
     pub sync: bool,
+    /// Deliver despite quiet hours and muted senders.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub page: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub comments_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -376,6 +379,7 @@ impl Request {
             link_url: None,
             link_label: None,
             sync: false,
+            page: false,
             comments_enabled: false,
             attachment: None,
             document_name: None,

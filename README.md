@@ -575,10 +575,14 @@ and PR behavior. The stable assignee remains `human:boss`. The CLI equivalents a
 `--host HOST` to address a remote issue store. Settings are stored in SQLite,
 with version checks and request IDs for safe retries.
 
-Quiet hours in **Settings** silence Mac popups and phone pushes daily, initially
+Quiet hours in **Settings** silence Mac popups daily, initially
 22:00–07:00. Change the times and time zone, or turn the schedule off. Requests
 stay in the inbox; muted notifications are not replayed in the morning. The
-schedule syncs to connected devices and the phone relay.
+schedule syncs to connected devices.
+
+Add `--page` to an alert, update, image, or question to bypass quiet hours and muted
+senders: `hey-boss notif alert --page --title 'Service down' 'API is unreachable'`.
+Pages appear on the Mac and remain dismissible like other notices.
 
 For a detail read without expanding commit or attachment history, use
 `hey-boss issue view NUMBER --compact --json` (also supports `--supervisor`).
