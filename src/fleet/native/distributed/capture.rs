@@ -91,6 +91,41 @@ pub(super) fn upgrade_retry_metadata(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn upgrade_worker_execution(db: &Connection) -> Result<()> {
+    let current = |db: &Connection| {
+        db.query_row("SELECT count(*)=3 FROM sqlite_master WHERE type='trigger' AND name IN ('distributed_capture_project_settings_INSERT','distributed_capture_project_settings_UPDATE','distributed_capture_project_settings_DELETE') AND instr(sql,'''worker_execution''')>0", [], |r| r.get::<_, bool>(0))
+    };
+    if current(db)? {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    if current(&tx)? {
+        tx.commit()?;
+        return Ok(());
+    }
+    for operation in ["INSERT", "UPDATE", "DELETE"] {
+        tx.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS distributed_capture_project_settings_{operation}"
+        ))?;
+    }
+    install(&tx)?;
+    // Repair choices saved before the trigger upgrade. Publish only this field,
+    // preserving concurrent prompt edits and deletion. Unconfigured peers must
+    // not publish their migration default over another machine's saved choice.
+    let rows = replica::rows(
+        &tx,
+        "SELECT project_id,worker_execution FROM project_settings s WHERE worker_execution<>'{}' AND NOT EXISTS(SELECT 1 FROM distributed_fields WHERE table_name='project_settings' AND entity=json_object('project_id',s.project_id) AND field='worker_execution')",
+        &[],
+    )?;
+    for row in rows {
+        let before = serde_json::json!({"project_id": row["project_id"]});
+        tx.execute("UPDATE distributed_meta SET clock=clock+1 WHERE id=1", [])?;
+        tx.execute("INSERT INTO distributed_outbox SELECT clock,'project_settings',?1,?2 FROM distributed_meta WHERE id=1", [before.to_string(), row.to_string()])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 fn row_json(columns: &[String], prefix: &str) -> String {
     format!(
         "json_object({})",

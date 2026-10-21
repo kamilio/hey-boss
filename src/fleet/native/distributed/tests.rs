@@ -284,6 +284,106 @@ fn seed(db: &Connection) {
 }
 
 #[test]
+fn worker_execution_upgrade_republishes_settings_and_captures_resets() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        db.execute("UPDATE fleet_meta SET node=?1,role='peer'", [node])
+            .unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+        // Reproduce enrolled machines whose triggers predate this column.
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            let name = format!("distributed_capture_project_settings_{operation}");
+            let sql: String = db
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name=?1",
+                    [&name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let sql = sql
+                .replace(",'worker_execution',NEW.\"worker_execution\"", "")
+                .replace(",'worker_execution',OLD.\"worker_execution\"", "")
+                .replace(
+                    " AND OLD.\"worker_execution\" IS NEW.\"worker_execution\"",
+                    "",
+                );
+            db.execute_batch(&format!("DROP TRIGGER {name}; {sql};"))
+                .unwrap();
+        }
+    }
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    seed(&a);
+    a.execute(
+        "INSERT INTO project_settings(project_id,prompt,version) VALUES('p','Instructions',18)",
+        [],
+    )
+    .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let execution = r#"{"model":"gpt-6-astra","reasoning":"medium","permissions":"yolo"}"#;
+    a.execute(
+        "UPDATE project_settings SET worker_execution=?1 WHERE project_id='p'",
+        [execution],
+    )
+    .unwrap();
+    install(&a, "a").unwrap();
+    let pending: i64 = a.query_row("SELECT count(*) FROM distributed_outbox WHERE clock>(SELECT exported FROM distributed_meta)", [], |r| r.get(0)).unwrap();
+    assert_eq!(
+        pending, 1,
+        "upgrade must publish the previously omitted choice"
+    );
+    install(&a, "a").unwrap();
+    assert_eq!(a.query_row("SELECT count(*) FROM distributed_outbox WHERE clock>(SELECT exported FROM distributed_meta)", [], |r| r.get::<_,i64>(0)).unwrap(), pending, "repair is idempotent");
+    // The unconfigured peer upgrades later; its default must not undo YOLO.
+    b.execute("UPDATE distributed_meta SET clock=clock+1000", [])
+        .unwrap();
+    install(&b, "b").unwrap();
+    capture_all(&b, &mut eb);
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    for db in [&a, &b] {
+        assert_eq!(
+            db.query_row(
+                "SELECT worker_execution FROM project_settings WHERE project_id='p'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            execution
+        );
+    }
+    let inherited = r#"{"model":"","reasoning":"","permissions":""}"#;
+    b.execute(
+        "UPDATE project_settings SET worker_execution=?1 WHERE project_id='p'",
+        [inherited],
+    )
+    .unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row(
+            "SELECT worker_execution FROM project_settings WHERE project_id='p'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        inherited
+    );
+}
+
+#[test]
 fn remote_retry_cooldown_follows_the_attempt_between_machines() {
     let fa = Fixture::new();
     let a = fa.db();
