@@ -183,12 +183,31 @@ function syncProblem(machine, now=Date.now()) {
   if(machine.peer_sync_error)return 'Peer sync: '+machine.peer_sync_error;
   const sample=machine.sync;
   const local=['supervisor','controller'].includes(machine.role);
-  if(!sample || !local && (!machine.sync_observed_at || now/1000-machine.sync_observed_at>30))return 'Data sync is not verified';
+  const observedAge=local?0:now-machine.sync_observed_at*1000;
+  if(!sample || !local && (!machine.sync_observed_at || observedAge<0 || observedAge>30000))return 'Data sync is not verified';
+  // A fresh exchange with ordinary queued changes is progress, not an alert.
+  if(sample.state==='catching_up'&&Number.isFinite(sample.exchange_age_ms)&&sample.exchange_age_ms+observedAge<=30000&&!sample.pending_reservations&&!sample.conflicting_attempts)return null;
   if(sample.state!=='healthy')return sample.message||'Data sync needs attention';
-  if(machine.conflicts>0)return machine.conflicts+' saved offline edits need review';
   return null;
 }
-if (typeof module !== 'undefined') module.exports = {syncProblem, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
+function fleetAttention(data,now=Date.now()) {
+  const notices=[],name=machine=>machine.hostname||machine.host;
+  const devices=(data.machines||[]).map(machine=>({machine,online:machine.state==='connected'&&now/1000-(machine.heartbeat||0)<=15})).sort((a,b)=>name(a.machine).localeCompare(name(b.machine)));
+  const problems=devices.map(d=>({machine:d.machine,note:!d.online?'offline; activity is last known':d.machine.configuration_error?'new settings have not applied':syncProblem(d.machine,now)})).filter(d=>d.note);
+  if(problems.length||data.configuration?.error)notices.push({key:'machines',summary:data.configuration?.error?'Configuration file needs attention':problems.length+' '+(problems.length===1?'machine needs':'machines need')+' attention',note:[data.configuration?.error,...problems.map(d=>name(d.machine)+': '+d.note)].filter(Boolean).join(' · ')});
+  const retained=data.conflicts?.length||0;
+  const reports=devices.filter(d=>d.machine.host!=='local'&&!['supervisor','controller'].includes(d.machine.role)&&d.machine.conflicts>0).map(d=>name(d.machine)+': '+d.machine.conflicts);
+  if(retained||reports.length){
+    const summary=retained?(retained>=100?'100+':retained)+' saved offline '+(retained===1?'edit needs':'edits need')+' review':'Saved offline edits reported';
+    const notes=[];
+    if(retained)notes.push('Retained on the main machine after earlier sync conflicts.');
+    if(reports.length)notes.push('Machine reports: '+reports.join(' · ')+'.');
+    if(retained&&reports.length)notes.push('These counts can include copies of the same edits.');
+    notices.push({key:'saved-edits',summary,note:notes.join(' ')});
+  }
+  return notices;
+}
+if (typeof module !== 'undefined') module.exports = {syncProblem, fleetAttention, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -257,7 +276,7 @@ if (typeof document !== 'undefined') (() => {
     const expanded=new Set([...board.querySelectorAll('details[open]')].map(d=>d.dataset.key));
     const devices=deviceView(managedFleet(data));
     const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,usage:slotUsage(worker,device.machine),phase:workerPhase(worker,device.machine)})));
-    renderFleetAttention(data,devices);
+    renderFleetAttention(data);
     const relevant=entries.filter(e=>e.worker.pid>0||e.worker.intent==='running'||e.worker.intent==='drain');
     const filters=[['all','All'],['busy','Working'],['available','Available'],['attention','Needs attention']];
     $('worker-filters').replaceChildren(...filters.map(([value,label])=>{const b=element('button','worker-filter',label);b.type='button';b.dataset.activityFilter=value;b.setAttribute('aria-pressed',String(activityFilter===value));return b;}));
@@ -396,17 +415,17 @@ if (typeof document !== 'undefined') (() => {
     else if(worker.pid>0){actions.append(element('span','device-note','Finishing current work before removal.'));const kill=element('button','button small danger','Kill now');kill.type='button';Object.assign(kill.dataset,{signal:'stop',worker:worker.id,host:machine.host});actions.append(kill);}
     return actions;
   }
-  function renderFleetAttention(data,devices){
-    const previous=$('fleet-attention').querySelector('details');
-    const problems=devices.filter(d=>!d.online||d.machine.configuration_error||syncProblem(d.machine));
-    const retained=data.conflicts?.length||0;
-    if(!problems.length&&!data.configuration?.error&&!retained){$('fleet-attention').replaceChildren();return;}
-    const health=element('details','fleet-health');health.open=previous?previous.open:true;
-    health.append(element('summary','',data.configuration?.error?'Configuration file needs attention':problems.length?problems.length+' '+(problems.length===1?'machine needs':'machines need')+' attention':'Saved offline edits need review'));
-    const notes=problems.map(d=>(d.machine.hostname||d.machine.host)+': '+(!d.online?'offline; activity is last known':d.machine.configuration_error?'new settings have not applied':syncProblem(d.machine)));
-    if(retained)notes.push(retained+' retained edits on the main machine need review');
-    health.append(element('p','',data.configuration?.error||notes.join(' · ')));
-    $('fleet-attention').replaceChildren(health);
+  function renderFleetAttention(data){
+    const container=$('fleet-attention'),notices=fleetAttention(data);
+    for(const child of [...container.children])if(!notices.some(n=>n.key===child.dataset.notice))child.remove();
+    for(const [index,notice] of notices.entries()){
+      let health=container.querySelector('[data-notice="'+notice.key+'"]');
+      if(!health){health=element('details','fleet-health'+(notice.key==='saved-edits'?' fleet-review':''));health.dataset.notice=notice.key;health.open=true;health.append(element('summary'),element('p'));}
+      const summary=health.querySelector('summary'),note=health.querySelector('p');
+      if(summary.textContent!==notice.summary)summary.textContent=notice.summary;
+      if(note.textContent!==notice.note)note.textContent=notice.note;
+      if(container.children[index]!==health)container.insertBefore(health,container.children[index]||null);
+    }
   }
 
   function renderWorkerBoard(data) {
@@ -423,7 +442,7 @@ if (typeof document !== 'undefined') (() => {
     const devices=deviceView(managedFleet(data));
     const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,phase:workerPhase(worker,device.machine)})));
     const count=group=>entries.filter(e=>e.phase.group===group).length;
-    renderFleetAttention(data,devices);
+    renderFleetAttention(data);
     $('worker-view-help').textContent=configuring?'Edit a worker’s settings below. Changes save to the supervisor’s fleet.yaml and apply automatically.':'Workers are grouped by machine. Expand a row for its tasks and controls. Stopped workers are kept out of the way.';
     const filters=[['current','Current',entries.length-count('stopped')],['attention','Needs attention',count('attention')],['paused','Paused',count('paused')],['stopped','Stopped',count('stopped')],['all','All',entries.length]];
     $('worker-filters').replaceChildren(...filters.map(([value,label,total])=>{const b=element('button','worker-filter',label+' '+total);b.type='button';b.dataset.filter=value;b.setAttribute('aria-pressed',String(workerFilter===value));return b;}));

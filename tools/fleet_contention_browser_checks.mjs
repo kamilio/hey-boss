@@ -7,8 +7,8 @@ const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const source = resolve('src/issues/web');
 const project = {id:'named:Contention QA',name:'Contention QA'};
 const runs = Array.from({length:2},(_,i)=>({id:'run-'+i,project_id:project.id,project_name:project.name,number:i+1,title:['Keep the current task running','Apply changes after the database is available'][i],state:'running',started_at:Date.now()-120000,finished_at:null,last_event:'Working through the existing task.'}));
-let state = 'healthy';
-const fleet = () => ({ok:true,machines:[{host:'remote',hostname:'Connected MacBook',role:'agent',state:state==='offline'?'disconnected':'connected',heartbeat:Date.now()/1000,desired_revision:'current',applied_revision:'current',sync_observed_at:Date.now()/1000,sync:state==='sync_waiting'?{state:'waiting',message:'Database busy; data sync will retry',error:'Database writer queue timed out before execution'}:{state:'healthy',message:'Changes are applied and sync is responding'},database_errors:state==='waiting'?{pull:'Database writer queue timed out before execution'}:{},workers:[{id:'preserved-worker',pid:123,intent:'running',managed:true,active:2,config:{name:'Productive worker',enabled:true,concurrency:3,projects:[project.id]},runs}]}],signals:[],conflicts:[]});
+let state = 'healthy',retained=false;
+const fleet = () => ({ok:true,machines:[{host:'remote',hostname:'Connected MacBook',role:'agent',state:state==='offline'?'disconnected':'connected',heartbeat:Date.now()/1000,desired_revision:'current',applied_revision:'current',sync_observed_at:Date.now()/1000,sync:state==='sync_waiting'?{state:'waiting',message:'Database busy; data sync will retry',error:'Database writer queue timed out before execution'}:state==='syncing'?{state:'catching_up',message:'Changes are waiting to be applied or sent',age_ms:500,exchange_age_ms:1000,pending_local:2,outgoing_pending:4}:{state:'healthy',message:'Changes are applied and sync is responding'},conflicts:retained?7:0,database_errors:state==='waiting'?{pull:'Database writer queue timed out before execution'}:{},workers:[{id:'preserved-worker',pid:123,intent:'running',managed:true,active:2,config:{name:'Productive worker',enabled:true,concurrency:3,projects:[project.id]},runs}]}],signals:[],conflicts:retained?Array.from({length:8},(_,id)=>({id})):[]});
 const mutations=[];
 const server=createServer((req,res)=>{
   const url=new URL(req.url,'http://fixture'),path=url.pathname;
@@ -43,7 +43,7 @@ try{
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
     await page.goto(`http://127.0.0.1:${server.address().port}/workers${paired?'?paired=1':''}`);
     await page.locator('.activity-machine').waitFor();
-    for(const next of ['healthy','waiting','sync_waiting','recovered','offline']){
+    for(const next of ['healthy','syncing','waiting','sync_waiting','recovered','offline']){
       state=next;await page.locator('#refresh').click();
       await page.waitForFunction(expected=>{
         const message=document.querySelector('#fleet-attention').textContent;
@@ -67,7 +67,35 @@ try{
     }
     await page.locator('#refresh').focus();await page.keyboard.press('Enter');
     assert(await page.locator('#refresh').evaluate(el=>el===document.activeElement),'Refresh retains keyboard focus');
+    retained=true;state='healthy';await page.locator('#refresh').click();
+    const review=page.locator('[data-notice="saved-edits"]');
+    await review.locator('summary').filter({hasText:'8 saved offline edits need review'}).waitFor();
+    await review.locator('summary').focus();await page.keyboard.press('Enter');
+    await page.evaluate(()=>{
+      window.savedReview=document.querySelector('[data-notice="saved-edits"]');
+      window.noticeMutations=[];
+      window.noticeObserver=new MutationObserver(records=>window.noticeMutations.push(...records));
+      window.noticeObserver.observe(document.querySelector('#fleet-attention'),{subtree:true,childList:true,characterData:true});
+    });
+    for(const next of ['syncing','healthy','syncing','waiting','offline','recovered']){
+      state=next;
+      const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/fleet/status');
+      await page.evaluate(()=>document.querySelector('#refresh').click());await(await response).finished();
+      await page.evaluate(()=>new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done))));
+      assert(await review.evaluate(el=>el===window.savedReview&&!el.open&&el.querySelector('summary')===document.activeElement),'Refresh retains notice identity, collapse state and keyboard focus');
+      assert.equal(await review.locator('summary').innerText(),'8 saved offline edits need review');
+      if(['syncing','healthy'].includes(state))assert.equal(await page.evaluate(()=>window.noticeMutations.length),0,'Ordinary sync causes no notice DOM changes');
+      assert.equal(await page.locator('[data-notice="machines"]').count(),['waiting','offline'].includes(state)?1:0,'Only real failures produce a machine alert');
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Separate notices fit '+width);
+      checks++;
+    }
+    await page.evaluate(()=>window.noticeObserver.disconnect());
+    if(process.env.FLEET_SCREENSHOTS&&[1440,390].includes(width)){
+      await review.locator('summary').click();
+      await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`${paired?'paired':'desktop'}-${colorScheme}-${width}-saved-edits.png`),fullPage:true});
+    }
+    retained=false;
   }
   assert.deepEqual(mutations,[],'Visual tests never send worker controls');assert.deepEqual(errors,[]);
-  console.log(`PASS: ${checks} desktop/paired light/dark layouts, waiting/recovery/offline states, preserved tasks, keyboard focus, no mutations or runtime errors`);
+  console.log(`PASS: ${checks} desktop/paired light/dark layouts, waiting/recovery/offline states, stable saved-edit notices during sync, preserved tasks and keyboard focus, no API mutations or runtime errors`);
 }finally{await browser?.close();await new Promise(done=>server.close(done));}
