@@ -21,6 +21,13 @@ private final class FakeSpeechOutput: SpeechOutput {
     func stop() { stops += 1 }
 }
 final class SpeechPlaybackTests: XCTestCase {
+    @MainActor func testDefaultSpeakingSpeedIsFasterAndUserCanStillChangeIt() {
+        let playback = SpeechPlayback(engine: FakeSpeechEngine(), output: FakeSpeechOutput())
+        XCTAssertEqual(playback.rate, 1.25)
+        playback.rate = 1.5
+        playback.stop()
+        XCTAssertEqual(playback.rate, 1.5)
+    }
     @MainActor func testAudioClockIsSafeBeforeFirstBuffer() {
         let output = NativeSpeechOutput()
         XCTAssertEqual(output.time, 0)

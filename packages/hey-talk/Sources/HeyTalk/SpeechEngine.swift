@@ -113,15 +113,36 @@ final class SupertonicSpeechEngine: SpeechEngine {
     deinit { cancel() }
 }
 
+// Optional alignment warms independently. Short opening sentences must not
+// finish playing while the next audio chunk waits for a second model to load.
+private final class SpeechAlignment {
+    private let lock = NSLock()
+    private var recognizer: OpaquePointer?
+    init(library: String, model: String) {
+        DispatchQueue.global(qos: .utility).async {
+            let directory = URL(fileURLWithPath: model)
+            guard ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.vocab"].allSatisfy({ FileManager.default.isReadableFile(atPath: directory.appendingPathComponent($0).path) }) else { return }
+            let recognizer = ht_create(library, model, 2)
+            self.lock.lock(); self.recognizer = recognizer; self.lock.unlock()
+        }
+    }
+    func json(samples: [Float]) -> String? {
+        lock.lock(); let ready = recognizer; lock.unlock()
+        guard let ready, let value = samples.withUnsafeBufferPointer({ ht_align(ready, $0.baseAddress, Int32($0.count)) }) else { return nil }
+        defer { ht_free_text(value) }
+        return String(cString: value)
+    }
+    deinit { if let recognizer { ht_destroy(recognizer) } }
+}
+
 func runSpeechWorker(model: String, library: String, alignmentModel: String) throws {
     try Wire.prepare(STDIN_FILENO); try Wire.prepare(STDOUT_FILENO)
     let parentWatch = DispatchSource.makeProcessSource(identifier: getppid(), eventMask: .exit, queue: .global())
     parentWatch.setEventHandler { _exit(0) }; parentWatch.resume()
     guard let speech = ht_speech_create(library, model) else { throw TalkError("Cannot load Supertonic speech model") }
     defer { ht_speech_destroy(speech); parentWatch.cancel() }
-    guard let recognizer = ht_create(library, alignmentModel, 2) else { throw TalkError("Cannot load speech timing model") }
-    defer { ht_destroy(recognizer) }
     try Wire.write(Wire.json(["ready": true]), to: STDOUT_FILENO)
+    let alignment = SpeechAlignment(library: library, model: alignmentModel)
     while true {
         let request = try Wire.line(from: STDIN_FILENO, timeout: 86_400, limit: 16_384)
         guard let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
@@ -133,12 +154,11 @@ func runSpeechWorker(model: String, library: String, alignmentModel: String) thr
         try Wire.write(Wire.json(["count": Int(count), "rate": Int(rate)]), to: STDOUT_FILENO)
         try Wire.write(data, to: STDOUT_FILENO)
         let pcm = try speechAlignmentSamples(data, rate: Double(rate))
-        guard let json = pcm.withUnsafeBufferPointer({ ht_align(recognizer, $0.baseAddress, Int32($0.count)) }) else {
+        guard let json = alignment.json(samples: pcm) else {
             try Wire.write(Wire.json(["tokens": [], "timestamps": []]), to: STDOUT_FILENO); continue
         }
-        var alignment = Data(String(cString: json).utf8); alignment.append(10)
-        ht_free_text(json)
-        try Wire.write(alignment, to: STDOUT_FILENO)
+        var timing = Data(json.utf8); timing.append(10)
+        try Wire.write(timing, to: STDOUT_FILENO)
     }
 }
 

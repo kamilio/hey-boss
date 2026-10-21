@@ -4,6 +4,26 @@ import TalkCore
 @testable import HeyTalk
 
 final class SpeechInferenceTests: XCTestCase {
+    func testFirstAudioDoesNotDependOnLoadingWordAlignment() throws {
+        guard let path = ProcessInfo.processInfo.environment["HEY_TALK_TEST_APP"] else { throw XCTSkip("Run test-speech.sh after building the app") }
+        let app = URL(fileURLWithPath: path), worker = Process(), input = Pipe(), output = Pipe()
+        worker.executableURL = app.appendingPathComponent("Contents/Helpers/hey-talk-inference")
+        worker.arguments = ["--speech-worker", SpeechModel.directory.path, app.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib").path, "/nonexistent-word-alignment-model"]
+        worker.standardInput = input; worker.standardOutput = output
+        try Wire.prepare(input.fileHandleForWriting.fileDescriptor); try Wire.prepare(output.fileHandleForReading.fileDescriptor)
+        try worker.run()
+        defer { if worker.isRunning { worker.terminate() }; worker.waitUntilExit() }
+        let ready = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
+        XCTAssertEqual(ready?["ready"] as? Bool, true, "Alignment must not block speech startup")
+        guard ready?["ready"] as? Bool == true else { return }
+        try Wire.write(Wire.json(["text": "Hello there."]), to: input.fileHandleForWriting.fileDescriptor)
+        let header = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
+        let count = try XCTUnwrap(header?["count"] as? Int)
+        XCTAssertGreaterThan(count, 1000)
+        _ = try Wire.readExactly(count * 4, from: output.fileHandleForReading.fileDescriptor)
+        let alignment = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
+        XCTAssertEqual(alignment?["tokens"] as? [String], [], "Missing alignment uses the existing phrase highlight")
+    }
     func testPackagedSupertonicProducesAudibleRecognizableSpeech() throws {
         guard let path = ProcessInfo.processInfo.environment["HEY_TALK_TEST_APP"] else {
             throw XCTSkip("Run test-speech.sh after building the app")
@@ -22,7 +42,9 @@ final class SpeechInferenceTests: XCTestCase {
         guard ready?["ready"] as? Bool == true else { return }
         print("Supertonic model load: \(Int((ProcessInfo.processInfo.systemUptime - cold) * 1000))ms")
         var first: [Float] = []
-        for text in ["Hello there. This paragraph can now be read aloud.", "The quick brown fox jumps over the lazy dog.", "Speech stays on this computer."] {
+        var alignedSentences = 0
+        let sentences = ["Hello there. This paragraph can now be read aloud.", "The quick brown fox jumps over the lazy dog.", "Speech stays on this computer."]
+        for text in sentences + sentences {
             let start = ProcessInfo.processInfo.systemUptime
             try Wire.write(Wire.json(["text": text]), to: input.fileHandleForWriting.fileDescriptor)
             let response = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
@@ -36,11 +58,14 @@ final class SpeechInferenceTests: XCTestCase {
             print("Supertonic generation: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))ms for \(String(format: "%.2f", Double(count) / 44_100))s audio")
             let alignment = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor)) as? [String: Any]
             let words = SpeechTiming.align(text: text, tokens: alignment?["tokens"] as? [String] ?? [], times: alignment?["timestamps"] as? [Double] ?? [], duration: Double(count) / 44_100)
-            XCTAssertFalse(words.isEmpty, "\(alignment ?? [:])")
-            if text.hasPrefix("Hello") { XCTAssertEqual(words.count, 9, "\(alignment ?? [:])") }
+            if !words.isEmpty {
+                alignedSentences += 1
+                if text.hasPrefix("Hello") { XCTAssertEqual(words.count, 9, "\(alignment ?? [:])") }
+            }
             print("Word timing ready: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))ms, \(words.count) aligned words")
             if first.isEmpty { first = samples }
         }
+        XCTAssertGreaterThan(alignedSentences, 0, "Word timing must become available after background initialization")
         // An independent speech recognizer checks that the waveform says the
         // requested words, rather than merely containing nonzero audio.
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("hey-talk-speech-\(UUID()).wav")
