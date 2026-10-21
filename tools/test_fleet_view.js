@@ -163,3 +163,33 @@ assert.match(syncProblem({...connectedSync,peer_sync_error:'No SSH route'},now),
 assert.equal(syncProblem({...connectedSync,database_errors:{pull:'Database writer unavailable'}},now),'Database busy; data sync will retry');
 assert.equal(syncProblem({...connectedSync,database_errors:{configure:'Database writer unavailable',heartbeat:'locked'}},now),'Database busy; settings and activity will retry');
 assert.equal(syncProblem({...connectedSync,database_errors:{}},now),null,'Only completed recovery clears the contention warning');
+
+const {fleetAttention}=require('../src/issues/web/fleet.js');
+const syncing={state:'catching_up',message:'Changes are waiting to be applied or sent',age_ms:500,exchange_age_ms:1000,pending_local:1,pending_projection:4,outgoing_pending:2};
+assert.equal(syncProblem({...connectedSync,sync:syncing},now),null,'Recent ordinary sync activity does not require attention');
+assert.equal(syncProblem({...connectedSync,conflicts:7},now),null,'Retained edits are independent of machine health');
+for(const pending of ['pending_reservations','conflicting_attempts'])assert.match(syncProblem({...connectedSync,sync:{...syncing,[pending]:1}},now),/waiting/,'Worker coordination delays remain visible');
+for(const exchange_age_ms of [null,undefined,30001])assert.match(syncProblem({...connectedSync,sync:{...syncing,exchange_age_ms}},now),/waiting/,'Unverified or stale exchanges remain visible');
+assert.match(syncProblem({...connectedSync,sync_observed_at:now/1000-29,sync:syncing},now+1000),/waiting/,'Exchange age includes the time since the remote report');
+const reviewFleet={machines:[
+  {...connectedSync,host:'local',hostname:'Main',role:'supervisor',conflicts:8},
+  {...connectedSync,host:'devbox',hostname:'devboxkjopek',conflicts:7},
+  {...connectedSync,host:'mac',hostname:'Mac.lan',conflicts:1},
+],conflicts:Array.from({length:8},(_,id)=>({id}))};
+const reviewNotices=fleetAttention(reviewFleet,now);
+assert.equal(reviewNotices.length,1,'Copies on the main machine do not count as another machine failure');
+assert.equal(reviewNotices[0].key,'saved-edits');
+assert.equal(reviewNotices[0].summary,'8 saved offline edits need review');
+assert.match(reviewNotices[0].note,/same edits/,'Explain that machine reports can overlap the retained records');
+assert(!reviewNotices[0].note.includes('Main: 8'),'The main machine count is not repeated');
+assert.deepEqual(fleetAttention({...reviewFleet,machines:reviewFleet.machines.map(m=>({...m,sync:syncing}))},now),reviewNotices,'Healthy and busy sync snapshots keep the same notice');
+assert.deepEqual(fleetAttention({...reviewFleet,machines:[...reviewFleet.machines].reverse()},now),reviewNotices,'Machine order does not change the notice');
+const offlineNotices=fleetAttention({...reviewFleet,machines:reviewFleet.machines.map(m=>m.host==='mac'?{...m,state:'disconnected'}:m)},now);
+assert.equal(offlineNotices.length,2);
+assert.equal(offlineNotices[0].summary,'1 machine needs attention');
+assert.match(offlineNotices[0].note,/Mac.lan: offline/);
+assert.deepEqual(offlineNotices[1],reviewNotices[0],'A real outage does not replace the saved-edit notice');
+assert.equal(fleetAttention({...reviewFleet,conflicts:[]},now)[0].summary,'Saved offline edits reported','Companion-only reports stay visible');
+assert.equal(fleetAttention({machines:[{...connectedSync,host:'local',role:'supervisor'}],conflicts:[{id:1}]},now)[0].summary,'1 saved offline edit needs review');
+assert.match(fleetAttention({...reviewFleet,conflicts:Array(100).fill({})},now)[0].summary,/100\+/,'The bounded record list is not presented as a complete total');
+console.log('Stable fleet attention and retained-edit notice checks passed');
