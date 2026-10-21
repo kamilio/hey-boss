@@ -25,10 +25,24 @@ async page => {
   assert(await dialog.evaluate(d=>d.open),'Dragging outside closed dialog');
   await page.mouse.click(5,5);await page.waitForFunction(()=>!document.querySelector('#error-dialog').open);
   await open();await page.locator('#error-task-prompt').fill('Edited error task');
+  const failCreation = route => route.request().postDataJSON().action === 'promote'
+    ? route.fulfill({status:503,json:{ok:false,error:{message:'Synthetic creation failure'}}})
+    : route.continue();
+  await page.route('**/api/errors',failCreation);
   await dialog.getByRole('button',{name:'Create task',exact:true}).click();
-  await page.getByRole('link',{name:/Open task #/}).waitFor();
-  await page.getByRole('link',{name:/Open task #/}).click();
-  await page.waitForFunction(()=>model.detail?.issue?.body==='Edited error task');
+  await page.getByText('Synthetic creation failure',{exact:true}).waitFor();
+  assert(await dialog.evaluate(d=>d.open),'Failed creation closed the dialog');
+  assert(await page.locator('#error-task-prompt').inputValue()==='Edited error task','Failed creation lost the draft');
+  assert(await page.locator('#error-task-prompt').isEnabled(),'Failed creation left the draft disabled');
+  await page.unroute('**/api/errors',failCreation);
+  await dialog.getByRole('button',{name:'Create task',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#error-dialog').open,null,{timeout:5000});
+  const taskLink = page.locator('#error-rows').getByRole('link',{name:/^Task #\d+$/});
+  await taskLink.waitFor();
+  assert(await taskLink.evaluate(el=>document.activeElement===el),'Successful creation should focus its task link');
+  assert(await taskLink.getAttribute('href')===await page.locator('#error-rows').getByRole('link',{name:'Open task',exact:true}).getAttribute('href'),'Task links should open the same task');
+  await taskLink.click();
+  await page.waitForFunction(()=>typeof model!=='undefined'&&model.detail?.issue?.body==='Edited error task');
   await page.keyboard.press('n');await page.locator('#editor-subject').fill('Backdrop draft');
   await page.mouse.click(5,5);await page.waitForFunction(()=>!document.querySelector('#editor-dialog').open);
   await page.keyboard.press('n');
@@ -62,5 +76,7 @@ async page => {
   assert(mobile.x>=0&&mobile.x+mobile.width<=390&&mobile.height>780,'Mobile dialog bounds');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Mobile horizontal overflow');
   await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('#error-dialog').open);
-  return {desktop:true,mobile:true,prompt:true,projectPromptSaved:true,taskCreated:true,indexAction:true,backdrop:true,draftPreserved:true,dragProtected:true,cancelGuard:true,blocking:true};
+  await taskLink.click();
+  await page.waitForFunction(()=>typeof model!=='undefined'&&model.detail?.issue?.body==='Edited error task');
+  return {desktop:true,mobile:true,prompt:true,projectPromptSaved:true,taskCreated:true,creationClosesDialog:true,failurePreservesDraft:true,indexTaskLink:true,indexAction:true,backdrop:true,draftPreserved:true,dragProtected:true,cancelGuard:true,blocking:true};
 }

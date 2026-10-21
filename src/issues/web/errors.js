@@ -33,7 +33,7 @@
     const filtered=rows.filter(r=>r.title.toLowerCase().includes($('#error-search').value.toLowerCase()));
     $('#families').textContent=rows.length;
     $('#collection').textContent=enabled?'Collection on':'Enable collection';$('#collection').setAttribute('aria-pressed',String(enabled));
-    $('#error-rows').innerHTML=filtered.map(r=>`<article class="issue-row"><span class="issue-state" data-icon="code"></span><div class="issue-row-main"><div class="issue-title-line"><button class="issue-title error-title" data-id="${esc(r.id)}" aria-haspopup="dialog">${esc(r.title)}</button></div>${lastEvent(r.last_seen,observedAt)}<div class="issue-meta"><span>${r.total.toLocaleString()} total</span>${r.issue?`<span>Task #${r.issue}</span>`:''}</div></div><div class="error-frequency">${activity(r)}<span class="error-count" aria-label="${r.count_24h.toLocaleString()} observed in the last 24 hours">${r.count_24h.toLocaleString()}<small>last 24h</small></span></div>${r.issue?`<a class="button error-row-action" href="/#${esc(new URLSearchParams({project,issue:r.issue}))}">Open task</a>`:`<button type="button" class="button error-row-action" data-create="${esc(r.id)}" aria-haspopup="dialog">Create task</button>`}</article>`).join('');
+    $('#error-rows').innerHTML=filtered.map(r=>`<article class="issue-row"><span class="issue-state" data-icon="code"></span><div class="issue-row-main"><div class="issue-title-line"><button class="issue-title error-title" data-id="${esc(r.id)}" aria-haspopup="dialog">${esc(r.title)}</button></div>${lastEvent(r.last_seen,observedAt)}<div class="issue-meta"><span>${r.total.toLocaleString()} total</span>${r.issue?`<a class="error-task-link" data-task="${esc(r.id)}" href="/#${esc(new URLSearchParams({project,issue:r.issue}))}">Task #${r.issue}</a>`:''}</div></div><div class="error-frequency">${activity(r)}<span class="error-count" aria-label="${r.count_24h.toLocaleString()} observed in the last 24 hours">${r.count_24h.toLocaleString()}<small>last 24h</small></span></div>${r.issue?`<a class="button error-row-action" href="/#${esc(new URLSearchParams({project,issue:r.issue}))}">Open task</a>`:`<button type="button" class="button error-row-action" data-create="${esc(r.id)}" aria-haspopup="dialog">Create task</button>`}</article>`).join('');
     HeyBossUI.icons();
     $('#errors-status').textContent=filtered.length?`Showing ${filtered.length} of up to 200 groups` : enabled?'No matching errors. The collector will send new observations here.':'Collection is off. Enable it for this project to accept events.';
     $('#errors-updated').textContent=observedAt?`As of ${exactTime(observedAt)} · Refresh for new events.`:'';
@@ -59,10 +59,12 @@
           const selectedProject=project, prompt=input.value;
           input.disabled=true;
           try{
-            await api('promote',{id,prompt});drafts.delete(key);
+            const result=await api('promote',{id,prompt});drafts.delete(key);
             if(project!==selectedProject)return;
-            const stillOpen=$('#error-dialog').open;
-            await load();if(stillOpen&&$('#error-dialog').open)await show(id);
+            const closeDialog=input.isConnected&&$('#error-dialog').open;
+            if(closeDialog)$('#error-dialog').close();
+            rows=rows.map(r=>r.id===id?{...r,issue:result.issue}:r);render();
+            if(closeDialog)$(`[data-task="${CSS.escape(id)}"]`)?.focus();
           }catch(error){
             if(input.isConnected){$('#error-task-status').textContent=error.message;$('#error-task-status').hidden=false;}
             else throw error;
