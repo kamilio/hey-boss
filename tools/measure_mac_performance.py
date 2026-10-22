@@ -9,7 +9,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):self.respond()
  def respond(self):
   time.sleep(1)
-  body=json.dumps({'notifications':{'macState':'active','notifyPhone':False},'tasks':[]}).encode()
+  body=json.dumps({'tasks':[]}).encode()
   self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers()
   try:self.wfile.write(body)
   except (BrokenPipeError,ConnectionResetError):pass

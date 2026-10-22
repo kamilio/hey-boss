@@ -1956,32 +1956,6 @@ func auditReplayPresentation(_ rows: [Record], store: Store) {
 }
 
 func auditResilience(root: URL) {
-    let menuOverview = AgentsOverview(present: false, cli: nil)
-    menuOverview.updateInboxCount(3)
-    menuOverview.updateActivity(["macState": "active", "macIdleSeconds": 2.0, "notifyPhone": false])
-    precondition(menuOverview.activityBadge.state == .active)
-    precondition(menuOverview.activityMenuItem.title.contains("phone pushes paused"))
-    menuOverview.updateInboxCount(4)
-    precondition(menuOverview.activityBadge.state == .active && menuOverview.inboxCount == 4)
-    menuOverview.updateActivity(["macState": "active", "macIdleSeconds": 40.0, "notifyPhone": false])
-    precondition(menuOverview.activityBadge.state == .idle)
-    menuOverview.updateActivity(["macState": "confirming", "notifyPhone": false])
-    precondition(menuOverview.activityBadge.state == .confirming)
-    menuOverview.updateActivity(["macState": "away", "notifyPhone": true])
-    precondition(menuOverview.activityBadge.state == .away && menuOverview.activityMenuItem.title.contains("phone pushes enabled"))
-    menuOverview.updateActivity(["macState": "unknown"])
-    precondition(menuOverview.activityBadge.state == .unknown && menuOverview.activityMenuItem.title.contains("routing unknown"))
-    precondition(menuOverview.activityBadge.hitTest(NSPoint(x: 3, y: 3)) == nil)
-    precondition(MenuActivity.state(["macState": "active", "macIdleSeconds": Double.nan]) == .unknown)
-    let presence = MacPresence()
-    var sampleTimes: [Double] = []
-    for _ in 0..<200 {
-        let start = ProcessInfo.processInfo.systemUptime
-        if let idle = presence.hidIdleSeconds { precondition(idle.isFinite && idle >= 0) }
-        sampleTimes.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
-    }
-    print("HID presence sampler: p95=\(sampleTimes.sorted()[190]) ms; mean=\(sampleTimes.reduce(0,+)/200) ms")
-
     precondition(notificationTimerInterval(autoclose: 10, expiry: nil, now: 100) == 10)
     precondition(notificationTimerInterval(autoclose: 10, expiry: 105, now: 100) == 5)
     precondition(notificationTimerInterval(autoclose: 10, expiry: Double.greatestFiniteMagnitude, now: 100) == 10)
@@ -3830,6 +3804,11 @@ func auditSubscriptionQuota() {
     while !completed && Date() < deadline { _ = RunLoop.main.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01)) }
     precondition(completed, "Background CLI reads must complete while the native menu tracks events")
     let overview = AgentsOverview(present: false)
+    precondition(overview.statusMenu.items[1].isSeparatorItem, "Quick add leads directly to navigation without an activity status row")
+    overview.updateInboxCount(4)
+    precondition(overview.inboxCount == 4 && overview.inboxMenuItem.title == "Inbox · 4 unread…")
+    overview.updateInboxCount(0)
+    precondition(overview.inboxCount == 0 && overview.inboxMenuItem.title == "Inbox…")
     let item = overview.statusMenu.items.first { $0.view === overview.subscriptionQuota.content }
     precondition(item != nil && item?.submenu == nil, "Quota is visible directly inside the status dropdown")
     var menuCalls = 0
