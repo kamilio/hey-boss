@@ -754,7 +754,9 @@ An already matching companion connection stays open after a no-change upgrade.
 Priority moves replicate one compact queue rotation and small metadata records,
 without resending crossed issues or their text. Older sync peers must upgrade
 before reconnecting; the handshake rejects them before exchanging facts. Existing
-immutable history and reconnect cursors remain intact.
+immutable history and reconnect cursors remain intact, including the earlier
+position-only rotations; new rotations also identify the moved issue so tied
+positions preserve issue identity.
 Verified installations remain current while reconnecting; a stale runtime build
 cannot trigger repeated installs or terminate a replacement connection before hello.
 Companions keep reporting liveness while database work delays configuration,

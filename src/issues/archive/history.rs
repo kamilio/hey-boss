@@ -322,7 +322,9 @@ fn key(db: &HotConnection, project: &str, number: i64) -> Result<Option<String>>
 
 pub(crate) fn mutation_targets(operation: &crate::issues::Operation) -> Vec<i64> {
     use crate::issues::Operation;
-    if !operation.writes() {
+    // Priority only changes the hot header; restoring would recapture unchanged
+    // issue text and history solely to move it in the queue.
+    if !operation.writes() || matches!(operation, Operation::Move { .. }) {
         return vec![];
     }
     let mut numbers: Vec<_> = operation.number().into_iter().collect();

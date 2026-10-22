@@ -11,10 +11,15 @@ pub(super) fn install(db: &Connection) -> Result<()> {
         |r| r.get(0),
     )?;
     if installed {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('distributed_order_rotations') WHERE name='number')", [], |r| r.get::<_, bool>(0))? {
+            // Published rotations retain their position-only semantics. No
+            // journal rewrite, coordinate rebuild, or cursor change is needed.
+            db.execute("ALTER TABLE distributed_order_rotations ADD COLUMN number INTEGER", [])?;
+        }
         return Ok(());
     }
     db.execute_batch("CREATE TABLE distributed_order_capture(active INTEGER NOT NULL); INSERT INTO distributed_order_capture VALUES(0);
-        CREATE TABLE distributed_order_rotations(project_id TEXT NOT NULL,clock INTEGER NOT NULL,origin TEXT NOT NULL,first INTEGER NOT NULL,last INTEGER NOT NULL,PRIMARY KEY(project_id,clock,origin)) WITHOUT ROWID;
+        CREATE TABLE distributed_order_rotations(project_id TEXT NOT NULL,clock INTEGER NOT NULL,origin TEXT NOT NULL,first INTEGER NOT NULL,last INTEGER NOT NULL,number INTEGER,PRIMARY KEY(project_id,clock,origin)) WITHOUT ROWID;
         CREATE TABLE distributed_order_positions(project_id TEXT NOT NULL,number INTEGER NOT NULL,clock INTEGER NOT NULL,origin TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(project_id,number)) WITHOUT ROWID;
         CREATE INDEX distributed_order_range ON distributed_order_positions(project_id,position);
         CREATE INDEX IF NOT EXISTS distributed_issue_order_base ON distributed_fields(json_extract(entity,'$.project_id'),entity) WHERE table_name='issues' AND field='sort_order';
@@ -24,15 +29,15 @@ pub(super) fn install(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn rotate(position: i64, from: i64, to: i64) -> i64 {
-    if position == from {
-        to
-    } else if to <= position && position < from {
-        position + 1
-    } else if from < position && position <= to {
-        position - 1
-    } else {
+fn rotate(position: i64, number: i64, from: i64, to: i64, moved: Option<i64>) -> i64 {
+    if position < from.min(to) || position > from.max(to) {
         position
+    } else if moved.map_or(position == from, |moved| moved == number) {
+        to
+    } else if to < from {
+        position + 1
+    } else {
+        position - 1
     }
 }
 
@@ -43,12 +48,12 @@ pub(super) fn seed(db: &Connection, key: &Value) -> Result<()> {
     let number = key["number"].as_i64().unwrap();
     let Some((clock,origin,value)) = db.query_row("SELECT clock,origin,value FROM distributed_fields WHERE table_name='issues' AND entity=?1 AND field='sort_order'", [key.to_string()], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).optional()? else {return Ok(())};
     let mut position: i64 = serde_json::from_str(&value)?;
-    let mut query = db.prepare("SELECT first,last FROM distributed_order_rotations WHERE project_id=?1 AND (clock,origin)>(?2,?3) ORDER BY clock,origin")?;
+    let mut query = db.prepare("SELECT first,last,number FROM distributed_order_rotations WHERE project_id=?1 AND (clock,origin)>(?2,?3) ORDER BY clock,origin")?;
     for movement in query.query_map(params![project, clock, origin], |r| {
-        Ok((r.get(0)?, r.get(1)?))
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
     })? {
-        let (from, to) = movement?;
-        position = rotate(position, from, to);
+        let (from, to, moved) = movement?;
+        position = rotate(position, number, from, to, moved);
     }
     db.execute("INSERT INTO distributed_order_positions VALUES(?1,?2,?3,?4,?5) ON CONFLICT(project_id,number) DO UPDATE SET clock=excluded.clock,origin=excluded.origin,position=excluded.position", params![project,number,clock,origin,position])?;
     db.execute(
@@ -73,20 +78,30 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
     let to = row["to"]
         .as_i64()
         .ok_or_else(|| replica::invalid("Invalid queue position"))?;
+    let number = row
+        .get("number")
+        .map(|n| {
+            n.as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| replica::invalid("Invalid moved issue"))
+        })
+        .transpose()?;
     if fact.before.is_some()
         || from == to
-        || row.as_object().is_none_or(|r| r.len() != 3)
+        || row
+            .as_object()
+            .is_none_or(|r| r.len() != 3 + usize::from(number.is_some()))
         || fact.clock == 0
     {
         return Err(replica::invalid("Invalid queue rotation"));
     }
-    if let Some(saved) = db.query_row("SELECT first,last FROM distributed_order_rotations WHERE project_id=?1 AND clock=?2 AND origin=?3", params![project,fact.clock,fact.origin], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).optional()? {
-        return if saved==(from,to) {Ok(())} else {Err(replica::invalid("A replica reused a queue revision"))};
+    if let Some(saved) = db.query_row("SELECT first,last,number FROM distributed_order_rotations WHERE project_id=?1 AND clock=?2 AND origin=?3", params![project,fact.clock,fact.origin], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<i64>>(2)?))).optional()? {
+        return if saved==(from,to,number) {Ok(())} else {Err(replica::invalid("A replica reused a queue revision"))};
     }
     let late: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_order_rotations WHERE project_id=?1 AND (clock,origin)>(?2,?3))", params![project,fact.clock,fact.origin], |r|r.get(0))?;
     db.execute(
-        "INSERT INTO distributed_order_rotations VALUES(?1,?2,?3,?4,?5)",
-        params![project, fact.clock, fact.origin, from, to],
+        "INSERT INTO distributed_order_rotations VALUES(?1,?2,?3,?4,?5,?6)",
+        params![project, fact.clock, fact.origin, from, to, number],
     )?;
     if late {
         // Only a genuinely out-of-order operation rebuilds coordinates. The
@@ -100,7 +115,7 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
             seed(db, &serde_json::from_str(key["entity"].as_str().unwrap())?)?;
         }
     } else {
-        db.execute("UPDATE distributed_order_positions SET position=CASE WHEN position=?4 THEN ?5 WHEN ?5<?4 THEN position+1 ELSE position-1 END WHERE project_id=?1 AND (clock,origin)<(?2,?3) AND position BETWEEN min(?4,?5) AND max(?4,?5)", params![project,fact.clock,fact.origin,from,to])?;
+        db.execute("UPDATE distributed_order_positions SET position=CASE WHEN CASE WHEN ?6 IS NULL THEN position=?4 ELSE number=?6 END THEN ?5 WHEN ?5<?4 THEN position+1 ELSE position-1 END WHERE project_id=?1 AND (clock,origin)<(?2,?3) AND position BETWEEN min(?4,?5) AND max(?4,?5)", params![project,fact.clock,fact.origin,from,to,number])?;
     }
     db.execute(
         "INSERT OR IGNORE INTO distributed_order_dirty VALUES(?1)",
@@ -212,6 +227,183 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn tied_positions_preserve_moved_identity_locally_and_on_peers() {
+        for (positions, movement, expected) in [
+            (
+                vec![1, 1, 2],
+                json!({"action":"move","number":2,"after":3}),
+                vec![1, 3, 2],
+            ),
+            (
+                vec![1, 2, 2],
+                json!({"action":"move","number":2,"before":1}),
+                vec![2, 1, 3],
+            ),
+        ] {
+            let mut a = Queue::new(3);
+            let mut b = Queue::with_origin(0, "peer");
+            for (index, position) in positions.into_iter().enumerate() {
+                a.db.execute(
+                    "UPDATE issues SET sort_order=?1 WHERE number=?2",
+                    params![position, index as i64 + 1],
+                )
+                .unwrap();
+            }
+            a.flush();
+            a.send_to(&mut b);
+            let before = a.preserved();
+            a.execute(movement, "tied").unwrap();
+            assert_eq!(a.numbers(), expected, "local move");
+            a.flush();
+            assert_eq!(a.numbers(), expected, "local projection");
+            a.send_to(&mut b);
+            assert_eq!(b.numbers(), expected, "fast peer projection");
+            assert_eq!(a.preserved(), before);
+            assert_eq!(b.preserved(), before);
+
+            let c = Queue::with_origin(0, "reverse");
+            let batch = a.engine.batch(0).unwrap();
+            let tx = c.db.unchecked_transaction().unwrap();
+            for record in batch.records.into_iter().rev() {
+                if let Some(fact) = archives::revision(&record.payload).unwrap() {
+                    projection::reduce(&tx, &fact).unwrap();
+                }
+            }
+            materialize::drain(&tx).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(c.numbers(), expected, "reverse peer projection");
+        }
+    }
+
+    #[test]
+    fn moving_cold_issue_does_not_retransmit_unchanged_history() {
+        let mut q = Queue::new(8);
+        q.db.execute_batch("UPDATE issues SET state='closed',closed_at=2,closed_by='human:test' WHERE number=8;
+            INSERT INTO comments(project_id,issue_number,author,body,created_at) VALUES('p',8,'human:test','Unchanged archived comment',1);").unwrap();
+        q.flush();
+        let db = crate::issues::Store::open(&q.root.join("issues.db"))
+            .unwrap()
+            .into_database();
+        assert!(crate::issues::archive::archive_issue(&db, "p", 8, 10_000_000_000).unwrap());
+        while crate::issues::archive::cleanup_history(&db).unwrap() > 0 {}
+        archives::prepare(&q.db, &mut q.engine).unwrap();
+        q.flush();
+        let start = q.engine.head().unwrap();
+        q.execute(json!({"action":"move","number":8,"before":1}), "cold")
+            .unwrap();
+        q.flush();
+        let batch = q.engine.batch(start).unwrap();
+        let count = q.engine.head().unwrap() - start;
+        let bytes = serde_json::to_vec(&batch).unwrap().len();
+        eprintln!("cold move: records={count} wire_bytes={bytes}");
+        assert!((1..=6).contains(&count));
+        assert!(bytes < 8192);
+        assert!(
+            batch
+                .records
+                .iter()
+                .all(|r| !r.payload.contains("Unchanged title")
+                    && !r.payload.contains("Unchanged archived comment")
+                    && !r.payload.contains(&"x".repeat(4096)))
+        );
+        assert_eq!(q.numbers(), vec![8, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn upgrade_keeps_published_three_field_rotations_and_cursors() {
+        let mut q = Queue::new(3);
+        q.db.execute("UPDATE issues SET sort_order=1 WHERE number=2", [])
+            .unwrap();
+        q.db.execute("UPDATE issues SET sort_order=2 WHERE number=3", [])
+            .unwrap();
+        q.flush();
+        // The already-published format rotates positions, including ties.
+        q.db.execute_batch("UPDATE distributed_meta SET clock=clock+1;
+            INSERT INTO distributed_outbox SELECT clock,'issue_order',NULL,'{\"project_id\":\"p\",\"from\":1,\"to\":2}' FROM distributed_meta;").unwrap();
+        q.flush();
+        assert_eq!(q.numbers(), vec![3, 1, 2]);
+        q.db.execute(
+            "ALTER TABLE distributed_order_rotations DROP COLUMN number",
+            [],
+        )
+        .unwrap();
+        let head = q.engine.head().unwrap();
+        let history = serde_json::to_value(q.engine.batch(0).unwrap()).unwrap();
+        let cursors: (i64, i64) =
+            q.db.query_row("SELECT exported,projected FROM distributed_meta", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        install(&q.db, "source").unwrap();
+        install(&q.db, "source").unwrap();
+        assert_eq!(q.engine.head().unwrap(), head);
+        assert_eq!(
+            serde_json::to_value(q.engine.batch(0).unwrap()).unwrap(),
+            history
+        );
+        assert_eq!(
+            q.db.query_row("SELECT exported,projected FROM distributed_meta", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .unwrap(),
+            cursors
+        );
+        assert_eq!(q.numbers(), vec![3, 1, 2]);
+        q.execute(json!({"action":"move","number":2,"before":3}), "new-format")
+            .unwrap();
+        q.flush();
+        assert_eq!(q.numbers(), vec![2, 3, 1]);
+        let mut peer = Queue::with_origin(0, "peer");
+        q.send_to(&mut peer);
+        assert_eq!(peer.numbers(), q.numbers());
+        let reverse = Queue::with_origin(0, "reverse");
+        let tx = reverse.db.unchecked_transaction().unwrap();
+        for record in q.engine.batch(0).unwrap().records.into_iter().rev() {
+            if let Some(fact) = archives::revision(&record.payload).unwrap() {
+                projection::reduce(&tx, &fact).unwrap();
+            }
+        }
+        materialize::drain(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(reverse.numbers(), q.numbers());
+    }
+
+    #[test]
+    fn concurrent_creates_at_same_position_and_moves_converge() {
+        let mut a = Queue::new(8);
+        let mut b = Queue::with_origin(0, "peer");
+        a.send_to(&mut b);
+        for (q, number) in [(&mut a, 9), (&mut b, 10)] {
+            q.db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels,sort_order) VALUES('p',?1,'Concurrent birth','','open','human:test',1,1,1,'[]',9)", [number]).unwrap();
+            q.flush();
+        }
+        a.send_to(&mut b);
+        b.send_to(&mut a);
+        assert_eq!(a.numbers(), (1..=10).collect::<Vec<_>>());
+        a.execute(json!({"action":"move","number":9,"before":1}), "a")
+            .unwrap();
+        b.execute(json!({"action":"move","number":10,"before":2}), "b")
+            .unwrap();
+        assert_eq!(a.numbers(), vec![9, 1, 2, 3, 4, 5, 6, 7, 8, 10]);
+        assert_eq!(b.numbers(), vec![1, 10, 2, 3, 4, 5, 6, 7, 8, 9]);
+        a.flush();
+        b.flush();
+        a.send_to(&mut b);
+        b.send_to(&mut a);
+        assert_eq!(a.numbers(), b.numbers());
+        let c = Queue::with_origin(0, "reverse");
+        let tx = c.db.unchecked_transaction().unwrap();
+        for record in a.engine.batch(0).unwrap().records.into_iter().rev() {
+            if let Some(fact) = archives::revision(&record.payload).unwrap() {
+                projection::reduce(&tx, &fact).unwrap();
+            }
+        }
+        materialize::drain(&tx).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(c.numbers(), a.numbers());
     }
 
     #[test]

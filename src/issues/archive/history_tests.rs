@@ -60,6 +60,75 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn priority_moves_keep_cold_content_and_history_in_place() {
+    let mut f = Fixture::new();
+    // Open an existing installation with the old version-only guard.
+    let guard: String =
+        f.db.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='issue_archive_mutation_guard'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    f.db.execute_batch("DROP TRIGGER issue_archive_mutation_guard")
+        .unwrap();
+    f.db.execute_batch(&guard.replace(
+        "NEW.deleted_at IS NOT OLD.deleted_at",
+        "NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at",
+    ))
+    .unwrap();
+    f.store = Store::open(&f.root.join("issues.db")).unwrap();
+    f.db.execute("UPDATE issues SET sort_order=number", [])
+        .unwrap();
+    f.db.execute(
+        "UPDATE issues SET body=?1 WHERE number=1",
+        ["Archived requirements. ".repeat(200)],
+    )
+    .unwrap();
+    f.archive();
+    let before = f.read(json!({"action":"view","number":1}));
+    let moved = f.write(json!({"action":"move","number":1,"after":2}));
+    assert_eq!(
+        moved["issue"]["version"],
+        before["issue"]["version"].as_i64().unwrap() + 1
+    );
+    assert_eq!(moved["issue"]["body"], before["issue"]["body"]);
+    assert_eq!(moved["issue"]["state"], "closed");
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NOT NULL AND length(body)=513 FROM issues WHERE number=1",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        f.db.query_row("SELECT count(*) FROM comments", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let after = f.read(json!({"action":"view","number":1}));
+    assert_eq!(after["comments"], before["comments"]);
+    assert!(
+        f.db.execute("UPDATE issues SET body='corrupt' WHERE number=1", [])
+            .is_err()
+    );
+    assert!(
+        f.db.execute("UPDATE issues SET state='open' WHERE number=1", [])
+            .is_err()
+    );
+    f.write(json!({"action":"reopen","number":1}));
+    assert!(
+        f.db.query_row(
+            "SELECT archive_key IS NULL FROM issues WHERE number=1",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn compact_detail_reads_full_archived_requirements_and_comment_pages() {
     let mut f = Fixture::new();
     let before = f.read(json!({"action":"view","number":1}));

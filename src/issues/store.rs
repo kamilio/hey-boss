@@ -1298,10 +1298,21 @@ impl Store {
         let needs_readiness_refresh = prior_readiness
             .as_ref()
             .is_none_or(|sql| !sql.contains("explicit_dependencies_only"));
+        let archive_guard: Option<String> = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='issue_archive_mutation_guard'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let stale_archive_guard = archive_guard
+            .as_ref()
+            .is_some_and(|sql| sql.contains("NEW.version IS NOT OLD.version OR "));
         let needs_repair = version >= 10
-            && (!missing_additive_columns(&db)
-                .map_err(|e| migration_error(e, path))?
-                .is_empty()
+            && (stale_archive_guard
+                || !missing_additive_columns(&db)
+                    .map_err(|e| migration_error(e, path))?
+                    .is_empty()
                 || registry::stale_pr_capture(&db).map_err(|e| migration_error(e, path))?
                 || prior_readiness.as_ref().is_none_or(|sql| {
                     !sql.contains("worker_retry_history") || !sql.contains("project_pause")
@@ -1401,6 +1412,17 @@ impl Store {
                     tx.execute_batch("CREATE INDEX request_archive_candidates ON requests(created_at,project_id,actor,request_id) WHERE archive_key IS NULL")?;
                 }
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                if stale_archive_guard {
+                    // Version/order metadata is hot. Keep the enrolled
+                    // projector exception and all content/lifecycle guards.
+                    let guard: String = tx.query_row(
+                        "SELECT sql FROM sqlite_master WHERE name='issue_archive_mutation_guard'",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    tx.execute_batch("DROP TRIGGER issue_archive_mutation_guard")?;
+                    tx.execute_batch(&guard.replace("NEW.version IS NOT OLD.version OR ", ""))?;
+                }
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_archive_pending ON worker_runs(finished_at,id) WHERE archive_pending=1 AND finished_at IS NOT NULL;
                     CREATE INDEX IF NOT EXISTS worker_archive_cleanup ON worker_runs(id) WHERE archive_cleanup=1 AND finished_at IS NOT NULL;
                     CREATE TRIGGER IF NOT EXISTS worker_archive_late_event AFTER INSERT ON worker_events WHEN EXISTS(SELECT 1 FROM worker_runs WHERE id=NEW.run_id AND archive_pending=0) BEGIN UPDATE worker_runs SET archive_pending=1 WHERE id=NEW.run_id; END;
@@ -1408,7 +1430,7 @@ impl Store {
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS issue_archive_cleanup ON issues(project_id,number) WHERE archive_cleanup=1 AND archive_restoring=0;
                     CREATE INDEX IF NOT EXISTS issue_archive_restoring ON issues(project_id,number) WHERE archive_restoring=1;
                     CREATE INDEX IF NOT EXISTS issue_archive_candidates ON issues(max(updated_at,coalesce(closed_at,0),coalesce(deleted_at,0),archive_touched_at),project_id,number) WHERE archive_key IS NULL AND (state='closed' OR deleted_at IS NOT NULL);
-                    CREATE TRIGGER IF NOT EXISTS issue_archive_mutation_guard BEFORE UPDATE ON issues WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at) BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
+                    CREATE TRIGGER IF NOT EXISTS issue_archive_mutation_guard BEFORE UPDATE ON issues WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.deleted_at IS NOT OLD.deleted_at) BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
                 tx.commit()?;
                 Ok(())
             };
@@ -2320,7 +2342,7 @@ impl Store {
                 };
                 let changed = old != target;
                 if changed {
-                    ordering::rotate(&tx, &project.id, old, target)?;
+                    ordering::rotate(&tx, &project.id, *number, old, target)?;
                     tx.execute("UPDATE issues SET updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![project.id,number,now])?;
                     tx.execute(
                         "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",
