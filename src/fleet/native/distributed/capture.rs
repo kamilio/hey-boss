@@ -91,7 +91,7 @@ pub(super) fn upgrade_retry_metadata(db: &Connection) -> Result<()> {
 
 pub(super) fn upgrade_ordering(db: &Connection) -> Result<()> {
     if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_order_capture')",
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('distributed_order_rotations') WHERE name='number')",
         [],
         |r| r.get::<_, bool>(0),
     )? {
@@ -156,7 +156,7 @@ pub(super) fn install(db: &Connection) -> Result<()> {
     db.execute_batch("DROP TRIGGER IF EXISTS issue_archive_mutation_guard;
         CREATE TRIGGER issue_archive_mutation_guard BEFORE UPDATE ON issues
         WHEN OLD.archive_key IS NOT NULL AND NEW.archive_key IS OLD.archive_key
-        AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.version IS NOT OLD.version OR NEW.deleted_at IS NOT OLD.deleted_at)
+        AND (NEW.body IS NOT OLD.body OR NEW.state IS NOT OLD.state OR NEW.deleted_at IS NOT OLD.deleted_at)
         AND NOT ((SELECT active FROM distributed_meta WHERE id=1)=1 AND (SELECT syncing FROM fleet_meta WHERE id=1)=2)
         BEGIN SELECT RAISE(ABORT,'Restore archived issue before changing it'); END;")?;
     db.execute_batch("CREATE TRIGGER IF NOT EXISTS distributed_archive_cooled AFTER UPDATE OF archive_key ON issues

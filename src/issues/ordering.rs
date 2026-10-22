@@ -1,8 +1,14 @@
 use super::*;
 
-/// A rotation is a permutation of integer positions. Capture it once, rather
+/// Capture the moved identity and interval once, rather
 /// than capturing every crossed task (including its unchanged requirements).
-pub(super) fn rotate(db: &Connection, project: &str, from: i64, to: i64) -> Result<()> {
+pub(super) fn rotate(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    from: i64,
+    to: i64,
+) -> Result<()> {
     let installed: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_order_capture')",
         [],
@@ -24,10 +30,10 @@ pub(super) fn rotate(db: &Connection, project: &str, from: i64, to: i64) -> Resu
             ));
         }
         db.execute("UPDATE distributed_meta SET clock=clock+1 WHERE id=1", [])?;
-        db.execute("INSERT INTO distributed_outbox SELECT clock,'issue_order',NULL,json_object('project_id',?1,'from',?2,'to',?3) FROM distributed_meta WHERE id=1", params![project,from,to])?;
+        db.execute("INSERT INTO distributed_outbox SELECT clock,'issue_order',NULL,json_object('project_id',?1,'from',?2,'to',?3,'number',?4) FROM distributed_meta WHERE id=1", params![project,from,to,number])?;
         db.execute("UPDATE distributed_order_capture SET active=1", [])?;
     }
-    db.execute("UPDATE issues SET sort_order=CASE WHEN sort_order=?2 THEN ?3 WHEN ?3<?2 THEN sort_order+1 ELSE sort_order-1 END WHERE project_id=?1 AND sort_order BETWEEN min(?2,?3) AND max(?2,?3)", params![project,from,to])?;
+    db.execute("UPDATE issues SET sort_order=CASE WHEN number=?4 THEN ?3 WHEN ?3<?2 THEN sort_order+1 ELSE sort_order-1 END WHERE project_id=?1 AND sort_order BETWEEN min(?2,?3) AND max(?2,?3)", params![project,from,to,number])?;
     if compact {
         db.execute("UPDATE distributed_order_capture SET active=0", [])?;
     }
