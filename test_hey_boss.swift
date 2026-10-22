@@ -101,7 +101,6 @@ func audit() {
         withExtendedLifetime((ui, shortcut)) { app.run() }
         return
     }
-    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MINDMAP_ONLY"] == "1" { auditNativeMindmap(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUICK_ISSUE_ONLY"] == "1" { auditQuickIssue(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SECRET_ONLY"] == "1" { auditSecretInput(); return }
     if let appearance = ProcessInfo.processInfo.environment["HEY_BOSS_SECRET_VISUAL"] {
@@ -135,7 +134,6 @@ func audit() {
     auditPaging()
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
-    auditNativeMindmap()
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("hey-boss-test-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try! FileManager.default.removeItem(at: root) }
@@ -252,44 +250,13 @@ func audit() {
     print("Passed: grouping threshold, CTA dismissal, preview with local/web/unsupported links, project isolation, queued questions, Unicode answers, durable history, Markdown links")
 }
 
-func auditNativeMindmap() {
-    let viewer = NativeMindmapViewer()
-    var browserURLs: [URL] = []
-    var destinations: [URL] = []
-    viewer.openExternal = { browserURLs.append($0); return true }
-    viewer.launcher.probe = { $0(true) }
-    viewer.launcher.openURL = { url in
-        destinations.append(url)
-        viewer.show(URL(string: "about:blank")!)
-        return true
-    }
-    viewer.open(cli: nil)
-    precondition(viewer.window.isVisible, "Mindmaps opens a native window")
-    precondition(destinations.last?.path == "/mm")
-    precondition(destinations.last?.query == "focus=1", "Native viewer requests the focused web map")
-    precondition(browserURLs.isEmpty, "Opening Mindmaps must not launch the browser")
-    precondition(viewer.browser.configuration.websiteDataStore.isPersistent, "Project selection survives daemon restarts")
-    let window = viewer.window
-    viewer.window.close()
-    viewer.open(cli: nil)
-    precondition(viewer.window === window && viewer.window.isVisible, "Reopen reuses the native window")
-    let map = URL(string: "http://hey-boss.test/mm#project=named%3AAtlas&node=topic")!
-    precondition(viewer.policy(for: map) == .allow, "Map relationships remain native")
-    let issue = URL(string: "http://hey-boss.test/#project=named%3AAtlas&issue=1")!
-    precondition(viewer.policy(for: issue) == .cancel && browserURLs.last == issue, "Issue links open in the browser")
-    let pr = URL(string: "https://github.com/example/repo/pull/1")!
-    precondition(viewer.policy(for: pr) == .cancel && browserURLs.last == pr, "PR links open in the browser")
-    let count = browserURLs.count
-    precondition(viewer.policy(for: URL(string: "file:///tmp/private")!) == .cancel && browserURLs.count == count)
-    viewer.window.close()
-    print("Passed: native mindmap window, focused URL, persistent project storage, reopen and resource links")
-}
 
 func auditIssuesShortcut() {
     let overview = AgentsOverview(present: false, cli: nil)
     var urls: [URL] = []
     overview.issuesLauncher.probe = { $0(true) }
     overview.issuesLauncher.openURL = { urls.append($0); return true }
+    precondition(!overview.issuesMenuItem.menu!.items.contains { $0.title.contains("Mindmap") })
     let item = overview.issuesMenuItem
     precondition(item.keyEquivalent == "o" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
@@ -748,17 +715,15 @@ func auditQuickIssueMediaIntegration() {
 
 func auditInbox(root: URL, sample: Record) {
     let overview = AgentsOverview(present: false, cli: nil)
-    var openedInbox = 0, openedIssues = 0, openedMindmaps = 0
+    var openedInbox = 0, openedIssues = 0
     overview.openInbox = { openedInbox += 1 }
     overview.openIssues = { openedIssues += 1 }
-    overview.openMindmaps = { openedMindmaps += 1 }
     precondition(overview.inboxMenuItem.menu != nil && overview.issuesMenuItem.menu === overview.inboxMenuItem.menu)
-    precondition(overview.mindmapsMenuItem.menu === overview.inboxMenuItem.menu)
-    for item in [overview.inboxMenuItem, overview.issuesMenuItem, overview.mindmapsMenuItem] {
+    for item in [overview.inboxMenuItem, overview.issuesMenuItem] {
         precondition(overview.validateMenuItem(item))
         precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
     }
-    precondition(openedInbox == 1 && openedIssues == 1 && openedMindmaps == 1)
+    precondition(openedInbox == 1 && openedIssues == 1)
     let launcher = IssuesLauncher()
     var launches = 0, urls: [URL] = [], failures: [String] = []
     launcher.openURL = { urls.append($0); return true }
@@ -769,21 +734,19 @@ func auditInbox(root: URL, sample: Record) {
     precondition(launches == 0 && urls.count == 1 && failures.isEmpty, "Reuse the running issue service")
     launcher.open(cli:nil,page:.inbox)
     precondition(urls.last?.fragment == "view=inbox", "Inbox opens the shared web interface")
-    launcher.open(cli:nil,page:.mindmaps)
-    precondition(urls.last?.path == "/mm" && urls.last?.fragment == nil && launches == 0, "Mindmaps reuses the shared web service")
     var probes = 0
     launcher.probe = { probes += 1; $0(probes > 1) }
     launcher.open(cli: "/usr/bin/true")
-    precondition(launches == 1 && urls.count == 4 && !launcher.launching)
+    precondition(launches == 1 && urls.count == 3 && !launcher.launching)
     precondition(urls.last?.path == "/" && urls.last?.fragment == "view=issues", "Issues resets the destination to the normal list")
     launcher.probe = { $0(false) }
     launcher.open(cli: nil)
     precondition(failures.count == 1 && !launcher.launching)
     var ready: ((Bool) -> Void)?
     launcher.probe = { ready = $0 }
-    launcher.open(cli: nil); launcher.open(cli: nil, page: .mindmaps)
+    launcher.open(cli: nil); launcher.open(cli: nil, page: .inbox)
     ready?(true)
-    precondition(urls.count == 5 && urls.last?.path == "/mm" && !launcher.launching, "Repeated menu clicks must open the latest destination without starting duplicate servers")
+    precondition(urls.count == 4 && urls.last?.fragment == "view=inbox" && !launcher.launching, "Repeated menu clicks must open the latest destination without starting duplicate servers")
     launcher.probe = { $0(true) }
     launcher.open(cli: nil, page: .quickIssue)
     precondition(urls.last?.fragment == "quick-issue=1" && launches == 1, "Quick add opens above the shared interface without starting another service")
@@ -810,7 +773,7 @@ func auditInbox(root: URL, sample: Record) {
     precondition(ui.current?.taskID == second.taskID)
     ui.presentQuestion(first)
     precondition(ui.field?.stringValue == "Keep my unfinished answer" && ui.questions.count == 1)
-    print("Passed: web Inbox/Issues/Mindmaps menu actions, service reuse/start/errors, grouped review dismissal, hidden stack, question draft preservation")
+    print("Passed: web Inbox/Issues menu actions, service reuse/start/errors, grouped review dismissal, hidden stack, question draft preservation")
 }
 
 func auditDismissalAnimation(sample: Record) {

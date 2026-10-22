@@ -5,9 +5,9 @@ const HeyBossArtifacts = (() => {
   const failure=(message,uncertain=false)=>Object.assign(Error(message),{uncertain});
   const reads = new Set(["list","view","links","preview"]);
   const url = (project,id,extra={}) => `/artifacts#${new URLSearchParams({project,...(id?{artifact:id}:{}),...extra})}`;
-  const resourceURL=(context,kind,target)=>{
-    const params=new URLSearchParams({project:context.project,[kind==="issue"?"issue":"node"]:target,...(!mobile&&context.host?{host:context.host}:{})});
-    return `${mobile?"/project-resource":kind==="issue"?"/":"/mm"}#${params}`;
+  const resourceURL=(context,target)=>{
+    const params=new URLSearchParams({project:context.project,issue:target,...(!mobile&&context.host?{host:context.host}:{})});
+    return `${mobile?"/project-resource":"/"}#${params}`;
   };
   let mobile = false;
   const browserEditor = () => mobile || document.documentElement.dataset.issueMobile === "true" || matchMedia("(pointer: coarse)").matches;
@@ -160,10 +160,10 @@ const HeyBossArtifacts = (() => {
     const render = artifacts => {
       root.hidden=context.artifacts_enabled===false && !artifacts.length;
       root.classList.add("artifact-relationship");
-      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a>${mobile?"":`<button type="button" data-open-native="${esc(a.id)}" aria-label="Edit ${esc(a.title)} in native editor" title="Edit in native editor">${HeyBossUI.icon("edit")}</button>`}<button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a data-create-artifact class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...(context.issue?{issue:context.issue}:{node:context.node}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
+      root.innerHTML=`<h2 class="side-heading">Artifacts</h2><ul class="artifact-attachment-list" ${artifacts.length?"":"hidden"}>${artifacts.map(a=>`<li><a href="${esc(url(context.project,a.id,context.host?{host:context.host}:{}))}">${HeyBossUI.icon("docs")}<span>${esc(a.title)}${a.archived?'<small>Archived</small>':""}</span></a>${mobile?"":`<button type="button" data-open-native="${esc(a.id)}" aria-label="Edit ${esc(a.title)} in native editor" title="Edit in native editor">${HeyBossUI.icon("edit")}</button>`}<button type="button" data-unlink="${esc(a.id)}" aria-label="Unlink ${esc(a.title)}" title="Unlink artifact">${HeyBossUI.icon("x")}</button></li>`).join("")}</ul><div class="artifact-attachment-actions"><a data-create-artifact class="artifact-text-button" href="${esc(url(context.project,null,{new:"1",...({issue:context.issue}),...(context.host?{host:context.host}:{})}))}">${HeyBossUI.icon("plus")}Create artifact</a><button type="button" class="artifact-text-button" data-attach>${HeyBossUI.icon("link")}Attach existing</button></div><div data-attach-form></div><p role="alert" hidden></p>`;
       $(".artifact-attachment-actions",root).hidden=context.artifacts_enabled===false;
       const error=e=>{const p=$("[role=alert]",root);p.hidden=false;p.textContent=e.message;};
-      const target=context.issue?{issue:context.issue}:{node:context.node};
+      const target={issue:context.issue};
       root.querySelectorAll("[data-open-native]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await openNative(context,{id:b.dataset.openNative});}catch(e){error(e);}finally{b.disabled=false;}});
       root.querySelectorAll("[data-unlink]").forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(context,{command:"unlink",id:b.dataset.unlink,...target});render(artifacts.filter(a=>a.id!==b.dataset.unlink));}catch(e){b.disabled=false;error(e);}});
       $("[data-attach]",root).onclick=async()=>{
@@ -296,7 +296,7 @@ const HeyBossArtifacts = (() => {
       if($("#artifact-delete-dialog"))return;
       const dialog=document.createElement("dialog");dialog.id="artifact-delete-dialog";dialog.className="artifact-delete-dialog";
       dialog.setAttribute("aria-labelledby","artifact-delete-title");dialog.setAttribute("aria-describedby","artifact-delete-description");
-      dialog.innerHTML=`<h2 id="artifact-delete-title">Delete artifact permanently?</h2><p class="artifact-delete-name">${esc(artifact.title)}</p><p id="artifact-delete-description">This removes the document, comments, attached files, and links from issues and mindmaps. This cannot be undone.</p><p class="artifact-delete-hint">To keep it for later, use Archive instead.</p><p role="alert" hidden></p><div class="artifact-delete-actions"><button class="button" type="button" data-cancel autofocus>Cancel</button><button class="button danger" type="button" data-confirm>Delete permanently</button></div>`;
+      dialog.innerHTML=`<h2 id="artifact-delete-title">Delete artifact permanently?</h2><p class="artifact-delete-name">${esc(artifact.title)}</p><p id="artifact-delete-description">This removes the document, comments, attached files, and links from issues. This cannot be undone.</p><p class="artifact-delete-hint">To keep it for later, use Archive instead.</p><p role="alert" hidden></p><div class="artifact-delete-actions"><button class="button" type="button" data-cancel autofocus>Cancel</button><button class="button danger" type="button" data-confirm>Delete permanently</button></div>`;
       document.body.append(dialog);
       $("[data-cancel]",dialog).onclick=()=>dialog.close();
       $("[data-confirm]",dialog).onclick=e=>documentAction(artifact,"delete",e.currentTarget,dialog);
@@ -352,8 +352,8 @@ const HeyBossArtifacts = (() => {
         }).catch(err=>{if(form.isConnected)error(err);});
       }
       $("#artifact-cancel").onclick=()=>{keepDraft();editing=false;doc?reading():(()=>{
-        const params=route(),issue=params.get("issue"),node=params.get("node");
-        if(issue||node)location.href=resourceURL(context,issue?"issue":"node",issue||node);
+        const params=route(),issue=params.get("issue");
+        if(issue)location.href=resourceURL(context,issue);
         else location.href=libraryURL();
       })();};
       $("#artifact-import").onchange=async e=>{
@@ -401,7 +401,7 @@ const HeyBossArtifacts = (() => {
       };
       $("#artifact-editor").onsubmit=async e=>{
         e.preventDefault();if(saving)return;keepDraft();const form=e.currentTarget,key=draftKey(doc?.id),title=$("#artifact-title").value,body=editorBody();
-        const target=route().get("issue")?{issue:Number(route().get("issue"))}:route().get("node")?{node:route().get("node")}:{};
+        const target=route().get("issue")?{issue:Number(route().get("issue"))}:{};
         saving=true;writingEditor?.readOnly(true);form.querySelectorAll("input,textarea,button").forEach(el=>el.disabled=true);status("Saving…");$("#artifact-error").hidden=true;
         try {
           if(!pending){
@@ -434,7 +434,7 @@ const HeyBossArtifacts = (() => {
         const body=`${c.quote?`<blockquote>${esc(c.quote)}</blockquote>${c.outdated?'<p class="artifact-muted">Outdated selection · discussion preserved</p>':""}`:""}${comment(c)}${(replies.get(c.id)||[]).map(r=>`<div class="reply">${comment(r)}</div>`).join("")}<div class="artifact-thread-actions"><details class="artifact-reply"><summary>Reply</summary><form data-reply="${c.id}"><textarea aria-label="Reply to comment" required placeholder="Write a reply…" rows="3">${esc(drafts.get(`${draftKey(doc.id)}:reply:${c.id}`)?.body||"")}</textarea><button class="button" type="submit">Reply</button></form></details><button class="artifact-text-button" type="button" data-resolve="${c.id}" data-resolved="${!c.resolved}">${c.resolved?"Reopen thread":"Resolve"}</button></div>`;
         return c.resolved?`<details class="artifact-thread resolved"><summary>Resolved · ${esc(c.body.slice(0,70))}</summary>${body}</details>`:`<section class="artifact-thread">${body}</section>`;
       }).join("");
-      const backlinks=v.backlinks.map(l=>`<li>${l.title?`<a href="${esc(resourceURL(context,l.kind,l.target))}">${esc(l.title)}${l.kind==="issue"?` · #${esc(l.target)}`:""}</a>`:`<span class="artifact-muted">Removed ${esc(l.kind)} · ${esc(l.target)}</span>`}</li>`).join("");
+      const backlinks=v.backlinks.map(l=>`<li>${l.title?`<a href="${esc(resourceURL(context,l.target))}">${esc(l.title)}${l.kind==="issue"?` · #${esc(l.target)}`:""}</a>`:`<span class="artifact-muted">Removed ${esc(l.kind)} · ${esc(l.target)}</span>`}</li>`).join("");
       const commentCount=v.comments.filter(c=>!c.parent&&!c.resolved).length;
       commentsOpen ??= false;
       const markup=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
@@ -564,7 +564,7 @@ const HeyBossArtifacts = (() => {
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}
       context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
       $("#nav-artifacts").setAttribute("aria-current","page");
-      if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;}
+      if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;}
       const resource=HeyBossRoutes.resolve();const idDoc=resource?.entity==="artifact"?resource.id:"";
       if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;$("#artifact-new").hidden=v.artifacts_enabled===false;reading();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
       else if(params.get("new")==="1"){
@@ -612,18 +612,19 @@ const HeyBossArtifacts = (() => {
       const project=boot.projects.find(p=>p.id===params.get("project"));if(!project)throw Error("Project is unavailable");
       resourcePicker ||= new HeyBossUI.ProjectPicker({onSelect:id=>location.href=url(id)});
       resourcePicker.update(boot.projects,project);
-      $("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;$("#nav-mindmaps").hidden=true;
+      $("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;
       const context={project:project.id};
-      const resolved=HeyBossRoutes.resolve();const issue=resolved?.entity==="issue"?resolved.id:null,node=resolved?.entity==="node"?resolved.id:null;
-      const result=await rpc(context,issue?{action:"view",number:Number(issue)}:{action:"mindmap",operation:{command:"view",node,body_mode:"full"}},true);
+      const resolved=HeyBossRoutes.resolve();const issue=resolved?.entity==="issue"?resolved.id:null;
+      if(!issue)throw Error("Issue is unavailable");
+      const result=await rpc(context,{action:"view",number:Number(issue)},true);
       if(ticket!==resourceGeneration)return;
-      const resource=issue?result.issue:result.nodes.find(n=>n.id===node)||result.nodes[0];
+      const resource=result.issue;
       if(!resource)throw Error("Resource was removed");
       if(!resource.body_html){resource.body_html=(await api(context,{command:"preview",body:resource.body||""})).html;}
-      const links=await api(context,issue?{command:"links",issue:Number(issue)}:{command:"links",node:resource.id});
+      const links=await api(context,{command:"links",issue:Number(issue)});
       if(ticket!==resourceGeneration)return;
       document.title=resource.title+" · Hey Boss";
-      $("#resource-content").innerHTML=`<h1>${esc(resource.display_label||resource.title)}</h1><p class="artifact-muted">${issue?`Issue #${esc(issue)} · ${esc(resource.state)}`:"Mindmap topic"}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article>${issue?HeyBossStatus.card(resource,author)+HeyBossOrigin.card(resource.origin,context.project,author):""}<section id="resource-attachments"></section>`;
+      $("#resource-content").innerHTML=`<h1>${esc(resource.title)}</h1><p class="artifact-muted">Issue #${esc(issue)} · ${esc(resource.state)}</p><article class="markdown artifact-reading">${resource.body_html||esc(resource.body)}</article>${HeyBossStatus.card(resource,author)+HeyBossOrigin.card(resource.origin,context.project,author)}<section id="resource-attachments"></section>`;
       if(issue){
         const attach=()=>HeyBossStatus.mount($(".issue-progress-card"),resource,author,(offset,before)=>rpc(context,{action:"status_history",number:Number(issue),limit:20,offset,before},true));
         let update=attach(),refreshing=false;
@@ -640,8 +641,8 @@ const HeyBossArtifacts = (() => {
           finally{refreshing=false;}
         },15000);
       }
-      HeyBossAttachments.mount($("#resource-attachments"),{...context,target:{kind:issue?"issue":"node",id:issue?String(issue):resource.id},readonly:!!resource.deleted_at});
-      mount($("#resource-artifacts"),{...context,...(issue?{issue:Number(issue)}:{node:resource.id}),artifacts:links.artifacts,artifacts_enabled:links.artifacts_enabled});
+      HeyBossAttachments.mount($("#resource-attachments"),{...context,target:{kind:"issue",id:String(issue)},readonly:!!resource.deleted_at});
+      mount($("#resource-artifacts"),{...context,issue:Number(issue),artifacts:links.artifacts,artifacts_enabled:links.artifacts_enabled});
       $("#resource-status").textContent="";
     }catch(e){if(ticket===resourceGeneration)$("#resource-status").textContent=e.message;}
   }

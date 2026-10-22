@@ -35,7 +35,7 @@ try {
   }
   for (const command of [[],['add'],['create'],['remove']]) {
     const help=run(['issue','subtask',...command,'--help']);
-    for(const text of ['Blocked','claim','mindmap']) assert(help.includes(text),'Missing help: '+text);
+    for(const text of ['Blocked','claim']) assert(help.includes(text),'Missing help: '+text);
   }
   issue(['create','--title','Parent']);
   issue(['create','--title','Follow-up']);
@@ -46,9 +46,6 @@ try {
     assert.equal(issue(args,4).error.code,'subtask_claim_conflict');
     assert.deepEqual(issue(['view','1']),before);
   }
-  const mm = args => JSON.parse(run(['mm','--project','Subtask installation QA','--json',...args]));
-  mm(['issue','1','--id','parent-work']);
-  mm(['issue','2','--under','parent-work']);
   for(const number of ['1','2']) {
     const current=issue(['view',number]).issue;
     assert.equal(current.assignee,'codex:verification');
@@ -72,7 +69,7 @@ try {
   const script=await(await fetch(new URL('/app.js',info.url))).text();
   assert(html.includes('id="editor-subtask-help"') && html.includes('id="subtask-picker-help"'));
   assert(script.includes('subtask_claim_conflict') && script.includes('$("#editor-subtask-help").hidden = !options.parent'));
-  result={version,help_commands:4,claim_mutations_rejected:2,mindmap_claims_preserved:2,
+  result={version,help_commands:4,claim_mutations_rejected:2,existing_claims_preserved:2,
     scheduling_verified:true,numbering_preserved:true,embedded_ui_verified:true};
 } finally {
   await Promise.all(children.map(child=>new Promise(resolve=>{

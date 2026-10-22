@@ -288,7 +288,7 @@ pub(crate) fn archive_issue(
     copy.commit()?;
     snapshot.commit()?;
     verify_copy(&archive, &key, project, number)?;
-    // Mindmap metadata and previews stay cheap without loading the cold body.
+    // Issue metadata and previews stay cheap without loading the cold body.
     // Keep one extra character so the existing 512-character truncation is exact.
     let preview: String = original["body"]
         .as_str()

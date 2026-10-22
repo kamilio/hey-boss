@@ -82,22 +82,13 @@ fn lookup_resolves_issue_url_project_before_worker_default_without_mutating() {
 }
 
 #[test]
-fn lookup_reads_artifacts_and_mindmap_nodes_from_desktop_and_mobile_links() {
+fn lookup_reads_artifacts_from_desktop_and_mobile_links() {
     let f = Fixture::new("resources");
     let artifact = f.execute(json!({"action":"artifact","operation":{"command":"create","title":"Design","body":"Document contents"}}));
     let id = artifact["artifact"]["id"].as_str().unwrap();
     let doc = f.value(&format!("https://example.invalid/artifacts#project=github.com%2Fpoe-platform%2Fpoe-code&artifact={id}&issue=91"));
     assert_eq!(doc["route"]["entity"], "artifact");
     assert_eq!(doc["artifact"]["body"], "Document contents");
-    let added = f.execute(json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":"Topic","body":"Topic contents","alias":"topic"}}));
-    let id = added["node"]["id"].as_str().unwrap();
-    for path in ["mm", "project-resource"] {
-        let node = f.value(&format!(
-            "http://localhost/{path}#project=github.com%2Fpoe-platform%2Fpoe-code&node={id}"
-        ));
-        assert_eq!(node["route"]["entity"], "node");
-        assert_eq!(node["node"]["body"], "Topic contents");
-    }
 }
 
 #[test]
@@ -105,6 +96,8 @@ fn lookup_rejects_invalid_and_missing_targets_instead_of_returning_unrelated_ite
     let f = Fixture::new("errors");
     f.execute(json!({"action":"create","title":"Existing","body":"","labels":[]}));
     for url in [
+        "http://localhost/mm#node=topic",
+        "http://localhost/project-resource#node=topic",
         "ftp://localhost/#issue=1",
         "https://localhost/unknown#issue=1",
         "http://localhost/#issue=-1",
@@ -217,10 +210,6 @@ fn lookup_collections_keep_web_issue_filters() {
     );
     assert_eq!(
         f.value("http://localhost/artifacts#project=github.com%2Fpoe-platform%2Fpoe-code")["artifacts"],
-        json!([])
-    );
-    assert_eq!(
-        f.value("http://localhost/mm#project=github.com%2Fpoe-platform%2Fpoe-code")["nodes"],
         json!([])
     );
 }

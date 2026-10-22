@@ -147,12 +147,7 @@ impl Store {
             actor_labels::enrich(&tx, &mut result)?;
         }
         let settings = registry::project_settings(&tx, &project)?;
-        for key in [
-            "prs_enabled",
-            "drafts_enabled",
-            "artifacts_enabled",
-            "mindmaps_enabled",
-        ] {
+        for key in ["prs_enabled", "drafts_enabled", "artifacts_enabled"] {
             result[key] = settings[key].clone();
         }
         let boss = super::super::global_settings::read(&tx)?;

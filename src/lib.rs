@@ -24,7 +24,6 @@ pub mod health;
 pub mod issues;
 pub mod jobs;
 pub mod markdown;
-pub mod mindmap;
 pub mod notices;
 pub mod quiet_hours;
 #[doc(hidden)]

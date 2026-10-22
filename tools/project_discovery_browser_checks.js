@@ -26,7 +26,7 @@ async page => {
   check(registry.projects.some(p => p.id === saved), 'Temporary project with saved work retained');
   check(registry.projects.filter(p => p.id === repository).length === 1, 'One canonical repository entry');
   await page.route('**/api/inbox*', route => route.fulfill({json:{ok:true,tasks:[]}}));
-  for (const route of ['/', '/mm', '/artifacts', '/agents']) {
+  for (const route of ['/', '/artifacts', '/agents']) {
     for (const [width,height] of [[320,568],[390,844],[844,390],[1440,1000]]) {
       await page.setViewportSize({width,height});
       for (const colorScheme of ['light','dark']) {

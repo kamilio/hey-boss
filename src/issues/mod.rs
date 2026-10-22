@@ -320,9 +320,6 @@ pub enum Operation {
     Artifact {
         operation: crate::artifacts::Operation,
     },
-    Mindmap {
-        operation: crate::mindmap::Operation,
-    },
     Projects {
         #[serde(default)]
         include_hidden: bool,
@@ -409,8 +406,6 @@ pub enum Operation {
         drafts_enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifacts_enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mindmaps_enabled: Option<bool>,
         if_version: Option<i64>,
     },
     PullRequests {
@@ -729,8 +724,6 @@ pub struct ProjectInitSettings {
     pub drafts_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mindmaps_enabled: Option<bool>,
     pub if_version: i64,
 }
 
@@ -749,9 +742,6 @@ impl Operation {
             return operation.writes();
         }
         if let Self::Artifact { operation } = self {
-            return operation.writes();
-        }
-        if let Self::Mindmap { operation } = self {
             return operation.writes();
         }
         !matches!(
@@ -803,7 +793,6 @@ impl Operation {
             | Self::Job { .. }
             | Self::Artifact { .. }
             | Self::Batch { .. }
-            | Self::Mindmap { .. }
             | Self::Projects { .. }
             | Self::MergedPullRequests { .. }
             | Self::HideProject

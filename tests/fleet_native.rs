@@ -514,25 +514,13 @@ fn authority_replies_arrive_while_a_replica_pull_waits_for_the_writer() {
 }
 
 #[test]
-fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream() {
+fn authoritative_artifacts_and_status_round_trip_over_the_existing_fleet_stream() {
     use std::os::unix::fs::PermissionsExt;
     let main = Fixture::new();
     let peer = Fixture::new();
     for fixture in [&main, &peer] {
         projects::seed(&fixture.root.join("issues.db"), &["named:Authority"]);
     }
-    main.cli(&[
-        "mm",
-        "--project",
-        "Authority",
-        "--agent",
-        "human:fixture",
-        "--json",
-        "add",
-        "Authoritative root",
-        "--id",
-        "root",
-    ]);
     fs::write(
         main.root.join("inventory.json"),
         r#"{"ssh_hosts":["fixture.test"]}"#,
@@ -580,9 +568,9 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         );
         thread::sleep(Duration::from_millis(100));
     }
-    let mm = |args: &[&str]| {
+    let artifact = |args: &[&str]| {
         let mut all = vec![
-            "mm",
+            "artifact",
             "--project",
             "Authority",
             "--agent",
@@ -592,14 +580,14 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         all.extend_from_slice(args);
         peer.cli(&all)
     };
-    let initial = mm(&["show"]);
-    assert_eq!(initial["nodes"][0]["title"], "Authoritative root");
+    let initial = artifact(&["list"]);
+    assert_eq!(initial["artifacts"], serde_json::json!([]));
     // A supervisor journal write may wait for another writer. Its transport
     // must still serve canonical WAL reads instead of queuing them behind sync.
     let writer = hey_boss::database::Connection::connect(&main.root.join("issues.db")).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     thread::sleep(Duration::from_secs(6)); // At least one five-second sync tick.
-    let mut read = peer.command(&["mm", "--project", "Authority", "--json", "show"]);
+    let mut read = peer.command(&["artifact", "--project", "Authority", "--json", "list"]);
     let mut status = peer.command(&["fleet", "status", "--json"]);
     let (finished, result) = std::sync::mpsc::channel();
     let reader = thread::spawn(move || {
@@ -611,7 +599,7 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     writer.execute_batch("ROLLBACK").unwrap();
     reader.join().unwrap();
     let (during_write, status) =
-        during_write.expect("canonical map read waited behind supervisor replication");
+        during_write.expect("canonical artifact read waited behind supervisor replication");
     assert!(
         during_write.status.success(),
         "{}",
@@ -636,7 +624,7 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
     fs::create_dir_all(home.join(".local/share")).unwrap();
     std::os::unix::fs::symlink(&peer.root, home.join(".local/share/hey-boss")).unwrap();
     let inherited = peer
-        .command(&["mm", "--project", "Authority", "--json", "show"])
+        .command(&["artifact", "--project", "Authority", "--json", "list"])
         .env("HOME", &home)
         .env_remove("HEY_BOSS_FLEET_STATE")
         .output()
@@ -651,27 +639,20 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         serde_json::from_slice::<Value>(&inherited.stdout).unwrap(),
         initial
     );
-    let added = mm(&[
-        "add",
-        "Companion child",
-        "--id",
-        "child",
-        "--under",
-        "root",
+    let args = [
+        "create",
+        "--title",
+        "Companion document",
+        "--body",
+        "",
         "--request-id",
         "authority-child",
-    ]);
-    let replay = mm(&[
-        "add",
-        "Companion child",
-        "--id",
-        "child",
-        "--under",
-        "root",
-        "--request-id",
-        "authority-child",
-    ]);
-    assert_eq!(added, replay, "the authority owns idempotency receipts");
+    ];
+    assert_eq!(
+        artifact(&args),
+        artifact(&args),
+        "the authority owns idempotency receipts"
+    );
     let main_db = rusqlite::Connection::open(main.root.join("issues.db")).unwrap();
     let receipt_actor: String = main_db
         .query_row(
@@ -685,43 +666,6 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         "the relay preserves the caller"
     );
     drop(main_db);
-    let graph = mm(&["show"]);
-    assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        graph["version"], 2,
-        "map revision must not become the fleet protocol version"
-    );
-    assert_eq!(
-        main.cli(&["mm", "--project", "Authority", "--json", "show"]),
-        graph
-    );
-    let stale = peer
-        .command(&[
-            "mm",
-            "--project",
-            "Authority",
-            "--agent",
-            "human:fixture",
-            "--json",
-            "--if-version",
-            "0",
-            "edit",
-            "child",
-            "--title",
-            "Stale",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(
-        stale.status.code(),
-        Some(4),
-        "{}",
-        String::from_utf8_lossy(&stale.stdout)
-    );
-    let error: Value = serde_json::from_slice(&stale.stdout).unwrap();
-    assert_eq!(error["error"]["code"], "conflict");
-    // The viewer's topic inspector uses the same authority for linked documents
-    // and file bytes; a map that loads with broken resource panels is incomplete.
     let artifact = peer.cli(&[
         "artifact",
         "--project",
@@ -734,8 +678,6 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         "Design notes",
         "--body",
         "From the companion",
-        "--node",
-        "child",
     ]);
     let artifact_id = artifact["artifact"]["id"].as_str().unwrap();
     assert_eq!(
@@ -760,8 +702,8 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         "--json",
         "upload",
         file.to_str().unwrap(),
-        "--node",
-        "child",
+        "--artifact",
+        artifact_id,
     ]);
     let attachment_id = uploaded["attachment"]["id"].as_str().unwrap();
     let listed = peer.cli(&[
@@ -770,8 +712,8 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         "Authority",
         "--json",
         "list",
-        "--node",
-        "child",
+        "--artifact",
+        artifact_id,
     ]);
     assert_eq!(listed["attachments"][0]["id"], attachment_id);
     let downloaded = peer.root.join("downloaded.txt");
@@ -794,14 +736,14 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
             .unwrap(),
         0
     );
-    assert!(!peer.root.join("issues.attachments").exists());
-    assert_eq!(
-        peer_db
-            .query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
+    let attachments = peer.root.join("issues.attachments");
+    if attachments.exists() {
+        for entry in fs::read_dir(&attachments).unwrap() {
+            let entry = entry.unwrap();
+            assert_eq!(entry.file_name(), ".replication");
+            assert_eq!(fs::read_dir(entry.path()).unwrap().count(), 0);
+        }
+    }
     assert_eq!(
         peer_db
             .query_row(
@@ -1074,7 +1016,7 @@ fn authoritative_mindmaps_and_status_round_trip_over_the_existing_fleet_stream()
         serde_json::json!(["reviewed"])
     );
     let offline = peer
-        .command(&["mm", "--project", "Authority", "--json", "show"])
+        .command(&["artifact", "--project", "Authority", "--json", "list"])
         .output()
         .unwrap();
     assert_eq!(offline.status.code(), Some(1));

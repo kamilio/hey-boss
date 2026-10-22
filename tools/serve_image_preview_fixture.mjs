@@ -47,7 +47,6 @@ try {
     child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(Error(error||'Fixture initialization failed')));
   });
   await command(['project','init','--project','Image Preview QA','--yes','--prs','false','--worktree','false','--json']);
-  await command(['mm','add','Image review','--project','Image Preview QA','--id','image-preview','--json']);
   start(['issue','--project','Image Preview QA','web','--port','59661','--no-discovery','--json']);
   const native='http://127.0.0.1:59661';
   let boot;

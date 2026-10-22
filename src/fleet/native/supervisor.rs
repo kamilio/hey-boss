@@ -1895,14 +1895,13 @@ impl Supervisor {
                     serde_json::from_value(value["request"].clone())?;
                 if !matches!(
                     request.operation,
-                    crate::issues::Operation::Mindmap { .. }
-                        | crate::issues::Operation::Job { .. }
+                    crate::issues::Operation::Job { .. }
                         | crate::issues::Operation::Artifact { .. }
                         | crate::issues::Operation::Attachment { .. }
                 ) && !matches!(&request.operation, crate::issues::Operation::Create { attachments, .. } if !attachments.is_empty())
                 {
                     return Err(crate::issues::Error::invalid(
-                        "Only jobs, maps, artifacts and attachments use the authority relay",
+                        "Only jobs, artifacts and attachments use the authority relay",
                     ));
                 }
                 crate::issues::Store::open(&self.ctx.path)?.execute(&request)

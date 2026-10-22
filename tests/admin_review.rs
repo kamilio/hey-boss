@@ -24,7 +24,6 @@ fn catalog_contains_nested_commands_help_and_output_support() {
         "issue view",
         "issue pr add",
         "artifact create",
-        "mm show",
         "notif secret",
         "skill install",
         "agent list",
@@ -114,7 +113,7 @@ fn privileged_commands_are_documented_without_running_them() {
 
 #[test]
 fn lifecycle_and_batch_previews_include_the_required_context() {
-    for command in ["issue ready", "issue transfer", "issue batch", "mm batch"] {
+    for command in ["issue ready", "issue transfer", "issue batch"] {
         let preview = cli(&["admin", "preview", command, "--json"]);
         for format in ["text", "json"] {
             assert_eq!(

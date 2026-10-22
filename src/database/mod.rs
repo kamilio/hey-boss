@@ -87,8 +87,7 @@ fn connection_error(source: std::io::Error) -> rusqlite::Error {
              A sandbox or OS permission may block the local socket.\n\
              Retry hey-boss as a standalone command without pipes or redirection.\n\
              If still denied, request approval for that command.\n\
-             Compact reads: hey-boss issue list --limit 20 (text)\n\
-             or hey-boss mm show --bodies none."
+             Compact reads: hey-boss issue list --limit 20 (text)."
         )
     } else {
         format!("Database service unavailable: {source}")

@@ -306,7 +306,7 @@ impl Graph {
                 return Err(Error::new(
                     "subtask_claim_conflict",
                     format!(
-                        "Cannot change subtasks: issue #{number} has an existing claim that this change would release. Use mindmap nesting for organization without changing ownership, or have the owner explicitly unassign the affected issue first."
+                        "Cannot change subtasks: issue #{number} has an existing claim that this change would release. Have the owner explicitly unassign the affected issue first."
                     ),
                 ));
             }

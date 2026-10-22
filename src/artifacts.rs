@@ -27,7 +27,6 @@ pub enum Operation {
         title: String,
         body: String,
         issue: Option<i64>,
-        node: Option<String>,
     },
     Edit {
         id: String,
@@ -62,16 +61,13 @@ pub enum Operation {
     Link {
         id: String,
         issue: Option<i64>,
-        node: Option<String>,
     },
     Unlink {
         id: String,
         issue: Option<i64>,
-        node: Option<String>,
     },
     Links {
         issue: Option<i64>,
-        node: Option<String>,
     },
 }
 impl Operation {
@@ -146,15 +142,10 @@ impl Operation {
                     return Err(Error::invalid("Invalid offset"));
                 }
             }
-            Self::Create {
-                title,
-                body,
-                issue,
-                node,
-            } => {
+            Self::Create { title, body, issue } => {
                 identifier(title, "title", 512)?;
                 text(body)?;
-                target(*issue, node.as_deref(), false)?;
+                target(*issue, false)?;
             }
             Self::Edit {
                 id,
@@ -204,11 +195,11 @@ impl Operation {
                     return Err(Error::invalid("Invalid comment ID"));
                 }
             }
-            Self::Link { id, issue, node } | Self::Unlink { id, issue, node } => {
+            Self::Link { id, issue } | Self::Unlink { id, issue } => {
                 identifier(id, "artifact ID", 128)?;
-                target(*issue, node.as_deref(), true)?;
+                target(*issue, true)?;
             }
-            Self::Links { issue, node } => target(*issue, node.as_deref(), true)?,
+            Self::Links { issue } => target(*issue, true)?,
             Self::View { id } => identifier(id, "artifact ID", 128)?,
         }
         Ok(())
@@ -221,15 +212,9 @@ fn revision(v: i64) -> Result<()> {
         Ok(())
     }
 }
-fn target(issue: Option<i64>, node: Option<&str>, required: bool) -> Result<()> {
-    if issue.is_some() && node.is_some()
-        || required && issue.is_none() && node.is_none()
-        || issue.is_some_and(|n| n <= 0)
-    {
-        return Err(Error::invalid("Specify one issue or mindmap node"));
-    }
-    if let Some(n) = node {
-        identifier(n, "mindmap node", 2048)?;
+fn target(issue: Option<i64>, required: bool) -> Result<()> {
+    if required && issue.is_none() || issue.is_some_and(|n| n <= 0) {
+        return Err(Error::invalid("Specify a positive issue number"));
     }
     Ok(())
 }

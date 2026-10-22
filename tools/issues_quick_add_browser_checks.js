@@ -27,7 +27,7 @@ async page => {
     }, {project:route.project,number:Number(route.issue)});
     if (result.title !== title || result.body !== '' || !route.project.endsWith(projectName)) throw Error('Wrong created issue: '+JSON.stringify(result));
   };
-  for (const path of ['/#project='+encodeURIComponent(current), '/#project='+encodeURIComponent(current)+'&view=inbox', '/workers#project='+encodeURIComponent(current), '/mm#project='+encodeURIComponent(current), '/mm?focus=1#project='+encodeURIComponent(current)]) {
+  for (const path of ['/#project='+encodeURIComponent(current), '/#project='+encodeURIComponent(current)+'&view=inbox', '/workers#project='+encodeURIComponent(current)]) {
     await page.goto(base+path);
     await create('Fix @poe-code from '+path.split('#')[0], 'Fix from '+path.split('#')[0], 'poe-code');
     checks.push('Create from '+path);

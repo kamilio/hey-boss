@@ -118,18 +118,17 @@ struct ProjectSettingsRow {
     version: i64,
     drafts_enabled: bool,
     artifacts_enabled: bool,
-    mindmaps_enabled: bool,
     worktree_enabled: bool,
     overrides: String,
 }
 pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason,worker_execution FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason,worker_execution FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
-            execution: r.get(10)?,
-            paused: r.get(8)?, pause_reason: r.get(9)?,
-            artifacts_enabled: r.get(6)?, mindmaps_enabled: r.get(7)?,
+            execution: r.get(9)?,
+            paused: r.get(7)?, pause_reason: r.get(8)?,
+            artifacts_enabled: r.get(6)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
             drafts_enabled: r.get(3)?,
             worktree_enabled: r.get(4)?, overrides: r.get(5)?,
@@ -144,7 +143,6 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         version,
         drafts_enabled,
         artifacts_enabled,
-        mindmaps_enabled,
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
@@ -156,7 +154,6 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
         version: 0,
         drafts_enabled: true,
         artifacts_enabled: true,
-        mindmaps_enabled: true,
         worktree_enabled: false,
         overrides: "{}".into(),
     });
@@ -165,7 +162,7 @@ pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"mindmaps_enabled":mindmaps_enabled,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -860,7 +857,6 @@ pub(super) fn execute(
             prompt_overrides,
             drafts_enabled,
             artifacts_enabled,
-            mindmaps_enabled,
             if_version,
         } => {
             if *chief_enabled == Some(true) || chief_prompt.is_some() {
@@ -920,8 +916,6 @@ pub(super) fn execute(
             let drafts_enabled = drafts_enabled.unwrap_or(defaults["drafts_enabled"] == true);
             let artifacts_enabled =
                 artifacts_enabled.unwrap_or(defaults["artifacts_enabled"] != false);
-            let mindmaps_enabled =
-                mindmaps_enabled.unwrap_or(defaults["mindmaps_enabled"] != false);
             let prs_enabled = prs_enabled.unwrap_or(defaults["prs_enabled"] == true);
             if prompt.trim().is_empty() || prompt.len() > 32000 {
                 return Err(Error::invalid("Project prompt must contain 1–32000 bytes"));
@@ -933,7 +927,7 @@ pub(super) fn execute(
             if let Some(name) = boss_name {
                 crate::issues::global_settings::configure(db, name, None)?;
             }
-            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,mindmaps_enabled,paused,pause_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,mindmaps_enabled=excluded.mindmaps_enabled,paused=excluded.paused,pause_reason=excluded.pause_reason",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,mindmaps_enabled,paused,pause_reason])?;
+            db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,paused=excluded.paused,pause_reason=excluded.pause_reason",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,paused,pause_reason])?;
             db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit',worker_execution=?2 WHERE project_id=?1", params![p.id,serde_json::to_string(&execution)?])?;
             project_settings(db, p)
         }

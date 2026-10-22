@@ -14,12 +14,11 @@ async (page) => {
     for (const width of [320, 390, 768, 1440]) {
       await page.setViewportSize({width,height:900});
       let reference;
-      for (const path of ['/', '/#view=inbox', '/workers', '/mm']) {
+      for (const path of ['/', '/#view=inbox', '/workers']) {
         await page.goto(origin + path, {waitUntil:'domcontentloaded'});
         await page.waitForFunction(() => document.querySelector('#project-name')?.textContent !== 'Projects');
         if (path.includes('inbox')) await page.waitForSelector('#inbox-search');
         if (path === '/workers') await page.waitForSelector('.machine');
-        if (path === '/mm') await page.waitForSelector('#caption');
         const style = await page.evaluate(() => {
           const heading = [...document.querySelectorAll('.page-heading')].find(e => e.getBoundingClientRect().height);
           const main = document.querySelector('main'), h1 = heading.querySelector('h1'), panel = document.querySelector('.glass');
@@ -50,7 +49,7 @@ async (page) => {
   await page.locator('.project-option').click();
   await page.waitForFunction(() => document.querySelector('#project-name').textContent === 'Borealis');
   check((await page.locator('#nav-issues').getAttribute('href')).includes('named%3ABorealis'), 'Workers picker preserves project in Issues navigation');
-  check((await page.locator('#nav-mindmaps').getAttribute('href')).includes('named%3ABorealis'), 'Workers picker preserves project in Mindmaps navigation');
+  check((await page.locator('#nav-artifacts').getAttribute('href')).includes('named%3ABorealis'), 'Workers picker preserves project in Artifacts navigation');
   check(await page.locator('.machine').count() === 1, 'Project selection keeps whole fleet visible');
   check(errors.length === 0, `No browser exceptions: ${errors.join('; ')}`);
   await page.screenshot({path:'output/playwright/issue18-workers-desktop-dark.png',fullPage:true});

@@ -514,11 +514,6 @@ fn seed(root: &Path, context: &Value) -> io::Result<Value> {
     )?;
     call(json!({"action":"comment","number":1,"body":"Keep the next action easy to find."}))?;
     call(json!({"action":"configure_project","prs_enabled":true}))?;
-    for (alias, title) in [("review", "Review plan"), ("details", "Output details")] {
-        call(
-            json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":title,"body":"Review context","alias":alias}}),
-        )?;
-    }
     let artifact = call(
         json!({"action":"artifact","operation":{"command":"create","title":"Review notes","body":"# Review\n\nInspect the context sent to agents.","issue":1}}),
     )?;
@@ -530,13 +525,6 @@ fn seed(root: &Path, context: &Value) -> io::Result<Value> {
         root.join("issues.json"),
         serde_json::to_vec(&json!([
             {"number":2,"if_version":1,"expected_assignee":null,"add_labels":["reviewed"],"assignment":"keep"}
-        ]))?,
-    )?;
-    fs::write(
-        root.join("map.json"),
-        serde_json::to_vec(&json!([
-            {"command":"edit","node":"review","title":"Reviewed plan"},
-            {"command":"link","from":"review","to":"details","kind":"related","description":"Supporting context"}
         ]))?,
     )?;
     let mut destination = request(
@@ -579,7 +567,7 @@ fn dispatch(args: Vec<String>) -> io::Result<()> {
     let family = args.first().cloned().unwrap_or_default();
     if matches!(
         args.first().map(String::as_str),
-        Some("issue" | "artifact" | "attachment" | "mm")
+        Some("issue" | "artifact" | "attachment")
     ) {
         args.extend([
             "--project".into(),
@@ -617,7 +605,6 @@ fn dispatch(args: Vec<String>) -> io::Result<()> {
         crate::Command::Issue(o) => crate::issue_cli::run(&o),
         crate::Command::Artifact(o) => crate::artifact_cli::run(&o),
         crate::Command::Attachment(o) => crate::attachment_cli::run(&o),
-        crate::Command::Mm(o) => crate::mindmap_cli::run(&o),
         crate::Command::Settings(o) => crate::issue_cli::run_global(&o),
         crate::Command::Skill(o) => {
             return match o.action {
@@ -759,9 +746,6 @@ fn setup_operation(
         }
         ["artifact", "comment", id, ..] => {
             json!({"action":"artifact","operation":{"command":"comment","id":id,"body":"Review comment"}})
-        }
-        ["mm", "link", from, to] => {
-            json!({"action":"mindmap","operation":{"command":"link","from":from,"to":to,"kind":"related"}})
         }
         _ => return Err(io::Error::other("Unknown preview setup")),
     };

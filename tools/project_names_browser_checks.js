@@ -14,7 +14,7 @@ async page => {
   for(const project of body.projects||[])project.name_collisions=[{name:project.name,project_id:project.id,rejected_id:'local:fixture:/.git',legacy:true}];
   await route.fulfill({response,json:body});
  });
- for(const path of [paired?'/issues':'/','/mm','/artifacts','/agents']){
+ for(const path of [paired?'/issues':'/','/artifacts','/agents']){
   for(const [width,height] of [[320,568],[390,844],[844,390],[1440,1000]]){
    for(const colorScheme of ['light','dark']){
     await page.setViewportSize({width,height});await page.emulateMedia({colorScheme});

@@ -33,7 +33,6 @@ jobs:
       - run: node tools/test_issue_list_actions.cjs
       - run: node tools/test_project_navigation.cjs && node tools/test_issue_architecture.cjs
       - run: cargo fmt --check
-      - run: node tools/test_mindmap_layout.js && node --check src/issues/web/mindmap-map.js && node --check src/issues/web/mindmap.js
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: |
           mkdir -p out

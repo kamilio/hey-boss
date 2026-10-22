@@ -152,8 +152,6 @@ pub(super) fn execute(
     // Opaque file IDs and disk locations survive a project transfer; only access
     // metadata follows the issue. Source-project access is revoked atomically.
     db.execute("UPDATE file_attachments SET project_id=?3,target=CAST(?4 AS TEXT) WHERE project_id=?1 AND kind='issue' AND target=CAST(?2 AS TEXT)",params![source.id,number,target.id,next])?;
-    db.execute("UPDATE mindmaps SET version=version+1 WHERE project_id IN (SELECT project_id FROM mindmap_nodes WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT))",params![source.id,number])?;
-    db.execute("UPDATE mindmap_nodes SET reference_project=?3,reference=CAST(?4 AS TEXT),updated_at=?5 WHERE kind='issue' AND reference_project=?1 AND reference=CAST(?2 AS TEXT)",params![source.id,number,target.id,next,now])?;
     db.execute("UPDATE issues SET deleted_at=?3,assignee=NULL,assignment_target=NULL,github_ack_event=NULL,updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![source.id,number,now])?;
     db.execute(
         "DELETE FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2",

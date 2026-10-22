@@ -36,7 +36,6 @@ fn every_web_page_advertises_the_same_cli_guide_without_resource_data() {
         "/",
         "/issues",
         "/artifacts",
-        "/mm",
         "/workers",
         "/agents",
         "/agents/session",

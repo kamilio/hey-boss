@@ -261,10 +261,6 @@ fn files_are_disk_backed_project_scoped_and_survive_restart_for_all_targets() {
         &mut s,
         json!({"action":"create","title":"Issue","body":"","labels":[]}),
     );
-    call(
-        &mut s,
-        json!({"action":"mindmap","operation":{"command":"add","title":"Topic","alias":"topic","body":"","kind":"text"}}),
-    );
     let doc = call(
         &mut s,
         json!({"action":"artifact","operation":{"command":"create","title":"Doc","body":""}}),
@@ -272,7 +268,6 @@ fn files_are_disk_backed_project_scoped_and_survive_restart_for_all_targets() {
     let binary = vec![0, 255, 10, 13, 128, 42];
     for target in [
         json!({"kind":"issue","id":"1"}),
-        json!({"kind":"node","id":"topic"}),
         json!({"kind":"artifact","id":doc["artifact"]["id"]}),
     ] {
         let mut req = request(
@@ -367,7 +362,6 @@ fn uploads_reject_bad_names_missing_targets_invalid_bytes_and_oversized_files() 
     }
     for target in [
         json!({"kind":"issue","id":"999"}),
-        json!({"kind":"node","id":"absent"}),
         json!({"kind":"artifact","id":"absent"}),
     ] {
         assert_eq!(s.execute(&request(json!({"action":"attachment","operation":{"command":"upload","target":target,"name":"file.txt","data":""}}))).unwrap_err().code,"not_found");

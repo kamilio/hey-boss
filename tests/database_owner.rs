@@ -373,17 +373,13 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
         unsafe { libc::getuid() },
         &identity[..24]
     ));
-    for args in [
-        vec!["issue", "list", "--project", "Database owner", "--all"],
-        vec![
-            "mm",
-            "show",
-            "--project",
-            "Database owner",
-            "--bodies",
-            "none",
-        ],
-    ] {
+    for args in [vec![
+        "issue",
+        "list",
+        "--project",
+        "Database owner",
+        "--all",
+    ]] {
         for json in [false, true] {
             let mut args = args.clone();
             if json {
@@ -462,7 +458,6 @@ fn sandbox_denial_does_not_bootstrap_another_service() {
                             "{message}"
                         );
                         assert!(message.contains("approval"), "{message}");
-                        assert!(message.contains("mm show --bodies none"), "{message}");
                     } else if json {
                         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
                         assert_eq!(value["ok"], true, "{value}");

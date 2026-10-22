@@ -171,25 +171,6 @@ pub fn run(options: &Options) -> Result<()> {
                 },
             },
         )?,
-        "node" => execute(
-            &route,
-            options,
-            Operation::Mindmap {
-                operation: hey_boss::mindmap::Operation::View {
-                    node: route.id.clone(),
-                    body_mode: hey_boss::mindmap::BodyMode::Full,
-                },
-            },
-        )?,
-        "mindmap" => execute(
-            &route,
-            options,
-            Operation::Mindmap {
-                operation: hey_boss::mindmap::Operation::Show {
-                    body_mode: hey_boss::mindmap::BodyMode::Full,
-                },
-            },
-        )?,
         "notice" | "inbox" => {
             // Inbox navigation may retain an issue backend's host. Like the web,
             // read notices from the connected desktop rather than that issue host.
@@ -214,22 +195,6 @@ pub fn run(options: &Options) -> Result<()> {
         "agents" => hey_boss::agent_conversations::overview()?,
         _ => return Err(Error::invalid("Unsupported resource")),
     };
-    if hey_boss::mindmap::needs_inbox(&value) {
-        hey_boss::mindmap::enrich_notifications(
-            &mut value,
-            hey_boss::notices::execute(&hey_boss::notices::Action::List),
-        )?;
-    }
-    if route.entity == "node" && value.get("node").is_none() {
-        return Err(Error::new(
-            if value["notifications"]["available"] == false {
-                "inbox_unavailable"
-            } else {
-                "not_found"
-            },
-            "This notification node is not confirmed pending in Inbox",
-        ));
-    }
     if route.entity == "agents"
         && let Some(project) = &route.project
     {
@@ -355,10 +320,9 @@ fn print_text(route: &Route, value: &Value) {
                 }
             }
         }
-        "artifacts" | "mindmap" | "inbox" => {
+        "artifacts" | "inbox" => {
             let key = match route.entity.as_str() {
                 "artifacts" => "artifacts",
-                "mindmap" => "nodes",
                 _ => "tasks",
             };
             let entries = value[key].as_array().map(Vec::as_slice).unwrap_or_default();

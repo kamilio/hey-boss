@@ -63,9 +63,6 @@ async page => {
     await page.screenshot({path:`output/playwright/issue71/detail-${width}-${scheme}.png`});
   }
   await page.setViewportSize({width:1440,height:1000});
-  await page.goto(alias + '/mm?focus=1' + hash);
-  await page.waitForFunction(() => document.documentElement.classList.contains('mindmap-focus'));
-  check(await page.evaluate(() => location.pathname === '/mm' && location.search === '?focus=1'), 'Mindmap path and query preserved at hostname');
   check(errors.length === 0, `No JavaScript page errors: ${errors.join('; ')}`);
-  return {complete:true,completed:checks.length,expected:14,checks};
+  return {complete:true,completed:checks.length,expected:13,checks};
 }

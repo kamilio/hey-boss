@@ -38,7 +38,7 @@ impl Fixture {
             .unwrap();
     }
     fn run(&self, project: &str, args: &[&str]) -> Value {
-        let (command, args) = if args.first().is_some_and(|c| *c == "artifact" || *c == "mm") {
+        let (command, args) = if args.first().is_some_and(|c| *c == "artifact") {
             (args[0], &args[1..])
         } else {
             ("issue", args)
@@ -175,7 +175,6 @@ fn legacy_empty_git_metadata_releases_its_name_but_preserves_saved_work() {
                 "Keep this",
             ],
         ),
-        ("map", vec!["mm", "add", "Saved map"]),
         (
             "settings",
             vec!["settings", "set", "--prompt", "Saved instructions"],
@@ -284,10 +283,9 @@ fn legacy_empty_temporary_projects_are_omitted_but_saved_work_remains_accessible
     let empty = "local:remote:/tmp/hey-boss-empty";
     let saved = "local:remote:/tmp/hey-boss-saved";
     let artifact = "local:remote:/tmp/hey-boss-artifact";
-    let map = "local:remote:/tmp/hey-boss-map";
     let settings = "local:remote:/tmp/hey-boss-settings";
     let deleted = "local:remote:/tmp/hey-boss-deleted";
-    for id in [empty, saved, artifact, map, settings, deleted] {
+    for id in [empty, saved, artifact, settings, deleted] {
         f.legacy_project(id);
     }
     f.run(empty, &["list"]);
@@ -303,7 +301,6 @@ fn legacy_empty_temporary_projects_are_omitted_but_saved_work_remains_accessible
             "Saved work",
         ],
     );
-    f.run(map, &["mm", "add", "Keep my map"]);
     f.run(
         settings,
         &["settings", "set", "--prompt", "Keep my instructions"],
@@ -316,7 +313,7 @@ fn legacy_empty_temporary_projects_are_omitted_but_saved_work_remains_accessible
         assert!(!projects.iter().any(|p| p["id"] == empty));
         assert!(projects.iter().any(|p| p["id"] == saved));
         assert!(projects.iter().any(|p| p["id"] == artifact));
-        for durable in [map, settings, deleted] {
+        for durable in [settings, deleted] {
             assert!(projects.iter().any(|p| p["id"] == durable));
         }
     }

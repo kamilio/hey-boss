@@ -79,7 +79,6 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     .unwrap();
     call("Source", json!({"action":"resolve_comment","number":1,"comment_id":comment["comment_id"],"resolved":true}),None).unwrap();
     call("Source", json!({"action":"add_pull_request","number":1,"url":"https://github.com/example/repo/pull/1","purpose":"supporting-evidence"}), None).unwrap();
-    call("Source",json!({"action":"mindmap","operation":{"command":"add","title":"Keep everything","body":"","kind":"issue","reference":"1","reference_project":"named:Source","alias":"moving"}}),None).unwrap();
     let source = call("Source", json!({"action":"view","number":1}), None).unwrap();
     let transfer = json!({"action":"transfer","number":1,"destination":"named:Destination","if_version":source["issue"]["version"]});
     let moved = call("Source", transfer.clone(), Some("move-once")).unwrap();
@@ -109,14 +108,6 @@ fn transfer_preserves_issue_history_and_retries_without_duplicating() {
     .unwrap();
     assert_eq!(status_history["updates"].as_array().unwrap().len(), 1);
     assert_eq!(status_history["updates"][0]["level"], "green");
-    let map = call(
-        "Source",
-        json!({"action":"mindmap","operation":{"command":"view","node":"moving"}}),
-        None,
-    )
-    .unwrap();
-    assert_eq!(map["node"]["reference_project"], "named:Destination");
-    assert_eq!(map["node"]["reference"], "2");
     let old = call("Source", json!({"action":"view","number":1}), None).unwrap();
     assert_eq!(old["moved_to"]["project"]["id"], "named:Destination");
     let projects = call("Source", json!({"action":"projects"}), None).unwrap();

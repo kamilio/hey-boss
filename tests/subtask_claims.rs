@@ -79,7 +79,6 @@ impl Fixture {
             .unwrap_err();
         assert_eq!(error.code, "subtask_claim_conflict");
         assert!(error.message.contains(&format!("#{parent}")), "{error}");
-        assert!(error.message.contains("mindmap"), "{error}");
         assert_eq!(
             self.snapshot(),
             before,
@@ -192,31 +191,5 @@ fn subtask_help_explains_scheduling_and_ownership_safe_grouping() {
         let help = String::from_utf8(output.stdout).unwrap();
         assert!(help.contains("Blocked"), "{help}");
         assert!(help.contains("claim"), "{help}");
-        assert!(help.contains("mindmap"), "{help}");
-    }
-}
-
-#[test]
-fn mindmap_nesting_is_an_ownership_preserving_alternative() {
-    let mut f = Fixture::new("mindmap");
-    f.create();
-    f.create();
-    for number in [1, 2] {
-        f.run(json!({"action":"claim","number":number,"force":false}));
-    }
-    let before = f.snapshot();
-    f.run(json!({"action":"mindmap","operation":{"command":"add","title":"Parent","body":"","kind":"issue","reference":"1","alias":"parent-work"}}));
-    f.run(json!({"action":"mindmap","operation":{"command":"add","title":"Follow-up","body":"","kind":"issue","reference":"2","under":"parent-work"}}));
-    // Mindmaps advance project activity but never issue rows, links, or events.
-    let after = f.snapshot();
-    assert_eq!(
-        before.split("projects:").next(),
-        after.split("projects:").next()
-    );
-    for number in [1, 2] {
-        let issue = f.run(json!({"action":"view","number":number}));
-        assert_eq!(issue["issue"]["state"], "open");
-        assert_eq!(issue["issue"]["assignee"], "codex:owner");
-        assert_eq!(issue["issue"]["parent"], Value::Null);
     }
 }

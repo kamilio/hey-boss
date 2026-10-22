@@ -55,7 +55,6 @@ try {
     await session.waitFor('Allow draft issues?');
     await session.send('n\r');
     await session.waitFor('Allow artifacts?'); await session.send('n\r');
-    await session.waitFor('Allow mindmaps?'); await session.send('n\r');
     await session.waitFor('Save project?');
     const history = (await session.history()).join('\n');
     assert(history.includes('Pull request (default)'));
@@ -73,7 +72,6 @@ try {
     assert.equal(saved.worktree_enabled, false);
     assert.equal(saved.drafts_enabled, false);
     assert.equal(saved.artifacts_enabled, false);
-    assert.equal(saved.mindmaps_enabled, false);
     const rerun = await pilot.newSession({command: binary, args: ['project', 'init', '--project', project], cwd: root, env, cols, rows: 28});
     await rerun.waitFor('Use pull requests? [Y/n]');
     await rerun.send('\r');
@@ -82,7 +80,6 @@ try {
     await rerun.waitFor('Allow draft issues? [y/N]');
     await rerun.send('\r');
     await rerun.waitFor('Allow artifacts?'); await rerun.send('n\r');
-    await rerun.waitFor('Allow mindmaps?'); await rerun.send('n\r');
     await rerun.waitFor('Save project?');
     await rerun.send('n\r');
     assert.equal(await rerun.waitForExit({timeout: 10000}), 0);
@@ -130,7 +127,6 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
   await session.waitFor('Use worktrees?'); await session.send('y\r');
   await session.waitFor('Allow draft issues?'); await session.send('\r');
   await session.waitFor('Allow artifacts?'); await session.send('n\r');
-    await session.waitFor('Allow mindmaps?'); await session.send('n\r');
     await session.waitFor('Save project?');
   const edit = spawnSync(binary, ['issue', '--project', 'Terminal 80', '--agent', 'human:qa', 'settings', 'set', '--prompt', 'Concurrent custom prompt.'], {cwd: root, env, encoding:'utf8'});
   assert.equal(edit.status, 0, edit.stderr);
@@ -152,7 +148,6 @@ checks.push('Unknown directory rejects with both remedies; nested directories re
     await named.waitFor('Use worktrees?'); await named.send('y\r');
     await named.waitFor('Allow draft issues?'); await named.send('n\r');
     await named.waitFor('Allow artifacts?'); await named.send('n\r');
-    await named.waitFor('Allow mindmaps?'); await named.send('n\r');
     await named.waitFor('Save project?');
     await capture(named, `named-review-${cols}`);
     await named.send('y\r');

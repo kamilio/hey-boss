@@ -80,14 +80,12 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
             json!({"action":"create","title":"Keep issue","body":"","labels":[]}),
         ))
         .unwrap();
-    store.execute(&request(json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":"Keep node","body":"","alias":"topic"}}))).unwrap();
     let mut creation = request(
         json!({"action":"artifact","operation":{"command":"create","title":"Junk","body":"Discard","issue":1}}),
     );
     creation.request_id = Some("create-junk".into());
     let created = store.execute(&creation).unwrap();
     let id = created["artifact"]["id"].as_str().unwrap();
-    run(&mut store, json!({"command":"link","id":id,"node":"topic"}));
     let comment = run(
         &mut store,
         json!({"command":"comment","id":id,"body":"Thread"}),
@@ -176,7 +174,7 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
             .is_empty()
     );
     assert!(
-        run(&mut store, json!({"command":"links","node":"topic"}))["artifacts"]
+        run(&mut store, json!({"command":"links","issue":1}))["artifacts"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -197,12 +195,6 @@ fn permanent_delete_is_scoped_revision_checked_and_retryable_with_file_cleanup()
     }
     assert_eq!(
         db.query_row("SELECT count(*) FROM issues", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
-            .get::<_, i64>(0))
             .unwrap(),
         1
     );
@@ -383,23 +375,24 @@ fn artifacts_keep_comments_links_and_conflicted_edits() {
 }
 
 #[test]
-fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
+fn artifacts_are_shared_by_issues_and_scoped_to_their_project() {
     let path =
         std::env::temp_dir().join(format!("hey-boss-artifact-links-{}.db", std::process::id()));
     let mut store = Store::open(&path).unwrap();
     projects::seed(&path, &["named:Artifacts", "named:Other"]);
-    for alias in ["first", "second"] {
-        store.execute(&request(json!({"action":"mindmap","operation":{"command":"add","kind":"text","title":alias,"body":"","alias":alias}}))).unwrap();
+    for title in ["first", "second"] {
+        store
+            .execute(&request(
+                json!({"action":"create","title":title,"body":"","labels":[]}),
+            ))
+            .unwrap();
     }
     let created = run(
         &mut store,
-        json!({"command":"create","title":"Shared","body":"A **selected** phrase","node":"first"}),
+        json!({"command":"create","title":"Shared","body":"A **selected** phrase","issue":1}),
     );
     let id = created["artifact"]["id"].as_str().unwrap();
-    run(
-        &mut store,
-        json!({"command":"link","id":id,"node":"second"}),
-    );
+    run(&mut store, json!({"command":"link","id":id,"issue":2}));
     let commented = run(
         &mut store,
         json!({"command":"comment","id":id,"body":"Thread","quote":"selected","prefix":"A ","suffix":" phrase"}),
@@ -410,20 +403,6 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
         &mut store,
         json!({"command":"comment","id":id,"body":"Reply","parent":parent}),
     );
-    let graph = store
-        .execute(&request(
-            json!({"action":"mindmap","operation":{"command":"show"}}),
-        ))
-        .unwrap();
-    assert_eq!(graph["nodes"][0]["artifacts"][0]["id"], id);
-    assert_eq!(graph["nodes"][1]["artifacts"][0]["id"], id);
-    let first_node = graph["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|node| node["title"] == "first")
-        .unwrap()["id"]
-        .clone();
     assert_eq!(
         run(&mut store, json!({"command":"view","id":id}))["comments"]
             .as_array()
@@ -435,19 +414,14 @@ fn artifacts_are_shared_by_nodes_and_scoped_to_their_project() {
     other.project.id = "named:Other".into();
     other.project.name = "Other".into();
     assert_eq!(store.execute(&other).unwrap_err().code, "not_found");
-    store.execute(&request(json!({"action":"mindmap","operation":{"command":"remove","node":"first","recursive":false}}))).unwrap();
     assert_eq!(
         run(&mut store, json!({"command":"view","id":id}))["artifact"]["title"],
         "Shared"
     );
+    run(&mut store, json!({"command":"unlink","id":id,"issue":1}));
     let viewed = run(&mut store, json!({"command":"view","id":id}));
-    let removed_link = viewed["backlinks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|link| link["target"] == first_node)
-        .unwrap();
-    assert!(removed_link["title"].is_null());
+    assert_eq!(viewed["backlinks"].as_array().unwrap().len(), 1);
+    assert_eq!(viewed["backlinks"][0]["target"], "2");
 }
 
 #[test]

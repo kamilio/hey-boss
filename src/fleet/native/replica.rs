@@ -206,6 +206,7 @@ impl<'a> RowWriter<'a> {
             let m = row
                 .as_object_mut()
                 .ok_or_else(|| invalid("Invalid settings row"))?;
+            m.remove("mindmaps_enabled");
             // Retained only for older peers; sibling scheduling is no longer supported.
             m.insert("subtask_scheduling".into(), json!("explicit"));
         }
@@ -216,7 +217,6 @@ impl<'a> RowWriter<'a> {
                 ("pause_reason", json!("")),
                 ("drafts_enabled", json!(1)),
                 ("artifacts_enabled", json!(1)),
-                ("mindmaps_enabled", json!(1)),
                 ("plan_template", json!("plans/{timestamp}-{number}.md")),
                 ("worktree_enabled", json!(0)),
                 ("prompt_overrides", json!("{}")),
@@ -312,6 +312,7 @@ impl RowPlan {
         let columns = rows(db, &format!("PRAGMA table_info({table})"), &[])?
             .iter()
             .map(|r| r["name"].as_str().unwrap().to_string())
+            .filter(|name| table != "project_settings" || name != "mindmaps_enabled")
             .collect::<Vec<_>>();
         let names = columns
             .iter()
@@ -6639,7 +6640,6 @@ mod tests {
             "pause_reason",
             "drafts_enabled",
             "artifacts_enabled",
-            "mindmaps_enabled",
             "plan_template",
             "worktree_enabled",
             "prompt_overrides",
@@ -6672,7 +6672,7 @@ mod tests {
             .unwrap();
         main.db
             .execute(
-                "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for the next release'",
+                "UPDATE project_settings SET artifacts_enabled=0,paused=1,pause_reason='Waiting for the next release'",
                 [],
             )
             .unwrap();
@@ -6703,7 +6703,7 @@ mod tests {
         )
         .unwrap();
         f.db.execute(
-            "UPDATE project_settings SET artifacts_enabled=0,mindmaps_enabled=0,paused=1,pause_reason='Waiting for release'",
+            "UPDATE project_settings SET artifacts_enabled=0,paused=1,pause_reason='Waiting for release'",
             [],
         )
         .unwrap();
@@ -6717,13 +6717,13 @@ mod tests {
         );
         let retained = rows(
             &f.db,
-            "SELECT artifacts_enabled,mindmaps_enabled,paused,pause_reason FROM project_settings",
+            "SELECT artifacts_enabled,paused,pause_reason FROM project_settings",
             &[],
         )
         .unwrap();
         assert_eq!(
             retained[0],
-            json!({"artifacts_enabled":0,"mindmaps_enabled":0,"paused":1,"pause_reason":"Waiting for release"})
+            json!({"artifacts_enabled":0,"paused":1,"pause_reason":"Waiting for release"})
         );
     }
 

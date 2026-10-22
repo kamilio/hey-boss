@@ -123,87 +123,7 @@ fn compact_reads_skip_history_preserve_health_and_paginate() {
         "--json",
     ]);
     assert_eq!(filtered["issues"].as_array().unwrap().len(), 1);
-    for number in [1, 2, 3] {
-        ok(&[
-            "mm",
-            "--project",
-            "Compact",
-            "--agent",
-            "qa",
-            "issue",
-            &number.to_string(),
-            "--id",
-            &format!("issue-{number}"),
-            "--json",
-        ]);
-    }
-    ok(&[
-        "mm",
-        "--project",
-        "Compact",
-        "--agent",
-        "qa",
-        "link",
-        "issue-1",
-        "issue-2",
-        "--kind",
-        "depends-on",
-        "--json",
-    ]);
-    let mut ids = std::collections::BTreeSet::new();
-    for offset in 0..3 {
-        let page = ok(&[
-            "mm",
-            "--project",
-            "Compact",
-            "show",
-            "--compact",
-            "--limit",
-            "1",
-            "--offset",
-            &offset.to_string(),
-            "--json",
-        ]);
-        assert_eq!(page["projection"], "compact");
-        assert_eq!(page["total"], 3);
-        assert_eq!(page["nodes"].as_array().unwrap().len(), 1);
-        assert!(page.to_string().len() < 12_000);
-        let node = &page["nodes"][0];
-        assert!(node.get("body").is_none());
-        assert!(node["issue"]["allocation"].is_object());
-        assert!(ids.insert(node["id"].as_str().unwrap().to_owned()));
-        assert_eq!(
-            page["next_offset"],
-            if offset < 2 {
-                json!(offset + 1)
-            } else {
-                Value::Null
-            }
-        );
-    }
-    for args in [
-        vec!["issue", "list", "--compact"],
-        vec!["mm", "show", "--compact"],
-        vec!["mm", "show", "--limit", "1", "--json"],
-        vec!["mm", "show", "--compact", "--bodies", "full", "--json"],
-    ] {
-        assert!(!run(&args).status.success());
-    }
-    // Missing resources remain explicit even when the saved map still refers to them.
-    {
-        let db = rusqlite::Connection::open(&db_path).unwrap();
-        db.execute_batch("UPDATE issues SET deleted_at=1 WHERE number=3;")
-            .unwrap();
-    }
-    let missing = ok(&["mm", "--project", "Compact", "show", "--compact", "--json"]);
-    let unavailable = missing["nodes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|n| n["reference"] == "3")
-        .unwrap();
-    assert_eq!(unavailable["available"], false);
-    assert_eq!(unavailable["resource_health"], "missing_or_deleted");
+    assert!(!run(&["issue", "list", "--compact"]).status.success());
     ok(&[
         "issue",
         "--project",
@@ -213,21 +133,6 @@ fn compact_reads_skip_history_preserve_health_and_paginate() {
         "--all",
         "--json",
     ]);
-    assert!(
-        ok(&[
-            "mm",
-            "--project",
-            "Compact",
-            "show",
-            "--compact",
-            "--offset",
-            "100",
-            "--json"
-        ])["nodes"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
     {
         let db = rusqlite::Connection::open(&db_path).unwrap();
         db.execute("UPDATE fleet_meta SET role='agent' WHERE id=1", [])
