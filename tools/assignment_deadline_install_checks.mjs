@@ -60,10 +60,10 @@ try {
   const machine=db.prepare("SELECT json_extract(metadata,'$.machine') machine FROM agents WHERE id='human:verification'").get().machine;
   assert(machine);
   // Seed the peer's empty remote-history projection without connecting to a fleet.
-  db.exec(`CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT NOT NULL,
+  db.exec(`CREATE TABLE IF NOT EXISTS distributed_attempts(id TEXT PRIMARY KEY,machine TEXT NOT NULL,
     project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,state TEXT NOT NULL,
     started_at INTEGER NOT NULL,finished_at INTEGER,summary TEXT NOT NULL,payload TEXT NOT NULL);
-    CREATE TABLE distributed_rejections(table_name TEXT NOT NULL,entity TEXT NOT NULL,
+    CREATE TABLE IF NOT EXISTS distributed_rejections(table_name TEXT NOT NULL,entity TEXT NOT NULL,
     reason TEXT NOT NULL,PRIMARY KEY(table_name,entity))`);
   db.prepare("UPDATE fleet_meta SET role='peer',node=?").run(machine);
   issue(['assign','1','machine:'+machine]);
