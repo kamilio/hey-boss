@@ -123,6 +123,8 @@ func audit() {
         prompt.show()
         withExtendedLifetime(prompt) { app.run() }; return
     }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SYNC_ONLY"] == "1" { auditFleetSync(); return }
+    auditFleetSync()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
     auditSubscriptionQuota()
     auditQuickIssue()
@@ -3706,6 +3708,39 @@ func auditNotificationAgents() {
     print("PASS sender trace, native web actions, persistent scoped mute, pending questions, unmute without replay")
 }
 
+func auditFleetSync() {
+    let ui = FleetSyncController()
+    let healthy: [String: Any] = ["state": "healthy", "message": "Changes are applied and sync is responding", "last_exchange": Date().timeIntervalSince1970]
+    ui.update(["health": healthy])
+    precondition(ui.title.stringValue == "Up to date")
+    ui.update(["health": ["state": "catching_up", "pending_local": 2, "pending_projection": 7, "outgoing_pending": 1200]])
+    precondition(ui.title.stringValue == "Syncing…")
+    precondition(ui.detail.stringValue.contains("1,200 to send") && ui.detail.stringValue.contains("7 to apply"))
+    ui.update(["health": ["state": "disconnected", "outgoing_pending": 5]])
+    precondition(ui.title.stringValue == "Offline · changes kept on this Mac")
+    ui.update(["health": ["state": "rejected", "conflicts": 2]])
+    precondition(ui.title.stringValue == "Sync needs attention" && ui.detail.stringValue.contains("2 rejected"))
+    ui.update(["health": healthy]); ui.update(nil)
+    precondition(ui.title.stringValue == "Sync status unavailable", "A failed read must clear the previous green state")
+    ui.update([:])
+    precondition(ui.title.stringValue == "Sync status unavailable")
+    ui.close(); precondition(ui.timer == nil)
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("hb-sync-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let cli = root.appendingPathComponent("hey-boss")
+    try! "#!/bin/sh\n[ \"$*\" = 'fleet sync-status' ] || exit 1\nprintf '%s' '{\"health\":{\"state\":\"catching_up\",\"outgoing_pending\":42}}'\n".write(to: cli, atomically: true, encoding: .utf8)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: cli.path)
+    ui.open(cli: cli.path)
+    precondition(ui.loading && ui.timer != nil)
+    ui.refresh()
+    let deadline = Date().addingTimeInterval(5)
+    while ui.loading && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    precondition(!ui.loading && ui.detail.stringValue.contains("42 to send"), "Read real CLI output asynchronously")
+    ui.close(); precondition(ui.timer == nil, "Do not poll while the menu is closed")
+    print("Fleet sync status checks passed")
+}
+
 func auditSubscriptionQuota() {
     auditNativeBackdrops()
     let json = #"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"ok","updated_at":2000,"data":{"windows":[{"id":"weekly","label":"Weekly · all models","remaining_percent":90,"resets_at":"2099-10-15T16:42:07Z"}]}}"#
@@ -3742,9 +3777,18 @@ func auditSubscriptionQuota() {
     precondition(ui.subtitle.stringValue == "Subscription quota", "Refresh cached quotas silently")
     replies.removeFirst()(.failure(StorageError(description: "Synthetic refresh failure")))
     precondition(ui.rows[0].reading != nil && !ui.loading && ui.rows[0].reading?.state == "stale", "A failed refresh preserves last-known quota")
+    func showsRefreshFailure() -> Bool {
+        ui.body.subviews.flatMap { $0.subviews }.compactMap { $0 as? NSTextField }.contains { $0.stringValue == "Refresh failed" }
+    }
+    precondition(showsRefreshFailure(), "Cached readings must not hide refresh failures")
     ui.refresh()
     replies.removeFirst()(.failure(StorageError(description: "Discovery offline")))
     precondition(ui.rows.count == 1 && ui.rows[0].reading != nil, "Discovery failure preserves cached cards")
+    precondition(showsRefreshFailure(), "Discovery failure must remain visible with cached readings")
+    ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"}]}"#.utf8)))
+    replies.removeFirst()(.success(Data(json.utf8)))
+    precondition(!showsRefreshFailure() && ui.rows[0].message.isEmpty, "A successful refresh clears the failure")
     ui.refresh()
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
     precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
