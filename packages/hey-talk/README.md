@@ -132,6 +132,9 @@ For an existing installation, `./install-login.sh` enables login startup without
 Quit a development instance before rebuilding its bundle.
 Installation and login startup are per Mac. Installing Hey Boss on another
 machine does not enable Hey Talk there.
+Hey Talk is intentionally uninstalled on the second Mac
+(`kamils-macbook-pro.local`, also named `Mac.lan`). That Mac is excluded from
+Hey Talk installs and updates, including the project's usual all-machines rollout.
 
 ## Daily use
 
