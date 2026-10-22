@@ -327,7 +327,7 @@ pub(crate) fn mutation_targets(operation: &crate::issues::Operation) -> Vec<i64>
     }
     let mut numbers: Vec<_> = operation.number().into_iter().collect();
     match operation {
-        Operation::Batch { edits } => numbers.extend(edits.iter().map(|edit| edit.number)),
+        Operation::Batch { edits, .. } => numbers.extend(edits.iter().map(|edit| edit.number)),
         Operation::AddSubtask { child, .. } | Operation::RemoveSubtask { child, .. } => {
             numbers.push(*child)
         }

@@ -350,12 +350,17 @@ enum Action {
         #[arg(long, hide = true, default_value_t = 0)]
         if_version: i64,
     },
-    /// Move an issue before/after another issue; omit both to move to the end.
+    /// Move an issue, or all matches to the top/bottom while preserving their order.
     #[command(
-        after_help = "Companions use the supervisor tunnel and require issue_move support; --supervisor also works.\nThe CLI captures the queue version. Concurrent moves conflict; disconnection never saves locally.\nRetry uncertain results with the identical command and the same --request-id."
+        after_help = "Example: issue move --match-label e2e-case --to bottom\nMatchers select every match (open by default), not just the first page.\nSingle moves use issue_move; matching changes use issue_matching on the supervisor tunnel.\nThe CLI captures the queue version. Concurrent moves conflict; disconnection never saves locally.\nRetry uncertain results with the identical command and the same --request-id."
     )]
     Move {
-        number: i64,
+        number: Option<i64>,
+        #[command(flatten)]
+        matching: issues::IssueMatcher,
+        /// Move to an end of the queue, preserving the order of matching issues.
+        #[arg(long, value_enum, conflicts_with_all = ["before", "after"])]
+        to: Option<issues::QueueEnd>,
         #[arg(long, conflicts_with = "after")]
         before: Option<i64>,
         #[arg(long)]
@@ -430,12 +435,14 @@ enum Action {
     },
     /// Replace supplied fields; omitted fields are preserved.
     #[command(
-        after_help = "On a companion, --draft uses the existing supervisor tunnel.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
+        after_help = "Example: issue edit --match-label e2e-case --draft\nMatching edits support drafting and report ineligible work without releasing it.\nOn a companion, --draft uses the existing supervisor tunnel.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
     )]
     Edit {
         #[arg(long)]
         draft: bool,
-        number: i64,
+        number: Option<i64>,
+        #[command(flatten)]
+        matching: issues::IssueMatcher,
         #[arg(long)]
         title: Option<String>,
         #[command(flatten)]
@@ -607,7 +614,9 @@ enum Action {
     },
     /// Soft-delete an issue; its number and history are retained.
     Delete {
-        number: i64,
+        number: Option<i64>,
+        #[command(flatten)]
+        matching: issues::IssueMatcher,
         /// Delete even when another session owns the claim.
         #[arg(long)]
         force: bool,
@@ -870,6 +879,9 @@ impl Options {
                 }
                 Operation::Batch {
                     edits: serde_json::from_value(json!(edits))?,
+                    matching: None,
+                    change: None,
+                    if_order_version: None,
                 }
             }
             Action::Subtask { command } => match command {
@@ -1108,15 +1120,47 @@ impl Options {
             }
             Action::Move {
                 number,
+                matching,
+                to,
                 before,
                 after,
                 if_order_version,
-            } => Operation::Move {
-                number: *number,
-                before: *before,
-                after: *after,
-                if_order_version: *if_order_version,
-            },
+            } => {
+                if matching.is_empty() && to.is_none() {
+                    Operation::Move {
+                        number: number.ok_or_else(|| {
+                            Error::invalid("Supply an issue number or matching filters")
+                        })?,
+                        before: *before,
+                        after: *after,
+                        if_order_version: *if_order_version,
+                    }
+                } else {
+                    if before.is_some()
+                        || after.is_some()
+                        || number.is_some() && !matching.is_empty()
+                    {
+                        return Err(Error::invalid(
+                            "Use an issue number or matching filters, with --to top|bottom",
+                        ));
+                    }
+                    let mut matching = matching.clone();
+                    matching.numbers.extend(number);
+                    if number.is_some() {
+                        matching.state = Some("all".into());
+                    }
+                    Operation::Batch {
+                        edits: vec![],
+                        matching: Some(matching),
+                        change: Some(issues::MatchingChange::Move {
+                            to: to.ok_or_else(|| {
+                                Error::invalid("Matching moves require --to top|bottom")
+                            })?,
+                        }),
+                        if_order_version: *if_order_version,
+                    }
+                }
+            }
             Action::Transfer {
                 number,
                 destination,
@@ -1207,21 +1251,48 @@ impl Options {
             },
             Action::Edit {
                 number,
+                matching,
                 title,
                 body,
                 add_labels,
                 remove_labels,
                 if_version,
                 draft,
-            } => Operation::Edit {
-                draft: if *draft { Some(true) } else { None },
-                number: *number,
-                title: title.clone(),
-                body: body.read()?,
-                add_labels: add_labels.clone(),
-                remove_labels: remove_labels.clone(),
-                if_version: *if_version,
-            },
+            } => {
+                let body = body.read()?;
+                if matching.is_empty() {
+                    Operation::Edit {
+                        draft: if *draft { Some(true) } else { None },
+                        number: number.ok_or_else(|| {
+                            Error::invalid("Supply an issue number or matching filters")
+                        })?,
+                        title: title.clone(),
+                        body,
+                        add_labels: add_labels.clone(),
+                        remove_labels: remove_labels.clone(),
+                        if_version: *if_version,
+                    }
+                } else {
+                    if number.is_some()
+                        || !draft
+                        || title.is_some()
+                        || body.is_some()
+                        || !add_labels.is_empty()
+                        || !remove_labels.is_empty()
+                        || if_version.is_some()
+                    {
+                        return Err(Error::invalid(
+                            "Matching edits support --draft only; use --match-label to select labels",
+                        ));
+                    }
+                    Operation::Batch {
+                        edits: vec![],
+                        matching: Some(matching.clone()),
+                        change: Some(issues::MatchingChange::Edit { draft: true }),
+                        if_order_version: None,
+                    }
+                }
+            }
             Action::Undraft { number } => Operation::Undraft { number: *number },
             Action::Claim { number, force } => Operation::Claim {
                 number: *number,
@@ -1369,10 +1440,32 @@ impl Options {
                 number: *number,
                 if_version: *if_version,
             },
-            Action::Delete { number, force } => Operation::Delete {
-                number: *number,
-                force: *force,
-            },
+            Action::Delete {
+                number,
+                matching,
+                force,
+            } => {
+                if matching.is_empty() {
+                    Operation::Delete {
+                        number: number.ok_or_else(|| {
+                            Error::invalid("Supply an issue number or matching filters")
+                        })?,
+                        force: *force,
+                    }
+                } else {
+                    if number.is_some() || *force {
+                        return Err(Error::invalid(
+                            "Matching deletion preserves assigned and reserved work; use matching filters without a number or --force",
+                        ));
+                    }
+                    Operation::Batch {
+                        edits: vec![],
+                        matching: Some(matching.clone()),
+                        change: Some(issues::MatchingChange::Delete),
+                        if_order_version: None,
+                    }
+                }
+            }
             Action::Restore { number } => Operation::Restore { number: *number },
             Action::Rpc
             | Action::Web { .. }
@@ -1404,6 +1497,11 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Reopen { .. }
                 | Action::BlockedBy { .. }
                 | Action::Batch { .. }
+                | Action::Delete {
+                    number: None,
+                    force: false,
+                    ..
+                }
                 | Action::Pr {
                     command: PrAction::Add { .. } | PrAction::List { .. },
                 }
@@ -1689,6 +1787,22 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if let Some(count) = value["matched_count"].as_u64() {
+        println!(
+            "{count} matched · {} changed · {} skipped",
+            value["changed_count"], value["skipped_count"]
+        );
+        if let Some(skipped) = value["skipped"].as_array() {
+            for item in skipped {
+                println!(
+                    "#{}: {}",
+                    item["number"],
+                    item["reason"].as_str().unwrap_or("Unavailable")
+                );
+            }
+        }
+        return;
+    }
     if let Some(words) = value["vocabulary"].as_array() {
         for word in words {
             println!("{}", word.as_str().unwrap_or(""));

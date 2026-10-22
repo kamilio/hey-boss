@@ -25,9 +25,15 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
         "reopen" | "set_blockers" => supervisor && value["if_version"].is_null(),
         "ready" => value["guard"].is_null(),
         "close" => supervisor && value["guard"].is_null(),
-        "batch" => value["edits"]
-            .as_array()
-            .is_some_and(|edits| edits.iter().any(|edit| missing(&edit["if_version"]))),
+        "batch" => {
+            if !value["matching"].is_null() {
+                value["if_order_version"].is_null()
+            } else {
+                value["edits"]
+                    .as_array()
+                    .is_some_and(|edits| edits.iter().any(|edit| missing(&edit["if_version"])))
+            }
+        }
         "artifact" => {
             let mut inner = &value["operation"];
             while inner["command"] == "import" {
@@ -122,6 +128,21 @@ fn prepare(
         return call(request, supervisor);
     }
     let mut request = request.clone();
+    // A fresh matcher invocation selects current data. Only an explicitly reused
+    // request ID replays a previous selection (including its skipped items).
+    if request.request_id.is_none()
+        && matches!(
+            request.operation,
+            Operation::Batch {
+                matching: Some(_),
+                ..
+            }
+        )
+    {
+        let mut bytes = [0_u8; 16];
+        std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom")?, &mut bytes)?;
+        request.request_id = Some(format!("matching-{:x}", Sha256::digest(bytes)));
+    }
     if let Operation::Unassign {
         number,
         force: false,
@@ -149,6 +170,13 @@ fn prepare(
             .entry("guard")
             .or_insert(Value::Null);
     }
+    if operation["action"] == "batch" && !operation["matching"].is_null() {
+        operation
+            .as_object_mut()
+            .unwrap()
+            .entry("if_order_version")
+            .or_insert(Value::Null);
+    }
     let automatic = needs_snapshot(&operation, supervisor);
     let template = operation.clone();
     let authority = supervisor
@@ -156,6 +184,7 @@ fn prepare(
             operation["action"].as_str(),
             Some("assign" | "ready" | "move")
         )
+        || (operation["action"] == "batch" && !operation["matching"].is_null())
         || (operation["action"] == "edit" && operation["draft"] == true);
     if automatic {
         let mut read = request.clone();
@@ -173,6 +202,9 @@ fn prepare(
                 },
             };
             edit["if_version"] = call(&read, authority)?["artifact"]["version"].clone();
+        } else if operation["action"] == "batch" && !operation["matching"].is_null() {
+            read.operation = issues::IssueMatcher::default().list();
+            operation["if_order_version"] = call(&read, authority)?["order_version"].clone();
         } else if operation["action"] == "batch" {
             for edit in operation["edits"].as_array_mut().unwrap() {
                 if missing(&edit["if_version"]) {

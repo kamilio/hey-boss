@@ -235,6 +235,69 @@ pub enum BatchAssignment {
     Boss,
 }
 
+/// The same selectors as issue list, evaluated once in the write transaction.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, clap::Args)]
+#[serde(deny_unknown_fields)]
+pub struct IssueMatcher {
+    #[arg(long = "match-state", value_parser = ["active", "open", "blocked", "ready", "closed", "all"])]
+    pub state: Option<String>,
+    #[serde(default)]
+    #[arg(long = "match-label")]
+    pub labels: Vec<String>,
+    #[arg(long = "match-search")]
+    pub search: Option<String>,
+    #[arg(long = "match-assignee", conflicts_with = "unassigned")]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    #[arg(long = "match-unassigned")]
+    pub unassigned: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[arg(skip)]
+    pub numbers: Vec<i64>,
+}
+impl IssueMatcher {
+    pub fn is_empty(&self) -> bool {
+        self.state.is_none()
+            && self.labels.is_empty()
+            && self.search.is_none()
+            && self.assignee.is_none()
+            && !self.unassigned
+            && self.numbers.is_empty()
+    }
+    pub fn list(&self) -> Operation {
+        Operation::List {
+            compact: true,
+            state: self.state.clone().unwrap_or_else(|| "open".into()),
+            mine: false,
+            unassigned: self.unassigned,
+            assignee: self
+                .assignee
+                .as_deref()
+                .map(|v| if v == "boss" { "human:boss" } else { v }.into()),
+            labels: self.labels.clone(),
+            search: self.search.clone(),
+            limit: 1,
+            offset: 0,
+            all: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueEnd {
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MatchingChange {
+    Move { to: QueueEnd },
+    Edit { draft: bool },
+    Delete,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
@@ -245,7 +308,14 @@ pub enum Operation {
         operation: crate::attachments::Operation,
     },
     Batch {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         edits: Vec<BatchEdit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matching: Option<IssueMatcher>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<MatchingChange>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_order_version: Option<i64>,
     },
     Artifact {
         operation: crate::artifacts::Operation,

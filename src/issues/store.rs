@@ -48,6 +48,8 @@ mod assignments;
 pub(super) mod attempts;
 #[path = "batch.rs"]
 mod batch;
+#[path = "matching.rs"]
+mod matching;
 #[path = "pr_monitor.rs"]
 mod pr_monitor;
 pub(crate) use pr_monitor::TrackedPullRequest;
@@ -768,8 +770,22 @@ fn validate(r: &Request) -> Result<()> {
         _ => {}
     }
     match &r.operation {
-        Operation::Batch { edits } => {
-            batch::validate(edits)?;
+        Operation::Batch {
+            edits,
+            matching: matcher,
+            change,
+            if_order_version,
+        } => {
+            if let Some(matcher) = matcher {
+                matching::validate(r, matcher, edits, change.as_ref(), *if_order_version)?;
+            } else {
+                if change.is_some() || if_order_version.is_some() {
+                    return Err(Error::invalid(
+                        "A matching change requires matching filters",
+                    ));
+                }
+                batch::validate(edits)?;
+            }
             if r.request_id.is_none() {
                 return Err(Error::invalid("issue batch requires --request-id"));
             }
@@ -1634,6 +1650,10 @@ impl Store {
                 ..
             } | Operation::Assign { .. }
                 | Operation::Move { .. }
+                | Operation::Batch {
+                    matching: Some(_),
+                    ..
+                }
         ) {
             validate(r)?;
             let companion: bool = self.db.query_row(
@@ -1655,7 +1675,10 @@ impl Store {
                     ]))?;
                     let prefix = match request.operation {
                         Operation::Assign { .. } => "assign",
-                        Operation::Move { .. } => "move",
+                        Operation::Move { .. }
+                        | Operation::Batch {
+                            matching: Some(_), ..
+                        } => "move",
                         _ => "draft",
                     };
                     request.request_id = Some(format!("{prefix}-{:x}", Sha256::digest(key)));
@@ -2085,7 +2108,21 @@ impl Store {
                 now,
                 &mut attachment_files,
             )?,
-            Operation::Batch { edits } => batch::execute(&tx, &project, actor, edits, now)?,
+            Operation::Batch {
+                matching: Some(matcher),
+                change: Some(change),
+                if_order_version,
+                ..
+            } => matching::execute(
+                &tx,
+                &project,
+                actor.unwrap(),
+                matcher,
+                change,
+                *if_order_version,
+                now,
+            )?,
+            Operation::Batch { edits, .. } => batch::execute(&tx, &project, actor, edits, now)?,
             Operation::Artifact { operation } => artifacts::execute_import(
                 &tx,
                 &project,
@@ -2553,6 +2590,10 @@ impl Store {
                 | Operation::RemoveSubtask { .. }
                 | Operation::Move { .. }
                 | Operation::Unassign { .. }
+                | Operation::Batch {
+                    matching: Some(_),
+                    ..
+                }
                 | Operation::Block { .. }
                 | Operation::SetBlockers { .. }
                 | Operation::Ready { .. }

@@ -785,6 +785,40 @@ hey-boss issue move 12             # Move to the end
 hey-boss issue list
 ```
 
+Use the same matcher with `move`, `edit --draft`, and `delete` to change matching
+issues, including those beyond the first list page:
+
+```sh
+hey-boss issue move --match-label e2e-case --to bottom
+hey-boss issue move --match-label urgent --to top
+hey-boss issue edit --match-label e2e-case --draft
+hey-boss issue delete --match-label e2e-case
+```
+
+Matchers default to open issues. Combine `--match-state`, repeated
+`--match-label` (all required), `--match-search` (literal title/body text),
+`--match-assignee`, or `--match-unassigned`. Selection happens at the authority
+inside one transaction. Moves preserve the relative order of both groups.
+Drafting requires drafts enabled and reports each assigned, reserved or otherwise
+ineligible issue as skipped; it never stops an active attempt. Already-drafted
+matches are unchanged. Use a new request ID for a fresh selection; retry an
+uncertain result with the original ID to replay its result without reselecting.
+Matching deletion is soft deletion and skips assigned, reserved, or unfinished
+work. `issue restore NUMBER` restores it with its comments and history intact.
+
+These commands extend the existing batch API, with `matching` in place of
+`edits`, a `change`, and the captured `if_order_version`. For example:
+
+```json
+{"action":"batch","matching":{"labels":["e2e-case"],"state":"open"},"change":{"action":"move","to":"bottom"},"if_order_version":42}
+```
+
+For drafting, use `"change":{"action":"edit","draft":true}`; for soft deletion,
+use `"change":{"action":"delete"}`. The response
+reports `matched_count`, `changed_count`, `skipped_count`, and `skipped` reasons.
+Companions route them through the existing supervisor connection and require
+the `issue_matching` capability; there is no replica-write fallback.
+
 Concurrent browser reorders use a project order revision. A stale drag is rejected
 and the list refreshes, preserving the other change. Moves are atomic, audited,
 and can be deduplicated with the ordinary request ID. Issue content, comments,
