@@ -374,3 +374,41 @@ fn expired_assignment_competing_workers_and_replica_observation_keep_one_attempt
     }
     assert_eq!(f.count("worker_runs"), 1);
 }
+
+#[test]
+fn expired_assignment_waits_for_remote_attempt_without_reservation_or_presence() {
+    let f = Fixture::new("peer");
+    f.store.db.execute_batch("CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT,project_id TEXT,issue_number INTEGER,state TEXT,started_at INTEGER,finished_at INTEGER,summary TEXT,payload TEXT);
+        INSERT INTO distributed_attempts VALUES('remote','remote','named:Queue',1,'running',1,NULL,'','{}')").unwrap();
+    f.expire();
+    f.maintain();
+    assert_eq!(
+        f.count("fleet_allocation_deadlines"),
+        1,
+        "Remote attempt evidence can arrive ahead of its reservation and without presence"
+    );
+    assert_eq!(f.eligible(), 0);
+    assert_eq!(f.count("worker_runs"), 0);
+    f.store
+        .db
+        .execute(
+            "UPDATE distributed_attempts SET state='completed',finished_at=2",
+            [],
+        )
+        .unwrap();
+    f.expire();
+    f.maintain();
+    assert_eq!(f.count("fleet_allocation_deadlines"), 0);
+    assert_eq!(f.eligible(), 1);
+
+    // An echoed unfinished copy cannot override the actual owner's completion.
+    let f = Fixture::new("peer");
+    f.run("completed", Some(2), true);
+    f.store.db.execute_batch("UPDATE worker_allocations SET released=1;
+        CREATE TABLE distributed_attempts(id TEXT PRIMARY KEY,machine TEXT,project_id TEXT,issue_number INTEGER,state TEXT,started_at INTEGER,finished_at INTEGER,summary TEXT,payload TEXT);
+        INSERT INTO distributed_attempts VALUES('old','local','named:Queue',1,'running',1,NULL,'','{}')").unwrap();
+    f.expire();
+    f.maintain();
+    assert_eq!(f.eligible(), 1);
+    assert_eq!(f.count("fleet_allocation_deadlines"), 0);
+}
