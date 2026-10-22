@@ -471,9 +471,13 @@ to allow stable symlink paths; Homebrew's first-run setup uses its stable public
 managed policies, and Claude's sandbox restrictions still apply. The Git rule is
 Codex-only; it does not disable hooks globally or add `--no-verify` automatically.
 
+Agent configuration and fleet upgrade migrations also set `features.worktrees = false`
+in Codex's `config.toml`, disabling its built-in worktree feature. Restart existing
+Codex sessions to load the change. Existing worktrees are preserved.
+
 The updater preserves unrelated settings and formatting, recognizes existing
-permission entries, and does not touch `config.toml` or `default.rules`. It validates
-both files before changing either, refuses malformed settings or custom edits in
+permission entries, and does not touch `default.rules`. It validates
+the settings before changing them, refuses malformed settings or custom edits in
 its managed rules file, preserves existing symlinks and file permissions, and makes
 a private, uniquely named `.hey-boss-*.bak` copy before replacing a changed file.
 Writes use atomic replacement, with installer locks and checks for concurrent edits.

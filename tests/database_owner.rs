@@ -524,6 +524,7 @@ fn staged_migration_does_not_leave_a_temporary_service_running() {
             "--installation",
             env!("CARGO_BIN_EXE_hey-boss"),
         ])
+        .env("CODEX_HOME", fixture.root.join("codex"))
         .output()
         .unwrap();
     assert!(
@@ -537,6 +538,11 @@ fn staged_migration_does_not_leave_a_temporary_service_running() {
     assert!(
         fixture.replacement.is_none(),
         "Staged installer left a companion running"
+    );
+    assert!(
+        fs::read_to_string(fixture.root.join("codex/config.toml"))
+            .unwrap()
+            .contains("worktrees = false")
     );
     let db = rusqlite::Connection::open(fixture.root.join("issues.db")).unwrap();
     assert!(

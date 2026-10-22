@@ -4235,6 +4235,7 @@ fn staged_upgrade_migrates_the_destination_state_before_replacement() {
         .env_remove("HEY_BOSS_STATE_DIR")
         // Preflight is local even inside a remotely targeted worker session.
         .env("HEY_BOSS_ISSUE_HOST", "must-not-connect.invalid")
+        .env("CODEX_HOME", f.root.join("codex"))
         .args(["issue", "migrate", "--json", "--installation"])
         .arg(&installation)
         .output()

@@ -1,4 +1,4 @@
-//! Installation-time permissions. Never rewrite Codex's config.toml or default.rules.
+//! Installation-time agent settings and command permissions.
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
@@ -328,6 +328,37 @@ fn unique_file(path: &Path, suffix: &str) -> io::Result<(PathBuf, File)> {
     }
 }
 
+pub fn disable_codex_worktrees() -> io::Result<()> {
+    let path = config_home("CODEX_HOME", ".codex")?.join("config.toml");
+    let apply = || -> io::Result<()> {
+        let config = ConfigFile::open(path.clone())?;
+        let mut doc = config
+            .text()?
+            .unwrap_or("")
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| invalid("Invalid Codex config TOML; left unchanged"))?;
+        if !doc.contains_key("features") {
+            doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        let features = doc["features"]
+            .as_table_like_mut()
+            .ok_or_else(|| invalid("Codex features must be a TOML table"))?;
+        if features.get("worktrees").and_then(toml_edit::Item::as_bool) == Some(false) {
+            return Ok(());
+        }
+        let mut disabled = toml_edit::value(false);
+        if let Some(old) = features
+            .get("worktrees")
+            .and_then(toml_edit::Item::as_value)
+        {
+            *disabled.as_value_mut().unwrap().decor_mut() = old.decor().clone();
+        }
+        features.insert("worktrees", disabled);
+        config.write(&doc.to_string())
+    };
+    apply().map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+}
+
 /// Homebrew stages this manifest in its sandbox; user config writes happen only
 /// when the installed CLI runs in the user's normal environment.
 pub fn configure_pending(executable: &Path) -> io::Result<bool> {
@@ -410,6 +441,7 @@ pub fn configure(binaries: &[PathBuf]) -> io::Result<()> {
     claude
         .unchanged()
         .map_err(|e| contextual(&claude_path, e))?;
+    disable_codex_worktrees()?;
     codex
         .write(&rules)
         .map_err(|e| contextual(&codex_path, e))?;

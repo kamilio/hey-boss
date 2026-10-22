@@ -1501,6 +1501,7 @@ pub fn run(options: &Options) -> Result<()> {
         let path = issues::database_path_for_installation(&installation.canonicalize()?)?;
         Store::migrate(&path)?;
         issues::commits::retire_git_hooks()?;
+        crate::agent_permissions::disable_codex_worktrees()?;
         if options.json {
             println!("{}", json!({"ok": true}));
         }
