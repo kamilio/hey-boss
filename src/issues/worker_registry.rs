@@ -6,6 +6,10 @@ pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS work
 pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
 pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
 
+#[cfg(test)]
+#[path = "worker_assignment_deadline_tests.rs"]
+mod assignment_deadline_tests;
+
 // PR origins only need attachment events, not the issue's full activity log.
 // Match the PR URL's TEXT affinity so SQLite can seek the indexed expression.
 // Keep the prior index for queries from clients still running during upgrades.
