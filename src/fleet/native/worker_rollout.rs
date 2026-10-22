@@ -10,6 +10,11 @@ fn request_id(build: &str, id: &str) -> String {
     format!("upgrade-{build}-{}", super::context::hash(&json!(id)))
 }
 
+pub(super) fn request_build<'a>(id: &'a str, worker: &str) -> Option<&'a str> {
+    let (build, _) = id.strip_prefix("upgrade-")?.rsplit_once('-')?;
+    (!build.is_empty() && request_id(build, worker) == id).then_some(build)
+}
+
 fn snapshot(ctx: &Context, build: &str) -> Result<Vec<Value>> {
     let db = ctx.db()?;
     // Ordinary dashboards are capped at 100 registrations. A rollout must inspect
@@ -136,6 +141,15 @@ pub(super) fn run(build: &str, apply: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_identity_survives_raw_receipt_recovery() {
+        let id = request_id("target-build", "owner");
+        assert_eq!(request_build(&id, "owner"), Some("target-build"));
+        assert_eq!(request_build(&id, "other"), None);
+        assert_eq!(request_build("ordinary-restart", "owner"), None);
+        assert_eq!(request_build(&request_id("", "owner"), "owner"), None);
+    }
 
     #[test]
     fn paused_stopped_and_unknown_workers_cannot_be_misreported_or_resumed() {
