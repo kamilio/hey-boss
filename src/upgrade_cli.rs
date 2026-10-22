@@ -106,7 +106,7 @@ fn state() -> io::Result<PathBuf> {
     Ok(home()?.join(".local/share/hey-boss"))
 }
 fn output(command: &mut Command) -> io::Result<Vec<u8>> {
-    let result = command.output()?;
+    let result = hey_boss::ssh::capture::output(command)?;
     if !result.status.success() {
         return Err(error(format!(
             "Command {:?} failed: {}",
@@ -510,7 +510,7 @@ fn target_workers(
         command
     };
     // An incomplete handoff returns structured evidence with a failing exit code.
-    let result = command.output()?;
+    let result = hey_boss::ssh::capture::output(&mut command)?;
     serde_json::from_slice(&result.stdout).map_err(|_| {
         error(format!(
             "Worker rollout failed: {}",
@@ -633,22 +633,17 @@ fn remote_apply(
             .unwrap_or_default(),
         if force { " --force" } else { "" }
     );
-    let mut child = ssh(host)?
-        .arg(script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    let writer = std::thread::spawn(move || stdin.write_all(&archive));
-    let result = child.wait_with_output()?;
-    let sent = writer
-        .join()
-        .map_err(|_| error("Archive writer panicked"))?;
+    let captured = hey_boss::ssh::capture::exchange(
+        ssh(host)?.arg(script),
+        &archive,
+        None,
+        (usize::MAX, usize::MAX),
+    )?;
+    let result = captured.output;
     if !result.status.success() {
         return Err(error(String::from_utf8_lossy(&result.stderr).into_owned()));
     }
-    sent?;
+    captured.sent?;
     serde_json::from_slice(&result.stdout).map_err(io::Error::other)
 }
 
@@ -1040,6 +1035,18 @@ pub fn run(options: &Options) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captured_upgrade_reaps_exited_child_with_inherited_stderr() {
+        let start = std::time::Instant::now();
+        let result = output(Command::new("sh").args([
+            "-c",
+            "sleep 2 >&2 & printf receipt; printf diagnostic >&2; exit 0",
+        ]))
+        .unwrap();
+        assert_eq!(result, b"receipt");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     #[test]
     fn rollout_requires_complete_runtime_evidence_even_when_files_match() {
         use serde_json::json;
