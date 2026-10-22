@@ -539,12 +539,10 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                 for entry in std::fs::read_dir(&ctx.state)? {
                     let entry = entry?;
                     let name = entry.file_name();
-                    if name.to_str().is_some_and(|name| {
-                        (name.starts_with("sync-") || name.starts_with("peer-sync-"))
-                            && name.ends_with(".json")
-                    }) && !targets
-                        .values()
-                        .any(|target| target.diagnostic == entry.path())
+                    if health::transport_diagnostic(&name)
+                        && !targets
+                            .values()
+                            .any(|target| target.diagnostic == entry.path())
                     {
                         std::fs::remove_file(entry.path())?;
                     }

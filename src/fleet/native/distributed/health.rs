@@ -6,6 +6,20 @@ use serde_json::json;
 
 const FRESH_MS: i64 = 30_000;
 
+pub(super) fn transport_diagnostic(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+        return false;
+    };
+    let hash = name
+        .strip_prefix("sync-")
+        .filter(|hash| hash.len() == 64)
+        .or_else(|| {
+            name.strip_prefix("peer-sync-")
+                .filter(|hash| hash.len() == 16)
+        });
+    hash.is_some_and(|hash| hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn classify(sample: &Value, exchange: &Value, boot: &str, tick: i64) -> Value {
     let age = |v: &Value| {
         v["tick"]
@@ -140,11 +154,9 @@ pub(in crate::fleet::native) fn cached(ctx: &Context) -> Result<Value> {
     for entry in std::fs::read_dir(&ctx.state)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name) = name.to_str().filter(|name| {
-            (name.starts_with("sync-") || name.starts_with("peer-sync-")) && name.ends_with(".json")
-        }) else {
+        if !transport_diagnostic(&name) {
             continue;
-        };
+        }
         let route = ctx
             .read_json(&ctx.state.join(name), Value::Null)
             .unwrap_or(Value::Null);
@@ -254,6 +266,30 @@ pub(super) fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transport_diagnostics_exclude_peer_identity_and_settings() {
+        for name in [
+            "peer-sync-identity.json",
+            "peer-sync.json",
+            "peer-sync-private-key",
+            "sync-other.json",
+        ] {
+            assert!(
+                !transport_diagnostic(name.as_ref()),
+                "Trust material must never be treated as disposable diagnostics: {name}"
+            );
+        }
+        assert!(transport_diagnostic(
+            format!("sync-{}.json", hey_boss_sync::digest(b"host")).as_ref()
+        ));
+        assert!(transport_diagnostic(
+            format!(
+                "peer-sync-{}.json",
+                super::super::super::context::hash(&json!("host"))
+            )
+            .as_ref()
+        ));
+    }
     fn sample() -> Value {
         json!({"boot":"boot","tick":100,"active":1,"pending_local":0,"pending_projection":0,"conflicts":0,"baseline_remaining":0,"pending_archives":0,"projected":7,"journal_head":7,"pending_reservations":0,"conflicting_attempts":0})
     }
