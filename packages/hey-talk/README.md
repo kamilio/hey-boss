@@ -250,6 +250,10 @@ streams reopen capture automatically while retaining audio already received.
 Recording becomes ready after the first nonzero audio buffer; a recovery that
 cannot restore sound fails visibly. `status --json` includes `active_input` and
 `capture_restarts`. An explicitly selected input stays selected.
+If the default Bluetooth microphone stays silent after one retry, capture can
+use the unmuted built-in microphone for that recording, with a notice and
+`fallback_from` in status. This does not change the system input or saved choice;
+fallback is disabled when the laptop lid is closed or the input reports mute.
 With the MacBook lid closed, choose an external microphone as the system input.
 A separate disposable process runs Orukeet v0.1.0 INT8 through sherpa-onnx and
 ONNX Runtime. Private pipes carry PCM; the CLI uses a same-user Unix socket
@@ -267,7 +271,8 @@ Inference stays warm for ten minutes, then releases model memory. Waveform updat
 run only during visible recording. Bluetooth can still take roughly two seconds
 to open its microphone profile on first use. Readiness requires fresh audio from
 the new recording, not cached idle samples;
-the waveform appears immediately, without the previous 660 ms reveal delay.
+The bar appears immediately with “Connecting…” while waiting for sound, then
+shows the live waveform. Click the bar to stop; Esc cancels.
 Startup runs off the UI thread and remains cancellable.
 
 On an M5 Pro, a 5.05-second synthetic speech clip decoded in 138–203 ms with a

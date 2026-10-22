@@ -3,6 +3,8 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Accelerate
+import IOKit
+import os
 import TalkCore
 
 struct InputDevice: Equatable {
@@ -13,6 +15,21 @@ struct InputDevice: Equatable {
 }
 
 enum AudioDevices {
+    static func builtInFallback(for failed: InputDevice) -> InputDevice? {
+        guard isBluetoothInput(failed.id), !isMuted(failed.id) else { return nil }
+        let power = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard power != 0 else { return nil }
+        defer { IOObjectRelease(power) }
+        let lidClosed = IORegistryEntryCreateCFProperty(power, "AppleClamshellState" as CFString,
+                                                       kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
+        guard lidClosed != true else { return nil }
+        return list().first { transport($0.id) == kAudioDeviceTransportTypeBuiltIn && !isMuted($0.id) }
+    }
+    private static func isMuted(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute, mScope: kAudioDevicePropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+        var muted: UInt32 = 0, size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &muted) == noErr && muted != 0
+    }
     static func input(uid: String?) throws -> InputDevice {
         let devices = list(), defaultID = defaultInput
         guard let device = devices.first(where: { device in uid.map { $0 == device.uid } ?? (device.id == defaultID) }) else {
@@ -21,10 +38,14 @@ enum AudioDevices {
         return device
     }
     static func isBluetoothInput(_ device: AudioDeviceID) -> Bool {
+        let value = transport(device)
+        return value == kAudioDeviceTransportTypeBluetooth || value == kAudioDeviceTransportTypeBluetoothLE
+    }
+    private static func transport(_ device: AudioDeviceID) -> UInt32? {
         var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var transport: UInt32 = 0, size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return false }
-        return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr else { return nil }
+        return transport
     }
     static var defaultInput: AudioDeviceID {
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
@@ -56,8 +77,10 @@ enum AudioDevices {
 }
 
 final class AudioCapture {
+    private let logger = Logger(subsystem: "local.hey-talk", category: "capture")
     typealias StreamFactory = (InputDevice, DispatchQueue, @escaping (CMSampleBuffer) -> Void, @escaping (String) -> Void) throws -> MicrophoneStream
     private let resolveInput: (String?) throws -> InputDevice
+    private let fallbackInput: (InputDevice) -> InputDevice?
     private let makeStream: StreamFactory
     private let now: () -> TimeInterval
     private let control = DispatchQueue(label: "hey-talk.audio-control", qos: .userInitiated)
@@ -68,6 +91,8 @@ final class AudioCapture {
     // These fields belong to the control queue.
     private var recordingToken: UInt64?
     private var requestedUID: String?
+    private var fallbackRoute: (source: InputDevice, input: InputDevice)?
+    private var triedFallback = false
     private var recoveryStartedAt: TimeInterval?
     private var recoveryReason = "Microphone unavailable. Check the system input in Sound settings."
     private var nextAttemptAt: TimeInterval = 0
@@ -83,6 +108,7 @@ final class AudioCapture {
     private var streamID: UInt64 = 0
     private var bluetooth = false
     private var device: InputDevice?
+    private var fallbackDevice: InputDevice?
     private var ready = false
     private var restarts = 0
     private var lastAudioAt: TimeInterval = 0
@@ -97,14 +123,16 @@ final class AudioCapture {
     var maximumLevel: Float { lock.lock(); defer { lock.unlock() }; return peak }
     var usesBluetooth: Bool { lock.lock(); defer { lock.unlock() }; return bluetooth }
     var activeInput: InputDevice? { lock.lock(); defer { lock.unlock() }; return device }
+    var fallbackSource: InputDevice? { lock.lock(); defer { lock.unlock() }; return fallbackDevice }
     var isReady: Bool { lock.lock(); defer { lock.unlock() }; return ready }
     var restartCount: Int { lock.lock(); defer { lock.unlock() }; return restarts }
     var isKeepingAlive: Bool { lock.lock(); defer { lock.unlock() }; return keepingAlive }
 
     init(resolveInput: @escaping (String?) throws -> InputDevice = AudioDevices.input,
+         fallbackInput: @escaping (InputDevice) -> InputDevice? = AudioDevices.builtInFallback,
          makeStream: @escaping StreamFactory = { try SystemMicrophoneStream(device: $0, queue: $1, receive: $2, interrupted: $3) },
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.resolveInput = resolveInput; self.makeStream = makeStream; self.now = now
+        self.resolveInput = resolveInput; self.fallbackInput = fallbackInput; self.makeStream = makeStream; self.now = now
     }
 
     func start(uid: String?, completion: @escaping (Result<Void, Error>) -> Void) {
@@ -119,12 +147,14 @@ final class AudioCapture {
             self.processing.sync {}
             self.idleUntil = nil
             self.recordingToken = ticket; self.requestedUID = uid
+            self.fallbackRoute = nil; self.triedFallback = false
             self.lock.lock()
             guard self.token == ticket else {
                 self.lock.unlock(); self.endCapture()
                 DispatchQueue.main.async { completion(.failure(TalkError("Recording cancelled"))) }; return
             }
             self.samples = []; self.samples.reserveCapacity(PCMFrame.maxSamples)
+            self.fallbackDevice = nil
             self.rms = 0; self.peak = 0; self.fault = nil; self.ready = false; self.restarts = 0
             self.acceptingAudio = true; self.keepingAlive = false
             self.lastSignalAt = self.now(); self.signalSince = nil
@@ -184,7 +214,11 @@ final class AudioCapture {
         do {
             // Resolve the system default anew, including between retries. Never fall
             // back to an unrelated device when an explicit input was selected.
-            let input = try resolveInput(requestedUID)
+            var input = try resolveInput(requestedUID)
+            if let route = fallbackRoute {
+                if input == route.source, fallbackInput(route.source) == route.input { input = route.input }
+                else { fallbackRoute = nil }
+            }
             lock.lock()
             let sameInput = device == input
             let noBuffers = time - lastAudioAt >= 3
@@ -192,6 +226,16 @@ final class AudioCapture {
             lock.unlock()
             if stream != nil, sameInput {
                 if noBuffers || noSignal {
+                    // Reopening cannot reclaim AirPods owned by another device.
+                    // After one retry, default mode may use the unmuted built-in
+                    // microphone for this recording. Explicit choices stay pinned.
+                    if requestedUID == nil, !triedFallback, attempts >= 2,
+                       let replacement = fallbackInput(input), replacement != input {
+                        triedFallback = true
+                        fallbackRoute = (input, replacement)
+                        input = replacement
+                        logger.notice("Default microphone remained silent after retry; switching to built-in input")
+                    }
                     beginRecovery(noBuffers ? "The microphone stopped sending audio. Check the system input in Sound settings."
                                   : "No sound from the microphone. Check its mute control and the system input in Sound settings.", token: ticket)
                 } else { return }
@@ -204,9 +248,11 @@ final class AudioCapture {
             lock.lock()
             streamID &+= 1; let epoch = streamID
             device = input; ready = false; rms = 0
+            fallbackDevice = fallbackRoute?.source
             lastAudioAt = time; lastSignalAt = time; signalSince = nil
             restarts = attempts; lock.unlock()
             attempts += 1
+            logger.info("Opening microphone attempt \(self.attempts, privacy: .public), fallback \(self.fallbackRoute != nil, privacy: .public)")
             let bluetooth = AudioDevices.isBluetoothInput(input.id)
             lock.lock(); self.bluetooth = bluetooth; lock.unlock()
             let opened = try makeStream(input, processing,
@@ -222,6 +268,7 @@ final class AudioCapture {
         }
     }
     private func beginRecovery(_ message: String, token: UInt64) {
+        logger.notice("Recovering microphone: \(message, privacy: .public)")
         if recoveryStartedAt == nil { recoveryStartedAt = now() }
         recoveryReason = message
         closeStream()
@@ -288,7 +335,10 @@ final class AudioCapture {
             lastSignalAt = time; ready = true
         } else if time - lastSignalAt >= 1 { signalSince = nil }
         lock.unlock()
-        if becameReady { notifyReadiness(true, token: token) }
+        if becameReady {
+            logger.info("Microphone is delivering nonzero audio")
+            notifyReadiness(true, token: token)
+        }
     }
     private func notifyReadiness(_ ready: Bool, token: UInt64) {
         DispatchQueue.main.async { [weak self] in
@@ -301,6 +351,7 @@ final class AudioCapture {
         lock.lock()
         guard self.token == token, fault == nil else { lock.unlock(); return }
         fault = message; ready = false; lock.unlock()
+        logger.error("Microphone failed: \(message, privacy: .public)")
         control.async { if self.recordingToken == token { self.endCapture() } }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isCurrent(token) else { return }

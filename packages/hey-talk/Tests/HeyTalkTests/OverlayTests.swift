@@ -125,10 +125,20 @@ final class OverlayTests: XCTestCase {
         }
         let wave = try XCTUnwrap(panel.contentView.flatMap(findWave))
         overlay.preparing()
-        XCTAssertTrue(wave.isHidden)
+        XCTAssertFalse(wave.isHidden, "Opening the microphone must show the recording bar immediately")
+        XCTAssertLessThan(wave.alphaValue, 1, "Waiting for sound must look different from live audio")
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(try XCTUnwrap(panel.contentView))
+        let waiting = try XCTUnwrap(views.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Connecting…" })
+        XCTAssertFalse(waiting.isHidden)
+        XCTAssertFalse(views.contains { ($0 as? NSButton)?.toolTip == "Cancel · Esc" }, "No separate close button")
         overlay.update(.recording)
         XCTAssertFalse(wave.isHidden)
         XCTAssertEqual(wave.alphaValue, 1)
+        XCTAssertTrue(waiting.isHidden)
+        overlay.preparing()
+        XCTAssertFalse(wave.isHidden, "Recovery must not collapse back to the idle icon")
+        XCTAssertFalse(waiting.isHidden)
         overlay.update(.idle)
         XCTAssertTrue(wave.isHidden)
     }

@@ -58,7 +58,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         capture.onFailure = { [weak self] message in self?.fail(message) }
         capture.onReadinessChanged = { [weak self] ready in
             guard let self, self.session.phase == .recording else { return }
-            if ready { self.overlay?.update(.recording) } else { self.overlay?.preparing() }
+            if ready { self.updateRecordingOverlay() } else { self.overlay?.preparing() }
         }
         hotkey = Hotkey()
         hotkey?.onAction = { [weak self] action in
@@ -167,7 +167,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if overlay == nil && show {
             let view = Overlay()
             view.onToggle = { [weak self] in self?.toggle() }
-            view.onCancel = { [weak self] in self?.cancel() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
@@ -281,6 +280,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         value["speech_hotkey_registered"] = hotkey?.speechRegistered ?? false
         value["speech_mode_hotkey_registered"] = hotkey?.speechModeRegistered ?? false
         if let input = capture.activeInput { value["active_input"] = input.json }
+        if let input = capture.fallbackSource { value["fallback_from"] = input.json }
         if let pid = inference.pid { value["inference_pid"] = pid }
         if let error { value["last_error"] = error }
         if let reason = lastPasteBlock { value["last_paste_block"] = reason.rawValue }
@@ -459,7 +459,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
         speech.stop()
         pendingStartReply = reply
-        error = nil; captureReady = false; self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
+        error = nil; captureReady = false; captureMilliseconds = 0
+        self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
         clearAutomatic()
         automatic = focusedInput.map { AutoRecording(target: $0) }
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
@@ -477,7 +478,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 case .success:
                 self.captureMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 self.captureReady = true
-                self.overlay?.update(.recording); self.hotkey?.captureEscape(true)
+                self.updateRecordingOverlay(); self.hotkey?.captureEscape(true)
                 let limit = DispatchWorkItem { [weak self] in
                     guard let self, self.session.generation == id, self.session.phase == .recording else { return }
                     if self.autoTarget != nil {
@@ -493,6 +494,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async(execute: begin) }
         } else { begin() }
+    }
+    private func updateRecordingOverlay() {
+        overlay?.update(.recording)
+        if capture.fallbackSource != nil, let input = capture.activeInput {
+            overlay?.error("Using \(input.name). Bluetooth microphone unavailable.")
+        }
     }
     private func stop(_ reply: @escaping ([String: Any]) -> Void) {
         guard session.phase == .recording else { reply(failure("No recording is active")); return }
