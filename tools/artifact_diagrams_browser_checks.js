@@ -8,12 +8,6 @@ async page => {
     document.addEventListener('securitypolicyviolation',e=>window.diagramPolicyViolations.push(e.violatedDirective));
   });
   const origin=await page.evaluate(()=>location.origin);
-  const mobile=origin.endsWith(':59550');
-  if(mobile){
-    const pair=await(await page.request.get(origin+'/fixture-pairing')).json();
-    const response=await page.request.post(origin+'/api/pair',{data:{code:pair.code,device:'Diagram QA'}});
-    assert(response.ok(),'Mobile device pairs with isolated store');
-  }
   await page.goto(origin+'/artifacts#project=named%3AFlowchart+QA',{waitUntil:'domcontentloaded'});
   await page.reload({waitUntil:'domcontentloaded'});
   await page.locator('.artifact-row').first().click();
@@ -54,12 +48,12 @@ async page => {
       await page.setViewportSize({width,height});
       await figures.first().scrollIntoViewIfNeeded();
       await page.waitForFunction(()=>document.querySelector('.artifact-diagram')?.dataset.state==='ready');
-      await page.screenshot({path:`output/playwright/issue49/${mobile?'mobile':'native'}-${theme}-${size}.png`,fullPage:true});
+      await page.screenshot({path:`output/playwright/issue49/native-${theme}-${size}.png`,fullPage:true});
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${theme} ${size} reading stays within viewport`);
       await figures.first().locator('[data-expand]').click();
       await dialog.waitFor();
       assert(await dialog.evaluate(n=>{const r=n.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth+1&&r.top>=0&&r.bottom<=innerHeight+1;}),`${theme} ${size} expanded viewer fits screen`);
-      await page.screenshot({path:`output/playwright/issue49/${mobile?'mobile':'native'}-${theme}-${size}-expanded.png`});
+      await page.screenshot({path:`output/playwright/issue49/native-${theme}-${size}-expanded.png`});
       await page.keyboard.press('Escape');
       await dialog.waitFor({state:'detached'});
     }
@@ -85,5 +79,5 @@ async page => {
   assert(await page.getByText('Outdated selection · discussion preserved',{exact:true}).count()===0,'Diagram controls do not change prose comment anchors');
   assert(await page.evaluate(()=>window.diagramPolicyViolations.length===0),'Rendering satisfies production Content Security Policy');
   assert(errors.length===0,'No browser script errors');
-  return {checks,scriptErrors:errors,mobile};
+  return {checks,scriptErrors:errors};
 }

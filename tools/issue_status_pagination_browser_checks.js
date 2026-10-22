@@ -4,14 +4,12 @@ async page => {
  await page.unrouteAll({behavior:'wait'});
  page.on('pageerror',e=>errors.push(e.message));
  const fixture='http://127.0.0.1:52070';
- const {code}=await (await page.request.get(fixture+'/fixture/pairing')).json();
- check((await page.request.post(fixture+'/api/pair',{data:{code}})).ok(),'Paired fixture');
- for(const mode of ['desktop','paired']){
+ for(const mode of ['light','dark']){
   await page.setViewportSize({width:390,height:1000});
-  await page.emulateMedia({colorScheme:mode==='desktop'?'light':'dark',reducedMotion:'reduce'});
+  await page.emulateMedia({colorScheme:mode,reducedMotion:'reduce'});
   const baseline=await (await page.request.get(fixture+'/fixture/history')).json();
   const expected=baseline.updates.map(update=>update.comment);
-  const url=mode==='desktop'?`http://127.0.0.1:4796/?history-qa=${Date.now()}#project=named%3AProgress%20Studio&issue=1`:fixture+`/project-resource?history-qa=${Date.now()}#project=named%3AProgress%20Studio&issue=1`;
+  const url=`http://127.0.0.1:4796/?history-qa=${Date.now()}#project=named%3AProgress%20Studio&issue=1`;
   const historyRequests=[];
   const track=request=>{
    if(request.method()!=='POST')return;

@@ -16,10 +16,7 @@ __pycache__/
 
 .playwright-cli/
 
-mobile/public/artifact-web/
 
-mobile/public/agent-web/
-mobile/public/issue-web/
 
 /output/
 /packages/hey-harvester/

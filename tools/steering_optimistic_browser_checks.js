@@ -4,13 +4,12 @@ async page => {
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  await page.unroute('**/api/fleet/steer');
  page.on('pageerror',error=>errors.push(error.message));
- async function open(base,mobile){
-  if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();await page.request.post(base+'/api/pair',{data:{code:pair.code,deviceName:'Optimistic QA'}});}
+ async function open(base){
   await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();
   await page.waitForSelector('#steer-open:not([hidden])');
  }
- for(const [base,mobile] of [['http://127.0.0.1:59682',false],['http://127.0.0.1:59782',true]]){
-  await open(base,mobile);
+ for(const base of ['http://127.0.0.1:59682']){
+  await open(base);
   for(const [width,height,scheme] of [[1440,900,'light'],[390,844,'light'],[320,568,'dark'],[1440,900,'dark']]){
    await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:scheme});await page.evaluate(()=>scrollTo(0,0));
    let release,payload,count=0;
@@ -25,7 +24,7 @@ async page => {
     check((await page.locator('#steer-note').innerText()).includes('Sending'),'Pending status is honest');
     check(await page.locator('#main').evaluate(e=>document.activeElement===e),'Focus returns to conversation');
     check(await page.locator('#steer-open').isDisabled(),'Duplicate submissions prevented');
-    await page.screenshot({path:shots+(mobile?'phone':'native')+'-'+width+'-'+scheme+'-pending.png'});
+    await page.screenshot({path:shots+'native'+'-'+width+'-'+scheme+'-pending.png'});
    }finally{release();}
    await page.waitForSelector('#steer-error:not([hidden])');
    check(await page.locator('#steer-dialog').isVisible(),'Failure restores dialog');
@@ -39,7 +38,7 @@ async page => {
    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No page overflow');
    check(await page.locator('#steer-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth+1),'No dialog overflow');
    check(await page.locator('#steer-send').evaluate(e=>e.getBoundingClientRect().height>=44&&e.getBoundingClientRect().bottom<=innerHeight),'Send stays visible with 44px target');
-   await page.screenshot({path:shots+(mobile?'phone':'native')+'-'+width+'-'+scheme+'-recovered.png'});
+   await page.screenshot({path:shots+'native'+'-'+width+'-'+scheme+'-recovered.png'});
    await page.unroute('**/api/fleet/steer');
    let retry;
    await page.route('**/api/fleet/steer',route=>{retry=route.request().postDataJSON();return route.fulfill({json:{ok:true,state:'queued'}});});

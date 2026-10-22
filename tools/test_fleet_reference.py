@@ -1427,125 +1427,12 @@ def local_request(value):
         return json.loads(output)
 
 
-class MobileIssues:
-    """Only the supervisor consumes the relay's durable phone creation queue."""
-    def __init__(self, path, node):
-        self.path, self.node = path, node
-
-    def rpc(self, operation, project=None, request_id=None):
-        actor = {'id': 'human:boss', 'kind': 'human', 'session_id': None,
-                 'machine': self.node, 'host': socket.gethostname(), 'pid': None,
-                 'process_start': None, 'cwd': str(pathlib.Path.home()), 'source': 'phone'}
-        request = {'version': 1, 'project': project or {'id': 'named:Fleet', 'name': 'Fleet'},
-                   'project_override': None, 'actor': actor if request_id else None,
-                   'operation': operation, 'request_id': request_id}
-        environment = os.environ.copy()
-        environment['HEY_BOSS_ISSUE_DB'] = str(self.path)
-        environment.pop('HEY_BOSS_ISSUE_HOST', None)
-        result = subprocess.run([str(BINARY), 'issue', '--json', 'rpc'], input=encode(request),
-                                capture_output=True, text=True, env=environment,
-                                cwd=str(pathlib.Path.home()), timeout=20)
-        value = json.loads(result.stdout)
-        if result.returncode and value.get('error', {}).get('code') not in ('invalid_input', 'not_found', 'conflict'):
-            raise RuntimeError('Issue store temporarily unavailable')
-        return value
-
-    def call(self, path, body=None):
-        # The existing pairing secret is used only in the HTTPS Authorization header.
-        config = read_json(self.path.parent / 'mobile.json')
-        if not config:
-            raise FileNotFoundError('Mobile pairing is not configured')
-        url = urllib.parse.urlsplit(config['url'])
-        if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise ValueError('Invalid mobile service origin')
-        request = urllib.request.Request(config['url'].rstrip('/') + path,
-            data=None if body is None else encode(body).encode(),
-            headers={'Authorization': 'Bearer ' + config['token'], 'Content-Type': 'application/json'})
-        # Never send the bridge credential to a redirected endpoint.
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, *args, **kwargs):
-                return None
-        with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
-            data = response.read(LIMIT + 1)
-            if len(data) > LIMIT:
-                raise ValueError('Mobile response exceeds limit')
-            return json.loads(data)
-
-    def sync(self):
-        registry = self.rpc({'action': 'projects', 'include_hidden': True})
-        if not registry.get('ok'):
-            raise RuntimeError('Issue project registry unavailable')
-        projects = {p['id']: {'id': p['id'], 'name': p['name']} for p in registry['projects']}
-        visible = {p['id'] for p in registry['projects'] if p.get('hidden_at') is None}
-        self.call('/api/bridge/issue-projects', {'projects': [p for id, p in projects.items() if id in visible]})
-        for creation in self.call('/api/bridge/issues')['creations']:
-            request_id = creation['requestID']
-            if not isinstance(request_id, str) or not 0 < len(request_id) <= 128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in request_id):
-                raise ValueError('Invalid mobile creation ID')
-            project = projects.get(creation['project'])
-            accepted = False
-            if project is not None and project['id'] not in visible:
-                # A project hidden after native commit must not turn a lost ack
-                # into a false error. Reuse the native receipt without new writes.
-                with contextlib.closing(sqlite3.connect(self.path)) as db:
-                    accepted = db.execute('SELECT EXISTS(SELECT 1 FROM requests WHERE project_id=? AND actor=? AND request_id=?)',
-                        (project['id'], 'human:boss', 'mobile:' + request_id)).fetchone()[0]
-            if project is None or project['id'] not in visible and not accepted:
-                outcome = {'status': 'error', 'error': 'This project is no longer registered or is hidden. Choose a registered project and submit again.'}
-            else:
-                value = self.rpc({'action': 'create', 'title': creation['title'], 'body': creation['body'],
-                                  'labels': creation['labels'], 'at_top': True}, project, 'mobile:' + request_id)
-                outcome = {'status': 'synced', 'number': value['issue']['number']} if value.get('ok') else {
-                    'status': 'error', 'error': value['error']['message'][:1000]}
-            # Lost acknowledgments replay the same native idempotency key.
-            self.call('/api/bridge/issues/' + request_id + '/result', outcome)
-
-        self.sync_artifacts(projects, visible)
-
-    def sync_artifacts(self, projects, visible):
-        for request in self.call('/api/bridge/artifacts').get('requests', []):
-            request_id = request['id']
-            if not isinstance(request_id, str) or not 0 < len(request_id) <= 128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in request_id):
-                raise ValueError('Invalid artifact transport ID')
-            project = projects.get(request.get('project'))
-            operation = request.get('operation', {})
-            resource_read = operation.get('action') == 'view' or operation.get('action') == 'mindmap' and operation.get('operation', {}).get('command') in ('view', 'show')
-            if operation.get('action') != 'artifact' and not resource_read:
-                outcome = {'ok': False, 'error': {'code': 'invalid_input', 'message': 'Only artifact operations are accepted'}}
-            elif project is None:
-                outcome = {'ok': False, 'error': {'code': 'not_found', 'message': 'Project is no longer registered'}}
-            else:
-                writing = not resource_read and operation.get('operation', {}).get('command') not in ('list', 'view', 'links', 'preview')
-                key = 'artifact-mobile:' + request_id if writing else None
-                accepted = False
-                if writing and project['id'] not in visible:
-                    with contextlib.closing(sqlite3.connect(self.path)) as db:
-                        accepted = db.execute('SELECT EXISTS(SELECT 1 FROM requests WHERE project_id=? AND actor=? AND request_id=?)',
-                            (project['id'], 'human:boss', key)).fetchone()[0]
-                if project['id'] not in visible and not accepted:
-                    outcome = {'ok': False, 'error': {'code': 'not_found', 'message': 'Project is hidden; restore it before accessing artifacts'}}
-                else:
-                    outcome = self.rpc(operation, project, key)
-            self.call('/api/bridge/artifacts/' + request_id + '/result', outcome)
-
-    def loop(self):
-        while not STOP.is_set():
-            try:
-                self.sync()
-            except Exception:
-                # Offline/configuration/database failures leave the relay's queue pending.
-                # Do not log exceptions containing request headers or pairing data.
-                pass
-            STOP.wait(5)
-
-
 def supervisor():
     STATE.mkdir(parents=True, exist_ok=True)
     lock = open(STATE / 'fleet-controller.lock', 'a')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     node, path = identity()
     app = Supervisor(path, node)
-    threading.Thread(target=MobileIssues(path, node).loop, daemon=True).start()
     socket_path = STATE / 'fleet.sock'
     socket_path.unlink(missing_ok=True)
     class Handler(socketserver.StreamRequestHandler):

@@ -1,7 +1,7 @@
 import {build} from 'esbuild';
 import {existsSync,readFileSync,appendFileSync} from 'node:fs';
 import {dirname,resolve,join} from 'node:path';
-const outfile=new URL('../src/issues/web/artifact-editor.js',import.meta.url).pathname;
+const outfile=new URL('../../src/issues/web/artifact-editor.js',import.meta.url).pathname;
 const result=await build({entryPoints:[new URL('./artifact-editor.mjs',import.meta.url).pathname],outfile,bundle:true,minify:true,format:'iife',target:['safari16','chrome100'],legalComments:'eof',metafile:true});
 const packages=new Set();
 for(const input of Object.keys(result.metafile.inputs)){

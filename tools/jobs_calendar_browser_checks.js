@@ -1,15 +1,14 @@
 // Run through playwright-cli against serve_jobs_ui_fixture.mjs. Temporary PNGs go under /tmp.
 async page=>{
- const origin=await page.evaluate(()=>location.origin),paired=origin.endsWith('52049'),surface=paired?'paired':'desktop';
- if(!['http://127.0.0.1:59649','http://127.0.0.1:52049'].includes(origin))throw Error('Isolated fixture required');
+ const origin=await page.evaluate(()=>location.origin),surface='desktop';
+ if(!['http://127.0.0.1:59649'].includes(origin))throw Error('Isolated fixture required');
  const project='named:Jobs UI QA',checks=[],errors=[],queries=[];
  const check=(condition,name)=>{if(!condition)throw Error(name);checks.push(name);};
  await page.unroute('**/api/action');page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[]}}));
  await page.route('**/api/jobs/runtime',r=>r.fulfill({json:{ok:true,machine:'fixture',machines:[],catalog:{models:[]}}}));
- if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();check((await page.request.post(origin+'/api/pair',{data:{code}})).ok(),'Pair mobile');}
  const boot=await(await page.request.get(origin+'/api/bootstrap')).json();
- const api=async operation=>{const response=await page.request.post(origin+'/api/action',{headers:paired?{}:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation:{action:'job',operation},...(['create','edit','set_enabled','delete','run_now','stop'].includes(operation.command)?{request_id:"calendar-"+Date.now()+"-"+Math.random().toString(16).slice(2)}:{})}});const v=await response.json();if(!v.ok)throw Error(JSON.stringify(v));return v;};
+ const api=async operation=>{const response=await page.request.post(origin+'/api/action',{headers:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation:{action:'job',operation},...(['create','edit','set_enabled','delete','run_now','stop'].includes(operation.command)?{request_id:"calendar-"+Date.now()+"-"+Math.random().toString(16).slice(2)}:{})}});const v=await response.json();if(!v.ok)throw Error(JSON.stringify(v));return v;};
  const markdown=await(await page.request.get('http://127.0.0.1:52049/fixture-instructions.md')).text();
  const prefix=surface+'-'+Date.now();
  const create=async(id,name,cron,timezone,enabled=true)=>api({command:'create',id:prefix+id,definition:{name,cron,timezone,harness:'codex',model:'exact-model'},markdown,enabled});

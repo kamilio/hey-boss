@@ -13,10 +13,9 @@ const server = createServer((req,res) => {
   if(path === '/api/bootstrap') return res.end(JSON.stringify({ok:true,csrf:'fixture',project,projects:[project]}));
   if(path === '/api/action') return res.end(JSON.stringify({ok:true,pull_requests:[],next_offset:null}));
   try {
-    const mobile = path.startsWith('/issue-web/');
-    const name = path === '/paired' ? 'merged-prs.html' : path === '/merged-prs' ? 'merged-prs.html' : path.slice(1).replace(/^issue-web\//,'');
+    const name = path === '/merged-prs' ? 'merged-prs.html' : path.slice(1);
     if(!/^[\w.-]+$/.test(name)) throw Error('Not found');
-    let body = readFileSync(resolve(mobile || path === '/paired' ? 'mobile/public/issue-web' : source,name));
+    let body = readFileSync(resolve(source,name));
     if(path === '/merged-prs') body = body.toString().replace('<!--app-shell-->',readFileSync(resolve(source,'app-shell.html'),'utf8').replace(/<!--[^]*?-->/g,''));
     res.setHeader('Content-Type',name.endsWith('.css')?'text/css':name.endsWith('.js')?'text/javascript':name.endsWith('.png')?'image/png':'text/html');
     res.end(body);
@@ -81,13 +80,8 @@ try {
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Full issue header fits a narrow phone');
   await trigger.click();
   if(process.env.REVIEW_SCREENSHOTS) await page.screenshot({path:resolve(process.env.REVIEW_SCREENSHOTS,'320-full-header.png')});
-  await page.goto(origin+'/paired#project=named%3ANavigation');
-  assert.equal(await page.locator('#navigation-more').isVisible(),true,'Paired UI offers global Workers');
-  await page.locator('#navigation-more').click();
-  assert.equal(await page.locator('#nav-workers').isVisible(),true);
-  assert.equal(await review.isVisible(),false,'Unavailable Review stays hidden');
   assert.deepEqual(errors,[],'No runtime errors');
-  console.log('PASS: Review overflow, touch, keyboard, dismissal, context, 8 visual layouts, paired visibility');
+  console.log('PASS: Review overflow, touch, keyboard, dismissal, context, 8 visual layouts');
 } finally {
   await browser?.close();
   await new Promise(done=>server.close(done));

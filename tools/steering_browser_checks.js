@@ -5,11 +5,10 @@ async page => {
  page.on('pageerror',e=>errors.push(e.message));
  await page.unroute('**/api/fleet/steer');await page.unroute('**/api/fleet/status');await page.unroute('**/*');
  await page.route('**/*',route=>route.continue());
- const native='http://127.0.0.1:59682',phone='http://127.0.0.1:59782';
+ const native='http://127.0.0.1:59682';
  const action=async operation=>{const b=await(await page.request.get(native+'/api/bootstrap')).json();const r=await page.request.post(native+'/api/action',{headers:{'X-Hey-Boss-CSRF':b.csrf},data:{project:'named:Steering Studio',operation,request_id:null}});const value=await r.json();if(!r.ok()||value.ok===false)throw Error(JSON.stringify(value));return value;};
  const stamp=Date.now();
- async function review(base,mobile){
-  if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();check((await page.request.post(base+'/api/pair',{data:{code:pair.code,deviceName:'Steering QA'}})).ok(),'Phone paired');}
+ async function review(base){
   await page.goto(base+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');
   await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();await page.waitForSelector('#steer-open:not([hidden])');
   check(await page.locator('#takeover-open').isVisible(),'Steer alongside Take over');
@@ -24,7 +23,7 @@ async page => {
    check(await page.locator('#steer-dialog').evaluate(e=>e.scrollWidth<=e.clientWidth+1),'Dialog fits '+width+'px '+scheme);
    check(await page.locator('#steer-send').evaluate(e=>e.getBoundingClientRect().height>=44),'Send has a 44px target');
    check(await page.locator('#steer-send').evaluate(e=>e.getBoundingClientRect().top>=0&&e.getBoundingClientRect().bottom<=innerHeight),'Send remains visible '+width+'px');
-   await page.screenshot({path:shots+(mobile?'phone':'native')+'-'+width+'-'+scheme+'.png',fullPage:false});
+   await page.screenshot({path:shots+'native'+'-'+width+'-'+scheme+'.png',fullPage:false});
    await page.keyboard.press('Escape');check(!await page.locator('#steer-dialog').isVisible(),'Escape dismisses');
    await page.waitForFunction(()=>document.activeElement===document.querySelector('#steer-open'));check(await page.locator('#steer-open').evaluate(e=>document.activeElement===e),'Focus returns to Steer');
    await page.locator('#steer-open').click();check((await page.locator('#steer-text').inputValue()).includes('keyboard navigation'),'Cancelled draft retained');
@@ -33,18 +32,18 @@ async page => {
   await page.setViewportSize({width:1440,height:900});
   for(const scope of ['session','issue','project']){
    await page.locator('#steer-open').click();await page.locator('input[name=scope][value='+scope+']').check();
-   const text=(mobile?'Phone':'Native')+' '+scope+' instruction '+stamp;
+   const text='Native'+' '+scope+' instruction '+stamp;
    await page.locator('#steer-text').fill(text);await page.locator('#steer-send').click();
    await page.waitForFunction(()=>!document.querySelector('#steer-dialog').open);
    check(!(await page.locator('#steer-note').innerText()).includes('delivered'),'Acceptance accurately says queued');
    await page.waitForFunction(text=>[...document.querySelectorAll('#steering-list li')].some(e=>e.textContent.includes(text)&&e.textContent.includes('Delivered')),text,{timeout:15000});
-   check(true,scope+' instruction delivered through '+(mobile?'paired bridge':'native fleet'));
+   check(true,scope+' instruction delivered through '+'native fleet');
    if(scope==='issue'){const issue=(await action({action:'view',number:1})).issue;check(issue.body.includes(text),'Issue scope saved in requirements');}
    if(scope==='project'){const settings=await action({action:'project_settings'});check(settings.prompt.includes(text),'Project scope saved in base instructions');const snapshot=await(await page.request.get(native+'/api/fleet/status')).json();const other=snapshot.machines.flatMap(m=>m.workers.flatMap(w=>w.runs)).find(r=>r.number===2);let applied=false;for(let i=0;i<30&&!applied;i++){const conversation=await(await page.request.get(native+'/api/fleet/conversation?host=local&run='+encodeURIComponent(other.id)+'&latest=1')).json();applied=conversation.messages.some(m=>m.text.includes('Project instructions have changed')&&m.text.includes(text));if(!applied)await page.waitForTimeout(200);}check(applied,'Project update reaches the other running agent');}
   }
-  await page.locator('#steering-updates summary').click();await page.screenshot({path:shots+(mobile?'phone':'native')+'-delivered.png',fullPage:false});
+  await page.locator('#steering-updates summary').click();await page.screenshot({path:shots+'native'+'-delivered.png',fullPage:false});
  }
- await review(native,false);await review(phone,true);
+ await review(native);
  await page.goto(native+'/agents#view=conversations&scope=all',{waitUntil:'domcontentloaded'});await page.waitForSelector('.agent-card');await page.locator('.agent-card').filter({hasText:'Keep conversations intact'}).click();await page.waitForSelector('#steer-open:not([hidden])');
  // Lose the response after the server saves the requirement. Retrying must
  // preserve the request ID and append the saved requirement exactly once.

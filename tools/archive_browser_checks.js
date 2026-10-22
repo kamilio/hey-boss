@@ -5,10 +5,7 @@ async page => {
   page.on('pageerror',e=>errors.push(e.message));
   page.setDefaultTimeout(20000);
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
-  const phone='http://127.0.0.1:52062';
-  const {code}=await(await page.request.get(phone+'/fixture-pairing')).json();
-  check((await page.request.post(phone+'/api/pair',{data:{code}})).ok(),'Phone pairing');
-  for(const [surface,base] of [['desktop','http://127.0.0.1:59662/'],['phone',phone+'/issues']]) {
+  for(const [surface,base] of [['desktop','http://127.0.0.1:59662/']]) {
     const detail=async n=>{await page.goto(base+'#project=named%3AArchive%20QA&issue='+n);await page.locator('.issue-description').waitFor();await page.locator('.issue-activity').first().waitFor();};
     await detail(1);
     const run=await page.evaluate(()=>api({action:'worker_run',run_id:'archive-ui-run'},'named:Archive QA'));

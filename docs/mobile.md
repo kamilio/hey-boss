@@ -18,6 +18,6 @@ Every LAN request also requires private IPv4 addresses on the checked interface'
 
 This grants access to devices on the approved subnet. A public IP can be shared by other households through carrier-grade NAT and is not a cryptographic network identity. Only use this on a trusted LAN, and do not forward the port or expose it through a reverse proxy. An ISP address change or VPN can block access; update the configured address deliberately after confirming you are home.
 
-Local HTTP supports browsing and editing. iPhone Web Push and service-worker installation require trusted HTTPS and are unavailable over this HTTP connection. The retired relay server is restricted to loopback and has no deployment workflow. Old local mobile data is left intact; deleting deployment files does not destroy cloud resources.
+Local HTTP supports browsing and editing. iPhone Web Push and service-worker installation require trusted HTTPS and are unavailable over this HTTP connection. The separate React app and pairing relay have been removed.
 
 See [local HTTP service setup](local-http.md) for launchd provisioning. Existing explicit private Tailscale access cannot be combined with `--allow-public-ip`.

@@ -10,7 +10,7 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --locked -p hey-boss --lib github_http_ -- --ignored --test-threads=1
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
-      - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py tools/test_mobile_issues.py
+      - run: PYTHONPATH=tools python3 -m unittest tools/test_upgrade_hey_boss.py tools/test_fleet_hey_boss.py tools/test_fleet_subtasks.py tools/test_global_settings_fleet.py
       - run: python3 tools/test_skill_transport.py
       - run: node tools/test_skill_manager_api.mjs
       - run: node tools/test_skill_manager.cjs && node --check src/issues/web/skills.js
@@ -61,11 +61,11 @@ jobs:
           sudo env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" cargo test --locked --lib health::
       - run: HEY_BOSS_TEST_BINARY=target/debug/hey-boss python3 -m unittest tools/test_drain_github_issues.py
       - run: cargo clippy --locked --all-targets -- -D warnings
-  mobile:
+  web-assets:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: mobile
+        working-directory: tools/web-assets
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -73,4 +73,5 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      - run: git diff --exit-code -- src/issues/web
+        working-directory: .

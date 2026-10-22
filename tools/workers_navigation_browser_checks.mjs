@@ -1,4 +1,4 @@
-// Shared desktop/paired assets, synthetic read-only APIs, and isolated Chrome.
+// Web assets, synthetic read-only APIs, and isolated Chrome.
 import {createServer} from 'node:http';
 import {readFileSync, mkdirSync} from 'node:fs';
 import {resolve} from 'node:path';
@@ -17,12 +17,10 @@ const server = createServer((req,res) => {
   if(path==='/api/fleet/conversation') return json({ok:true,messages:[],availability:'waiting'});
   if(path==='/api/action') return json({ok:true,pull_requests:[],next_offset:null});
   try {
-    const paired=new URL(req.url,'http://fixture').searchParams.has('paired');
-    const assets=path.startsWith('/artifact-web/')?'mobile/public/artifact-web':path.startsWith('/agent-web/')?'mobile/public/agent-web':source;
-    const name=paired?'fleet.html':['/agents','/workers','/agents/session'].includes(path)?'fleet.html':path==='/merged-prs'?'merged-prs.html':path.split('/').pop();
+    const name=['/agents','/workers','/agents/session'].includes(path)?'fleet.html':path==='/merged-prs'?'merged-prs.html':path.split('/').pop();
     if(!/^[\w.-]+$/.test(name)) throw Error('Not found');
-    let body=readFileSync(resolve(paired?'mobile/public/agent-web':assets,name));
-    if(name.endsWith('.html')&&!paired) body=body.toString().replace('<!--app-shell-->',readFileSync(resolve(source,'app-shell.html'),'utf8').replace('<!--workers-current-->',name==='fleet.html'?' aria-current="page"':'').replace(/<!--[^]*?-->/g,''));
+    let body=readFileSync(resolve(source,name));
+    if(name.endsWith('.html')) body=body.toString().replace('<!--app-shell-->',readFileSync(resolve(source,'app-shell.html'),'utf8').replace('<!--workers-current-->',name==='fleet.html'?' aria-current="page"':'').replace(/<!--[^]*?-->/g,''));
     if(name==='routes.js') body=body.toString().replace('/* ROUTE_DEFINITIONS */ []',readFileSync(resolve(source,'routes.json'),'utf8'));
     res.setHeader('Content-Type',name.endsWith('.css')?'text/css':name.endsWith('.js')?'text/javascript':name.endsWith('.png')?'image/png':'text/html');
     res.end(body);
@@ -70,20 +68,20 @@ try {
   await visit('/agents#project=named%3AAtlas&view=conversations');
   await page.locator('#worker-board .activity-machine').waitFor();
   assert.equal(await page.locator('#projects').count(),0,'Legacy browse URL opens Workers');
-  for(const paired of [false,true]) for(const width of [1440,390,320]) {
+  for(const width of [1440,390,320]) {
     await page.setViewportSize({width,height:900});
-    await visit('/agents/session'+(paired?'?paired=1':'')+'#project=named%3AAtlas&host=devbox&run=run-1');
+    await visit('/agents/session'+'#project=named%3AAtlas&host=devbox&run=run-1');
     await page.locator('#session-title').filter({hasText:run.title}).waitFor();
     const back=await page.locator('#back').getAttribute('href');
     assert.ok(back.includes('issue=42')&&back.includes('project=named%3AAtlas'),'Conversation returns to its source issue');
-    assert.equal(new URL(origin+back).pathname,paired?'/project-resource':'/');
+    assert.equal(new URL(origin+back).pathname,'/');
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Conversation fits');
     assert.equal(await page.locator('#nav-workers').getAttribute('aria-current'),null,'Conversation does not select global Workers');
-    if(process.env.WORKERS_SCREENSHOTS) await page.screenshot({path:resolve(process.env.WORKERS_SCREENSHOTS,`session-${paired?'paired':'desktop'}-${width}.png`)});
+    if(process.env.WORKERS_SCREENSHOTS) await page.screenshot({path:resolve(process.env.WORKERS_SCREENSHOTS,`session-desktop-${width}.png`)});
   }
   await visit('/agents/session#project=named%3ABeacon&issue=77');
   await page.locator('#session-title').filter({hasText:'Conversation unavailable'}).waitFor();
   assert.match(await page.locator('#back').getAttribute('href'),/issue=77/,'Missing session still returns to task');
   assert.deepEqual(errors,[]);
-  console.log('PASS: global Workers menu, keyboard/touch, eight menu layouts, settings, legacy URL, desktop/paired task return, missing session');
+  console.log('PASS: global Workers menu, keyboard/touch, eight menu layouts, settings, legacy URL, task return, missing session');
 } finally {await browser?.close();await new Promise(done=>server.close(done));}

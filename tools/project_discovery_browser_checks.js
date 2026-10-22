@@ -1,7 +1,6 @@
-// Run with playwright-cli against the isolated project picker fixture, native or paired.
+// Run with playwright-cli against the isolated project picker fixture.
 async page => {
   const base = await page.evaluate(() => location.origin);
-  const paired = await page.evaluate(() => location.pathname === '/issues');
   const bootstrap = await (await page.request.get(base + '/api/bootstrap')).json();
   const action = async (project, operation) => {
     const response = await page.request.post(base + '/api/action', {
@@ -26,17 +25,8 @@ async page => {
   check(!registry.projects.some(p => p.id === temporary), 'Legacy empty temporary project omitted');
   check(registry.projects.some(p => p.id === saved), 'Temporary project with saved work retained');
   check(registry.projects.filter(p => p.id === repository).length === 1, 'One canonical repository entry');
-  if (paired) {
-    // Production's supervisor refreshes this inventory; the isolated fixture
-    // needs the projects created above before its Agent bootstrap can list them.
-    const response = await page.request.post(base + '/api/bridge/issue-projects', {
-      headers:{Authorization:'Bearer ' + 'synthetic-project-picker-fixture-'.repeat(3)},
-      data:{projects:registry.projects.filter(p => !p.hidden_at)},
-    });
-    check(response.ok(), 'Paired fixture inventory updated');
-  }
   await page.route('**/api/inbox*', route => route.fulfill({json:{ok:true,tasks:[]}}));
-  for (const route of [paired ? '/issues' : '/', '/mm', '/artifacts', '/agents']) {
+  for (const route of ['/', '/mm', '/artifacts', '/agents']) {
     for (const [width,height] of [[320,568],[390,844],[844,390],[1440,1000]]) {
       await page.setViewportSize({width,height});
       for (const colorScheme of ['light','dark']) {
@@ -55,7 +45,7 @@ async page => {
           `${route} ${width} ${colorScheme}: menu fits viewport`);
         check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${route} ${width} ${colorScheme}: no horizontal overflow`);
         if ((width === 390 || width === 1440) && (route === '/' || route === '/issues'))
-          await page.screenshot({path:`output/playwright/issue84/${paired ? 'paired' : 'native'}-${width}-${colorScheme}.png`});
+          await page.screenshot({path:`output/playwright/issue84/${'native'}-${width}-${colorScheme}.png`});
         await page.keyboard.press('ArrowDown');
         await page.keyboard.press('Enter');
         check(await page.locator('#project-menu').isHidden(), `${route} ${width} ${colorScheme}: keyboard selection works`);

@@ -4,14 +4,12 @@ async page => {
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
   page.on('pageerror', error => errors.push(error.message));
   page.setDefaultTimeout(15000);
-  const native = 'http://127.0.0.1:59701', paired = 'http://127.0.0.1:52701';
+  const native = 'http://127.0.0.1:59701';
   const hash = '#project=named%3AQueue%20placement%20QA&issue=2';
   await page.goto(native + '/' + hash);
   await page.locator('#comments > .activity-group').waitFor();
   await page.evaluate(async () => { await mutate({action:'claim',number:2,force:false}); });
-  const pairing = await (await page.request.get(paired+'/fixture-pairing')).json();
-  await page.request.post(paired+'/api/pair',{data:pairing});
-  for (const [surface,base] of [['native',native+'/'],['paired',paired+'/issues']]) {
+  for (const [surface,base] of [['native',native+'/']]) {
     for (const scheme of ['light','dark']) for (const width of [1440,768,390,320]) {
       const label = `${surface}/${scheme}/${width}`;
       await page.emulateMedia({colorScheme:scheme,reducedMotion:'reduce'});
@@ -52,7 +50,7 @@ async page => {
   await page.evaluate(async () => {
     for(let n=0;n<36;n++) await mutate({action:'edit',number:2,title:'Recovery first — '+n+' '+(n===35?'A very long activity title to test small screens and ensure every full change remains available when expanded. '.repeat(4):''),body:null,add_labels:[],remove_labels:[]});
   });
-  for (const [surface,base] of [['native',native+'/'],['paired',paired+'/issues']]) {
+  for (const [surface,base] of [['native',native+'/']]) {
     await page.goto(base+hash);
     await page.reload();
     const more = page.locator('.history-more');

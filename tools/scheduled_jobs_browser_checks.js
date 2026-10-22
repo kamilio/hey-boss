@@ -1,16 +1,15 @@
-// Run against the isolated native/paired issue fixture; never production data.
+// Run against the isolated native issue fixture; never production data.
 async page => {
   const checks=[],errors=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   const base=await page.evaluate(()=>location.origin);
-  if(!['http://127.0.0.1:59639','http://127.0.0.1:52039'].includes(base))throw Error('Isolated fixture required');
-  const paired=base.endsWith(':52039'),path=paired?'/issues':'/',surface=paired?'paired':'native';
+  if(!['http://127.0.0.1:59639'].includes(base))throw Error('Isolated fixture required');
+  const path='/',surface='native';
   page.setDefaultTimeout(20000);
   page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.route('**/fixture-instructions.md',r=>r.fulfill({path:'src/jobs/fixtures/original.md',contentType:'text/markdown'}));
-  for(const name of ['app.js','components.js','assignments.js'])await page.route(base+(paired?'/issue-web/':'/')+name,r=>r.fulfill({path:'src/issues/web/'+name,contentType:'text/javascript'}));
-  if(paired){const {code}=await(await page.request.get(base+'/fixture-pairing')).json();check((await page.request.post(base+'/api/pair',{data:{code}})).ok(),'Paired browser authenticated');}
+  for(const name of ['app.js','components.js','assignments.js'])await page.route(base+'/'+name,r=>r.fulfill({path:'src/issues/web/'+name,contentType:'text/javascript'}));
   const project='named:Quick action QA';
   await page.goto(base+path+'?qa='+Date.now()+'#project='+encodeURIComponent(project));
   await page.waitForFunction(()=>typeof model!=='undefined'&&model.csrf&&model.project);

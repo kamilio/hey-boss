@@ -11,21 +11,10 @@ async page => {
   });
   page.on('pageerror', error => errors.push(error.message));
   const base = await page.evaluate(() => location.origin);
-  if (!['http://127.0.0.1:59661', 'http://127.0.0.1:52061'].includes(base)) throw Error('Synthetic fixture required');
-  const paired = base.endsWith(':52061'), path = paired ? '/issues' : '/';
-  const surface = paired ? 'paired' : 'native';
+  if (!['http://127.0.0.1:59661'].includes(base)) throw Error('Synthetic fixture required');
+  const path = '/';
+  const surface = 'native';
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
-  if (paired) {
-    const {code} = await (await page.request.get(base + '/fixture-pairing')).json();
-    await page.request.post(base + '/api/pair', {data:{code}});
-    // Compare the same immutable release assets on both surfaces, even if the
-    // shared checkout's generated mobile directory has a concurrent edit.
-    for (const name of ['app.js','app.css']) {
-      const response = await page.request.get('http://127.0.0.1:59661/' + name);
-      const body = await response.body();
-      await page.route(base + '/issue-web/' + name, route => route.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':'text/css'}));
-    }
-  }
   await page.goto(base + path, {waitUntil:'domcontentloaded'});
   await page.waitForFunction(() => model.csrf && model.project && model.signature);
   const project = 'named:Reopen QA ' + Date.now();

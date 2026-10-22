@@ -31,14 +31,6 @@ const server=createServer(async(req,res)=>{
     const data=value.project===project?rows:[],offset=value.operation.offset||0,limit=value.operation.limit;
     return res.end(JSON.stringify({ok:true,pull_requests:data.slice(offset,offset+limit),authorship_pending:pending,next_offset:offset+limit<data.length?offset+limit:null}));
   }
-  if(req.url==='/mobile'){
-    res.setHeader('Content-Type','text/html');return res.end(readFileSync('mobile/public/issue-web/merged-prs.html'));
-  }
-  if(/^\/issue-web\/[\w.-]+$/.test(req.url)){
-    const name=req.url.split('/').pop();
-    res.setHeader('Content-Type',name.endsWith('.css')?'text/css':name.endsWith('.js')?'text/javascript':'image/png');
-    return res.end(readFileSync(resolve('mobile/public/issue-web',name)));
-  }
   const name=req.url.split('?')[0].slice(1)||'merged-prs';
   if(!/^[\w.-]+$/.test(name)){res.statusCode=404;return res.end();}
   try{
@@ -95,15 +87,6 @@ try{
   await page.locator('#merged-refresh').focus();await page.keyboard.press('Enter');
   await page.waitForFunction(()=>!document.querySelector('#merged-refresh').disabled);
   delayed=false;
-  await page.goto(`${origin}/mobile#project=${encodeURIComponent(project)}&host=ignored-mobile-host`);
-  await page.waitForFunction(()=>document.querySelectorAll('.merge-row').length===100);
-  assert.doesNotMatch(await page.locator('.merge-meta a').first().getAttribute('href'),/host=/,'Mobile links stay on the supervisor');
-  assert.equal(await page.locator('#navigation-more-links #nav-merged-prs').count(),1);
-  for(const width of [390,320])for(const colorScheme of ['light','dark']){
-    await page.setViewportSize({width,height:844});await page.emulateMedia({colorScheme});
-    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Paired mobile ${width} ${colorScheme}: no overflow`);
-    if(output)await page.screenshot({path:resolve(output,`paired-${width}-${colorScheme}.png`)});
-  }
   await page.close();
   const live=await context.newPage();
   await live.clock.install();

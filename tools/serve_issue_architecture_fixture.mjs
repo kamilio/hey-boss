@@ -3,8 +3,6 @@ import {mkdirSync, rmSync, copyFileSync, readFileSync} from 'node:fs';
 import {spawn, spawnSync} from 'node:child_process';
 import {createServer, request} from 'node:http';
 import {resolve} from 'node:path';
-import {createApp} from '../mobile/server/index.mjs';
-import {HubStore} from '../mobile/server/store.mjs';
 
 const root = resolve('output/playwright/issue121');
 mkdirSync(root, {recursive: true});
@@ -63,36 +61,8 @@ const proxy = createServer((req, res) => {
   req.pipe(upstream);
 });
 proxy.listen(48122, '127.0.0.1');
-const store = new HubStore(); store.setIssueProjects([project]);
-const hubToken = 'synthetic-design-fixture-'.repeat(4);
-const app = createApp({store, hubToken, secure: false, origin: 'http://127.0.0.1:52121'});
-app.get('/fixture/pairing', (_req, res) => res.json({code: store.pairing()}));
-const mobile = app.listen(52121, '127.0.0.1');
-let pumping = false;
-const timer = setInterval(async () => {
-  if (pumping) return;
-  pumping = true;
-  const hub = 'http://127.0.0.1:52121', desktop = 'http://127.0.0.1:48121';
-  const headers = {Authorization: 'Bearer ' + hubToken, 'Content-Type': 'application/json'};
-  try {
-    const {requests} = await (await fetch(hub + '/api/bridge/web', {headers})).json();
-    await Promise.all(requests.map(async row => {
-      const bootstrap = await (await fetch(desktop + '/api/bootstrap')).json();
-      const result = row.kind === 'bootstrap' ? bootstrap : await (await fetch(desktop + '/api/' + row.kind, {
-        method: 'POST', headers: {'Content-Type': 'application/json', 'X-Hey-Boss-CSRF': bootstrap.csrf}, body: JSON.stringify(row.payload),
-      })).json();
-      await fetch(hub + '/api/bridge/web/' + row.id + '/result', {method: 'POST', headers, body: JSON.stringify(result)});
-    }));
-  } catch (error) {if (!closing) console.error(error.message);}
-  finally {pumping = false;}
-}, 50);
-let closing = false;
-function close() {
-  if (closing) return; closing = true;
-  clearInterval(timer); app.locals.close(); web.kill('SIGTERM');
-  mobile.close(); proxy.close(); store.close();
-  rmSync(binary, {force: true});
-}
-for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, close);
-web.on('exit', close);
-console.log('Issue design fixtures: desktop 48122, paired phone 52121');
+let closing=false;
+function close(){if(closing)return;closing=true;web.kill('SIGTERM');proxy.close();rmSync(binary,{force:true});}
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,close);
+web.on('exit',close);
+console.log('Issue design fixture: http://127.0.0.1:48122');

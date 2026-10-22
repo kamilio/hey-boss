@@ -1,19 +1,17 @@
-// Real isolated issue database and HTTP API, plus the paired mobile relay.
+// Real isolated issue database and HTTP API.
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import {spawn,spawnSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {createServer,request} from 'node:http';
-import {createApp} from '../mobile/server/index.mjs';
-import {HubStore} from '../mobile/server/store.mjs';
 const root=mkdtempSync(join(tmpdir(),'hb-timeline-visual-'));
 const binary=resolve('target/debug/hey-boss'),project={id:'named:Timeline QA',name:'Timeline QA'};
 const env={...process.env,HEY_BOSS_ISSUE_DB:join(root,'issues.db'),HEY_BOSS_FLEET_STATE:root,HEY_BOSS_FLEET_DESIRED:join(root,'absent.json'),HEY_BOSS_INBOX_SOCKET:join(root,'absent.sock')};
 for(const k of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_AGENT_ID'])delete env[k];
 const web=spawn(binary,['issue','--project',project.id,'web','--port','48947','--no-discovery','--json'],{env,stdio:['ignore','inherit','inherit']});
-let proxy,mobile,store,app,timer,closing=false;
-function close(){if(closing)return;closing=true;clearInterval(timer);app?.locals.close();mobile?.close();proxy?.close();store?.close();web.kill('SIGTERM');}
+let proxy,closing=false;
+function close(){if(closing)return;closing=true;proxy?.close();web.kill('SIGTERM');}
 for(const signal of ['SIGINT','SIGTERM'])process.on(signal,close);
 process.on('exit',()=>{web.kill('SIGTERM');rmSync(root,{recursive:true,force:true});});
 web.on('exit',close);
@@ -51,11 +49,4 @@ proxy=createServer((req,res)=>{
  const headers={...req.headers,host:'127.0.0.1:48947'};delete headers['sec-fetch-site'];for(const k of ['origin','referer'])if(headers[k])headers[k]=headers[k].replace('48948','48947');
  const upstream=request({hostname:'127.0.0.1',port:48947,path:req.url,method:req.method,headers},r=>{res.writeHead(r.statusCode,r.headers);r.pipe(res);});upstream.on('error',()=>{res.writeHead(502);res.end();});req.pipe(upstream);
 });proxy.listen(48948,'127.0.0.1');
-store=new HubStore();store.setIssueProjects([project]);const hubToken='synthetic-timeline-fixture-'.repeat(4);
-app=createApp({store,hubToken,secure:false,origin:'http://127.0.0.1:52947'});app.get('/fixture/pairing',(_,res)=>res.json({code:store.pairing()}));mobile=app.listen(52947,'127.0.0.1');
-let pumping=false;
-timer=setInterval(async()=>{if(pumping||closing)return;pumping=true;const headers={Authorization:'Bearer '+hubToken,'Content-Type':'application/json'};try{
- const {requests}=await(await fetch('http://127.0.0.1:52947/api/bridge/web',{headers})).json();
- await Promise.all(requests.map(async row=>{const bootstrap=await(await fetch('http://127.0.0.1:48947/api/bootstrap')).json();const result=row.kind==='bootstrap'?bootstrap:await(await fetch('http://127.0.0.1:48947/api/'+row.kind,{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':bootstrap.csrf},body:JSON.stringify(row.payload)})).json();await fetch('http://127.0.0.1:52947/api/bridge/web/'+row.id+'/result',{method:'POST',headers,body:JSON.stringify(result)});}));
-}catch(e){if(!closing)console.error(e.message);}finally{pumping=false;}},50);
-console.log('Timeline fixtures: desktop http://127.0.0.1:48948, paired phone http://127.0.0.1:52947/issues');
+console.log('Timeline fixture: http://127.0.0.1:48948');

@@ -1,16 +1,15 @@
 // Run through playwright-cli against serve_jobs_ui_fixture.mjs only.
 async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  const origin=await page.evaluate(()=>location.origin);
- if(!['http://127.0.0.1:59649','http://hey-boss.test:59649','http://127.0.0.1:52049'].includes(origin))throw Error('Isolated fixture required');
+ if(!['http://127.0.0.1:59649','http://hey-boss.test:59649'].includes(origin))throw Error('Isolated fixture required');
  const params=value=>Object.entries(value).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
- const paired=origin.endsWith('52049'),ordinaryHTTP=origin.includes('hey-boss.test'),surface=paired?'paired':ordinaryHTTP?'desktop-http':'desktop',project='named:Jobs UI QA',errors=[],checks=[];
+ const ordinaryHTTP=origin.includes('hey-boss.test'),surface=ordinaryHTTP?'desktop-http':'desktop',project='named:Jobs UI QA',errors=[],checks=[];
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
  page.on('dialog',dialog=>dialog.accept());
  const runtime=route=>{const provider=route.request().postDataJSON().provider||'codex';return route.fulfill({json:{ok:true,machine:'fixture-device',machines:[{state:'connected',heartbeat:Date.now()/1000,jobs:{available:true,workers:[{id:'pool',projects:[project]}],runtimes:{codex:{available:true},claude:{available:true},pi:{available:false}}},workers:[]}],catalog:{provider,error:provider==='pi'?'Pi runtime is unavailable':null,models:provider==='pi'?[]:[{selection:{id:provider+'-exact'},label:provider+' exact',advertised:true}]}}});};
  await page.route('**/api/jobs/runtime',runtime);
  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
- if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();check((await page.request.post(origin+'/api/pair',{data:{code}})).ok(),'Authenticated paired surface');}
  const markdown=await(await page.request.get('http://127.0.0.1:52049/fixture-instructions.md')).text();
  await page.goto(origin+'/jobs?qa='+Date.now()+'#'+params({project}));
  await page.waitForFunction(()=>!document.querySelector('#job-new').disabled);
@@ -48,7 +47,7 @@ async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
  check(await page.locator('#job-timezone').inputValue()==='America/Chicago','Timezone round trip');
  check(await page.locator('#job-markdown').inputValue()===markdown,'Markdown byte-for-byte round trip');
  const boot=await(await page.request.get(origin+'/api/bootstrap')).json();
- const api=async operation=>{const response=await page.request.post(origin+'/api/action',{headers:paired?{}:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation:{action:'job',operation},...(['create','edit','run_now','stop','delete','set_enabled'].includes(operation.command)?{request_id:'browser-'+Date.now()+'-'+Math.random().toString(16).slice(2)}:{})}});const value=await response.json();if(!value.ok)throw Error(JSON.stringify(value));return value;};
+ const api=async operation=>{const response=await page.request.post(origin+'/api/action',{headers:{'X-Hey-Boss-CSRF':boot.csrf},data:{project,operation:{action:'job',operation},...(['create','edit','run_now','stop','delete','set_enabled'].includes(operation.command)?{request_id:'browser-'+Date.now()+'-'+Math.random().toString(16).slice(2)}:{})}});const value=await response.json();if(!value.ok)throw Error(JSON.stringify(value));return value;};
  await page.getByRole('button',{name:'Close job details'}).click();
  await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);
  await page.waitForFunction(()=>document.activeElement?.classList.contains('job-card'));
