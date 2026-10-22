@@ -246,7 +246,7 @@ final class Overlay {
         frame.origin.y -= dockLift
         dockLift = 0
         if let dock, let screen = panel.screen?.frame,
-           dock.width > dock.height, dock.intersects(screen), dock.minY <= screen.minY,
+           dock.width > dock.height, dock.intersects(screen),
            frame.maxX > dock.minX, frame.minX < dock.maxX {
             dockLift = max(0, dock.maxY + 12 - frame.minY)
         }
