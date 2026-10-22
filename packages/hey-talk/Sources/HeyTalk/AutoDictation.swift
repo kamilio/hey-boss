@@ -12,15 +12,16 @@ struct AutoDictationSettings {
     var json: [String: Any] { ["enabled": enabled, "apps": bundleIDs] }
 
     static func validate(_ arguments: [String]) throws {
-        if arguments.isEmpty || arguments == ["on"] || arguments == ["off"] { return }
+        if arguments.isEmpty || arguments == ["on"] || arguments == ["off"] || arguments == ["toggle"] { return }
         guard arguments.count == 2, ["add", "remove"].contains(arguments[0]),
               arguments[1].range(of: "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$", options: .regularExpression) != nil else {
-            throw TalkError("Use auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]")
+            throw TalkError("Use auto [on|off|toggle|add BUNDLE_ID|remove BUNDLE_ID]")
         }
     }
     func command(_ arguments: [String]) throws {
         try Self.validate(arguments)
         guard let action = arguments.first else { return }
+        if action == "toggle" { enabled.toggle(); return }
         if action == "on" || action == "off" { enabled = action == "on"; return }
         var ids = Set(bundleIDs)
         if action == "add" { ids.insert(arguments[1]) } else { ids.remove(arguments[1]) }

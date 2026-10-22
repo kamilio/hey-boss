@@ -8,10 +8,10 @@ enum CLI {
     static let help = """
     hey-talk — native, local dictation with Orukeet
 
-    hey-talk start [--no-overlay] [--no-paste]   Start microphone capture
-    hey-talk stop [--json]                      Transcribe and return the result
-    hey-talk record [--no-overlay] [--no-paste]  Record until Enter or Ctrl-C
-    hey-talk toggle                            Start or stop
+    hey-talk start [--no-overlay] [--no-paste|--submit]  Start microphone capture
+    hey-talk stop [--submit] [--json]            Transcribe and return the result
+    hey-talk record [--no-overlay] [--no-paste|--submit]  Record until Enter or Ctrl-C
+    hey-talk toggle [--submit]                  Start or stop; --submit matches Hyper+R
     hey-talk cancel                            Discard audio; never paste
     hey-talk transcribe FILE [--json]           Transcribe an audio file locally
     hey-talk status [--json]                    State, audio levels, worker PID
@@ -21,7 +21,7 @@ enum CLI {
     hey-talk history show                      Open history with Copy buttons
     hey-talk devices                           List microphone names and UIDs
     hey-talk input UID|default                  Select microphone
-    hey-talk auto [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
+    hey-talk auto [on|off|toggle|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
     hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
     hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
@@ -40,13 +40,22 @@ enum CLI {
     Audio stays in memory. File transcription never modifies your clipboard.
     """
 
+    static func submitOption(_ arguments: [String]) throws -> Bool? {
+        guard arguments.contains("--submit") else { return nil }
+        guard let verb = arguments.first, ["start", "stop", "toggle", "record"].contains(verb),
+              !arguments.contains("--no-paste"), arguments.filter({ $0 == "--submit" }).count == 1 else {
+            throw TalkError("Use --submit with start, stop, toggle, or record; it cannot be combined with --no-paste")
+        }
+        return true
+    }
     static func run(_ arguments: [String]) throws {
         if arguments.isEmpty || arguments == ["--help"] || arguments == ["help"] { print(help); return }
         if arguments == ["--version"] { print("hey-talk 0.1.0"); return }
         let json = arguments.contains("--json")
         let noOverlay = arguments.contains("--no-overlay")
         let noPaste = arguments.contains("--no-paste")
-        let args = arguments.filter { !["--json", "--no-overlay", "--no-paste"].contains($0) }
+        let submit = try submitOption(arguments)
+        let args = arguments.filter { !["--json", "--no-overlay", "--no-paste", "--submit"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
         let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "speech", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
@@ -56,6 +65,7 @@ enum CLI {
             guard args.count == (needsValue ? 2 : 1) else { throw TalkError("Unexpected arguments. Run hey-talk --help.") }
         }
         var request: [String: Any] = ["command": verb]
+        if let submit { request["submit"] = submit }
         if verb == "speech" {
             let values = Array(args.dropFirst())
             try SpeechSettings.validate(values)

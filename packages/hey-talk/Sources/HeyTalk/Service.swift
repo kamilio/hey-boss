@@ -248,11 +248,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         toggleDictation(shortcut: nil)
     }
     private func toggleDictation(shortcut: DictationShortcut?) {
-        if session.phase == .recording {
-            if let shortcut { pressEnter = shortcut == .submit }
-            stop { _ in }
-        } else if session.phase != .processing {
-            start(showOverlay: overlayEnabled, paste: true, pressEnter: shortcut == .submit) { _ in }
+        switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: shortcut.map { $0 == .submit }) {
+        case .stop(let submit): pressEnter = submit; stop { _ in }
+        case .start(let submit): start(showOverlay: overlayEnabled, paste: true, pressEnter: submit) { _ in }
+        case .busy: break
         }
     }
     @objc private func cancelMenu() { cancel() }
@@ -368,11 +367,22 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
                 reply(["ok": true, "enter_exceptions": try enterExceptions.command(arguments)])
             } catch { reply(failure(error.localizedDescription)) }
-        case "start": start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, reply: reply)
-        case "stop": stop(reply)
-        case "toggle":
-            if session.phase == .recording { stop(reply) }
-            else { start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, reply: reply) }
+        case "start", "stop", "toggle":
+            let submit = request["submit"] as? Bool
+            guard request["submit"] == nil || submit != nil else { reply(failure("submit must be a boolean")); return }
+            guard submit != true || (request["paste"] as? Bool != false) else { reply(failure("submit requires paste")); return }
+            if command == "start" {
+                start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, pressEnter: submit ?? false, reply: reply)
+            } else if command == "stop" {
+                if session.phase == .recording, let submit { pressEnter = submit }
+                stop(reply)
+            } else {
+                switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: submit) {
+                case .stop(let submit): pressEnter = submit; stop(reply)
+                case .start(let submit): start(showOverlay: request["overlay"] as? Bool ?? overlayEnabled, paste: request["paste"] as? Bool ?? true, pressEnter: submit, reply: reply)
+                case .busy: reply(failure("Already processing"))
+                }
+            }
         case "cancel": cancel(); reply(status())
         case "last":
             if !session.lastText.isEmpty { reply(["ok": true, "text": session.lastText]) }
