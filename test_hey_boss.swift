@@ -3790,6 +3790,10 @@ func auditSubscriptionQuota() {
     replies.removeFirst()(.success(Data(json.utf8)))
     precondition(!showsRefreshFailure() && ui.rows[0].message.isEmpty, "A successful refresh clears the failure")
     ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"}]}"#.utf8)))
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"error","updated_at":2000}"#.utf8)))
+    precondition(showsRefreshFailure() && ui.rows[0].reading?.data?.windows.count == 1, "Structured failures preserve limits and show the refresh failure")
+    ui.refresh()
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
     precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
     ui.refresh()
@@ -3936,7 +3940,9 @@ func previewSubscriptionQuota(_ state: String) {
         if state.contains("stale") { ui.rows = [reading("codex", "long-account-name-for-the-design-team-with-extra-detail", "stale", [limit("Weekly · all models and a very long provider-reported limit label", 18), limit("Weekly · unknown limit", NSNull())]), reading("claude", "personal", "disabled", [])] }
         if state.contains("many") { ui.rows = (1...12).map { reading("codex", "subscription-\($0)", "ok", [limit("Weekly · all models", 72)]) } }
         if state.contains("empty") { ui.rows = []; ui.message = "No subscriptions connected" }
-        if state.contains("error") { ui.rows = []; ui.message = "Could not load subscriptions" }
+        if state.contains("cached-error") {
+            for index in ui.rows.indices { ui.rows[index].reading?.state = "stale"; ui.rows[index].message = "Could not load subscriptions" }
+        } else if state.contains("error") { ui.rows = []; ui.message = "Could not load subscriptions" }
         if state.contains("loading") { ui.rows = []; ui.loading = true }
         ui.runner = { _, _ in }; ui.lastLoaded = Date()
         ui.render(); window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)

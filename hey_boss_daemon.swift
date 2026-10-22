@@ -4677,14 +4677,17 @@ final class SubscriptionQuotaController: NSObject {
                             if reading.data?.windows.isEmpty != false, ["error", "stale"].contains(reading.state), self.rows[index].reading != nil {
                                 self.rows[index].reading?.state = "stale"
                             } else { self.rows[index].reading = reading }
-                            self.rows[index].message = ""
+                            self.rows[index].message = ["error", "stale"].contains(reading.state) ? "Quota unavailable. Try refreshing." : ""
                         } catch { self.rows[index].reading?.state = "stale"; self.rows[index].message = "Quota unavailable. Try refreshing." }
                         pending -= 1
                         if pending == 0 { self.finish() } else { self.render() }
                     }
                 }
             } catch {
-                for index in self.rows.indices { self.rows[index].reading?.state = "stale" }
+                for index in self.rows.indices {
+                    self.rows[index].reading?.state = "stale"
+                    self.rows[index].message = "Could not load subscriptions"
+                }
                 self.message = "Could not load subscriptions"; self.finish()
             }
         }
@@ -4747,8 +4750,10 @@ final class SubscriptionQuotaController: NSObject {
             let accountTitle = row.account.title + (row.account.id == "default" ? "" : " · " + row.account.id)
             let name = label(accountTitle, size: 13, weight: .semibold)
             name.frame = NSRect(x: 12, y: 10, width: cardWidth - 108, height: 19); card.addSubview(name)
-            let statusText = reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
-            let status = label(statusText, size: 10, weight: .medium, color: fresh ? .systemTeal : .secondaryLabelColor)
+            let failed = !loading && !row.message.isEmpty
+            let statusText = failed ? "Refresh failed" : reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
+            let status = label(statusText, size: 10, weight: .medium, color: failed ? .systemOrange : fresh ? .systemTeal : .secondaryLabelColor)
+            if failed { status.toolTip = row.message }
             status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
             var rowY: CGFloat = 38
             for limit in windows {
