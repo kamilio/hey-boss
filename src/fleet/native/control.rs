@@ -446,13 +446,36 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
     // A live worker owns its idle reload, including the gap between checking
     // activity and reserving another job. Never convert an upgrade into Stop.
     // A recovered starting receipt may only acknowledge its live replacement.
-    if let Some(build) = message["upgrade_build"].as_str() {
+    // The request ID is durable, including for receipts written by older builds.
+    // Recovery reads raw fleet_signals rows, which have no upgrade_build column.
+    let upgrade_build = super::worker_rollout::request_build(
+        message["id"].as_str().unwrap_or_default(),
+        message["worker"].as_str().unwrap_or_default(),
+    );
+    if message.get("upgrade_build").is_some() && message["upgrade_build"].as_str() != upgrade_build
+    {
+        return Err(invalid(
+            "Upgrade build does not match the durable signal ID",
+        ));
+    }
+    if let Some(build) = upgrade_build {
         let worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
         let acknowledging_start = old.first().is_some_and(|v| v["state"] == "starting")
             && worker["pid"].is_number()
             && worker["pid"] != progress["prior_pid"]
             && worker["build"] == build
             && worker["config"]["enabled"] == true;
+        if !acknowledging_start && worker["pid"].is_number() && worker["build"] == build {
+            // An idle exec retains its PID. Settle the old receipt without
+            // changing user intent or asking the replacement to stop again.
+            let result = json!({"id":message["id"],"state":"acknowledged","signal":message["signal"],"worker":message["worker"]});
+            replica::execute(
+                &db,
+                "UPDATE fleet_signals SET state='acknowledged',result=? WHERE id=?",
+                &[json!(result.to_string()), message["id"].clone()],
+            )?;
+            return Ok(result);
+        }
         if !acknowledging_start && upgrade_restart_deferred(&worker, build) {
             return Ok(json!({"id":message["id"],"state":"deferred","worker":message["worker"]}));
         }
@@ -696,6 +719,100 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn upgrade_raw_receipt_replay_never_stops_the_owner() {
+        for phase in ["pending", "stopping", "starting"] {
+            let (root, ctx, mut store) = test_context();
+            let db = ctx.db().unwrap();
+            replica::ensure_metadata(&db).unwrap();
+            store
+                .register_worker(
+                    Some("owner"),
+                    &crate::issues::worker::Settings {
+                        enabled: true,
+                        ..Default::default()
+                    },
+                    &ctx.node,
+                )
+                .unwrap();
+            ctx.atomic_json(
+                &ctx.state.join("fleet-agent.json"),
+                &json!({"workers":[{"id":"owner","intent":"running"}]}),
+            )
+            .unwrap();
+            let id = format!("upgrade-new-{}", hash(&json!("owner")));
+            db.execute(
+                "INSERT INTO fleet_signals VALUES(?1,'local','owner','restart',?2,?3,0)",
+                rusqlite::params![
+                    id,
+                    phase,
+                    json!({"prior_pid":std::process::id()}).to_string()
+                ],
+            )
+            .unwrap();
+            // Controller and companion recovery pass the persisted row, with no
+            // transient upgrade_build field. Re-open it for every retry.
+            for _ in 0..2 {
+                let recovered = replica::rows(
+                    &ctx.db().unwrap(),
+                    "SELECT * FROM fleet_signals WHERE id=?",
+                    &[json!(id)],
+                )
+                .unwrap()
+                .remove(0);
+                assert!(recovered.get("upgrade_build").is_none());
+                assert_eq!(
+                    apply_signal(&ctx, &recovered).unwrap()["state"],
+                    "deferred",
+                    "{phase}"
+                );
+                let owner: (u32, bool) = db
+                    .query_row(
+                        "SELECT owner_pid,stop_requested FROM issue_workers WHERE id='owner'",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(owner, (std::process::id(), false));
+            }
+            // Natural idle reload keeps the PID. Its old receipt must converge
+            // without a second restart, even when the old phase was stopping.
+            db.execute(
+                "UPDATE issue_worker_builds SET build='new' WHERE worker_id='owner'",
+                [],
+            )
+            .unwrap();
+            let recovered =
+                replica::rows(&db, "SELECT * FROM fleet_signals WHERE id=?", &[json!(id)])
+                    .unwrap()
+                    .remove(0);
+            assert_eq!(
+                apply_signal(&ctx, &recovered).unwrap()["state"],
+                "acknowledged"
+            );
+            assert_eq!(
+                apply_signal(&ctx, &recovered).unwrap()["state"],
+                "acknowledged"
+            );
+            let owner: (u32, bool) = db
+                .query_row(
+                    "SELECT owner_pid,stop_requested FROM issue_workers WHERE id='owner'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(owner, (std::process::id(), false));
+            assert_eq!(
+                ctx.read_json(&ctx.state.join("fleet-agent.json"), Value::Null)
+                    .unwrap()["workers"][0]["intent"],
+                "running"
+            );
+            drop(db);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     fn upgrade_never_stops_a_live_owner_or_resumes_paused_work() {
         let idle =
             json!({"pid":null,"active":0,"job_active":0,"config":{"enabled":true},"build":"old"});
@@ -734,8 +851,19 @@ mod tests {
         )
         .unwrap();
         let db = ctx.db().unwrap();
-        db.execute("INSERT INTO fleet_signals VALUES('lost-start','local','replacement','restart','starting',?1,0)", [json!({"prior_pid":null}).to_string()]).unwrap();
-        let message = json!({"id":"lost-start","worker":"replacement","signal":"restart","upgrade_build":env!("HEY_BOSS_BUILD_ID")});
+        let id = format!(
+            "upgrade-{}-{}",
+            env!("HEY_BOSS_BUILD_ID"),
+            hash(&json!("replacement"))
+        );
+        db.execute(
+            "INSERT INTO fleet_signals VALUES(?1,'local','replacement','restart','starting',?2,0)",
+            rusqlite::params![id, json!({"prior_pid":null}).to_string()],
+        )
+        .unwrap();
+        let message = replica::rows(&db, "SELECT * FROM fleet_signals WHERE id=?", &[json!(id)])
+            .unwrap()
+            .remove(0);
         assert_eq!(
             apply_signal(&ctx, &message).unwrap()["state"],
             "acknowledged"

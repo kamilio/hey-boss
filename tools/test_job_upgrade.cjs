@@ -8,6 +8,8 @@ const {createHash} = require('node:crypto');
 const assert = require('node:assert/strict');
 const withIssue=process.argv.includes('--with-issue');
 const deadline=process.argv.includes('--deadline');
+const replayPhase=process.argv.find(arg=>arg.startsWith('--replay='))?.split('=')[1];
+assert(!replayPhase || ['pending','stopping','starting'].includes(replayPhase));
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'hb-job-upgrade-')));
 const source = path.resolve(process.env.HEY_BOSS_TEST_BINARY || 'target/debug/hey-boss');
@@ -107,12 +109,17 @@ async function main(){
   await stop(rollout);
   if(!deadline){
     await stop(supervisor);
+    if(replayPhase){
+      const id=`upgrade-${target}-${createHash('sha256').update(JSON.stringify(workerId)).digest('hex').slice(0,16)}`;
+      db.prepare("INSERT INTO fleet_signals VALUES(?,'local',?,'restart',?,?,?)").run(id,workerId,replayPhase,JSON.stringify({prior_pid:worker.pid}),Date.now()/1000);
+    }
     supervisor=start(['fleet','supervisor']);
     await wait(()=>fs.existsSync(path.join(state,'fleet.sock')));
   }
   rollout=start(['upgrade','--reload-workers',target,'--json']);
   await new Promise(r=>setTimeout(r,1000));
   assert.equal(JSON.parse(db.prepare('SELECT report FROM local_job_executions WHERE run_id=?').get(run.id).report).state,'running');
+  assert.equal(db.prepare('SELECT stop_requested FROM issue_workers WHERE id=?').get(workerId).stop_requested,0,'Durable replay must preserve the busy owner');
   fs.writeFileSync(env.HEY_BOSS_FIXTURE_JOB_RELEASE,'');
   if(withIssue){
     await wait(()=>db.prepare('SELECT state FROM scheduled_job_runs WHERE id=?').get(run.id).state==='succeeded');
@@ -129,6 +136,7 @@ async function main(){
   const after=command(['worker','status','--id',workerId,'--json']).workers.find(w=>w.id===workerId);
   assert.equal(after.pid,worker.pid,'Natural reload execs once in the original worker process');
   assert.equal(after.build,target);
+  if(replayPhase)assert.equal(db.prepare("SELECT state FROM fleet_signals WHERE worker=? AND id LIKE 'upgrade-%'").get(workerId).state,'acknowledged','Natural idle reload settles the recovered receipt');
   assert.deepEqual(after.config,status.workers.find(w=>w.id===workerId).config);
   assert.deepEqual(db.prepare('SELECT * FROM scheduled_jobs WHERE id=?').get('fixture-job'),savedJob,'Schedule and instruction revisions are untouched');
   assert.equal(db.prepare('SELECT generation FROM scheduled_job_owners WHERE run_id=?').get(run.id).generation,owner.generation);
