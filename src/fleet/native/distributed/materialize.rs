@@ -406,6 +406,7 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
     for project in projects {
         crate::issues::blockers::reconcile_replication(db, &project)?;
     }
+    ordering::apply(db)?;
     db.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
     Ok(count)
 }

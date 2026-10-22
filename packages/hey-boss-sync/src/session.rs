@@ -61,14 +61,21 @@ struct Turn {
 
 fn hello(engine: &Engine) -> Hello {
     Hello {
-        protocol: 1,
+        // Queue rotations require an upgraded application projector. Fence
+        // older peers before either side sends or acknowledges durable facts.
+        // The immutable journal's payload format and history are unchanged.
+        protocol: 2,
         replica: engine.id().into(),
         presence: Vec::new(),
     }
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
-    if peer.protocol != 1
-        || peer.replica.len() != 32
+    if peer.protocol != 2 {
+        return Err(invalid(
+            "Queue ordering requires upgraded sync peers; run hey-boss upgrade on the supervisor and reconnect both peers",
+        ));
+    }
+    if peer.replica.len() != 32
         || !peer.replica.bytes().all(|b| b.is_ascii_hexdigit())
         || peer.replica == engine.id()
     {
@@ -209,6 +216,31 @@ pub fn connect_present(
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn old_peer_is_rejected_before_preparation_or_journal_exchange() {
+        let root = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(&root.path().join("sync.db")).unwrap();
+        engine.put("existing immutable history").unwrap();
+        let mut frame = Vec::new();
+        wire::send(
+            &mut frame,
+            &Hello {
+                protocol: 1,
+                replica: "a".repeat(32),
+                presence: Vec::new(),
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let result = serve_next(&mut engine, &mut frame.as_slice(), &mut output, |_| {
+            panic!("must reject before preparation")
+        });
+        assert!(result.err().unwrap().to_string().contains("upgrade"));
+        assert!(output.is_empty());
+        assert_eq!(engine.head().unwrap(), 1);
+        assert_eq!(engine.received(&"a".repeat(32)).unwrap(), 0);
+    }
 
     #[test]
     fn persistent_stream_refreshes_presence_without_growing_the_fact_log() {
