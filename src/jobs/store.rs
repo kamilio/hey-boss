@@ -219,11 +219,11 @@ fn observed_run(db: &Connection, id: &str) -> Result<Run> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job run not found"))
 }
-// A non-target peer records a waiting observation, not an execution. Prefer
+// A non-target peer can wait or skip locally without executing the job. Prefer
 // execution evidence for that exact occurrence without hiding any history.
 fn execution_for_observation(db: &Connection, last: &Run) -> Result<Option<Run>> {
     let definition = &last.snapshot.definition;
-    if last.state != "pending"
+    if !matches!(last.state.as_str(), "pending" | "skipped")
         || last.machine.is_some()
         || last.started_at.is_some()
         || last.session_id.is_some()

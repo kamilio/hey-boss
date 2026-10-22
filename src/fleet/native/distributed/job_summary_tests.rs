@@ -4,6 +4,15 @@ use serde_json::json;
 
 #[test]
 fn latest_job_summary_prefers_execution_over_non_target_peer_observations() {
+    check_non_target_observations("pending");
+}
+
+#[test]
+fn latest_job_summary_prefers_execution_over_non_target_peer_skips() {
+    check_non_target_observations("skipped");
+}
+
+fn check_non_target_observations(observation_state: &str) {
     let f = Fixture::new();
     let db = f.db();
     install(&db, "mac").unwrap();
@@ -63,8 +72,15 @@ fn latest_job_summary_prefers_execution_over_non_target_peer_observations() {
         tx.commit().unwrap();
     };
     let mut pending = execution.clone();
-    pending["state"] = json!("pending");
-    pending["reason"] = json!("Waiting for an eligible worker on mac");
+    pending["state"] = json!(observation_state);
+    pending["reason"] = json!(if observation_state == "skipped" {
+        "overlap"
+    } else {
+        "Waiting for an eligible worker on mac"
+    });
+    if observation_state == "skipped" {
+        pending["finished_at"] = execution["created_at"].clone();
+    }
     for field in ["machine", "worker_id", "session_id", "started_at"] {
         pending[field] = Value::Null;
     }
@@ -153,11 +169,20 @@ fn latest_job_summary_prefers_execution_over_non_target_peer_observations() {
             "{field}"
         );
     }
-    // Real failure and waiting on an eligible peer must remain visible.
-    for (n, state, origin) in [(0, "failed", "devbox"), (1, "pending", "mac:baseline:seed")] {
+    // Real failure, waiting and skips on an eligible peer must remain visible.
+    for (n, state, origin) in [
+        (0, "failed", "devbox"),
+        (1, "pending", "mac:baseline:seed"),
+        (2, "skipped", "mac:baseline:seed"),
+    ] {
         let mut genuine = pending.clone();
         genuine["id"] = json!(format!("genuine-{n}"));
         genuine["state"] = json!(state);
+        genuine["finished_at"] = if state == "pending" {
+            Value::Null
+        } else {
+            genuine["created_at"].clone()
+        };
         import(&genuine, origin, 3000);
         assert_eq!(summary(&mut store)["last_run"]["id"], genuine["id"]);
     }
