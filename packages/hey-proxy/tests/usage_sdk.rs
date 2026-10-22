@@ -197,7 +197,7 @@ async fn cli_uses_local_host_key_for_config_and_lists_accounts_without_oauth_sto
     let path = dir.path().join("config.json");
     std::fs::write(
         &path,
-        serde_json::to_vec(&json!({"listen":url.trim_start_matches("http://"),"mode":"host"}))
+        serde_json::to_vec(&json!({"listen":url.trim_start_matches("http://"),"mode":"host","auto_approve":true}))
             .unwrap(),
     )
     .unwrap();
