@@ -130,16 +130,68 @@ final class OverlayTests: XCTestCase {
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let views = descendants(try XCTUnwrap(panel.contentView))
         let waiting = try XCTUnwrap(views.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Connecting…" })
-        XCTAssertFalse(waiting.isHidden)
+        XCTAssertTrue(waiting.isHidden, "Brief microphone startup must not flash the wide Connecting bubble")
+        let recordingSize = panel.frame.size
         XCTAssertFalse(views.contains { ($0 as? NSButton)?.toolTip == "Cancel · Esc" }, "No separate close button")
         overlay.update(.recording)
         XCTAssertFalse(wave.isHidden)
         XCTAssertEqual(wave.alphaValue, 1)
         XCTAssertTrue(waiting.isHidden)
+        XCTAssertEqual(panel.frame.size, recordingSize)
         overlay.preparing()
         XCTAssertFalse(wave.isHidden, "Recovery must not collapse back to the idle icon")
-        XCTAssertFalse(waiting.isHidden)
+        let early = expectation(description: "Connecting stays hidden before 700 ms")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            XCTAssertTrue(waiting.isHidden)
+            XCTAssertEqual(panel.frame.size, recordingSize)
+            early.fulfill()
+        }
+        let slow = expectation(description: "Slow microphone recovery shows Connecting")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            XCTAssertFalse(waiting.isHidden)
+            XCTAssertGreaterThan(panel.frame.width, recordingSize.width)
+            slow.fulfill()
+        }
+        wait(for: [early, slow], timeout: 2)
         overlay.update(.idle)
         XCTAssertTrue(wave.isHidden)
+        overlay.preparing()
+        overlay.update(.idle)
+        let cancelled = expectation(description: "Cancelled startup cannot reopen Connecting")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            XCTAssertTrue(waiting.isHidden)
+            XCTAssertTrue(wave.isHidden)
+            cancelled.fulfill()
+        }
+        wait(for: [cancelled], timeout: 2)
+    }
+
+    @MainActor func testDockLiftsBubbleWithoutDriftingAndRestoresItsPosition() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let screen = try XCTUnwrap(panel.screen).frame
+        panel.setFrameOrigin(NSPoint(x: screen.midX - 180, y: screen.minY + 12))
+        let original = panel.frame
+        let dock = NSRect(x: screen.midX - 300, y: screen.minY, width: 600, height: 80)
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minX, original.minX)
+        XCTAssertEqual(panel.frame.minY, dock.maxY + 12)
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, dock.maxY + 12, "Repeated checks must not push it farther up")
+        overlay.update(.recording)
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, dock.maxY + 12)
+        overlay.avoidDock(nil)
+        XCTAssertEqual(panel.frame.origin, original.origin)
+        overlay.avoidDock(dock.offsetBy(dx: 0, dy: -dock.height))
+        XCTAssertEqual(panel.frame.origin, original.origin, "An off-screen Dock is hidden")
+        overlay.avoidDock(dock.offsetBy(dx: screen.width, dy: 0))
+        XCTAssertEqual(panel.frame.origin, original.origin, "A Dock on another screen must not move this bubble")
+        panel.setFrameOrigin(NSPoint(x: original.minX, y: screen.minY + 200))
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, screen.minY + 200, "A bubble already clear of the Dock stays put")
     }
 }

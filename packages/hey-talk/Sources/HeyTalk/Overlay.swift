@@ -36,9 +36,10 @@ private final class ClickSurface: GlassFace {
     var onClick: (() -> Void)?
     var onHover: ((Bool) -> Void)?
     var makeMenu: (() -> NSMenu)?
+    var onDrag: (() -> Void)?
     private var start: NSPoint?
     private var origin: NSPoint?
-    private var dragged = false
+    private(set) var dragged = false
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect], owner: self))
@@ -51,9 +52,12 @@ private final class ClickSurface: GlassFace {
         guard let start, let origin else { return }
         let current = NSEvent.mouseLocation
         if hypot(current.x - start.x, current.y - start.y) > 3 { dragged = true }
-        if dragged { window?.setFrameOrigin(NSPoint(x: origin.x + current.x - start.x, y: origin.y + current.y - start.y)) }
+        if dragged {
+            window?.setFrameOrigin(NSPoint(x: origin.x + current.x - start.x, y: origin.y + current.y - start.y))
+            onDrag?()
+        }
     }
-    override func mouseUp(with event: NSEvent) { if !dragged { onClick?() }; start = nil }
+    override func mouseUp(with event: NSEvent) { if !dragged { onClick?() }; start = nil; dragged = false }
     override func rightMouseDown(with event: NSEvent) {
         guard let menu = menu(for: event) else { return }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
@@ -71,12 +75,16 @@ final class Overlay {
     private let wave = WaveView()
     private let connecting = NSTextField(labelWithString: "Connecting…")
     private var waitingForAudio = false
+    private var connectingDelay: DispatchWorkItem?
     private let autoHalo = CAShapeLayer()
     private var autoMode = false
     private let glow = CAGradientLayer()
     private let depth = CAShapeLayer()
     private let halo = CAShapeLayer()
     private var timer: Timer?
+    private var dockTimer: Timer?
+    private var dockList: AXUIElement?
+    private var dockLift: CGFloat = 0
     private var phase: Phase = .idle
     private var expanded = false
     private var enabled = true
@@ -175,6 +183,7 @@ final class Overlay {
         pillContent.onClick = { [weak self] in self?.onToggle?() }
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
         pillContent.onHover = { [weak self] hover in self?.pillContent.emphasized = hover }
+        pillContent.onDrag = { [weak self] in self?.dockLift = 0 }
         layout(animated: false)
         reposition()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.reposition() }
@@ -183,21 +192,75 @@ final class Overlay {
         let screen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main
         guard let screen else { return }
         let visible = screen.visibleFrame
+        dockLift = 0
         panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+    }
+    deinit {
+        timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel()
     }
     func show(_ visible: Bool) {
         enabled = visible
         if !visible { dismissNotice(animated: false) }
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+        dockTimer?.invalidate(); dockTimer = nil
+        if visible {
+            avoidDock(dockFrame())
+            let ticker = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                guard let self, !self.pillContent.dragged else { return }
+                self.avoidDock(self.dockFrame())
+            }
+            ticker.tolerance = 0.02
+            RunLoop.main.add(ticker, forMode: .common); dockTimer = ticker
+        }
         updateTimer()
+    }
+    private func dockFrame() -> NSRect? {
+        guard AXIsProcessTrusted(), let top = NSScreen.screens.first?.frame.maxY else { return nil }
+        if dockList == nil {
+            guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
+            let app = AXUIElementCreateApplication(dock.processIdentifier)
+            AXUIElementSetMessagingTimeout(app, 0.05)
+            var children: CFTypeRef?
+            AXUIElementCopyAttributeValue(app, kAXChildrenAttribute as CFString, &children)
+            dockList = (children as? [AXUIElement])?.first { child in
+                var role: CFTypeRef?
+                AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role)
+                return role as? String == kAXListRole
+            }
+        }
+        guard let dockList else { return nil }
+        var position: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(dockList, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(dockList, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size,
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else {
+            self.dockList = nil; return nil
+        }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+        return NSRect(x: point.x, y: top - point.y - dimensions.height, width: dimensions.width, height: dimensions.height)
+    }
+    func avoidDock(_ dock: NSRect?) {
+        var frame = panel.frame
+        frame.origin.y -= dockLift
+        dockLift = 0
+        if let dock, let screen = panel.screen?.frame,
+           dock.width > dock.height, dock.intersects(screen), dock.minY <= screen.minY,
+           frame.maxX > dock.minX, frame.minX < dock.maxX {
+            dockLift = max(0, dock.maxY + 12 - frame.minY)
+        }
+        frame.origin.y += dockLift
+        if frame.origin != panel.frame.origin { panel.setFrameOrigin(frame.origin) }
     }
     func update(_ next: Phase) {
         update(next, waitingForAudio: false)
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
+        connectingDelay?.cancel(); connectingDelay = nil
         if !modeNotice { clearNotice() }
         self.waitingForAudio = waitingForAudio
-        connecting.isHidden = !waitingForAudio
+        connecting.isHidden = true
         phase = next; expanded = next == .recording
         updateModeAppearance()
         wave.heights = Array(repeating: 4, count: Waveform.count)
@@ -222,7 +285,15 @@ final class Overlay {
         }
     }
     func preparing() {
+        guard !waitingForAudio else { return }
         update(.recording, waitingForAudio: true)
+        let delay = DispatchWorkItem { [weak self] in
+            guard let self, self.waitingForAudio else { return }
+            self.connecting.isHidden = false
+            self.layout(animated: true)
+        }
+        connectingDelay = delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: delay)
     }
     func setAutoMode(_ enabled: Bool) {
         autoMode = enabled
@@ -260,8 +331,9 @@ final class Overlay {
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
-        let size = notice.map { NSSize(width: max($0.frame.width, waitingForAudio ? 200 : 104), height: $0.frame.height + 36) }
-            ?? (waitingForAudio ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
+        let showConnecting = !connecting.isHidden
+        let size = notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
+            ?? (showConnecting ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
         resizePanel(for: size)
         let width = size.width, height = size.height
         let center = root.bounds.midX
@@ -293,7 +365,7 @@ final class Overlay {
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
-            let contentOrigin = (width - (waitingForAudio ? 200 : TalkDesign.recordingSize.width)) / 2
+            let contentOrigin = (width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2
             identity.animator().frame = NSRect(x: expanded ? contentOrigin + 9 : (width - 22) / 2, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
             connecting.frame = NSRect(x: contentOrigin + 102, y: 10, width: 90, height: 17)
