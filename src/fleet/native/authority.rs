@@ -149,7 +149,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"utils_v1":true,"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"utils_v1":true,"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_matching":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -249,6 +249,7 @@ impl Relay {
                             "issue_request_status": message["capabilities"]["issue_request_status"] == true,
                             "issue_draft": message["capabilities"]["issue_draft"] == true,
                             "issue_move": message["capabilities"]["issue_move"] == true,
+                            "issue_matching": message["capabilities"]["issue_matching"] == true,
                             "issue_reopen": message["capabilities"]["issue_reopen"] == true,
                             "issue_close": message["capabilities"]["issue_close"] == true,
                             "issue_dependencies": message["capabilities"]["issue_dependencies"] == true,
@@ -275,6 +276,7 @@ impl Relay {
                             .chain(matches!(metadata.operation, crate::issues::Operation::Status { .. } | crate::issues::Operation::StatusHistory { .. } | crate::issues::Operation::StatusView { .. }).then_some("issue_status"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::ViewCompact { .. }).then_some("issue_detail_compact"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::Move { .. }).then_some("issue_move"))
+                            .chain(matches!(metadata.operation, crate::issues::Operation::Batch { matching: Some(_), .. }).then_some("issue_matching"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::RequestStatus { .. }).then_some("issue_request_status"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::AddPullRequest { .. } | crate::issues::Operation::PullRequests { .. }).then_some("issue_pr_attachments"))
                             .chain(
@@ -635,6 +637,15 @@ mod tests {
         assert_eq!(error.details.unwrap()["sent"], false);
         assert!(output.lock().unwrap().is_empty());
         let movement = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"move-old","operation":{"action":"move","number":3,"before":1,"if_order_version":0}}});
+        let matching = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"matching-old","operation":{"action":"batch","matching":{"labels":["e2e-case"]},"change":{"action":"move","to":"bottom"},"if_order_version":0}}});
+        let error = call(&ctx.state, &ctx.path, matching).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_matching"
+        );
+        assert_eq!(error.details.as_ref().unwrap()["sent"], false);
+        assert!(output.lock().unwrap().is_empty());
         let error = call(&ctx.state, &ctx.path, movement).unwrap_err();
         assert_eq!(error.code, "fleet_capability_unsupported");
         assert_eq!(

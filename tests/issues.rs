@@ -2795,6 +2795,303 @@ fn schema_four_migration_initializes_order_without_losing_prs_claims_or_history(
 }
 
 #[test]
+fn filtered_moves_are_atomic_stable_and_replay_without_reselecting() {
+    let f = Fixture::new();
+    for number in 1..=6 {
+        f.run(
+            "session-a",
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                &format!("Issue {number}"),
+            ],
+        );
+    }
+    for number in ["2", "4", "6"] {
+        f.run("session-a", &["edit", number, "--label", "e2e-case"]);
+    }
+    f.run("session-a", &["claim", "4"]);
+    let order = || -> Vec<i64> {
+        f.run("reader", &["list", "--all"])["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect()
+    };
+    let version = f.run("reader", &["list"])["order_version"]
+        .as_i64()
+        .unwrap();
+    let args = [
+        "move",
+        "--match-label",
+        "e2e-case",
+        "--to",
+        "bottom",
+        "--request-id",
+        "bulk-once",
+    ];
+    let saved = f.run("session-a", &args);
+    assert_eq!(order(), vec![1, 3, 5, 2, 4, 6]);
+    assert_eq!(saved["matched_count"], 3);
+    assert_eq!(saved["order_version"], version + 1);
+    assert_eq!(
+        f.run("reader", &["view", "4"])["issue"]["assignee"],
+        "session-a"
+    );
+    assert_eq!(
+        f.run(
+            "session-a",
+            &["move", "--match-label", "e2e-case", "--to", "bottom"]
+        )["changed"],
+        false
+    );
+    f.run(
+        "session-a",
+        &["move", "--match-label", "e2e-case", "--to", "top"],
+    );
+    assert_eq!(order(), vec![2, 4, 6, 1, 3, 5]);
+    assert_eq!(f.run("session-a", &args), saved);
+    assert_eq!(order(), vec![2, 4, 6, 1, 3, 5]);
+    f.fail(
+        "session-a",
+        &[
+            "move",
+            "--match-label",
+            "e2e-case",
+            "--to",
+            "bottom",
+            "--if-order-version",
+            &version.to_string(),
+        ],
+        4,
+    );
+    assert_eq!(order(), vec![2, 4, 6, 1, 3, 5]);
+    assert_eq!(
+        f.run(
+            "session-a",
+            &["move", "--match-label", "absent", "--to", "top"]
+        )["matched_count"],
+        0
+    );
+    f.run("session-a", &["move", "5", "--to", "top"]);
+    assert_eq!(order(), vec![5, 2, 4, 6, 1, 3]);
+    let unique: i64 = f
+        .sql()
+        .query_row("SELECT count(DISTINCT sort_order) FROM issues", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(unique, 6);
+}
+
+#[test]
+fn filtered_moves_select_all_pages_and_intersect_filters() {
+    let f = Fixture::new();
+    for number in 1..=110 {
+        f.run(
+            "session-a",
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                &format!("Case {number}"),
+                "--label",
+                if number % 2 == 0 { "e2e-case" } else { "other" },
+            ],
+        );
+    }
+    let saved = f.run(
+        "session-a",
+        &[
+            "move",
+            "--match-label",
+            "e2e-case",
+            "--match-search",
+            "Case",
+            "--match-unassigned",
+            "--to",
+            "top",
+        ],
+    );
+    assert_eq!(saved["matched_count"], 55);
+    let list = f.run("reader", &["list", "--all"]);
+    let actual: Vec<_> = list["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["number"].as_i64().unwrap())
+        .collect();
+    let expected: Vec<_> = (1..=110)
+        .filter(|n| n % 2 == 0)
+        .chain((1..=110).filter(|n| n % 2 != 0))
+        .collect();
+    assert_eq!(actual, expected);
+    f.run("session-a", &["claim", "2"]);
+    f.run("session-a", &["edit", "2", "--label", "selected"]);
+    let saved = f.run(
+        "session-a",
+        &[
+            "move",
+            "--match-label",
+            "e2e-case",
+            "--match-label",
+            "selected",
+            "--match-assignee",
+            "session-a",
+            "--to",
+            "bottom",
+        ],
+    );
+    assert_eq!(saved["matched_count"], 1);
+    assert_eq!(
+        f.run("reader", &["list", "--all"])["issues"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["number"],
+        2
+    );
+}
+
+#[test]
+fn matching_drafts_report_ineligible_work_and_keep_retry_selection() {
+    let f = Fixture::new();
+    for number in 1..=5 {
+        f.run(
+            "session-a",
+            &[
+                "create",
+                "--title",
+                &format!("Case {number}"),
+                "--label",
+                if number == 5 { "other" } else { "e2e-case" },
+            ],
+        );
+    }
+    f.run("session-a", &["claim", "2"]);
+    f.run("session-a", &["block", "3"]);
+    f.run("session-a", &["settings", "set", "--no-drafts"]);
+    let args = [
+        "edit",
+        "--match-label",
+        "e2e-case",
+        "--match-state",
+        "active",
+        "--draft",
+        "--request-id",
+        "draft-once",
+    ];
+    f.fail("session-a", &args, 2);
+    f.run("session-a", &["settings", "set", "--drafts-enabled"]);
+    let saved = f.run("session-a", &args);
+    assert_eq!(saved["matched_count"], 4);
+    assert_eq!(saved["changed_count"], 3);
+    assert_eq!(saved["skipped_count"], 1);
+    assert_eq!(saved["skipped"][0]["number"], 2);
+    for number in ["1", "3", "4"] {
+        let issue = f.run("reader", &["view", number]);
+        assert_eq!(issue["issue"]["draft"], true);
+        assert_eq!(issue["issue"]["state"], "open");
+    }
+    assert_eq!(
+        f.run("reader", &["view", "2"])["issue"]["assignee"],
+        "session-a"
+    );
+    assert_eq!(f.run("reader", &["view", "5"])["issue"]["draft"], false);
+    f.run("session-a", &["unassign", "2"]);
+    assert_eq!(f.run("session-a", &args), saved);
+    assert_eq!(f.run("reader", &["view", "2"])["issue"]["draft"], false);
+    let fresh = f.run(
+        "session-a",
+        &["edit", "--match-label", "e2e-case", "--draft"],
+    );
+    assert_eq!(fresh["changed_count"], 1);
+    assert_eq!(fresh["skipped_count"], 0);
+    assert_eq!(f.run("reader", &["view", "2"])["issue"]["draft"], true);
+    f.fail(
+        "session-a",
+        &[
+            "edit",
+            "--match-label",
+            "e2e-case",
+            "--title",
+            "Do not overwrite",
+        ],
+        2,
+    );
+}
+
+#[test]
+fn matching_delete_preserves_busy_work_and_can_be_undone() {
+    let f = Fixture::new();
+    for number in 1..=5 {
+        f.run(
+            "session-a",
+            &[
+                "create",
+                "--at-bottom",
+                "--title",
+                &format!("Case {number}"),
+                "--body",
+                "Keep the requirements",
+                "--label",
+                if number == 5 { "other" } else { "e2e-case" },
+            ],
+        );
+    }
+    f.run("session-a", &["claim", "2"]);
+    f.run(
+        "session-a",
+        &["comment", "1", "--body", "Keep this history"],
+    );
+    f.sql().execute("INSERT INTO fleet_allocations(node,project_id,issue_number) SELECT 'other',project_id,3 FROM issues WHERE number=3", []).unwrap();
+    let args = [
+        "delete",
+        "--match-label",
+        "e2e-case",
+        "--request-id",
+        "delete-matching",
+    ];
+    let saved = f.run("session-a", &args);
+    assert_eq!(saved["matched_count"], 4);
+    assert_eq!(saved["changed_count"], 2);
+    assert_eq!(saved["skipped_count"], 2);
+    let list = f.run("reader", &["list", "--all"]);
+    assert_eq!(
+        list["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2, 3, 5]
+    );
+    assert_eq!(
+        f.run("reader", &["list", "--state", "deleted"])["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    f.run("session-a", &["restore", "1"]);
+    let restored = f.run("reader", &["view", "1"]);
+    assert_eq!(restored["issue"]["body"], "Keep the requirements");
+    assert_eq!(restored["comments"][0]["body"], "Keep this history");
+    assert_eq!(f.run("session-a", &args), saved);
+    assert_eq!(
+        f.run("reader", &["view", "1"])["issue"]["deleted_at"],
+        Value::Null
+    );
+    f.fail(
+        "session-a",
+        &["delete", "--match-label", "e2e-case", "--force"],
+        2,
+    );
+}
+
+#[test]
 fn repeated_issue_moves_match_user_order_and_preserve_unique_positions() {
     let f = Fixture::new();
     let mut expected: Vec<i64> = (1..=7).collect();

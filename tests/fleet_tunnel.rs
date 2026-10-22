@@ -228,6 +228,96 @@ fn cancelling_cli_during_authority_reconnect_stops_waiting() {
 }
 
 #[test]
+fn companion_matching_moves_drafts_and_deletes_use_one_authoritative_batch() {
+    let mut f = Fleet::new();
+    f.start();
+    f.sql(
+        "main",
+        "UPDATE fleet_meta SET node='tunnel-main' WHERE id=1",
+    );
+    for (title, label) in [("Test A", "e2e"), ("Other", "feature"), ("Test B", "e2e")] {
+        f.issue(
+            "main",
+            &["create", "--at-bottom", "--title", title, "--label", label],
+            0,
+        );
+    }
+    assert_eq!(
+        f.cli("peer", &["fleet", "capabilities"], 0)["capabilities"]["issue_matching"],
+        true
+    );
+    let args = [
+        "move",
+        "--match-label",
+        "e2e",
+        "--to",
+        "bottom",
+        "--request-id",
+        "matching-move",
+    ];
+    let moved = f.issue("peer", &args, 0);
+    assert_eq!(moved["matched_count"], 2);
+    assert_eq!(moved["store"]["host"], "supervisor");
+    let list = f.issue("main", &["list"], 0);
+    assert_eq!(
+        list["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["number"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2, 1, 3]
+    );
+    let drafted = f.issue(
+        "peer",
+        &[
+            "edit",
+            "--match-label",
+            "e2e",
+            "--draft",
+            "--request-id",
+            "matching-draft",
+        ],
+        0,
+    );
+    assert_eq!(drafted["changed_count"], 2);
+    assert_eq!(drafted["skipped_count"], 0);
+    assert_eq!(drafted["store"]["host"], "supervisor");
+    assert_eq!(f.issue("main", &["view", "1"], 0)["issue"]["draft"], true);
+    assert_eq!(f.issue("main", &["view", "2"], 0)["issue"]["draft"], false);
+    assert_eq!(f.issue("peer", &args, 0), moved);
+    let deleted = f.issue(
+        "peer",
+        &[
+            "delete",
+            "--match-label",
+            "e2e",
+            "--request-id",
+            "matching-delete",
+        ],
+        0,
+    );
+    assert_eq!(deleted["changed_count"], 2);
+    assert_eq!(
+        f.issue("main", &["list"], 0)["issues"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while f.issue("peer", &["list", "--state", "deleted"], 0)["issues"]
+        .as_array()
+        .unwrap()
+        .len()
+        != 2
+    {
+        assert!(Instant::now() < deadline, "Deletion did not replicate");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn companion_moves_persist_with_guarded_retries_and_no_offline_fallback() {
     let mut f = Fleet::new();
     f.start();
