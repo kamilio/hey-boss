@@ -139,14 +139,6 @@ work to the pool. Use `--body -` for Markdown on stdin, `--json` for automation,
 and `--agent ID` if session detection is unavailable. See [issue commands and
 storage](docs/issues.md) for recovery, filtering, retry IDs, and a shared SSH host.
 
-Create project outlines with `hey-boss mm add 'Release' --id release`, reference work
-with `mm issue NUMBER --under release`, and explain dependencies with
-`mm link FROM TO --kind depends-on --description 'Why it depends'`.
-`mm web` opens a read-only branching map with pan/zoom, collapsible topics, a
-clickable overview and an Outline view. Maps support cross-project references,
-live issues, automatic issue→PR links and pending-only notifications.
-See [mindmap commands](docs/mindmaps.md) and [tool research](docs/mindmaps-research.md).
-
 Open the issue interface with `hey-boss issue web`, then visit
 [hey-boss.test](http://hey-boss.test/). It shares the CLI's SQLite database and
 includes a project switcher, Markdown editing, comments, claims, search, history,
@@ -628,8 +620,7 @@ hey-boss lookup 'http://192.168.1.10:4781/artifacts#project=named%3AAtlas&artifa
 ```
 
 Lookup shares the web's resource route definitions for issues, Inbox notices,
-mindmap topics (including issue/PR/notice references), artifacts and agent
-conversations. Links to lists return their collection; issue list filters are
+artifacts and agent conversations. Links to lists return their collection; issue list filters are
 preserved. `--json` includes the resolved `route` and the usual resource result,
 including document comments and links. Reads do not mark notices as read or
 change resources. Conversation reads return the existing bounded first page.
@@ -790,8 +781,8 @@ also need the Xcode command-line tools. Builds use a persistent cache, replaceme
 are staged beside the installed executable, and failed verification restores the
 previous binary. Before replacing the CLI or restarting services, the staged
 build opens this installation's issue store and commits required schema changes
-atomically. Startup also reconciles missing draft, project settings, and
-mindmap label columns without overwriting existing values. A failed migration
+atomically. Startup also reconciles missing draft and project settings columns
+without overwriting existing values. A failed migration
 keeps the installed CLI and services in place and reports the store and cause;
 resolve that cause and retry rather than deleting the store. Committed schema
 changes are retained if a later installation step fails, so recovery must use a
@@ -1150,16 +1141,8 @@ from issuing obsolete sibling rework instructions.
 Subtasks are scheduling dependencies: unfinished descendants put a parent in
 **Blocked**. Creating, linking, or unlinking subtasks is rejected atomically if
 reconciliation would release an existing claim, including an ancestor's claim.
-This also applies to the claim owner. For follow-up organization while work is
-claimed, use ownership-preserving mindmap nesting:
-
-```sh
-hey-boss mm issue 12 --id parent-work
-hey-boss mm issue 15 --under parent-work
-```
-
-Mindmap nesting leaves issue state, assignees, and scheduling unchanged. To add a
-scheduling dependency instead, have the owner explicitly release the claim first.
+This also applies to the claim owner. Have the owner explicitly release the claim
+before adding a scheduling dependency.
 
 ```sh
 hey-boss issue subtask create 12 --title 'Implement the API' --body '## Requirements'
@@ -1224,9 +1207,9 @@ from the submitted title. Repeated mentions must identify the same project.
 Unknown projects and conflicting mentions show an error; email addresses stay
 unchanged, and `\@poe-code` keeps literal `@poe-code` text in the title.
 
-Persistent project Markdown documents, revision-checked editing, comments and issue/mindmap links are available through **Artifacts** in the web menu and `hey-boss artifact`. See [Project artifacts](docs/artifacts.md).
+Persistent project Markdown documents, revision-checked editing, comments and issue links are available through **Artifacts** in the web menu and `hey-boss artifact`. See [Project artifacts](docs/artifacts.md).
 
-Issues, mindmap nodes and artifacts also support disk-backed files, drag-and-drop upload and remote CLI downloads through `hey-boss attachment`. See [File attachments](docs/attachments.md).
+Issues and artifacts also support disk-backed files, drag-and-drop upload and remote CLI downloads through `hey-boss attachment`. See [File attachments](docs/attachments.md).
 
 ### PR status and automatic completion
 

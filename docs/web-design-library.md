@@ -1,6 +1,6 @@
 # Web design library
 
-The Issues page is the visual reference for Inbox, Issues, Workers and Mindmaps.
+The Issues page is the visual reference for Inbox, Issues, and Workers.
 Every route renders `src/issues/web/app-shell.html` and loads `components.css`
 and `components.js`. The server sets the current navigation item. Inbox lives
 within the Issues client and uses the same shell and controls.
@@ -23,9 +23,9 @@ motion/transparency preferences. Reuse these classes when adding UI:
 `HeyBossUI` supplies icons and the accessible `ProjectPicker`. Page clients own
 loading and mutations, passing projects and the selected project to the picker.
 Workers display the entire fleet; its picker sets the project context for links
-back to Issues and Mindmaps, rather than filtering machine availability.
+back to Issues, rather than filtering machine availability.
 
-Keep page-specific content geometry in `app.css`, `fleet.css` or `mindmap.css`.
+Keep page-specific content geometry in `app.css` or `fleet.css`.
 Do not redefine the theme, shell or shared controls in those files. There is no
 additional framework, font download or CSS runtime. The library is embedded in
 the CLI and distributed through normal source upgrades.

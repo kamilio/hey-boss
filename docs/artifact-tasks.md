@@ -17,7 +17,7 @@ mode; goal mode also follows the implementation prompt's `/goal` setting.
 Select **Preview task → Plan** to inspect the assembled instructions without
 changing any issues or worker settings.
 
-By default, agents can organize related artifacts in a mindmap and create draft
+By default, agents can create draft
 follow-up issues without starting implementation. When drafts are disabled,
 proposed follow-ups stay in the artifact. Successful Plan tasks close normally
 without a PR handoff.

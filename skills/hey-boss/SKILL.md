@@ -52,7 +52,7 @@ Read only the reference needed for the task:
 - [Issue coordination](references/issues.md): drafts, human handoffs, priority,
   blockers, subtasks, PR links, and guarded remote metadata edits.
 - [Documents and attachments](references/documents.md): persistent Markdown
-  artifacts, mindmaps, discussions, and file uploads.
+  artifacts, discussions, and file uploads.
 - [Workers and agents](references/workers.md): saved workers, explicit start versus
   observation, fleet setup, and agent controls.
 

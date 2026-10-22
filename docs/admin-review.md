@@ -14,7 +14,7 @@ CLI compatibility aliases and redirect to the grouped previews.
 Text and JSON appear side by side, with the invocation, exit status, stderr, and
 copy controls. Nothing is stored in browser storage.
 
-Issue, artifact, attachment, and mindmap samples use private temporary databases.
+Issue, artifact, and attachment samples use private temporary databases.
 The selected real issue's title and body are copied into the sample; its live
 database is never modified. Each output format starts with fresh sample state,
 so a mutation in the text preview cannot change the JSON preview. Notification

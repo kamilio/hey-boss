@@ -293,9 +293,8 @@ that the database is offline. Agent command permissions can treat a standalone
 read can therefore succeed directly and fail in `hey-boss … | jq …`.
 
 Run the read as a separate tool invocation without pipes or redirection. For
-compact output, use `hey-boss issue list --state active --limit 20` (text output)
-or `hey-boss mm show --bodies none`; both accept `--project`. JSON mindmaps also
-support `--bodies none`. If JSON filtering is needed, capture the standalone
+compact output, use `hey-boss issue list --state active --limit 20` (text output),
+which accepts `--project`. If JSON filtering is needed, capture the standalone
 command's tool result and filter that result separately. Shell redirection is
 not a guaranteed workaround. If the standalone read is still denied, request
 approved execution of that specific command through the agent's normal approval

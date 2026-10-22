@@ -11,9 +11,8 @@ that project. Existing drafts remain saved. Omitting `--drafts` in scripts keeps
 the saved choice (enabled for new projects). For an initialized project,
 `hey-boss issue settings set --no-drafts` changes only this setting.
 
-Artifacts and mindmaps follow the same rule: initialization accepts
-`--artifacts false --mindmaps false`; settings accepts `--no-artifacts` and
-`--no-mindmaps`. Omitted choices preserve saved values and default to enabled for
+Artifacts follow the same rule: initialization accepts
+`--artifacts false`; settings accepts `--no-artifacts`. Omitted choices preserve saved values and default to enabled for
 new projects. Disabled creation exits nonzero with a project-specific message
 pointing to regular tasks. Existing content remains available.
 
@@ -47,7 +46,7 @@ project matches, the command fails: use `--project <name-or-id>` to select an
 existing project, or run `hey-boss project init` in the project directory.
 
 Builder lists initialized projects and projects with saved issues, artifacts,
-mindmap nodes, or worker settings. Empty legacy discoveries stay out of the
+or worker settings. Empty legacy discoveries stay out of the
 picker. Their identities and all saved data are retained. Hidden projects stay hidden.
 
 Project names are unique identifiers (case insensitive). Explicit selectors can
@@ -62,7 +61,7 @@ Upgrades discard old warnings about aliases that never became projects. Paired
 devices also deduplicate their inventory and accept names as issue destinations.
 
 On upgrade, existing duplicate names choose one stable destination, preferring
-saved undeleted issues, then artifacts and mindmap data, then the oldest entry.
+saved undeleted issues, then artifacts, then the oldest entry.
 The picker shows that destination once. Other legacy rows and all their saved
 data remain accessible through their full IDs. The CLI and registry response
 retain legacy history warnings; web pages show only the selected destination.
@@ -76,7 +75,7 @@ registered folders such as `hey-boss-live-controls-*` as permanent projects,
 which filled the project picker with test runs. Empty discovered entries
 are omitted from project lists on desktop and paired devices. Registry rows
 are retained, and temporary projects with any saved issues (including deleted
-issues), artifacts, mindmap nodes, project settings, or worker settings remain
+issues), artifacts, project settings, or worker settings remain
 accessible. The same visibility rule applies to named projects and repository origins.
 
 Worker project settings control whether agents create worktrees. For this project,
