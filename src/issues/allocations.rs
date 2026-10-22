@@ -211,6 +211,20 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
     db.execute_batch("INSERT INTO fleet_allocations SELECT project_id,issue_number,machine FROM worker_allocation_winners WHERE true
         ON CONFLICT(project_id,issue_number) DO UPDATE SET node=excluded.node WHERE fleet_allocations.node<>excluded.node;
         DELETE FROM fleet_allocation_deadlines WHERE (project_id,issue_number) IN (SELECT project_id,issue_number FROM worker_allocation_winners);")?;
+    // A machine assignment is durable routing, not a worker lease. It can wait
+    // longer than the legacy allocator's fifteen-minute deadline for capacity.
+    // Retire only that orphan deadline; keep the route and all pickup gates.
+    // Attempts still in flight belong to their owner, even with stale presence.
+    db.execute_batch("DELETE FROM fleet_allocation_deadlines AS d
+        WHERE d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000
+        AND EXISTS(SELECT 1 FROM issues i JOIN fleet_allocations f
+            ON f.project_id=i.project_id AND f.issue_number=i.number
+            WHERE i.project_id=d.project_id AND i.number=d.issue_number
+            AND i.assignee IS NULL AND i.assignment_target='machine:'||f.node)
+        AND NOT EXISTS(SELECT 1 FROM worker_runs r
+            WHERE r.project_id=d.project_id AND r.issue_number=d.issue_number AND r.finished_at IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM worker_allocations a
+            WHERE a.project_id=d.project_id AND a.issue_number=d.issue_number AND a.released=0);")?;
     Ok(())
 }
 
