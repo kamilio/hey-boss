@@ -219,11 +219,51 @@ fn observed_run(db: &Connection, id: &str) -> Result<Run> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job run not found"))
 }
+// A non-target peer records a waiting observation, not an execution. Prefer
+// execution evidence for that exact occurrence without hiding any history.
+fn execution_for_observation(db: &Connection, last: &Run) -> Result<Option<Run>> {
+    let definition = &last.snapshot.definition;
+    if last.state != "pending"
+        || last.machine.is_some()
+        || last.started_at.is_some()
+        || last.session_id.is_some()
+        || definition.machines.is_empty()
+        || definition.fans_out()
+    {
+        return Ok(None);
+    }
+    let origin: Option<String> = db.query_row(
+        "SELECT origin FROM distributed_fields WHERE table_name='scheduled_job_runs' AND entity=?1 AND field='@row'",
+        [json!({"id":last.id}).to_string()], |r| r.get(0),
+    ).optional()?;
+    let Some(origin) = origin else {
+        return Ok(None);
+    };
+    // Baseline imports suffix the node ID with their capture identity.
+    let node = origin.split(':').next().unwrap_or(&origin);
+    if definition.machines.iter().any(|machine| machine == node) {
+        return Ok(None);
+    }
+    // distributed_job_calendar bounds this to one project's occurrence time;
+    // distributed_fields uses its primary key. Neither reads full history.
+    let candidates = db.query_collect(
+        &format!("SELECT {RUN_COLUMNS} FROM distributed_job_runs WHERE project_id=?1 AND scheduled_at=?2 AND job_id=?3 AND parent_run_id IS NULL AND trigger=?4 AND request_key IS ?5 AND machine IS NOT NULL AND state IN ('running','succeeded','failed','cancelled') ORDER BY sequence DESC"),
+        params![last.snapshot.project_id,last.scheduled_at,last.snapshot.job_id,last.trigger,last.request_key],
+        run_row,
+    )?;
+    Ok(candidates.into_iter().find(|run| {
+        run.snapshot == last.snapshot
+            && run
+                .machine
+                .as_ref()
+                .is_some_and(|machine| definition.machines.contains(machine))
+    }))
+}
 // Indexed, bounded lookups keep controls truthful even when the latest
 // occurrence was skipped while an older execution still owns the job.
 fn job_summary(db: &Connection, job: Job) -> Result<Value> {
     let history = history_table(db)?;
-    let last: Option<Run> = db
+    let mut last: Option<Run> = db
         .query_row(
             &format!(
                 "SELECT {RUN_COLUMNS} FROM {history} WHERE job_id=?1 AND parent_run_id IS NULL ORDER BY sequence DESC LIMIT 1"
@@ -232,6 +272,12 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
             run_row,
         )
         .optional()?;
+    if history == "distributed_job_runs"
+        && let Some(observation) = &last
+        && let Some(execution) = execution_for_observation(db, observation)?
+    {
+        last = Some(execution);
+    }
     let active: Option<Run> = db.query_row(
         &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND parent_run_id IS NULL AND state IN ('pending','running') LIMIT 1"),
         [&job.id], run_row,
