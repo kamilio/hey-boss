@@ -5,7 +5,7 @@ existing project, and choose **Move issue**. The issue opens in its destination
 with a new number at the bottom of that project's queue. Description, labels,
 state, Boss assignment, drafts, comments, comment resolutions, PR links, authors,
 timestamps, and activity are preserved. Unsaved comment text follows the move.
-Old issue URLs open the new location, and saved mindmap references follow it.
+Old issue URLs open the new location.
 
 The move action is part of the initial issue header, including on phones and
 paired devices. It remains available for open, blocked, ready, draft, and closed

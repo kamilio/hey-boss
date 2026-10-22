@@ -229,7 +229,7 @@ issues and controlling workers. There is no per-project access control. Host,
 Origin, fetch-site, and CSRF checks remain enforced. Responses use `no-store`,
 and HTTPS pages keep drafts and pending retry IDs only in page memory rather
 than browser storage. Only the selected project ID is remembered across page
-loads, shared by Issues, Inbox, Mindmaps, and Workers. A project in the URL
+loads, shared by Issues, Inbox, and Workers. A project in the URL
 overrides that remembered selection. Drafts survive navigation and reconnects in
 the same page, but disappear on reload or close. If a write's result is uncertain, reconnect in
 that tab or inspect the saved issue before resubmitting after a reload. Displayed
@@ -884,11 +884,6 @@ Closed children without unfinished descendants can still be linked to claimed
 parents; unlinking a child is allowed when it preserves claims.
 Fleet sync rejects stale subtask links and state transitions that would replace
 newer canonical ownership; rejected links converge back to the canonical graph.
-
-For organization only, prefer mindmap nesting: `hey-boss mm issue 12 --id parent-work`
-then `hey-boss mm issue 15 --under parent-work`. This preserves issue ownership,
-state, and scheduling. For an actual scheduling dependency, the claim owner must
-explicitly release the affected claim before linking.
 
 Subtasks are ordinary issues linked to one parent in the same project. Each keeps
 its own Markdown, assignee, labels, PR links, lifecycle and position in the queue.

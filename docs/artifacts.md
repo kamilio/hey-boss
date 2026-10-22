@@ -1,11 +1,10 @@
 # Project artifacts
 
 Open **Artifacts** in the web menu to create, search and read persistent Markdown
-documents in the selected project. Issue sidebars and selected mindmap topics
-offer **Create artifact** and **Attach existing**. Both reuse the resource's
-project. One document can be attached to multiple issues and map nodes; its
+documents in the selected project. Issue sidebars offer **Create artifact** and **Attach existing**. Both reuse the resource's
+project. One document can be attached to multiple issues; its
 stable URL and references survive renames, edits and archiving. Unlinking removes
-only the reference. Removed map topics remain identified in document backlinks.
+only the reference.
 
 The library shows document cards with short, readable text previews in a
 responsive two-column layout (one column on phones). Previews omit Markdown
@@ -19,7 +18,7 @@ contains Export Markdown, Archive/Restore, and Delete permanently. Library cards
 also offer quick Archive/Restore and Delete actions, including on touch screens.
 Select **Archived** to browse archived documents and restore them.
 Permanent deletion asks for confirmation and removes the document, its comments,
-attached files, and issue/mindmap references. Referring issues and map topics stay
+attached files, and issue references. Referring issues stay
 intact. Deletion cannot be undone; Archive keeps a document for later.
 **Comments** shows or hides the
 conversation beside the document, or below it on smaller screens. Reply composers
@@ -77,8 +76,8 @@ hey-boss artifact list --query migration --json
 hey-boss artifact view a-ID --json
 hey-boss artifact edit a-ID --file updated.md
 hey-boss artifact link a-ID --issue 15
-hey-boss artifact link a-ID --node release
-hey-boss artifact links --node release
+hey-boss artifact link a-ID --issue 12
+hey-boss artifact links --issue 12
 hey-boss artifact comment a-ID --body 'Check rollback' --quote 'Rollback'
 hey-boss artifact comment a-ID --body 'Covered' --parent 1
 hey-boss artifact resolve a-ID 1
@@ -102,6 +101,6 @@ anchors an 8 KiB limit. Each document supports 1,000 comments within an aggregat
 8 MiB source budget. The response budget also limits rendered document size.
 
 Artifacts use the same private SQLite project store, local web CSRF protection
-and SSH transport as issues. Like mindmaps, they are authored on the authoritative
+and SSH transport as issues. They are authored on the authoritative
 machine rather than replicated into fleet issue queues. Use `--host SUPERVISOR`
 from a companion to work with shared documents. Phones use the same local web interface on explicitly allowed Wi-Fi networks; see [local mobile access](mobile.md).

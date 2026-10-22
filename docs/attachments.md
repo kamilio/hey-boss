@@ -1,6 +1,6 @@
 # File attachments
 
-Issues, mindmap nodes and artifacts share disk-backed attachments. Open the resource
+Issues and artifacts share disk-backed attachments. Open the resource
 in the web UI, drop files on **Drop files here**, or use **Choose files**. Every row
 shows the original filename and size. Click a PNG, JPEG, GIF, WebP or SVG filename
 to open an image viewer. Images fit the screen; **Actual size** lets you scroll
@@ -12,7 +12,7 @@ embedded documents; HTML remains download-only. Any file type is accepted, up to
 
 ```sh
 hey-boss attachment upload ./design.png --issue 57
-hey-boss attachment upload ./trace.zip --node release
+hey-boss attachment upload ./trace.zip --issue 57
 hey-boss attachment upload ./reference.pdf --artifact ARTIFACT_ID
 hey-boss attachment list --issue 57 --json
 hey-boss attachment download FILE_ID
@@ -20,8 +20,7 @@ hey-boss attachment download FILE_ID --output ./reference.pdf
 hey-boss attachment remove FILE_ID
 ```
 
-Select exactly one of `--issue`, `--node`, or `--artifact` for upload/list. Node
-selectors accept a node ID, alias or `issue:NUMBER` in the selected project.
+Select exactly one of `--issue` or `--artifact` for upload/list.
 `--project` selects another project. `--host SUPERVISOR` sends reads and writes
 through the existing SSH issue RPC. Downloads always materialize on the caller's
 machine, even when the attachment is stored remotely. Omit `--output` to create a
