@@ -199,4 +199,49 @@ final class OverlayTests: XCTestCase {
         overlay.avoidDock(dock)
         XCTAssertEqual(panel.frame.minY, screen.minY + 200, "A bubble already clear of the Dock stays put")
     }
+
+    @MainActor func testDockMotionInterpolatesRetargetsAndPreservesResizing() throws {
+        try XCTSkipIf(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, "Motion is disabled in system settings")
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let screen = try XCTUnwrap(panel.screen).frame
+        panel.setFrameOrigin(NSPoint(x: screen.midX - 100, y: screen.minY + 12))
+        panel.orderFrontRegardless()
+        let original = panel.frame
+        let dock = NSRect(x: screen.midX - 300, y: screen.minY + 10, width: 600, height: 72)
+        func advance(_ seconds: TimeInterval) {
+            let tick = expectation(description: "animation advances")
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { tick.fulfill() }
+            wait(for: [tick], timeout: seconds + 1)
+        }
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, original.minY, accuracy: 1, "Motion must begin at the current position, without a jump")
+        advance(0.06)
+        XCTAssertGreaterThan(panel.frame.minY, original.minY)
+        XCTAssertLessThan(panel.frame.minY, dock.maxY + 12, "The window must pass through intermediate positions")
+        let during = panel.frame.minY
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, during, accuracy: 1, "Polling must not jump or restart the motion")
+        overlay.error("Test notice")
+        let expandedSize = panel.frame.size
+        advance(0.2)
+        XCTAssertEqual(panel.frame.minY, dock.maxY + 12, accuracy: 1)
+        XCTAssertEqual(panel.frame.size, expandedSize, "Motion must preserve a notice that resizes the bubble")
+        XCTAssertEqual(panel.frame.midX, original.midX, accuracy: 1)
+        overlay.avoidDock(nil)
+        advance(0.06)
+        XCTAssertLessThan(panel.frame.minY, dock.maxY + 12)
+        XCTAssertGreaterThan(panel.frame.minY, original.minY)
+        let returning = panel.frame.minY
+        overlay.avoidDock(dock)
+        XCTAssertEqual(panel.frame.minY, returning, accuracy: 1, "Reopening the Dock must continue from the current position")
+        advance(0.25)
+        XCTAssertEqual(panel.frame.minY, dock.maxY + 12, accuracy: 1)
+        overlay.avoidDock(nil)
+        advance(0.25)
+        XCTAssertEqual(panel.frame.minY, original.minY, accuracy: 1, "Interruptions must not change the resting height")
+    }
 }

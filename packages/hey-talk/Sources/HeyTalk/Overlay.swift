@@ -7,6 +7,27 @@ private final class RecordingPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+private final class DockMotion: NSAnimation {
+    private let panel: NSPanel
+    private let startY: CGFloat
+    let destination: CGFloat
+
+    init(panel: NSPanel, destination: CGFloat) {
+        self.panel = panel; startY = panel.frame.minY; self.destination = destination
+        super.init(duration: 0.18, animationCurve: .easeOut)
+        animationBlockingMode = .nonblocking
+        frameRate = 60
+    }
+    required init?(coder: NSCoder) { fatalError("DockMotion is not archived") }
+    override var runLoopModesForAnimating: [RunLoop.Mode]? { [.common] }
+    override var currentProgress: NSAnimation.Progress {
+        didSet {
+            // Only move vertically; recording and notices may resize the panel mid-flight.
+            panel.setFrameOrigin(NSPoint(x: panel.frame.minX, y: startY + CGFloat(currentValue) * (destination - startY)))
+        }
+    }
+}
+
 private final class WaveView: NSView {
     var color = TalkDesign.active { didSet { needsDisplay = true } }
     var heights = Array(repeating: 4.0, count: Waveform.count) { didSet { needsDisplay = true } }
@@ -84,7 +105,8 @@ final class Overlay {
     private var timer: Timer?
     private var dockTimer: Timer?
     private var dockList: AXUIElement?
-    private var dockLift: CGFloat = 0
+    private var dockRestY: CGFloat?
+    private var dockMotion: DockMotion?
     private var phase: Phase = .idle
     private var expanded = false
     private var enabled = true
@@ -183,7 +205,9 @@ final class Overlay {
         pillContent.onClick = { [weak self] in self?.onToggle?() }
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
         pillContent.onHover = { [weak self] hover in self?.pillContent.emphasized = hover }
-        pillContent.onDrag = { [weak self] in self?.dockLift = 0 }
+        pillContent.onDrag = { [weak self] in
+            self?.dockMotion?.stop(); self?.dockMotion = nil; self?.dockRestY = nil
+        }
         layout(animated: false)
         reposition()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.reposition() }
@@ -192,15 +216,18 @@ final class Overlay {
         let screen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main
         guard let screen else { return }
         let visible = screen.visibleFrame
-        dockLift = 0
+        dockMotion?.stop(); dockMotion = nil; dockRestY = nil
         panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
     }
     deinit {
-        timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel()
+        timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel(); dockMotion?.stop()
     }
     func show(_ visible: Bool) {
         enabled = visible
-        if !visible { dismissNotice(animated: false) }
+        if !visible {
+            dockMotion?.stop(); dockMotion = nil
+            dismissNotice(animated: false)
+        }
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
         dockTimer?.invalidate(); dockTimer = nil
         if visible {
@@ -242,16 +269,28 @@ final class Overlay {
         return NSRect(x: point.x, y: top - point.y - dimensions.height, width: dimensions.width, height: dimensions.height)
     }
     func avoidDock(_ dock: NSRect?) {
-        var frame = panel.frame
-        frame.origin.y -= dockLift
-        dockLift = 0
+        let frame = panel.frame
+        let restingY = dockRestY ?? frame.minY
+        var destination = restingY
         if let dock, let screen = panel.screen?.frame,
            dock.width > dock.height, dock.intersects(screen),
            frame.maxX > dock.minX, frame.minX < dock.maxX {
-            dockLift = max(0, dock.maxY + 12 - frame.minY)
+            destination = max(restingY, dock.maxY + 12)
         }
-        frame.origin.y += dockLift
-        if frame.origin != panel.frame.origin { panel.setFrameOrigin(frame.origin) }
+        if let motion = dockMotion, motion.destination == destination {
+            if !motion.isAnimating && destination == restingY { dockMotion = nil; dockRestY = nil }
+            return
+        }
+        dockMotion?.stop(); dockMotion = nil
+        dockRestY = restingY
+        if !panel.isVisible || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || destination == frame.minY {
+            panel.setFrameOrigin(NSPoint(x: frame.minX, y: destination))
+            if destination == restingY { dockRestY = nil }
+        } else {
+            let motion = DockMotion(panel: panel, destination: destination)
+            dockMotion = motion
+            motion.start()
+        }
     }
     func update(_ next: Phase) {
         update(next, waitingForAudio: false)
