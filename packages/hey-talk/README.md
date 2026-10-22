@@ -31,6 +31,9 @@ The existing per-app Enter exceptions also apply in Auto.
 The floating control is a compact glass capsule with an indigo waveform mark.
 It expands to show live teal audio levels while recording, then a quiet indigo
 glow while transcribing. Accent colors match the shared Hey Boss design tokens.
+“Connecting…” appears only if opening the microphone takes more than 700 ms.
+With Accessibility enabled, the bubble lifts above the bottom Dock when it opens
+and returns to its previous position when the Dock hides.
 macOS 26 uses native Liquid Glass with a fine reflective edge and soft shadow;
 macOS 15–25 uses a native translucent surface. There is no web renderer or account.
 Recording is silent on every microphone. The capsule provides the start and stop
