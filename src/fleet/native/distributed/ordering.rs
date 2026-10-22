@@ -303,11 +303,43 @@ mod tests {
             "comment",
         )
         .unwrap();
+        a.db.execute("UPDATE fleet_meta SET node='source'", [])
+            .unwrap();
+        a.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES('following-reservation','p',5,'{}','human:test','reserved',100,'synthetic','source',2,2)", []).unwrap();
+        crate::issues::allocations::receive_presence(
+            &b.db,
+            &[hey_boss_sync::session::Presence {
+                machine: "source".into(),
+                sequence: 1,
+                attempts: vec!["following-reservation".into()],
+                remaining_ms: 24_000,
+            }],
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::issues::allocations::pending_reservations(&b.db).unwrap(),
+            1
+        );
         a.flush();
         assert_eq!(
             a.send_to(&mut b),
             1,
-            "reopen/comment must fit in the next wire page"
+            "reopen/comment/reservation must fit in the next wire page"
+        );
+        assert_eq!(
+            crate::issues::allocations::pending_reservations(&b.db).unwrap(),
+            0,
+            "a queue move must not hold new agents behind thousands of issue snapshots"
+        );
+        assert_eq!(
+            b.db.query_row(
+                "SELECT node FROM fleet_allocations WHERE project_id='p' AND issue_number=5",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "source"
         );
         b.send_to(&mut a);
         assert_eq!(a.numbers(), b.numbers());
