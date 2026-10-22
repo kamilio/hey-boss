@@ -426,16 +426,6 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
         "SELECT * FROM fleet_signals WHERE id=?",
         &[message["id"].clone()],
     )?;
-    // Upgrade selection happened before taking this control lock. Respect a
-    // pause or a completed natural reload that won the race with that snapshot.
-    if old.is_empty()
-        && let Some(build) = message["upgrade_build"].as_str()
-    {
-        let worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
-        if worker["config"]["enabled"] != true || worker["build"] == build {
-            return Ok(json!({"id":message["id"],"state":"deferred","worker":message["worker"]}));
-        }
-    }
     if let Some(old) = old.first() {
         if old["worker"] != message["worker"] || old["signal"] != message["signal"] {
             return Err(invalid("Signal ID already has a different payload"));
@@ -453,6 +443,20 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
         .map(serde_json::from_str::<Value>)
         .transpose()?
         .unwrap_or(json!({}));
+    // A live worker owns its idle reload, including the gap between checking
+    // activity and reserving another job. Never convert an upgrade into Stop.
+    // A recovered starting receipt may only acknowledge its live replacement.
+    if let Some(build) = message["upgrade_build"].as_str() {
+        let worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
+        let acknowledging_start = old.first().is_some_and(|v| v["state"] == "starting")
+            && worker["pid"].is_number()
+            && worker["pid"] != progress["prior_pid"]
+            && worker["build"] == build
+            && worker["config"]["enabled"] == true;
+        if !acknowledging_start && upgrade_restart_deferred(&worker, build) {
+            return Ok(json!({"id":message["id"],"state":"deferred","worker":message["worker"]}));
+        }
+    }
     if progress["retry_at"].as_f64().unwrap_or(0.0) > now() {
         return Ok(json!({"id":message["id"],"state":"pending","error":progress["error"]}));
     }
@@ -496,6 +500,14 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
             Ok(receipt)
         }
     }
+}
+fn upgrade_restart_deferred(worker: &Value, build: &str) -> bool {
+    worker["config"]["enabled"] != true
+        || worker["build"] == build
+        || !worker["pid"].is_null()
+        || worker["active"].as_u64() != Some(0)
+        || worker["job_active"].as_u64() != Some(0)
+        || matches!(worker["intent"].as_str(), Some("pause" | "stop" | "drain"))
 }
 fn worker_snapshot(id: &Value, read: impl FnOnce(Value) -> Result<Value>) -> Result<Value> {
     let status = read(json!({"action":"workers","worker_id":id}))?;
@@ -683,6 +695,72 @@ pub(super) fn revision(node: &str, workers: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upgrade_never_stops_a_live_owner_or_resumes_paused_work() {
+        let idle =
+            json!({"pid":null,"active":0,"job_active":0,"config":{"enabled":true},"build":"old"});
+        assert!(!super::upgrade_restart_deferred(&idle, "new"));
+        for (key, value) in [
+            ("pid", json!(42)),
+            ("active", json!(1)),
+            ("job_active", json!(1)),
+            ("active", Value::Null),
+            ("job_active", Value::Null),
+            ("build", json!("new")),
+            ("intent", json!("pause")),
+            ("intent", json!("stop")),
+            ("intent", json!("drain")),
+            ("config", json!({"enabled":false})),
+        ] {
+            let mut worker = idle.clone();
+            worker[key] = value;
+            assert!(super::upgrade_restart_deferred(&worker, "new"), "{worker}");
+        }
+    }
+    #[test]
+    fn upgrade_recovers_a_lost_start_ack_without_stopping_the_replacement() {
+        let (root, ctx, mut store) = test_context();
+        replica::ensure_metadata(&ctx.db().unwrap()).unwrap();
+        let settings = crate::issues::worker::Settings {
+            enabled: true,
+            ..Default::default()
+        };
+        store
+            .register_worker(Some("replacement"), &settings, &ctx.node)
+            .unwrap();
+        ctx.atomic_json(
+            &ctx.state.join("fleet-agent.json"),
+            &json!({"workers":[{"id":"replacement","intent":"stop"}]}),
+        )
+        .unwrap();
+        let db = ctx.db().unwrap();
+        db.execute("INSERT INTO fleet_signals VALUES('lost-start','local','replacement','restart','starting',?1,0)", [json!({"prior_pid":null}).to_string()]).unwrap();
+        let message = json!({"id":"lost-start","worker":"replacement","signal":"restart","upgrade_build":env!("HEY_BOSS_BUILD_ID")});
+        assert_eq!(
+            apply_signal(&ctx, &message).unwrap()["state"],
+            "acknowledged"
+        );
+        assert_eq!(
+            apply_signal(&ctx, &message).unwrap()["state"],
+            "acknowledged"
+        );
+        let state: (u32, bool) = db
+            .query_row(
+                "SELECT owner_pid,stop_requested FROM issue_workers WHERE id='replacement'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (std::process::id(), false));
+        assert_eq!(
+            ctx.read_json(&ctx.state.join("fleet-agent.json"), Value::Null)
+                .unwrap()["workers"][0]["intent"],
+            "running"
+        );
+        drop(db);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn checkout_retry_waits_for_control_lock_then_acknowledges_attempt() {
         let (root, ctx, store) = super::super::context::tests::test_context();

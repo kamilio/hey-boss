@@ -1919,11 +1919,15 @@ fn offline_replica_launches_only_work_allocated_to_its_machine() {
     worker.stop();
 }
 #[test]
-fn rollout_replaces_busy_old_workers_and_verifies_the_replacement_without_restarting_twice() {
+fn rollout_waits_for_busy_old_workers_and_verifies_idle_reload_without_restarting_twice() {
     let f = Fixture::new("verified-worker-rollout");
-    fs::write(f.root.join("mode.txt"), "delay").unwrap();
+    fs::write(f.root.join("mode.txt"), "delay-release").unwrap();
     f.setup(&["--concurrency", "2"]);
-    let mut worker = f.worker();
+    let directory = f.root.join("bin");
+    fs::create_dir_all(&directory).unwrap();
+    let binary = directory.join("hey-boss");
+    fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
+    let mut worker = f.worker_binary(&binary);
     let before = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
     let id = before["worker_id"].as_str().unwrap();
     let old_run = before["runs"][0]["id"].clone();
@@ -1996,16 +2000,35 @@ fn rollout_replaces_busy_old_workers_and_verifies_the_replacement_without_restar
         [id],
     )
     .unwrap();
-    let (ok, report) = rollout(false);
+    let replacement = directory.join("hey-boss.new");
+    fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &replacement).unwrap();
+    fs::rename(replacement, &binary).unwrap();
+    let (ok, report) = thread::scope(|scope| {
+        let pending = scope.spawn(|| rollout(false));
+        thread::sleep(Duration::from_secs(2));
+        let during = f.cli(&["worker", "status"]);
+        assert_eq!(during["runs"][0]["id"], old_run);
+        assert_eq!(during["runs"][0]["state"], "running");
+        assert_eq!(during["workers"][0]["pid"], before["workers"][0]["pid"]);
+        assert!(
+            !pending.is_finished(),
+            "Busy rollout must remain incomplete"
+        );
+        fs::write(f.root.join("release"), "").unwrap();
+        pending.join().unwrap()
+    });
     assert!(
         ok,
         "Busy worker did not finish its guarded handoff: {report}"
     );
     assert_eq!(report["complete"], true);
-    let after = f.wait(|s| s["runs"][0]["claimed_at"].is_number() && s["runs"][0]["id"] != old_run);
+    let after = f.wait(|s| {
+        s["runs"][0]["state"] == "completed"
+            && s["workers"][0]["build"] == env!("HEY_BOSS_BUILD_ID")
+    });
     assert_eq!(after["worker_id"], id);
     assert_eq!(after["config"], before["config"]);
-    assert_ne!(after["workers"][0]["pid"], before["workers"][0]["pid"]);
+    assert_eq!(after["workers"][0]["pid"], before["workers"][0]["pid"]);
     assert_eq!(after["workers"][0]["build"], env!("HEY_BOSS_BUILD_ID"));
     let stopped: i64 = db
         .query_row(
@@ -2016,7 +2039,7 @@ fn rollout_replaces_busy_old_workers_and_verifies_the_replacement_without_restar
         .unwrap();
     assert_eq!(
         stopped, 1,
-        "Replacement must wait for the old attempt to stop"
+        "Reload must wait for the original attempt to finish"
     );
     assert_eq!(
         fs::read_to_string(f.root.join("saved-work.txt")).unwrap(),
