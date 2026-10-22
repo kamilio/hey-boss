@@ -132,7 +132,44 @@ pub(in crate::fleet::native) fn cached(ctx: &Context) -> Result<Value> {
         clock.tick,
         sample["journal_head"].as_i64().unwrap_or(0),
     );
-    Ok(classify(&sample, &exchange, &clock.boot, clock.tick))
+    let mut result = classify(&sample, &exchange, &clock.boot, clock.tick);
+    let mut failures = Vec::new();
+    // A failed route stays failed during retry backoff. Only a successful
+    // exchange clears it; the transport removes diagnostics for retired routes.
+    // This cached read must not depend on the database or configuration locks.
+    for entry in std::fs::read_dir(&ctx.state)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| {
+            (name.starts_with("sync-") || name.starts_with("peer-sync-")) && name.ends_with(".json")
+        }) else {
+            continue;
+        };
+        let route = ctx
+            .read_json(&ctx.state.join(name), Value::Null)
+            .unwrap_or(Value::Null);
+        if route["boot"] == clock.boot
+            && route["tick"]
+                .as_i64()
+                .is_some_and(|tick| tick <= clock.tick)
+            && route["state"] == "disconnected"
+            && let Some(error) = route["error"].as_str()
+        {
+            failures.push(format!(
+                "{}: {error}",
+                route["host"].as_str().unwrap_or("Peer")
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        failures.sort();
+        if let Some(error) = result["error"].as_str() {
+            failures.insert(0, error.to_owned());
+        }
+        result["state"] = json!("error");
+        result["message"] = json!(failures.join("\n"));
+    }
+    Ok(result)
 }
 
 fn aggregate(peers: &[Value], boot: &str, tick: i64, local_head: i64) -> Value {
@@ -202,7 +239,11 @@ pub(super) fn peer_exchanged(
     )
 }
 
-fn save(ctx: &Context, name: &str, mut value: Value) -> Result<()> {
+pub(super) fn save(
+    ctx: &Context,
+    name: impl AsRef<std::path::Path>,
+    mut value: Value,
+) -> Result<()> {
     let clock = Clock::read()?;
     value["boot"] = json!(clock.boot);
     value["tick"] = json!(clock.tick);
@@ -350,6 +391,74 @@ mod tests {
         };
         std::fs::write(ctx.state.join("distributed-health.json"), "{").unwrap();
         assert_eq!(cached(&ctx).unwrap()["state"], "unknown");
+    }
+    #[test]
+    fn transport_rejection_is_visible_until_recovery_even_with_a_healthy_peer() {
+        let root = crate::admin::Temporary::new().unwrap();
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.json"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "a".repeat(32),
+            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        ctx.atomic_json(
+            &ctx.home.join(".hey-boss/config.json"),
+            &json!({"ssh_hosts":["old-mac", "ready"]}),
+        )
+        .unwrap();
+        let failed_path = ctx
+            .state
+            .join(format!("sync-{}.json", hey_boss_sync::digest(b"old-mac")));
+        let ready_path = ctx
+            .state
+            .join(format!("sync-{}.json", hey_boss_sync::digest(b"ready")));
+        save(&ctx, "distributed-health.json", sample()).unwrap();
+        save(
+            &ctx,
+            "distributed-peers/ready.json",
+            json!({"peer":"ready","incoming_drained":true,"outgoing_pending":0,"journal_head":7}),
+        )
+        .unwrap();
+        save(
+            &ctx,
+            &failed_path,
+            json!({"host":"old-mac","state":"disconnected","error":"Incompatible sync protocol"}),
+        )
+        .unwrap();
+        save(
+            &ctx,
+            &ready_path,
+            json!({"host":"ready","state":"connected"}),
+        )
+        .unwrap();
+        let failed = cached(&ctx).unwrap();
+        assert_eq!(failed["state"], "error");
+        assert!(
+            failed["message"]
+                .as_str()
+                .unwrap()
+                .contains("old-mac: Incompatible sync protocol")
+        );
+        let mut retrying = ctx.read_json(&failed_path, Value::Null).unwrap();
+        retrying["tick"] = json!(0);
+        ctx.atomic_json(&failed_path, &retrying).unwrap();
+        assert_eq!(
+            cached(&ctx).unwrap()["state"],
+            "error",
+            "Retry backoff cannot erase the rejection"
+        );
+        save(
+            &ctx,
+            &failed_path,
+            json!({"host":"old-mac","state":"connected"}),
+        )
+        .unwrap();
+        assert_eq!(cached(&ctx).unwrap()["state"], "healthy");
+        ctx.atomic_json(&failed_path, &json!({"boot":"previous-boot","tick":0,"host":"old-mac","state":"disconnected","error":"old failure"})).unwrap();
+        assert_eq!(cached(&ctx).unwrap()["state"], "healthy");
     }
     #[test]
     fn heartbeat_age_and_incomplete_samples_fail_closed() {

@@ -156,6 +156,7 @@ console.log('Worker-independent job conversation liveness checks passed');
 const {syncProblem}=require('../src/issues/web/fleet.js');
 const connectedSync={state:'connected',heartbeat:now/1000,sync_observed_at:now/1000,sync:{state:'healthy',message:'Applied'}};
 assert.equal(syncProblem(connectedSync,now),null);
+assert.match(syncProblem({...connectedSync,sync:{state:'error',outgoing_pending:9000,message:'old-mac: Incompatible sync protocol'}},now),/old-mac: Incompatible sync protocol/,'A connected control channel must not hide rejected data sync');
 assert.match(syncProblem({...connectedSync,sync:{state:'shadow',message:'Migration inactive'}},now),/Migration inactive/);
 assert.match(syncProblem({...connectedSync,sync:undefined},now),/not verified/);
 assert.match(syncProblem({...connectedSync,sync_observed_at:now/1000-31},now),/not verified/);

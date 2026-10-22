@@ -380,6 +380,10 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
     let script = format!(
         "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH\"; exec hey-boss fleet sync --continuous --controller {controller}"
     );
+    // Keep remote rejection details without letting inherited stderr handles
+    // block shutdown or unbounded output grow memory.
+    let (mut errors, error_writer) = std::os::unix::net::UnixStream::pair()?;
+    errors.set_nonblocking(true)?;
     let mut child = command
         .args([
             "-T",
@@ -400,7 +404,7 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
         .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(std::os::fd::OwnedFd::from(error_writer)))
         .spawn()?;
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut writer = child.stdin.take().unwrap();
@@ -411,8 +415,24 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
         let pid = child.id();
         let progress = &progress;
         let finished = &finished;
-        scope.spawn(move || {
-            while !finished.load(Ordering::Acquire) {
+        let watchdog = scope.spawn(move || {
+            let mut detail = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                for _ in 0..16 {
+                    match errors.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            detail.extend_from_slice(&buffer[..count]);
+                            if detail.len() > 8192 {
+                                detail.drain(..detail.len() - 8192);
+                            }
+                        }
+                    }
+                }
+                if finished.load(Ordering::Acquire) {
+                    break;
+                }
                 let timed_out = progress.lock().unwrap().is_some_and(|start| {
                     start.elapsed() >= Timing::from_exchange(Duration::ZERO).lease * 2
                 });
@@ -424,6 +444,7 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
                 }
                 std::thread::sleep(SYNC_INTERVAL / 8);
             }
+            detail
         });
         let result = (|| -> Result<()> {
             while !cancelled(ctx, stop) {
@@ -439,7 +460,11 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
                 )?;
                 health::peer_exchanged(ctx, &result)?;
                 application.received(result.presence, result.presence_age.max(start.elapsed()));
-                ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"connected","at":super::super::context::now(),"exchange_ms":start.elapsed().as_millis()}))?;
+                health::save(
+                    ctx,
+                    &target.diagnostic,
+                    json!({"host":target.host,"state":"connected","exchange_ms":start.elapsed().as_millis()}),
+                )?;
                 *progress.lock().unwrap() = None;
                 // Drain actual changes immediately. Idle peers send one tiny
                 // exchange per interval over the existing authenticated pipe.
@@ -450,7 +475,15 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
             Ok(())
         })();
         finished.store(true, Ordering::Release);
-        result
+        let detail = watchdog.join().unwrap_or_default();
+        result.map_err(|error| {
+            let detail = String::from_utf8_lossy(&detail);
+            if detail.trim().is_empty() {
+                error
+            } else {
+                replica::invalid(&format!("{error}: {}", detail.trim()))
+            }
+        })
     });
     drop(writer);
     drop(reader);
@@ -502,6 +535,20 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                         );
                     }
                 }
+                // Retired routes must not leave permanent failure notices.
+                for entry in std::fs::read_dir(&ctx.state)? {
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    if name.to_str().is_some_and(|name| {
+                        (name.starts_with("sync-") || name.starts_with("peer-sync-"))
+                            && name.ends_with(".json")
+                    }) && !targets
+                        .values()
+                        .any(|target| target.diagnostic == entry.path())
+                    {
+                        std::fs::remove_file(entry.path())?;
+                    }
+                }
                 // Stop changed routes first, and reap them before replacing a connection.
                 // A slow peer's shutdown never blocks discovery of healthy peers.
                 let mut finished = Vec::new();
@@ -536,7 +583,11 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                                 {
                                     backoff = SYNC_INTERVAL;
                                 }
-                                let _=ctx.atomic_json(&target.diagnostic,&json!({"host":target.host,"state":"disconnected","error":error.to_string(),"at":super::super::context::now()}));
+                                let _ = health::save(
+                                    &ctx,
+                                    &target.diagnostic,
+                                    json!({"host":target.host,"state":"disconnected","error":error.to_string()}),
+                                );
                                 wait(&ctx, &stopping, backoff);
                                 backoff =
                                     (backoff * 2).min(Timing::from_exchange(Duration::ZERO).lease);
@@ -566,6 +617,60 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn remote_protocol_rejection_survives_eof_and_inherited_stderr() {
+        let root = crate::admin::Temporary::new().unwrap();
+        if std::env::var_os("HEY_BOSS_TEST_SYNC_REJECTION").is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let ssh = root.0.join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\nawk 'BEGIN { for(i=0;i<20000;i++) printf \"x\"; print \"\" }' >&2\necho 'Incompatible sync protocol: version 2' >&2\nsleep 3 >/dev/null &\nexit 1\n").unwrap();
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "fleet::native::distributed::transport::tests::remote_protocol_rejection_survives_eof_and_inherited_stderr", "--nocapture"])
+                .env("HEY_BOSS_TEST_SYNC_REJECTION", "1")
+                .env("PATH", format!("{}:{}", root.0.display(), std::env::var("PATH").unwrap()))
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let ctx = Context {
+            home: root.0.clone(),
+            state: root.0.clone(),
+            desired: root.0.join("fleet.yaml"),
+            path: root.0.join("issues.db"),
+            binary: std::env::current_exe().unwrap(),
+            node: "a".repeat(32),
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let db = crate::issues::Store::open(&ctx.path)
+            .unwrap()
+            .into_database();
+        install(&db, &ctx.node).unwrap();
+        drop(db);
+        let target = Target {
+            host: "test-peer".into(),
+            peer: None,
+            diagnostic: root.0.join("sync-test.json"),
+        };
+        let started = Instant::now();
+        let error = connected(&ctx, &target, &AtomicBool::new(false))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Incompatible sync protocol: version 2"),
+            "{error}"
+        );
+        assert!(error.len() < 9000, "SSH diagnostics must remain bounded");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "A descendant retaining stderr stalled recovery"
+        );
+    }
     #[test]
     fn application_recovers_after_writer_queue_timeout_without_reconnecting() {
         let root = crate::admin::Temporary::new().unwrap();
