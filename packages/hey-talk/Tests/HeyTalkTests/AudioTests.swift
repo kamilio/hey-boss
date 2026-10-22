@@ -4,6 +4,77 @@ import TalkCore
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
+    func testSilentDefaultRetriesOnceThenUsesFallbackUntilTheDefaultChanges() throws {
+        let sound = try firstBuffer(), silence = try firstBuffer(value: 0)
+        let rig = try CaptureRig(buffer: sound)
+        let capture = rig.capture(fallback: { _ in CaptureRig.builtIn })
+        defer { capture.cancel() }
+        start(capture)
+        let original = rig.streams[0]
+        rig.advance(3.1); original.receive(silence); capture.refresh()
+        eventually { original.stopped }
+        rig.advance(0.5); capture.refresh()
+        eventually { rig.streams.count == 2 && capture.isReady }
+        XCTAssertEqual(capture.activeInput, CaptureRig.headset, "Retry the selected route before falling back")
+        rig.advance(3.1); rig.streams[1].receive(silence); capture.refresh()
+        eventually { rig.streams[1].stopped }
+        rig.advance(0.5); capture.refresh()
+        eventually { capture.activeInput == CaptureRig.builtIn && capture.isReady }
+        XCTAssertEqual(capture.sampleCount, 800, "Recovery must preserve audio from before the route failed")
+        original.receive(sound)
+        XCTAssertEqual(capture.sampleCount, 800, "Old route callbacks must stay rejected")
+        rig.advance(0.5); rig.streams[2].receive(sound); capture.refresh()
+        let stopped = expectation(description: "Fallback remains selected")
+        capture.stop { result in
+            XCTAssertEqual(try? result.get().count, 960)
+            stopped.fulfill()
+        }
+        wait(for: [stopped], timeout: 2)
+        XCTAssertEqual(rig.streams.count, 3, "Do not oscillate back to the silent default")
+        start(capture)
+        XCTAssertEqual(capture.activeInput, CaptureRig.headset, "Fallback must not overwrite the next recording's preference")
+    }
+
+    func testSilentStartupCanBecomeReadyOnFallback() throws {
+        let rig = try CaptureRig(buffer: firstBuffer(value: 0))
+        let capture = rig.capture(fallback: { _ in CaptureRig.builtIn })
+        defer { capture.cancel() }
+        let started = expectation(description: "Fallback delivers the first sound")
+        capture.start(uid: nil) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            started.fulfill()
+        }
+        eventually { rig.streams.count == 1 }
+        for index in 0..<2 {
+            rig.advance(3.1); capture.refresh()
+            eventually { rig.streams[index].stopped }
+            rig.advance(0.5); capture.refresh()
+            eventually { rig.streams.count == index + 2 }
+        }
+        XCTAssertEqual(capture.activeInput, CaptureRig.builtIn)
+        rig.streams[2].receive(try firstBuffer())
+        wait(for: [started], timeout: 2)
+        XCTAssertTrue(capture.isReady)
+        rig.input = CaptureRig.headsetReplacement
+        capture.refresh()
+        eventually { capture.activeInput == CaptureRig.headsetReplacement }
+        XCTAssertTrue(rig.streams[2].stopped, "A deliberate default change still takes precedence")
+    }
+
+    func testExplicitMicrophoneNeverUsesFallback() throws {
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture(fallback: { _ in XCTFail("Explicit input must stay selected"); return CaptureRig.builtIn })
+        defer { capture.cancel() }
+        start(capture, uid: CaptureRig.headset.uid)
+        for index in 0..<2 {
+            rig.advance(3.1); capture.refresh()
+            eventually { rig.streams[index].stopped }
+            rig.advance(0.5); capture.refresh()
+            eventually { rig.streams.count == index + 2 && capture.isReady }
+        }
+        XCTAssertEqual(capture.activeInput, CaptureRig.headset)
+    }
+
     func testStoppedMicrophoneIsReusedForFiveMinutesWithoutKeepingIdleAudio() throws {
         let rig = try CaptureRig(buffer: firstBuffer()), idle = try firstBuffer(value: 0.75)
         let capture = rig.capture()
@@ -403,6 +474,7 @@ private final class TestMicrophoneStream: MicrophoneStream {
 private final class CaptureRig {
     static let headset = InputDevice(id: 10_001, uid: "test-headset", name: "Test headset")
     static let builtIn = InputDevice(id: 10_002, uid: "test-built-in", name: "Test built-in")
+    static let headsetReplacement = InputDevice(id: 10_003, uid: "test-replacement", name: "Replacement headset")
     private let lock = NSLock()
     private let buffer: CMSampleBuffer
     private var selected: InputDevice? = headset
@@ -415,12 +487,12 @@ private final class CaptureRig {
     var streams: [TestMicrophoneStream] { lock.lock(); defer { lock.unlock() }; return opened }
     init(buffer: CMSampleBuffer) throws { self.buffer = buffer }
     func advance(_ interval: TimeInterval) { lock.lock(); time += interval; lock.unlock() }
-    func capture() -> AudioCapture {
+    func capture(fallback: @escaping (InputDevice) -> InputDevice? = { _ in nil }) -> AudioCapture {
         AudioCapture(resolveInput: { uid in
             if let uid, uid == Self.headset.uid { return Self.headset }
             guard let device = self.input else { throw TalkError("No system input") }
             return device
-        }, makeStream: { _, _, receive, interrupted in
+        }, fallbackInput: fallback, makeStream: { _, _, receive, interrupted in
             let stream = TestMicrophoneStream(buffer: self.buffer, receive: receive, interrupted: interrupted)
             self.lock.lock(); self.opened.append(stream); self.lock.unlock()
             return stream

@@ -69,16 +69,15 @@ final class Overlay {
     private let pillContent = ClickSurface()
     private let identity = IdentityView()
     private let wave = WaveView()
+    private let connecting = NSTextField(labelWithString: "Connecting…")
+    private var waitingForAudio = false
     private let autoHalo = CAShapeLayer()
     private var autoMode = false
-    private let cancelGlass: NSView
-    private let cancelButton = NSButton()
     private let glow = CAGradientLayer()
     private let depth = CAShapeLayer()
     private let halo = CAShapeLayer()
     private var timer: Timer?
     private var phase: Phase = .idle
-    private var hovering = false
     private var expanded = false
     private var enabled = true
     private var notice: OverlayNotice?
@@ -86,7 +85,6 @@ final class Overlay {
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
-    var onCancel: (() -> Void)?
     var onOpenAccessibility: (() -> Void)?
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
@@ -136,16 +134,13 @@ final class Overlay {
             // preserves that backdrop instead of covering it with a frosted fill.
             let glass = NSGlassEffectView(); glass.style = .clear; glass.cornerRadius = 18
             glass.contentView = pillContent; pill = glass
-            let cancel = NSGlassEffectView(); cancel.style = .clear; cancel.cornerRadius = 14
-            let face = GlassFace(); face.addSubview(cancelButton)
-            cancel.contentView = face; cancelGlass = cancel
             let container = NSGlassEffectContainerView(frame: root.bounds)
             container.autoresizingMask = [.width, .height]
             container.spacing = 8
             let content = NSView(frame: root.bounds)
             content.autoresizingMask = [.width, .height]
             container.contentView = content; root.addSubview(container)
-            content.addSubview(pill); content.addSubview(cancelGlass)
+            content.addSubview(pill)
         } else {
             func glass(_ content: NSView, radius: CGFloat) -> NSView {
                 let view = NSVisualEffectView(); view.material = .popover
@@ -154,8 +149,8 @@ final class Overlay {
                 content.autoresizingMask = [.width, .height]; view.addSubview(content)
                 return view
             }
-            pill = glass(pillContent, radius: 18); cancelGlass = glass(cancelButton, radius: 14)
-            root.addSubview(pill); root.addSubview(cancelGlass)
+            pill = glass(pillContent, radius: 18)
+            root.addSubview(pill)
         }
         pill.wantsLayer = true
         // Keep the live waveform inside the capsule while it expands.
@@ -163,6 +158,10 @@ final class Overlay {
         wave.isHidden = true
         wave.identifier = NSUserInterfaceItemIdentifier("recording-waveform")
         pillContent.addSubview(identity); pillContent.addSubview(wave)
+        connecting.font = .systemFont(ofSize: 12, weight: .medium)
+        connecting.textColor = .secondaryLabelColor
+        connecting.isHidden = true
+        pillContent.addSubview(connecting)
         noticeRecordButton.title = ""
         noticeRecordButton.isBordered = false
         noticeRecordButton.setAccessibilityLabel("Start dictation")
@@ -175,13 +174,7 @@ final class Overlay {
         updateModeAppearance()
         pillContent.onClick = { [weak self] in self?.onToggle?() }
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
-        pillContent.onHover = { [weak self] hover in self?.hovering = hover; self?.pillContent.emphasized = hover; self?.showCancel() }
-        cancelButton.isBordered = false
-        cancelButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Cancel dictation")
-        cancelButton.imageScaling = .scaleNone
-        cancelButton.target = self; cancelButton.action = #selector(cancel)
-        cancelButton.toolTip = "Cancel · Esc"
-        cancelGlass.alphaValue = 0; cancelGlass.isHidden = true
+        pillContent.onHover = { [weak self] hover in self?.pillContent.emphasized = hover }
         layout(animated: false)
         reposition()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.reposition() }
@@ -199,17 +192,22 @@ final class Overlay {
         updateTimer()
     }
     func update(_ next: Phase) {
+        update(next, waitingForAudio: false)
+    }
+    private func update(_ next: Phase, waitingForAudio: Bool) {
         if !modeNotice { clearNotice() }
+        self.waitingForAudio = waitingForAudio
+        connecting.isHidden = !waitingForAudio
         phase = next; expanded = next == .recording
         updateModeAppearance()
         wave.heights = Array(repeating: 4, count: Waveform.count)
         wave.isHidden = next != .recording
-        wave.alphaValue = 1
+        wave.alphaValue = waitingForAudio ? 0.35 : 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
         glow.isHidden = next != .processing; halo.isHidden = next != .processing
         updateAccessibilityLabel()
-        layout(animated: true); showCancel(); updateTimer()
+        layout(animated: true); updateTimer()
         if next == .processing {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 let shimmer = CABasicAnimation(keyPath: "opacity")
@@ -224,8 +222,7 @@ final class Overlay {
         }
     }
     func preparing() {
-        update(.processing)
-        pillContent.setAccessibilityLabel("Opening microphone")
+        update(.recording, waitingForAudio: true)
     }
     func setAutoMode(_ enabled: Bool) {
         autoMode = enabled
@@ -258,13 +255,13 @@ final class Overlay {
             : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
     }
     private func updateAccessibilityLabel() {
-        let action = phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
+        let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
         pillContent.setAccessibilityLabel(autoMode ? "Auto mode · \(action)" : action)
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
-        let size = notice.map { NSSize(width: $0.frame.width, height: $0.frame.height + 36) }
-            ?? (expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
+        let size = notice.map { NSSize(width: max($0.frame.width, waitingForAudio ? 200 : 104), height: $0.frame.height + 36) }
+            ?? (waitingForAudio ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
         resizePanel(for: size)
         let width = size.width, height = size.height
         let center = root.bounds.midX
@@ -296,16 +293,15 @@ final class Overlay {
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
-            let contentOrigin = (width - TalkDesign.recordingSize.width) / 2
+            let contentOrigin = (width - (waitingForAudio ? 200 : TalkDesign.recordingSize.width)) / 2
             identity.animator().frame = NSRect(x: expanded ? contentOrigin + 9 : (width - 22) / 2, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
-            cancelGlass.animator().frame = NSRect(x: frame.maxX + 8, y: frame.midY - 14, width: 28, height: 28)
+            connecting.frame = NSRect(x: contentOrigin + 102, y: 10, width: 90, height: 17)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
-        notice?.frame.origin = NSPoint(x: 0, y: 36)
+        if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
-        cancelButton.frame = NSRect(x: 0, y: 0, width: 28, height: 28)
     }
     private func resizePanel(for size: NSSize) {
         let windowSize = NSSize(width: max(200, size.width + 96), height: size.height + 48)
@@ -319,7 +315,6 @@ final class Overlay {
         }
         panel.setFrame(frame, display: false)
         pill.frame.origin.x += delta
-        cancelGlass.frame.origin.x += delta
         var transform = CGAffineTransform(translationX: delta, y: 0)
         depth.removeAllAnimations()
         depth.path = depth.path?.copy(using: &transform)
@@ -327,22 +322,9 @@ final class Overlay {
         autoHalo.removeAllAnimations()
         autoHalo.path = autoHalo.path?.copy(using: &transform)
     }
-    private func showCancel() {
-        let visible = hovering && (phase == .recording || phase == .processing)
-        if visible { cancelGlass.isHidden = false }
-        // Keep the hit target alive while the pointer crosses the 8pt gap.
-        if !visible {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
-                guard let self, !self.hovering else { return }
-                let local = self.panel.convertPoint(fromScreen: NSEvent.mouseLocation)
-                if self.cancelGlass.frame.insetBy(dx: -8, dy: -8).contains(local) { return }
-                self.cancelGlass.alphaValue = 0; self.cancelGlass.isHidden = true
-            }
-        } else { cancelGlass.alphaValue = 1 }
-    }
     private func updateTimer() {
         timer?.invalidate(); timer = nil
-        guard phase == .recording, enabled else { return }
+        guard phase == .recording, !waitingForAudio, enabled else { return }
         let ticker = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.wave.heights.removeFirst()
@@ -351,7 +333,6 @@ final class Overlay {
         ticker.tolerance = 0.01
         RunLoop.main.add(ticker, forMode: .common); timer = ticker
     }
-    @objc private func cancel() { onCancel?() }
     @objc private func recordFromNotice() { onToggle?() }
     private func clearNotice() {
         noticeDismiss?.cancel(); noticeDismiss = nil
