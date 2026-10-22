@@ -4788,6 +4788,84 @@ final class SubscriptionQuotaController: NSObject {
     }
 }
 
+final class FleetSyncController {
+    let content = QuotaCanvas(frame: NSRect(x: 0, y: 0, width: 340, height: 104))
+    let title = NSTextField(labelWithString: "Checking sync…")
+    let detail = NSTextField(labelWithString: "")
+    let exchanged = NSTextField(labelWithString: "")
+    var timer: Timer?
+    var loading = false
+    var cli: String?
+    init() {
+        let heading = NSTextField(labelWithString: "This Mac · Sync")
+        heading.font = .systemFont(ofSize: 12, weight: .semibold); heading.textColor = .secondaryLabelColor
+        for (label, y) in [(heading, 8.0), (title, 30.0), (detail, 52.0), (exchanged, 73.0)] {
+            label.frame = NSRect(x: 18, y: y, width: 306, height: 19)
+            label.lineBreakMode = .byTruncatingTail
+            content.addSubview(label)
+        }
+        title.font = .systemFont(ofSize: 13, weight: .medium)
+        for label in [detail, exchanged] { label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor }
+    }
+    func open(cli: String?) {
+        self.cli = cli
+        refresh()
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+    func close() { timer?.invalidate(); timer = nil }
+    deinit { timer?.invalidate() }
+    func update(_ value: [String: Any]?) {
+        let health = value?["health"] as? [String: Any] ?? [:]
+        let state = health["state"] as? String ?? "unknown"
+        switch state {
+        case "healthy": title.stringValue = "Up to date"; title.textColor = .systemTeal
+        case "catching_up": title.stringValue = "Syncing…"; title.textColor = .labelColor
+        case "disconnected": title.stringValue = "Offline · changes kept on this Mac"; title.textColor = .secondaryLabelColor
+        case "error", "rejected", "shadow": title.stringValue = "Sync needs attention"; title.textColor = .systemOrange
+        case "waiting": title.stringValue = "Sync waiting · retrying automatically"; title.textColor = .secondaryLabelColor
+        default: title.stringValue = "Sync status unavailable"; title.textColor = .secondaryLabelColor
+        }
+        let formatter = NumberFormatter(); formatter.numberStyle = .decimal; formatter.locale = Locale(identifier: "en_US")
+        let counts = [("outgoing_pending", "to send"), ("pending_projection", "to apply"), ("pending_local", "to prepare"), ("pending_archives", "archives"), ("conflicts", "rejected")].compactMap { key, label -> String? in
+            guard let count = health[key] as? NSNumber, count.int64Value > 0 else { return nil }
+            return "\(formatter.string(from: count) ?? count.stringValue) \(label)"
+        }
+        detail.stringValue = counts.isEmpty ? (health["message"] as? String ?? "Open the menu to check again") : counts.joined(separator: " · ")
+        detail.toolTip = [detail.stringValue, health["message"] as? String].compactMap { $0 }.joined(separator: "\n")
+        if let seconds = health["last_exchange"] as? Double, seconds.isFinite {
+            let date = Date(timeIntervalSince1970: seconds)
+            exchanged.stringValue = "Last exchange \(DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .medium))"
+        } else { exchanged.stringValue = "No completed exchange reported" }
+        exchanged.toolTip = exchanged.stringValue
+    }
+    func refresh() {
+        guard !loading else { return }
+        let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path].compactMap { $0 }
+        guard let executable = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { update(nil); return }
+        loading = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let value: [String: Any]? = try? {
+                let process = Process(); process.executableURL = URL(fileURLWithPath: executable)
+                process.arguments = ["fleet", "sync-status"]
+                process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+                let pipe = Pipe(); process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+                defer { try? pipe.fileHandleForReading.close() }
+                try process.run()
+                let timeout = DispatchWorkItem { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8, execute: timeout)
+                defer { timeout.cancel(); if process.isRunning { process.terminate() } }
+                let bytes = try readScannerOutput(pipe.fileHandleForReading); process.waitUntilExit()
+                guard process.terminationStatus == 0, bytes.count <= 1024 * 1024 else { throw StorageError(description: "Sync status unavailable") }
+                return try JSONSerialization.jsonObject(with: bytes) as? [String: Any]
+            }()
+            onMain { self?.loading = false; self?.update(value) }
+        }
+    }
+}
+
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate, NSMenuDelegate {
     lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
     lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
@@ -4801,8 +4879,9 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
     let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "o")
     let subscriptionQuota: SubscriptionQuotaController
-    func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli) }
-    func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close() }
+    let fleetSync = FleetSyncController()
+    func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli); fleetSync.open(cli: cli) }
+    func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close(); fleetSync.close() }
     let statusMenu = NSMenu()
     var inboxCount = 0
     func updateInboxCount(_ count: Int) {
@@ -4997,6 +5076,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         talkItem.target = self
         talkItem.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         menu.addItem(talkItem)
+        menu.addItem(.separator())
+        let syncItem = NSMenuItem()
+        syncItem.view = fleetSync.content
+        menu.addItem(syncItem)
         menu.addItem(.separator())
         let quotaItem = NSMenuItem()
         quotaItem.view = subscriptionQuota.content

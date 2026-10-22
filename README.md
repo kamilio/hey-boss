@@ -21,6 +21,9 @@ and local services keep it running without the laptop. Removing `sync_address`
 revokes the managed access when the affected machines next receive configuration.
 Initial distributed activation must still finish before relying on offline work.
 `hey-boss fleet sync-status` includes direct peer connection status.
+The Mac menu's **This Mac · Sync** section refreshes every two seconds while
+open, showing changes left to send or apply and the last completed exchange.
+**Up to date** requires fresh sync health; errors and unavailable peers remain visible.
 
 `hey-boss utils gcn` runs `git commit --no-verify`; `hey-boss utils gpn` runs `git push --no-verify`, forwarding all further arguments unchanged. Both always run locally in the caller's checkout, without fleet lookup or a daemon, including on companion machines.
 Examples: `hey-boss utils gcn -m 'Fix typo'`; `hey-boss utils gpn origin main`.
