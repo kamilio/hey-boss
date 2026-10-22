@@ -1,4 +1,4 @@
-// Run against an isolated Attachment Studio fixture with issues, nodes and artifacts.
+// Run against an isolated Attachment Studio fixture with issues and artifacts.
 // playwright-cli -s=issue57 run-code --filename=tools/attachments_browser_checks.js
 async page => {
   const origin=await page.evaluate(()=>location.origin),project='named:Attachment Studio';
@@ -10,10 +10,9 @@ async page => {
     const boot=await (await fetch('/api/bootstrap')).json();
     const call=async operation=>(await (await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':boot.csrf},body:JSON.stringify({project,operation})})).json());
     const docs=await call({action:'artifact',operation:{command:'list',archived:false,offset:0}});
-    const graph=await call({action:'mindmap',operation:{command:'show'}});
-    return {artifact:docs.artifacts[0].id,node:graph.nodes.find(n=>n.alias==='resources').id};
+    return {artifact:docs.artifacts[0].id};
   },project);
-  const routes={issue:`/#project=${encodeURIComponent(project)}&issue=1`,artifact:`/artifacts#project=${encodeURIComponent(project)}&artifact=${fixture.artifact}`,node:`/mm#project=${encodeURIComponent(project)}&node=${fixture.node}`};
+  const routes={issue:`/#project=${encodeURIComponent(project)}&issue=1`,artifact:`/artifacts#project=${encodeURIComponent(project)}&artifact=${fixture.artifact}`};
   const panel=()=>page.locator('.file-attachments:visible');
   const wait=async()=>{await panel().waitFor();await page.waitForFunction(()=>{const root=[...document.querySelectorAll('.file-attachments')].find(r=>r.getBoundingClientRect().height);return root&&!root.querySelector('.attachment-status').textContent.includes('Loading');});if(await panel().locator('.attachment-error:visible').count())throw Error(await panel().locator('.attachment-error').textContent());};
   for(const theme of ['light','dark']) {
@@ -24,15 +23,10 @@ async page => {
         await page.goto(origin+route);await wait();
         if(await panel().locator('li').count()<3)throw Error('Fixture files missing on '+kind);
         await panel().scrollIntoViewIfNeeded();
-        if(kind==='node') {
-          const info=await panel().locator('.attachment-info').first().boundingBox();
-          if(info.width<120)throw Error('Unreadable filename column in inspector');
-          await page.locator('#map-details').evaluate(el=>{const file=el.querySelector('.file-attachments');el.scrollTop+=file.getBoundingClientRect().top-el.getBoundingClientRect().top;});
-        }
         const bad=await page.evaluate(()=>({page:document.documentElement.scrollWidth>innerWidth+1,files:[...document.querySelectorAll('.attachment-list li')].some(e=>e.scrollWidth>e.clientWidth+1)}));
         if(bad.page||bad.files)throw Error(`Overflow: ${theme}-${width}-${kind} ${JSON.stringify(bad)}`);
         const path=`output/playwright/issue57/${theme}-${width}-${kind}.png`;
-        await page.screenshot({path,fullPage:kind!=='node'});screenshots.push(path);checks.push(`${theme}-${width}-${kind}`);
+        await page.screenshot({path,fullPage:true});screenshots.push(path);checks.push(`${theme}-${width}-${kind}`);
       }
     }
   }

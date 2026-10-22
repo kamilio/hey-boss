@@ -101,7 +101,6 @@ function projectSettingsDraft() {
     prs_enabled: $("#project-prs").checked,
     drafts_enabled: $("#project-drafts").checked,
     artifacts_enabled: $("#project-artifacts").checked,
-    mindmaps_enabled: $("#project-mindmaps").checked,
   };
 }
 function projectSettingsChanged() {
@@ -167,7 +166,7 @@ $("#project-settings-trigger").onclick = async () => {
       input.value = value.prompt_overrides[key] ?? "";
       input.placeholder = projectPromptDefaults[key];
     }
-    for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
+    for (const resource of ["drafts", "artifacts"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
     projectSettingsOriginal = projectSettingsDraft();
     setProjectSettingsDisabled(false);
     projectSettingsChanged();
@@ -291,7 +290,7 @@ for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", 
   });
 }
 
-for (const resource of ["drafts", "artifacts", "mindmaps"]) $("#project-" + resource).onchange = projectSettingsChanged;
+for (const resource of ["drafts", "artifacts"]) $("#project-" + resource).onchange = projectSettingsChanged;
 $("#project-paused").onchange = projectSettingsChanged;
 $("#project-pause-reason").oninput = projectSettingsChanged;
 for (const field of ["model", "reasoning", "permissions"]) $("#project-worker-" + field).addEventListener("input", projectSettingsChanged);

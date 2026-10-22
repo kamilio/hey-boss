@@ -57,7 +57,6 @@ pub struct Config {
     pub actor: Option<String>,
     pub host: Option<String>,
     pub json: bool,
-    pub mindmap: bool,
 }
 enum Backend {
     Local(std::path::PathBuf),
@@ -256,7 +255,7 @@ pub fn serve(config: Config) -> Result<()> {
     let base_url = local_url
         .map(str::to_owned)
         .unwrap_or_else(|| format!("http://{}/", app.authority));
-    let url = format!("{base_url}{}", if config.mindmap { "mm" } else { "" });
+    let url = base_url;
     let lan_url = config
         .allow_public_ip
         .and_then(|_| lan::current())
@@ -275,10 +274,7 @@ pub fn serve(config: Config) -> Result<()> {
             json!({"ok":true,"url":url,"local_url":local_url,"local_http_error":local_http_error,"mobile_url":app.mobile_origin,"lan_url":lan_url,"project":app.project,"actor":app.actor.id})
         );
     } else {
-        println!(
-            "Hey Boss {} · {url}\nPress Ctrl+C to stop.",
-            if config.mindmap { "Mindmaps" } else { "Issues" }
-        );
+        println!("Hey Boss Issues · {url}\nPress Ctrl+C to stop.");
         if let Some(origin) = &app.mobile_origin {
             println!("Mobile · {origin}/ (requires private Tailscale Serve)");
         }
@@ -792,19 +788,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/css; charset=utf-8",
                 include_bytes!("web/artifacts.css"),
             )),
-            "/mm" => Some((
-                "text/html; charset=utf-8",
-                include_bytes!("web/mindmap.html"),
-            )),
-            "/mindmap.css" => Some(("text/css; charset=utf-8", include_bytes!("web/mindmap.css"))),
-            "/mindmap.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_bytes!("web/mindmap.js"),
-            )),
-            "/mindmap-map.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_bytes!("web/mindmap-map.js"),
-            )),
             "/jobs" => Some(("text/html; charset=utf-8", include_bytes!("web/jobs.html"))),
             "/jobs.js" => Some((
                 "text/javascript; charset=utf-8",
@@ -917,7 +900,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             if matches!(
                 path.as_str(),
                 "/" | "/issues"
-                    | "/mm"
                     | "/workers"
                     | "/agents"
                     | "/agents/session"
@@ -972,14 +954,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                         },
                     )
                     .replace(
-                        "<!--mindmap-current-->",
-                        if path == "/mm" {
-                            " aria-current=\"page\""
-                        } else {
-                            ""
-                        },
-                    )
-                    .replace(
                         "<!--workers-current-->",
                         if matches!(path.as_str(), "/workers" | "/agents") {
                             " aria-current=\"page\""
@@ -1011,19 +985,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                             ""
                         },
                     );
-                let mut html = std::str::from_utf8(data)
+                let html = std::str::from_utf8(data)
                     .unwrap()
                     .replace("<!--app-shell-->", &shell);
-                if path == "/mm"
-                    && request.url().split_once('?').is_some_and(|(_, query)| {
-                        query.split('&').any(|parameter| parameter == "focus=1")
-                    })
-                {
-                    html = html.replace(
-                        "<html lang=\"en\">",
-                        "<html lang=\"en\" class=\"mindmap-focus\">",
-                    );
-                }
                 return Ok((
                     200,
                     kind,
@@ -1103,7 +1067,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet/takeover",
             "/api/fleet/steer",
             "/api/fleet/configuration",
-            "/api/mm",
             "/api/admin/preview",
             "/api/skills",
         ]
@@ -1241,32 +1204,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "Issue status updates use the terminal workflow",
             ));
         }
-        if let Operation::Mindmap { operation } = &action.operation {
-            if operation.writes() {
-                return Err(Error::new(
-                    "forbidden",
-                    "Mindmaps are read-only on the web; author with hey-boss mm",
-                ));
-            }
-        } else if path == "/api/mm" {
-            return Err(Error::new(
-                "forbidden",
-                "The mindmap viewer only accepts mindmap reads",
-            ));
-        }
-
         let mut result = app.execute_at(
             Some(action.project),
             action.operation,
             action.request_id,
             action.host.as_deref(),
         )?;
-        if crate::mindmap::needs_inbox(&result) {
-            crate::mindmap::enrich_notifications(
-                &mut result,
-                crate::notices::execute(&crate::notices::Action::List),
-            )?;
-        }
         if let Some(issue) = result.get_mut("issue")
             && let Some(body) = issue["body"].as_str()
         {

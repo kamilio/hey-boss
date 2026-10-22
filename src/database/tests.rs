@@ -20,7 +20,6 @@ fn socket_access_denials_keep_their_kind_and_recovery_guidance() {
                 .message
                 .contains("\nCompact reads: hey-boss issue list --limit 20")
         );
-        assert!(domain.message.contains("hey-boss mm show --bodies none"));
     }
     for errno in [libc::ENOENT, libc::ECONNREFUSED] {
         let source = std::io::Error::from_raw_os_error(errno);

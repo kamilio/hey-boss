@@ -8,7 +8,6 @@ fn empty_git_metadata(db: &Connection, id: &str) -> Result<bool> {
     Ok(!db.query_row(
         "SELECT EXISTS(SELECT 1 FROM issues WHERE project_id=?1)
         OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=?1)
-        OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=?1)
         OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1)
         OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=?1)",
         [id],
@@ -56,7 +55,7 @@ pub(super) fn reconcile_git_metadata(db: &Connection) -> Result<()> {
                 "SELECT p.id,p.name FROM projects p WHERE p.name=?1 COLLATE NOCASE ORDER BY
             (SELECT count(*) FROM issues i WHERE i.project_id=p.id AND i.deleted_at IS NULL) DESC,
             (SELECT count(*) FROM artifacts a WHERE a.project_id=p.id) DESC,
-            (SELECT count(*) FROM mindmap_nodes m WHERE m.project_id=p.id) DESC,p.created_at,p.id",
+            p.created_at,p.id",
             )?
             .query_map([name], |r| {
                 Ok(Project {
@@ -115,7 +114,7 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
             SELECT p.name,p.id,row_number() OVER (PARTITION BY p.name COLLATE NOCASE ORDER BY
                 (SELECT count(*) FROM issues i WHERE i.project_id=p.id AND i.deleted_at IS NULL) DESC,
                 (SELECT count(*) FROM artifacts a WHERE a.project_id=p.id) DESC,
-                (SELECT count(*) FROM mindmap_nodes m WHERE m.project_id=p.id) DESC,
+
                 p.created_at,p.id) AS rank FROM projects p) WHERE rank=1;
         INSERT OR IGNORE INTO project_name_collisions SELECT p.id,p.name,k.project_id,1 FROM projects p JOIN project_name_keys k ON k.name=p.name WHERE p.id<>k.project_id;
         CREATE TRIGGER IF NOT EXISTS project_name_guard BEFORE INSERT ON projects
@@ -201,7 +200,6 @@ pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<
         "SELECT selected.value FROM json_each(?1) selected WHERE
         EXISTS(SELECT 1 FROM issues WHERE project_id=selected.value)
         OR EXISTS(SELECT 1 FROM artifacts WHERE project_id=selected.value)
-        OR EXISTS(SELECT 1 FROM mindmap_nodes WHERE project_id=selected.value)
         OR EXISTS(SELECT 1 FROM project_settings WHERE project_id=selected.value)
         OR EXISTS(SELECT 1 FROM project_workers WHERE project_id=selected.value)
         OR selected.value IN (SELECT assigned.value FROM issue_workers w,json_each(w.config,'$.projects') assigned)",

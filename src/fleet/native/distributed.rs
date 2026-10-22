@@ -156,6 +156,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         activation::protect_role(db)?;
         capture::upgrade_retry_metadata(db)?;
         capture::upgrade_worker_execution(db)?;
+        capture::retire_mindmaps(db)?;
         crate::issues::worker_retry::migrate(db)?;
         return Ok(());
     }

@@ -87,7 +87,6 @@ fn target(
     db: &Connection,
     p: &Project,
     issue: Option<i64>,
-    node: Option<&str>,
     check: bool,
 ) -> Result<(String, String)> {
     if let Some(n) = issue {
@@ -96,23 +95,10 @@ fn target(
         }
         return Ok(("issue".into(), n.to_string()));
     }
-    let n = node.unwrap();
-    let id:Option<String>=db.query_row("SELECT id FROM mindmap_nodes WHERE project_id=?1 AND (id=?2 OR alias=?2 OR (kind='issue' AND 'issue:'||reference=?2)) LIMIT 1",params![p.id,n],|r|r.get(0)).optional()?;
-    if !check {
-        return Ok(("node".into(), id.unwrap_or_else(|| n.into())));
-    }
-    Ok((
-        "node".into(),
-        id.ok_or_else(|| Error::new("not_found", "Mindmap node not found in this project"))?,
-    ))
+    Err(Error::invalid("Specify an issue number"))
 }
-pub(super) fn links(
-    db: &Connection,
-    p: &Project,
-    issue: Option<i64>,
-    node: Option<&str>,
-) -> Result<Value> {
-    let (kind, target) = target(db, p, issue, node, false)?;
+pub(super) fn links(db: &Connection, p: &Project, issue: Option<i64>) -> Result<Value> {
+    let (kind, target) = target(db, p, issue, false)?;
     let mut stmt=db.prepare("SELECT a.id,a.title,'',a.version,a.archived,a.created_at,a.updated_at FROM artifact_links l JOIN artifacts a ON a.project_id=l.project_id AND a.id=l.artifact_id WHERE l.project_id=?1 AND l.kind=?2 AND l.target=?3 ORDER BY a.updated_at DESC,a.id LIMIT 1001")?;
     let mut rows = stmt
         .query_map(params![p.id, kind, target], row)?
@@ -122,45 +108,6 @@ pub(super) fn links(
     Ok(json!({"ok":true,"project":p,"artifacts":rows,"more":more}))
 }
 
-/// Read documents for the displayed cards in one indexed batch.
-pub(super) fn enrich_nodes(db: &Connection, nodes: &mut [Value]) -> Result<()> {
-    use std::collections::{BTreeSet, HashMap};
-    let selected: BTreeSet<_> = nodes
-        .iter()
-        .filter_map(|n| Some((n["id"].as_str()?, n["project_id"].as_str()?)))
-        .collect();
-    if selected.is_empty() {
-        return Ok(());
-    }
-    let mut attached: HashMap<String, Vec<Value>> = HashMap::new();
-    // The primary key covers link columns but can seek only the project here.
-    // Use the target index so other cards in that project add no read work.
-    let mut stmt=db.prepare("SELECT l.target,a.id,a.title,'',a.version,a.archived,a.created_at,a.updated_at
-        FROM json_each(?1) selected CROSS JOIN mindmap_nodes n
-        JOIN artifact_links l INDEXED BY artifact_link_target ON l.project_id=n.project_id AND l.kind='node' AND l.target=n.id
-        JOIN artifacts a ON a.project_id=l.project_id AND a.id=l.artifact_id
-        WHERE n.id=json_extract(selected.value,'$[0]') AND n.project_id=json_extract(selected.value,'$[1]')
-        ORDER BY a.updated_at DESC,a.id")?;
-    let mut rows = stmt.query([serde_json::to_string(&selected)?])?;
-    while let Some(r) = rows.next()? {
-        let target: String = r.get(0)?;
-        let items = attached.entry(target).or_default();
-        if items.len() >= 1000 {
-            return Err(Error::invalid(
-                "Too many artifacts on a map node; unlink a reference using the CLI",
-            ));
-        }
-        items.push(json!({"id":r.get::<_,String>(1)?,"title":r.get::<_,String>(2)?,"version":r.get::<_,i64>(4)?,"archived":r.get::<_,bool>(5)?,"updated_at":r.get::<_,i64>(7)?}));
-    }
-    for node in nodes {
-        node["artifacts"] = json!(
-            attached
-                .remove(node["id"].as_str().unwrap())
-                .unwrap_or_default()
-        );
-    }
-    Ok(())
-}
 fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     let mut artifact = get(db, &p.id, id)?;
     let source = artifact["body"].as_str().unwrap();
@@ -184,7 +131,7 @@ fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     }
     let more = comments.len() > 1000;
     comments.truncate(1000);
-    let mut stmt=db.prepare("SELECT l.kind,l.target,CASE l.kind WHEN 'issue' THEN (SELECT title FROM issues WHERE project_id=l.project_id AND number=CAST(l.target AS INTEGER)) ELSE (SELECT coalesce(display_label,title) FROM mindmap_nodes WHERE project_id=l.project_id AND id=l.target) END FROM artifact_links l WHERE l.project_id=?1 AND l.artifact_id=?2 ORDER BY l.created_at LIMIT 1000")?;
+    let mut stmt=db.prepare("SELECT l.kind,l.target,(SELECT title FROM issues WHERE project_id=l.project_id AND number=CAST(l.target AS INTEGER)) FROM artifact_links l WHERE l.project_id=?1 AND l.artifact_id=?2 AND l.kind='issue' ORDER BY l.created_at LIMIT 1000")?;
     let backlinks=stmt.query_map(params![p.id,id],|r|Ok(json!({"kind":r.get::<_,String>(0)?,"target":r.get::<_,String>(1)?,"title":r.get::<_,Option<String>>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     artifact["body_html"] = json!(rendered);
     let result = json!({"ok":true,"project":p,"artifact":artifact,"comments":comments,"more_comments":more,"backlinks":backlinks});
@@ -276,12 +223,11 @@ pub(super) fn execute(
             rows.truncate(50);
             return Ok(json!({"ok":true,"project":p,"artifacts":rows,"more":more}));
         }
-        Operation::Links { issue, node } => return links(db, p, *issue, node.as_deref()),
+        Operation::Links { issue } => return links(db, p, *issue),
         Operation::Create {
             title,
             body: text,
             issue,
-            node,
         } => {
             crate::issues::project_features::Feature::Artifacts.require(db, p)?;
             let mut bytes = [0u8; 16];
@@ -294,8 +240,8 @@ pub(super) fn execute(
                 .map(|a| crate::issues::provenance::capture(db, a, now))
                 .transpose()?;
             db.execute("INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at,origin) VALUES(?1,?2,?3,?4,?5,?5,?6)",params![p.id,id,title,text,now,origin])?;
-            if issue.is_some() || node.is_some() {
-                let (kind, target) = target(db, p, *issue, node.as_deref(), true)?;
+            if issue.is_some() {
+                let (kind, target) = target(db, p, *issue, true)?;
                 db.execute(
                     "INSERT INTO artifact_links VALUES(?1,?2,?3,?4,?5)",
                     params![p.id, id, kind, target, now],
@@ -409,9 +355,9 @@ pub(super) fn execute(
                 params![p.id, id, now],
             )?;
         }
-        Operation::Link { issue, node, .. } | Operation::Unlink { issue, node, .. } => {
+        Operation::Link { issue, .. } | Operation::Unlink { issue, .. } => {
             let linking = matches!(op, Operation::Link { .. });
-            let (kind, target) = target(db, p, *issue, node.as_deref(), linking)?;
+            let (kind, target) = target(db, p, *issue, linking)?;
             if linking {
                 db.execute(
                     "INSERT OR IGNORE INTO artifact_links VALUES(?1,?2,?3,?4,?5)",
@@ -448,8 +394,8 @@ pub(super) fn prepare_import(
     // Reject an already-invalid target before touching disk. The mutation still
     // checks these conditions again after acquiring the writer.
     match operation.as_ref() {
-        Operation::Create { issue, node, .. } if issue.is_some() || node.is_some() => {
-            target(db, p, *issue, node.as_deref(), true)?;
+        Operation::Create { issue, .. } if issue.is_some() => {
+            target(db, p, *issue, true)?;
         }
         Operation::Edit { id, if_version, .. } if get(db, &p.id, id)?["version"] != *if_version => {
             return Err(Error::conflict(
@@ -553,84 +499,5 @@ mod tests {
         );
         assert_eq!(preview("  \n\t", "Empty"), "");
         assert_eq!(preview(&"界".repeat(400), "Unicode").chars().count(), 241);
-    }
-
-    #[test]
-    fn map_documents_batch_selected_nodes_without_scanning_other_cards() {
-        let mut measurements = Vec::new();
-        for (count, unrelated) in [(16, 0), (128, 0), (16, 8192)] {
-            let root = std::env::temp_dir().join(format!(
-                "hb-map-documents-{}",
-                crate::issues::worker::random_id().unwrap()
-            ));
-            let path = root.join("issues.db");
-            let store = crate::issues::Store::open(&path).unwrap();
-            store.db.execute_batch(&format!("
-                WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{count})
-                INSERT INTO projects(id,name,next_number) SELECT 'named:Project-'||id,'Project '||id,1 FROM n;
-                INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,created_at,updated_at)
-                SELECT 'node-'||id,id,0,'text','Selected','',0,0 FROM projects;
-                INSERT INTO artifacts(project_id,id,title,body,archived,created_at,updated_at)
-                SELECT id,'old','Old','',1,0,0 FROM projects UNION ALL SELECT id,'new','New','',0,0,1 FROM projects;
-                INSERT INTO artifact_links(project_id,artifact_id,kind,target,created_at)
-                SELECT a.project_id,a.id,'node',n.id,0 FROM artifacts a JOIN mindmap_nodes n ON n.project_id=a.project_id;
-            ")).unwrap();
-            if unrelated > 0 {
-                store.db.execute_batch(&format!("
-                    WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<{unrelated})
-                    INSERT INTO mindmap_nodes(id,project_id,position,kind,title,body,created_at,updated_at)
-                    SELECT 'unrelated-'||id,'named:Project-1',id,'text','Unrelated','',0,0 FROM n;
-                    INSERT INTO artifact_links(project_id,artifact_id,kind,target,created_at)
-                    SELECT project_id,'old','node',id,0 FROM mindmap_nodes WHERE id LIKE 'unrelated-%';
-                ")).unwrap();
-            }
-            let mut nodes: Vec<_> = (1..=count).map(|n|json!({"id":format!("node-named:Project-{n}"),"project_id":format!("named:Project-{n}")})).collect();
-            nodes.push(json!({"id":"automatic-node","project_id":"named:Project-1"}));
-            let mut expected = nodes.clone();
-            enrich_nodes(&store.db, &mut expected).unwrap();
-            let mut owner = crate::database::Owner::start(&path).unwrap().unwrap();
-            let (db, transport) = crate::database::tests::measured_connection(&path);
-            enrich_nodes(&db, &mut nodes).unwrap();
-            assert_eq!(nodes, expected);
-            for node in nodes.iter().take(count) {
-                assert_eq!(
-                    node["artifacts"],
-                    json!([
-                        {"id":"new","title":"New","version":1,"archived":false,"updated_at":1},
-                        {"id":"old","title":"Old","version":1,"archived":true,"updated_at":0}
-                    ])
-                );
-            }
-            assert_eq!(nodes.last().unwrap()["artifacts"], json!([]));
-            drop(db);
-            let (commands, steps) = transport.join().unwrap();
-            if unrelated > 0 {
-                store.db.execute_batch("WITH RECURSIVE n(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM n WHERE id<1001)
-                    INSERT INTO artifacts(project_id,id,title,body,created_at,updated_at)
-                    SELECT 'named:Project-1','extra-'||id,'Extra','',0,0 FROM n;
-                    INSERT INTO artifact_links(project_id,artifact_id,kind,target,created_at)
-                    SELECT project_id,id,'node','unrelated-1',0 FROM artifacts WHERE id LIKE 'extra-%';").unwrap();
-                enrich_nodes(&store.db, &mut nodes).unwrap();
-                let mut crowded = vec![json!({"id":"unrelated-1","project_id":"named:Project-1"})];
-                assert_eq!(
-                    enrich_nodes(&store.db, &mut crowded).unwrap_err().code,
-                    "invalid_input"
-                );
-            }
-            drop(store);
-            owner.stop();
-            std::fs::remove_dir_all(root).unwrap();
-            eprintln!(
-                "{count} selected nodes/{unrelated} other cards: {commands} RPCs/{steps} steps"
-            );
-            measurements.push((count, unrelated, commands, steps));
-        }
-        for (count, unrelated, commands, steps) in measurements {
-            assert!(commands <= 2, "{count} projects used {commands} RPCs");
-            assert!(
-                steps < (count as i64) * 200,
-                "{unrelated} unrelated cards caused {steps} steps"
-            );
-        }
     }
 }

@@ -1,4 +1,4 @@
-//! Disk-backed project files, shared by issues, mindmap nodes and artifacts.
+//! Disk-backed project files, shared by issues and artifacts.
 use crate::database::Connection;
 use crate::issues::{Error, Project, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -55,14 +55,12 @@ CREATE INDEX IF NOT EXISTS file_attachment_target ON file_attachments(project_id
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Issue,
-    Node,
     Artifact,
 }
 impl Kind {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Issue => "issue",
-            Self::Node => "node",
             Self::Artifact => "artifact",
         }
     }
@@ -183,7 +181,6 @@ fn target_id(db: &Connection, p: &Project, t: &Target, upload: bool) -> Result<S
     let id=match t.kind {
         Kind::Issue=>db.query_row("SELECT cast(number AS TEXT) FROM issues WHERE project_id=?1 AND number=?2 AND (?3=0 OR deleted_at IS NULL)",params![p.id,t.id,upload],|r|r.get(0)).optional()?,
         Kind::Artifact=>db.query_row("SELECT id FROM artifacts WHERE project_id=?1 AND id=?2",params![p.id,t.id],|r|r.get(0)).optional()?,
-        Kind::Node=>db.query_row("SELECT id FROM mindmap_nodes WHERE project_id=?1 AND (id=?2 OR alias=?2 OR (kind='issue' AND 'issue:'||reference=?2))",params![p.id,t.id],|r|r.get(0)).optional()?,
     };
     id.ok_or_else(|| Error::new("not_found", "Attachment target not found in this project"))
 }

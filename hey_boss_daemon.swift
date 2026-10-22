@@ -4449,9 +4449,7 @@ final class IssuesLauncher {
     enum Page: String {
         case issues = "/#view=issues"
         case inbox = "/#view=inbox"
-        case mindmaps = "/mm"
         case quickIssue = "/#quick-issue=1"
-        case nativeMindmap = "/mm?focus=1"
     }
     let url = URL(string: "http://hey-boss.test/")!
     var destination = URL(string: "http://hey-boss.test/")!
@@ -4508,63 +4506,6 @@ final class IssuesLauncher {
     }
     func finish() { launching = false; if !openURL(destination) { report("Open \(destination.absoluteString) in your browser.") } }
     func fail(_ message: String) { launching = false; report(message) }
-}
-
-/// The web map in a persistent desktop window, without the application's shell.
-final class NativeMindmapViewer: NSObject, WKNavigationDelegate {
-    let launcher = IssuesLauncher()
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-    let browser: WKWebView
-    var openExternal: (URL) -> Bool = { NSWorkspace.shared.open($0) }
-    override init() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        browser = WKWebView(frame: .zero, configuration: configuration)
-        super.init()
-        window.title = "Mindmaps · Hey Boss"
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 720, height: 520)
-        window.center()
-        window.setFrameAutosaveName("HeyBossMindmaps")
-        window.contentView = browser
-        browser.navigationDelegate = self
-        launcher.openURL = { [weak self] url in self?.show(url); return self != nil }
-        launcher.report = { message in
-            let alert = NSAlert(); alert.messageText = "Could not open Mindmaps"; alert.informativeText = message
-            alert.addButton(withTitle: "OK"); NSApp.activate(ignoringOtherApps: true); alert.runModal()
-        }
-    }
-    func open(cli: String?) { launcher.open(cli: cli, page: .nativeMindmap) }
-    func show(_ url: URL) {
-        // Preserve the camera, selected topic and project when reopening this window.
-        if browser.url == nil { browser.load(URLRequest(url: url)) }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    func policy(for url: URL) -> WKNavigationActionPolicy {
-        let local = url.scheme == launcher.url.scheme && url.host == launcher.url.host && url.port == launcher.url.port
-        if local && url.path == "/mm" { return .allow }
-        if url.scheme == "https" || url.scheme == "http" { _ = openExternal(url) }
-        return .cancel
-    }
-    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = action.request.url else { decisionHandler(.cancel); return }
-        decisionHandler(policy(for: url))
-    }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        window.title = webView.title ?? "Mindmaps · Hey Boss"
-    }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { webView.reload() }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        if (error as NSError).code == NSURLErrorCancelled { return }
-        let alert = NSAlert(); alert.messageText = "Could not load Mindmaps"; alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "Retry"); alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
-            self.browser.load(URLRequest(url: self.launcher.destination))
-        }
-    }
 }
 
 // Subscription data comes only from the proxy's versioned CLI, never OAuth stores.
@@ -4857,12 +4798,8 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var openIssues: (() -> Void)?
     lazy var issuesLauncher = IssuesLauncher()
     @objc func showIssues() { if let openIssues { openIssues() } else { issuesLauncher.open(cli: cli) } }
-    var openMindmaps: (() -> Void)?
-    lazy var mindmapViewer = NativeMindmapViewer()
-    @objc func showMindmaps() { if let openMindmaps { openMindmaps() } else { mindmapViewer.open(cli: cli) } }
     let inboxMenuItem = NSMenuItem(title: "Inbox…", action: nil, keyEquivalent: "")
     let issuesMenuItem = NSMenuItem(title: "Issues…", action: nil, keyEquivalent: "o")
-    let mindmapsMenuItem = NSMenuItem(title: "Mindmaps…", action: nil, keyEquivalent: "")
     let subscriptionQuota: SubscriptionQuotaController
     func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli) }
     func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close() }
@@ -5056,9 +4993,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         issuesMenuItem.target = self
         issuesMenuItem.keyEquivalentModifierMask = [.command, .control, .option, .shift]
         menu.addItem(issuesMenuItem)
-        mindmapsMenuItem.action = #selector(showMindmaps)
-        mindmapsMenuItem.target = self
-        menu.addItem(mindmapsMenuItem)
         let talkItem = NSMenuItem(title: "Hey Talk…", action: #selector(showHeyTalk), keyEquivalent: "")
         talkItem.target = self
         talkItem.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
@@ -5907,7 +5841,6 @@ struct ArtifactLaunch: Codable {
     var title: String? = nil
     var body: String? = nil
     var issue: Int? = nil
-    var node: String? = nil
     var file: String? = nil
     var skillSession: String? = nil
     var recoveryID: String? = nil
@@ -6874,7 +6807,6 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             else {
                 operation["command"] = "create"
                 if let issue = session.launch.issue { operation["issue"] = issue }
-                if let node = session.launch.node { operation["node"] = node }
             }
             do {
                 let body = String(decoding: try JSONSerialization.data(withJSONObject: operation), as: UTF8.self)

@@ -917,7 +917,6 @@ pub fn act(action: Action) -> Result<Value> {
                 )),
                 body: None,
                 issue: None,
-                node: None,
                 file: Some(target_file.to_string_lossy().into_owned()),
                 skill_session: native.map(|(id, _)| id),
             })?;

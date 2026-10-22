@@ -27,8 +27,6 @@ struct Resource {
     #[arg(long)]
     issue: Option<i64>,
     #[arg(long)]
-    node: Option<String>,
-    #[arg(long)]
     artifact: Option<String>,
 }
 impl Resource {
@@ -37,11 +35,6 @@ impl Resource {
             Target {
                 kind: Kind::Issue,
                 id: n.to_string(),
-            }
-        } else if let Some(id) = &self.node {
-            Target {
-                kind: Kind::Node,
-                id: id.clone(),
             }
         } else {
             Target {

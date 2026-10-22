@@ -231,7 +231,6 @@ fn ordinary_commands_reject_unknown_projects_without_registering_them() {
             "--body",
             "Test",
         ],
-        vec!["mm", "--agent", "human:qa", "add", "Must not be saved"],
         vec!["notif", "alert", "Test", "--title", "Must not be sent"],
     ] {
         let output = f.run(&f.root, &args);

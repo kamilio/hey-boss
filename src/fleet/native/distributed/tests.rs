@@ -1506,36 +1506,6 @@ fn stale_completion_does_not_close_new_requirements_in_either_delivery_order() {
 }
 
 #[test]
-fn cutover_rebuilds_a_large_outline_once_across_projection_pages() {
-    use serde_json::json;
-    let f = Fixture::new();
-    let db = f.db();
-    install(&db, "a").unwrap();
-    seed(&db);
-    let tx = db.unchecked_transaction().unwrap();
-    for n in 0..260 {
-        projection::reduce(&tx,&Revision {protocol:PROTOCOL,origin:"a".into(),clock:n+1,table:"mindmap_nodes".into(),before:None,
-            after:Some(json!({"id":format!("node-{n:03}"),"project_id":"p","alias":null,"parent_id":null,"position":n,"kind":"markdown","title":"Node","body":"","reference":null,"reference_project":null,"created_at":1,"updated_at":1})),resource:None,archive:None}).unwrap();
-    }
-    tx.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer';
-        CREATE TABLE outline_writes(n INTEGER NOT NULL); INSERT INTO outline_writes VALUES(0);
-        CREATE TRIGGER count_outline_inserts AFTER INSERT ON mindmap_nodes BEGIN UPDATE outline_writes SET n=n+1; END;").unwrap();
-    materialize::drain(&tx).unwrap();
-    assert_eq!(
-        tx.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        260
-    );
-    assert_eq!(
-        tx.query_row("SELECT n FROM outline_writes", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        260
-    );
-    tx.commit().unwrap();
-}
-
-#[test]
 fn incoming_pages_wait_for_local_revisions_at_the_end_of_the_journal() {
     let fa = Fixture::new();
     let a = fa.db();
@@ -2341,78 +2311,6 @@ fn legacy_companion_comment_keeps_identity_across_hot_sync_archive_and_restore()
 }
 
 #[test]
-fn outline_cycles_and_alias_conflicts_converge_without_discarding_nodes() {
-    use serde_json::json;
-    let fa = Fixture::new();
-    let a = fa.db();
-    install(&a, "a").unwrap();
-    seed(&a);
-    let fb = Fixture::new();
-    let b = fb.db();
-    install(&b, "b").unwrap();
-    seed(&b);
-    let node = |id: &str, parent: &str| Revision {
-        protocol: PROTOCOL,
-        origin: id.into(),
-        clock: 1,
-        table: "mindmap_nodes".into(),
-        before: None,
-        after: Some(
-            json!({"id":id,"project_id":"p","alias":"same","parent_id":parent,"position":0,"kind":"markdown","title":id,"body":"","reference":null,"reference_project":null,"created_at":1,"updated_at":1}),
-        ),
-        resource: None,
-        archive: None,
-    };
-    let one = node("one", "two");
-    let two = node("two", "one");
-    for (db, facts) in [(&a, [&one, &two]), (&b, [&two, &one])] {
-        for fact in facts {
-            let tx = db.unchecked_transaction().unwrap();
-            projection::reduce(&tx, fact).unwrap();
-            materialize::apply(&tx).unwrap();
-            tx.commit().unwrap();
-        }
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM mindmap_nodes WHERE parent_id IS NOT NULL",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            1
-        );
-        assert!(
-            db.query_row(
-                "SELECT count(*) FROM distributed_rejections WHERE table_name='mindmap_nodes'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap()
-                > 0
-        );
-        assert_eq!(
-            db.query_row(
-                "SELECT count(*) FROM distributed_dirty WHERE table_name='mindmap_nodes'",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            0
-        );
-    }
-    assert_eq!(
-        replica::rows(&a, "SELECT * FROM mindmap_nodes ORDER BY id", &[]).unwrap(),
-        replica::rows(&b, "SELECT * FROM mindmap_nodes ORDER BY id", &[]).unwrap()
-    );
-}
-
-#[test]
 fn independent_task_creation_does_not_reproject_the_project_history() {
     use serde_json::json;
     let f = Fixture::new();
@@ -3113,4 +3011,109 @@ fn conflicting_archive_does_not_block_other_tasks_and_retries_after_repair() {
 #[test]
 fn secret_revisions_are_not_issue_revisions() {
     assert!(archives::revision(r#"{"protocol":2,"kind":"secret_revision_v1","revision":{"encrypted":"synthetic"}}"#).unwrap().is_none());
+}
+
+#[test]
+fn retired_map_records_do_not_block_sync_or_recreate_schema() {
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    for (clock, table) in ["mindmaps", "mindmap_nodes", "mindmap_links", "projects"]
+        .into_iter()
+        .enumerate()
+    {
+        let fact = Revision {
+            protocol: PROTOCOL,
+            origin: "old-peer".into(),
+            clock: clock as i64 + 1,
+            table: table.into(),
+            before: None,
+            after: Some(serde_json::json!({"id":"p","name":"Surviving project"})),
+            resource: None,
+            archive: None,
+        };
+        engine.put(&serde_json::to_string(&fact).unwrap()).unwrap();
+    }
+    assert_eq!(import(&db, &engine).unwrap(), 4);
+    assert_eq!(import(&db, &engine).unwrap(), 0);
+    assert!(
+        projection::row(&db, "projects", &serde_json::json!({"id":"p"}))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name LIKE 'mindmap%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn upgrade_retires_map_capture_and_accepts_legacy_project_settings() {
+    use serde_json::json;
+    let f = Fixture::new();
+    let db = f.db();
+    install(&db, "a").unwrap();
+    seed(&db);
+    db.execute_batch("ALTER TABLE project_settings ADD COLUMN mindmaps_enabled INTEGER NOT NULL DEFAULT 1;
+        CREATE TABLE mindmap_nodes(id TEXT PRIMARY KEY);
+        INSERT INTO mindmap_nodes VALUES('saved');
+        CREATE TRIGGER distributed_capture_mindmap_nodes_INSERT AFTER INSERT ON mindmap_nodes BEGIN
+          UPDATE distributed_meta SET clock=clock+1;
+          INSERT INTO distributed_outbox SELECT clock,'mindmap_nodes',NULL,json_object('id',NEW.id) FROM distributed_meta;
+        END;
+        INSERT INTO mindmap_nodes VALUES('pending');
+        INSERT INTO distributed_dirty VALUES('mindmap_nodes','{}');
+        INSERT INTO distributed_rejections VALUES('mindmap_nodes','{}','old conflict');").unwrap();
+    install(&db, "a").unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='distributed_capture_mindmap_nodes_INSERT'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    for table in [
+        "distributed_outbox",
+        "distributed_dirty",
+        "distributed_rejections",
+    ] {
+        assert_eq!(
+            db.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE table_name='mindmap_nodes'"),
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM mindmap_nodes", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "keep saved data dormant"
+    );
+    let fact = Revision {
+        protocol: PROTOCOL,
+        origin: "old-peer".into(),
+        clock: 100,
+        table: "project_settings".into(),
+        before: None,
+        after: Some(json!({"project_id":"p","artifacts_enabled":0,"mindmaps_enabled":0})),
+        resource: None,
+        archive: None,
+    };
+    projection::reduce(&db, &fact).unwrap();
+    let row = projection::row(&db, "project_settings", &json!({"project_id":"p"}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(row["artifacts_enabled"], 0);
+    assert!(row.get("mindmaps_enabled").is_none());
+    assert!(
+        !capture::columns(&db, "project_settings")
+            .unwrap()
+            .iter()
+            .any(|c| c == "mindmaps_enabled")
+    );
 }

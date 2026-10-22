@@ -13,7 +13,6 @@ mod issue_attachments;
 mod issue_cli;
 mod job_cli;
 mod lookup_cli;
-mod mindmap_cli;
 mod notif_cli;
 mod project_cli;
 mod proxy_cli;
@@ -222,12 +221,9 @@ enum Command {
     /// Persistent project Markdown artifacts, comments and resource links.
     #[command(visible_alias = "artifacts")]
     Artifact(artifact_cli::Options),
-    /// Disk-backed files for issues, mindmap nodes and artifacts; SSH-aware downloads.
+    /// Disk-backed files for issues and artifacts; SSH-aware downloads.
     #[command(visible_alias = "attachments")]
     Attachment(attachment_cli::Options),
-    /// Project mindmaps with nested topics, live resources and cross-project links.
-    #[command(visible_alias = "mindmap")]
-    Mm(mindmap_cli::Options),
     /// Global profile settings shared across all projects.
     Settings(issue_cli::GlobalOptions),
     /// Run an independent Codex issue worker with its own slots and tag filter.
@@ -525,17 +521,6 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss settings: {error}");
-                }
-                std::process::exit(error.exit_code());
-            }
-            return Ok(());
-        }
-        Command::Mm(options) => {
-            if let Err(error) = mindmap_cli::run(options) {
-                if options.json {
-                    println!("{}", serde_json::json!({"ok":false,"error":error}));
-                } else {
-                    eprintln!("hey-boss mm: {error}");
                 }
                 std::process::exit(error.exit_code());
             }

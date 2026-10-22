@@ -1003,7 +1003,7 @@ if (typeof document !== 'undefined') (() => {
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{
     const data=await read(mobile?'/api/agent-bootstrap':'/api/bootstrap');csrf=data.csrf;projects=data.projects||[];defaultProject=data.project||projects[0];context();
-    if(mobile){$('quick-issue-open').hidden=true;$('nav-inbox').href='/';$('nav-issues').href='/#issues';$('nav-mindmaps').hidden=true;}
+    if(mobile){$('quick-issue-open').hidden=true;$('nav-inbox').href='/';$('nav-issues').href='/#issues';}
     await refresh();
     if(!mobile){const events=new EventSource('/api/fleet/events');events.addEventListener('connected',()=>refresh());events.onmessage=()=>refresh();events.onerror=()=>{$('connection').classList.add('offline');$('connection').querySelector('span').textContent='Reconnecting…';};events.onopen=()=>{$('connection').classList.remove('offline');$('connection').querySelector('span').textContent='Connected';};}
   }catch(e){fail(e);}})();

@@ -23,18 +23,6 @@
     "args": [],
     "setup": []
   },
-  "mm show": {
-    "args": [],
-    "setup": []
-  },
-  "mm projects": {
-    "args": [],
-    "setup": []
-  },
-  "mm export": {
-    "args": [],
-    "setup": []
-  },
   "artifact list": {
     "args": [],
     "setup": []
@@ -485,94 +473,6 @@
     ],
     "setup": []
   },
-  "mm view": {
-    "args": [
-      "review"
-    ],
-    "setup": []
-  },
-  "mm add": {
-    "args": [
-      "Next steps",
-      "--id",
-      "next"
-    ],
-    "setup": []
-  },
-  "mm issue": {
-    "args": [
-      "1",
-      "--under",
-      "review"
-    ],
-    "setup": []
-  },
-  "mm pr": {
-    "args": [
-      "https://github.com/example/review/pull/42",
-      "--under",
-      "review"
-    ],
-    "setup": []
-  },
-  "mm edit": {
-    "args": [
-      "review",
-      "--title",
-      "Reviewed plan"
-    ],
-    "setup": []
-  },
-  "mm alias": {
-    "args": [
-      "review",
-      "reviewed"
-    ],
-    "setup": []
-  },
-  "mm move": {
-    "args": [
-      "details",
-      "--under",
-      "review"
-    ],
-    "setup": []
-  },
-  "mm remove": {
-    "args": [
-      "details"
-    ],
-    "setup": []
-  },
-  "mm links": {
-    "args": [
-      "review"
-    ],
-    "setup": []
-  },
-  "mm link": {
-    "args": [
-      "review",
-      "details",
-      "--description",
-      "Supporting context"
-    ],
-    "setup": []
-  },
-  "mm unlink": {
-    "args": [
-      "review",
-      "details"
-    ],
-    "setup": [
-      [
-        "mm",
-        "link",
-        "review",
-        "details"
-      ]
-    ]
-  },
   "skill show": {
     "args": [],
     "setup": []
@@ -591,15 +491,6 @@
       "issues.json",
       "--request-id",
       "review-issue-batch"
-    ],
-    "setup": []
-  },
-  "mm batch": {
-    "args": [
-      "--file",
-      "map.json",
-      "--request-id",
-      "review-map-batch"
     ],
     "setup": []
   },

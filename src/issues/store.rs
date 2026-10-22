@@ -25,8 +25,6 @@ mod compact;
 mod compact_detail;
 #[path = "coordination.rs"]
 pub(crate) mod coordination;
-#[path = "../mindmap/store.rs"]
-mod mindmap;
 #[path = "origin_reader.rs"]
 mod origin_reader;
 #[path = "worker_registry.rs"]
@@ -248,11 +246,6 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     (
         "project_settings",
-        "mindmaps_enabled",
-        "INTEGER NOT NULL DEFAULT 1",
-    ),
-    (
-        "project_settings",
         "drafts_enabled",
         "INTEGER NOT NULL DEFAULT 1",
     ),
@@ -271,7 +264,6 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
         "prompt_overrides",
         "TEXT NOT NULL DEFAULT '{}'",
     ),
-    ("mindmap_nodes", "display_label", "TEXT"),
 ];
 
 fn missing_additive_columns(
@@ -795,9 +787,6 @@ fn validate(r: &Request) -> Result<()> {
         }
         Operation::Attachment { operation } => operation.validate()?,
         Operation::Artifact { operation } => operation.validate()?,
-        Operation::Mindmap { operation } => {
-            operation.validate()?;
-        }
         Operation::Create {
             title,
             body: text,
@@ -988,11 +977,6 @@ fn request_project(db: &Connection, r: &Request) -> Result<Project> {
             | Operation::WorkerStatus
             | Operation::ControlWorker { .. }
             | Operation::ConfigureWorker { .. }
-    ) || matches!(
-        r.operation,
-        Operation::Mindmap {
-            operation: crate::mindmap::Operation::Projects
-        }
     ) {
         project_candidate(db, &r.project, r.project_override.as_deref())
     } else {
@@ -1385,7 +1369,6 @@ impl Store {
                     tx.pragma_update(None, "user_version", 9)?;
                 }
                 if version < 10 {
-                    tx.execute_batch(mindmap::SCHEMA)?;
                     tx.pragma_update(None, "user_version", 10)?;
                 }
                 for (table, column, definition) in missing_additive_columns(&tx)? {
@@ -1441,8 +1424,8 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('mindmap_reference_lookup','issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery','worker_control_status','issue_timeline_events','issue_timeline_comments','issue_timeline_comment_models')", [], |r| r.get::<_, i64>(0))? < 15 {
-            db.execute_batch(mindmap::INDEXES)?;
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery','worker_control_status','issue_timeline_events','issue_timeline_comments','issue_timeline_comment_models')", [], |r| r.get::<_, i64>(0))? < 14 {
+            db.execute_batch("CREATE INDEX IF NOT EXISTS issue_pr_canonical_url ON issue_pull_requests(rtrim(url,'/'),project_id,issue_number);")?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(workers::CONTROL_INDEX)?;
             db.execute_batch(registry::FINISHED_HISTORY_INDEX)?;
@@ -1699,10 +1682,7 @@ impl Store {
         }
         if matches!(
             r.operation,
-            Operation::Mindmap { .. }
-                | Operation::Artifact { .. }
-                | Operation::Attachment { .. }
-                | Operation::Job { .. }
+            Operation::Artifact { .. } | Operation::Attachment { .. } | Operation::Job { .. }
         ) || matches!(&r.operation, Operation::Create { attachments, .. } if !attachments.is_empty())
         {
             validate(r)?;
@@ -1714,7 +1694,7 @@ impl Store {
             if companion {
                 // Route before opening a transaction or resolving against the
                 // replica. Only the authority may register projects and cache
-                // mutation receipts for maps and their documents/files.
+                // mutation receipts for documents, files, and jobs.
                 let path = self.db.path().ok_or_else(|| {
                     Error::invalid("Resource routing requires a persistent issue database")
                 })?;
@@ -2090,7 +2070,7 @@ impl Store {
                     Some(settings) => serde_json::from_value(json!({
                         "action":"configure_project", "prs_enabled":settings.prs_enabled,
                         "worktree_enabled":settings.worktree_enabled, "drafts_enabled":settings.drafts_enabled,
-                        "artifacts_enabled":settings.artifacts_enabled, "mindmaps_enabled":settings.mindmaps_enabled,
+                        "artifacts_enabled":settings.artifacts_enabled,
                         "if_version":settings.if_version
                     }))?,
                 };
@@ -2131,14 +2111,6 @@ impl Store {
                 now,
                 prepared_import.as_ref(),
             )?,
-            Operation::Mindmap { operation } => {
-                let result = mindmap::execute(&tx, &project, operation, now)?;
-                if matches!(operation, crate::mindmap::Operation::ShowCompact { .. }) {
-                    tx.commit()?;
-                    return Ok(result);
-                }
-                result
-            }
             Operation::Workers { .. }
             | Operation::ConfigureWorker { .. }
             | Operation::ControlWorker { .. }
@@ -2184,7 +2156,6 @@ impl Store {
                     coalesce(sum(i.state='ready' AND i.deleted_at IS NULL),0),
                     EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.prs_enabled=1),
                     coalesce((SELECT s.artifacts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
-                    coalesce((SELECT s.mindmaps_enabled FROM project_settings s WHERE s.project_id=p.id),1),
                     coalesce((SELECT s.drafts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
                     coalesce((SELECT s.paused FROM project_settings s WHERE s.project_id=p.id),0),
                     coalesce((SELECT s.pause_reason FROM project_settings s WHERE s.project_id=p.id),'')
@@ -2194,7 +2165,7 @@ impl Store {
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?,
-                    "artifacts_enabled":row.get::<_,bool>(12)?,"mindmaps_enabled":row.get::<_,bool>(13)?,"drafts_enabled":row.get::<_,bool>(14)?,"paused":row.get::<_,bool>(15)?,"pause_reason":row.get::<_,String>(16)?
+                    "artifacts_enabled":row.get::<_,bool>(12)?,"drafts_enabled":row.get::<_,bool>(13)?,"paused":row.get::<_,bool>(14)?,"pause_reason":row.get::<_,String>(15)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 // Discovery and read-only commands do not enroll a project in
                 // Builder. Explicit settings or saved work do, without deleting
@@ -2459,7 +2430,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"ready_guard":ready::snapshot(&tx,&project.id,&issue)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number),None)?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"ready_guard":ready::snapshot(&tx,&project.id,&issue)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number))?["artifacts"]})
             }
             Operation::Comments {
                 number,
@@ -2652,7 +2623,6 @@ impl Store {
             .or_insert_with(|| project_settings["prs_enabled"].clone());
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
         result["artifacts_enabled"] = project_settings["artifacts_enabled"].clone();
-        result["mindmaps_enabled"] = project_settings["mindmaps_enabled"].clone();
         result["paused"] = project_settings["paused"].clone();
         result["pause_reason"] = project_settings["pause_reason"].clone();
         let settings = super::global_settings::read(&tx)?;

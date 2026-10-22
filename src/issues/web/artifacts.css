@@ -206,7 +206,7 @@
 .artifact-conflict:empty { display: none; }
 .artifact-conflict { margin-top: 20px; padding: 20px; background: var(--surface); border: 1px solid var(--danger); border-radius: 12px; }
 .artifact-conflict pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
-/* Attachments on issue and mindmap detail surfaces. */
+/* Attachments on issue detail surfaces. */
 .artifact-relationship .artifact-attachment-list { list-style: none; padding: 0; margin: 10px 0; }
 .artifact-attachment-list li { display: flex; align-items: start; gap: 4px; margin: 4px 0; }
 .artifact-attachment-list a { display: flex; align-items: start; gap: 8px; flex: 1; min-width: 0; padding: 7px 0; font-size: 12px; overflow-wrap: anywhere; }

@@ -151,13 +151,10 @@ async page => {
   const resources=await page.evaluate(async({project,png})=>{
     const action=operation=>api(operation,project);
     const artifact=(await action({action:'artifact',operation:{command:'create',title:'Image review',body:'Review the release image.'}})).artifact;
-    const graph=await action({action:'mindmap',operation:{command:'view',node:'image-preview'}});
-    const node=graph.node;
-    if(!node?.id)throw Error('Missing fixture node');
-    for(const target of [{kind:'artifact',id:artifact.id},{kind:'node',id:node.id}])await action({action:'attachment',operation:{command:'upload',target,name:'release-overview.png',data:png}});
-    return {artifact:artifact.id,node:node.id};
+    for(const target of [{kind:'artifact',id:artifact.id}])await action({action:'attachment',operation:{command:'upload',target,name:'release-overview.png',data:png}});
+    return {artifact:artifact.id};
   },{project,png:fixture.png});
-  for(const [kind,path] of Object.entries({artifact:'/artifacts',node:'/mm'})) {
+  for(const [kind,path] of Object.entries({artifact:'/artifacts'})) {
     await page.goto(base+path+'#project='+encodeURIComponent(project)+'&'+kind+'='+resources[kind]);
     await page.getByRole('button',{name:'release-overview.png',exact:true}).first().click();await ready();
     check(await dialog.locator('footer').evaluate(el=>getComputedStyle(el).flexDirection)==='row', `${kind} keeps the compact viewer toolbar`);

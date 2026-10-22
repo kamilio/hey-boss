@@ -342,7 +342,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
     ];
     let settings = f.json(&init);
     assert_eq!(settings["artifacts_enabled"], true);
-    assert_eq!(settings["mindmaps_enabled"], true);
     let artifact = f.json(&[
         "artifact",
         "--project",
@@ -355,16 +354,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         "Existing document",
         "--body",
         "Keep this",
-    ]);
-    let node = f.json(&[
-        "mm",
-        "--project",
-        "Resources",
-        "--agent",
-        "human:qa",
-        "--json",
-        "add",
-        "Existing topic",
     ]);
     f.json(&[
         "issue",
@@ -394,41 +383,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         String::from_utf8_lossy(&rejected.stderr)
             .contains("Project \"Resources\" is not using artifacts. Use regular tasks.")
     );
-    f.json(&[
-        "mm",
-        "--project",
-        "Resources",
-        "--agent",
-        "human:qa",
-        "--json",
-        "add",
-        "Still allowed",
-    ]);
-    f.json(&[
-        "issue",
-        "--project",
-        "Resources",
-        "--agent",
-        "human:qa",
-        "--json",
-        "settings",
-        "set",
-        "--no-mindmaps",
-    ]);
-    let rejected = f.run(&[
-        "mm",
-        "--project",
-        "Resources",
-        "--agent",
-        "human:qa",
-        "add",
-        "Rejected",
-    ]);
-    assert_eq!(rejected.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&rejected.stderr)
-            .contains("Project \"Resources\" is not using mindmaps. Use regular tasks.")
-    );
     assert_eq!(
         f.json(&[
             "artifact",
@@ -439,17 +393,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
             artifact["artifact"]["id"].as_str().unwrap()
         ])["artifact"]["body"],
         "Keep this"
-    );
-    assert_eq!(
-        f.json(&[
-            "mm",
-            "--project",
-            "Resources",
-            "--json",
-            "view",
-            node["node"]["id"].as_str().unwrap()
-        ])["node"]["title"],
-        "Existing topic"
     );
     fs::write(f.0.join("note.txt"), "attachment").unwrap();
     fs::write(f.0.join("document.md"), "[Note](note.txt)").unwrap();
@@ -470,21 +413,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         String::from_utf8_lossy(&imported.stderr)
             .contains("is not using artifacts. Use regular tasks.")
     );
-    let linked = f.run(&[
-        "mm",
-        "--project",
-        "Resources",
-        "--agent",
-        "human:qa",
-        "link",
-        node["node"]["id"].as_str().unwrap(),
-        "pr:https://github.com/example/repo/pull/1",
-    ]);
-    assert_eq!(linked.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&linked.stderr)
-            .contains("is not using mindmaps. Use regular tasks.")
-    );
     let db = Connection::open(f.db()).unwrap();
     assert_eq!(
         db.query_row(
@@ -501,20 +429,17 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
             .unwrap(),
         0
     );
-    assert_eq!(
-        db.query_row(
-            "SELECT count(*) FROM mindmap_nodes WHERE project_id='named:Resources'",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .unwrap(),
-        2
-    );
     drop(db);
-    assert!(!f.0.join("issues.attachments").exists());
+    let attachments = f.0.join("issues.attachments");
+    if attachments.exists() {
+        for entry in fs::read_dir(&attachments).unwrap() {
+            let entry = entry.unwrap();
+            assert_eq!(entry.file_name(), ".replication");
+            assert_eq!(fs::read_dir(entry.path()).unwrap().count(), 0);
+        }
+    }
     let saved = f.json(&init);
     assert_eq!(saved["artifacts_enabled"], false);
-    assert_eq!(saved["mindmaps_enabled"], false);
     let listed = f.json(&["issue", "--project", "Resources", "--json", "projects"]);
     let resource = listed["projects"]
         .as_array()
@@ -523,14 +448,12 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         .find(|p| p["id"] == "named:Resources")
         .unwrap();
     assert_eq!(resource["artifacts_enabled"], false);
-    assert_eq!(resource["mindmaps_enabled"], false);
     let text = f.run(&["issue", "--project", "Resources", "settings", "show"]);
     assert!(text.status.success());
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.contains("Artifacts enabled: false"));
-    assert!(text.contains("Mindmaps enabled: false"));
     let mut enabled = init.to_vec();
-    enabled.extend(["--artifacts", "true", "--mindmaps", "false"]);
+    enabled.extend(["--artifacts", "true"]);
     assert_eq!(f.json(&enabled)["artifacts_enabled"], true);
     f.json(&[
         "artifact",
@@ -558,7 +481,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         "--json",
     ]);
     assert_eq!(other["artifacts_enabled"], true);
-    assert_eq!(other["mindmaps_enabled"], true);
     let listed = f.json(&["issue", "--project", "Other", "--json", "projects"]);
     let projects = listed["projects"].as_array().unwrap();
     let resource = projects
@@ -566,8 +488,6 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
         .find(|p| p["id"] == "named:Resources")
         .unwrap();
     assert_eq!(resource["artifacts_enabled"], true);
-    assert_eq!(resource["mindmaps_enabled"], false);
     let other = projects.iter().find(|p| p["id"] == "named:Other").unwrap();
     assert_eq!(other["artifacts_enabled"], true);
-    assert_eq!(other["mindmaps_enabled"], true);
 }

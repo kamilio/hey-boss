@@ -39,7 +39,7 @@ const server=createServer(async(req,res)=>{
  const file=['/agents','/workers'].includes(path)?'fleet.html':path.slice(1);
  if(!['fleet.html','fleet.js','fleet.css','components.js','components.css','quick-issue.js','routes.js','origin.css','icon.png'].includes(file)){res.writeHead(404);return res.end();}
  let content=readFileSync(new URL(file,source));
- if(file==='fleet.html')content=Buffer.from(content.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replaceAll('<!--workers-current-->',' aria-current="page"').replaceAll('<!--mindmap-current-->','')));
+ if(file==='fleet.html')content=Buffer.from(content.toString().replace('<!--app-shell-->',readFileSync(new URL('app-shell.html',source),'utf8').replaceAll('<!--workers-current-->',' aria-current="page"')));
  if(file==='routes.js')content=Buffer.from(content.toString().replace('/* ROUTE_DEFINITIONS */ []',readFileSync(new URL('routes.json',source),'utf8')));
  res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.png')?'image/png':'text/html'});res.end(content);
 });

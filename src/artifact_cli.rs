@@ -63,10 +63,8 @@ impl Text {
 }
 #[derive(Args)]
 struct Target {
-    #[arg(long, conflicts_with = "node")]
+    #[arg(long)]
     issue: Option<i64>,
-    #[arg(long, conflicts_with = "issue")]
-    node: Option<String>,
 }
 #[derive(Subcommand)]
 enum Action {
@@ -109,7 +107,7 @@ enum Action {
         #[arg(long)]
         title: Option<String>,
         /// Local Markdown or HTML file path to open in the native editor.
-        #[arg(long, conflicts_with_all = ["id", "new", "title", "issue", "node"])]
+        #[arg(long, conflicts_with_all = ["id", "new", "title", "issue"])]
         file: Option<PathBuf>,
         #[command(flatten)]
         target: Target,
@@ -183,14 +181,7 @@ pub fn run(options: &Options) -> Result<()> {
             title,
             file,
             target,
-        } => Some((
-            id.clone(),
-            *new,
-            title.clone(),
-            file.clone(),
-            target.issue,
-            target.node.clone(),
-        )),
+        } => Some((id.clone(), *new, title.clone(), file.clone(), target.issue)),
         Action::Edit {
             id,
             title,
@@ -209,12 +200,11 @@ pub fn run(options: &Options) -> Result<()> {
                 title.clone(),
                 text.file.clone(),
                 None,
-                None,
             ))
         }
         _ => None,
     };
-    if let Some((id, new, title, file, issue, node)) = open_native {
+    if let Some((id, new, title, file, issue)) = open_native {
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
         let default_project = issues::identity::project(&cwd, &machine)?;
@@ -240,7 +230,6 @@ pub fn run(options: &Options) -> Result<()> {
             title: title.or_else(|| new.then(|| String::from("Untitled artifact"))),
             body: None,
             issue,
-            node,
             file: file_path,
             skill_session: None,
         })?;
@@ -282,7 +271,6 @@ pub fn run(options: &Options) -> Result<()> {
             title: title.clone(),
             body: text.read()?.unwrap_or_default(),
             issue: target.issue,
-            node: target.node.clone(),
         },
         Action::Edit {
             id,
@@ -334,16 +322,13 @@ pub fn run(options: &Options) -> Result<()> {
         Action::Link { id, target } => Operation::Link {
             id: id.clone(),
             issue: target.issue,
-            node: target.node.clone(),
         },
         Action::Unlink { id, target } => Operation::Unlink {
             id: id.clone(),
             issue: target.issue,
-            node: target.node.clone(),
         },
         Action::Links { target } => Operation::Links {
             issue: target.issue,
-            node: target.node.clone(),
         },
     };
     let text = match &options.action {

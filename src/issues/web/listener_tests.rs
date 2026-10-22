@@ -224,7 +224,7 @@ fn simultaneous_listeners_share_writes_csrf_routes_and_release_both_sockets() {
         assert_eq!(boot["csrf"], fixture.app.token);
         assert_eq!(
             fixture
-                .request(listener, "/mm?focus=1", &hosts[listener], None, None, None)
+                .request(listener, "/artifacts", &hosts[listener], None, None, None)
                 .status(),
             200
         );

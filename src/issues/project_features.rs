@@ -3,7 +3,6 @@ use crate::database::Connection;
 
 pub(crate) enum Feature {
     Artifacts,
-    Mindmaps,
 }
 
 impl Feature {
@@ -12,10 +11,6 @@ impl Feature {
             Self::Artifacts => (
                 "artifacts",
                 "SELECT coalesce((SELECT artifacts_enabled FROM project_settings WHERE project_id=?1),1)",
-            ),
-            Self::Mindmaps => (
-                "mindmaps",
-                "SELECT coalesce((SELECT mindmaps_enabled FROM project_settings WHERE project_id=?1),1)",
             ),
         };
         if !db.query_row(query, [&project.id], |row| row.get::<_, bool>(0))? {

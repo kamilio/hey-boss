@@ -95,8 +95,6 @@ pub enum Action {
         #[serde(default)]
         issue: Option<i64>,
         #[serde(default)]
-        node: Option<String>,
-        #[serde(default)]
         file: Option<String>,
         #[serde(default)]
         skill_session: Option<String>,
@@ -169,7 +167,6 @@ impl Action {
                 title,
                 body,
                 issue,
-                node,
                 file,
                 skill_session,
             } => {
@@ -193,9 +190,6 @@ impl Action {
                 if issue.is_some_and(|n| n <= 0) {
                     return Err(Error::invalid("Issue number must be positive"));
                 }
-                if let Some(node) = node.as_deref().filter(|s| !s.is_empty()) {
-                    crate::issues::identifier(node, "mindmap node", 2048)?;
-                }
                 if let Some(file) = file.as_deref().filter(|s| !s.is_empty())
                     && (file.len() > 4096 || file.contains('\0'))
                 {
@@ -210,7 +204,6 @@ impl Action {
                     "title": title,
                     "body": body,
                     "issue": issue,
-                    "node": node.as_deref().filter(|s| !s.is_empty()),
                     "file": file.as_deref().filter(|s| !s.is_empty()),
                     "skillSession": skill_session,
                 }))?);

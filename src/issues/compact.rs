@@ -30,15 +30,6 @@ pub(super) fn metadata(db: &Connection, result: &mut Value) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn issues(db: &Connection, project: &str, numbers: &[i64]) -> Result<Vec<Value>> {
-    let mut issues = db.query_collect::<_, _, rusqlite::Error>(
-        &format!("SELECT {COLUMNS} FROM json_each(?2) selected CROSS JOIN issues WHERE project_id=?1 AND number=selected.value AND deleted_at IS NULL"),
-        params![project, serde_json::to_string(numbers)?], row,
-    )?;
-    enrich(db, project, &mut issues)?;
-    Ok(issues)
-}
-
 pub(super) fn enrich(db: &Connection, project: &str, issues: &mut [Value]) -> Result<()> {
     let numbers: Vec<_> = issues.iter().filter_map(|i| i["number"].as_i64()).collect();
     if numbers.is_empty() {

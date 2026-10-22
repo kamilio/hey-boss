@@ -22,9 +22,6 @@ pub(super) const TABLES: &[&str] = &[
     "artifact_comments",
     "artifact_links",
     "file_attachments",
-    "mindmaps",
-    "mindmap_nodes",
-    "mindmap_links",
     "scheduled_jobs",
     "scheduled_job_revisions",
     "scheduled_job_runs",
@@ -42,6 +39,7 @@ pub(super) fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
             .iter()
             .map(|r| r["name"].as_str().unwrap().to_owned())
             .filter(|c| match table {
+                "project_settings" => c != "mindmaps_enabled",
                 "projects" => !matches!(c.as_str(), "next_number"),
                 "issues" => !super::super::archive::local_column(c) && c != "attempt_hold",
                 "worker_runs" => matches!(
@@ -205,5 +203,39 @@ pub(super) fn install(db: &Connection) -> Result<()> {
             db.execute_batch(&sql)?;
         }
     }
+    Ok(())
+}
+
+// Old immutable journals can still contain these records after every app is upgraded.
+pub(super) fn retired(table: &str) -> bool {
+    matches!(table, "mindmaps" | "mindmap_nodes" | "mindmap_links")
+}
+
+pub(super) fn retire_mindmaps(db: &Connection) -> Result<()> {
+    let triggers = replica::rows(
+        db,
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'distributed_capture_mindmap*' OR (name GLOB 'distributed_capture_project_settings_*' AND instr(sql,'mindmaps_enabled')>0))",
+        &[],
+    )?;
+    if triggers.is_empty() {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    for trigger in triggers {
+        let name = trigger["name"].as_str().unwrap().replace('"', "\"\"");
+        tx.execute_batch(&format!("DROP TRIGGER \"{name}\""))?;
+    }
+    for table in [
+        "distributed_outbox",
+        "distributed_baseline",
+        "distributed_fields",
+        "distributed_dirty",
+        "distributed_rejections",
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE table_name IN ('mindmaps','mindmap_nodes','mindmap_links')"), [])?;
+    }
+    tx.execute("DELETE FROM distributed_fields WHERE table_name='project_settings' AND field='mindmaps_enabled'", [])?;
+    install(&tx)?;
+    tx.commit()?;
     Ok(())
 }

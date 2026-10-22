@@ -361,30 +361,6 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
                 } else {
                     Ok(())
                 }
-            } else if *table == "mindmap_nodes" {
-                let project = desired
-                    .as_ref()
-                    .and_then(|r| r["project_id"].as_str())
-                    .map(str::to_owned)
-                    .or_else(|| {
-                        db.query_row(
-                            "SELECT project_id FROM mindmap_nodes WHERE id=?1",
-                            [key["id"].as_str()],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .optional()
-                        .ok()
-                        .flatten()
-                    });
-                if let Some(project) = project
-                    && !rebuilt.contains(&project)
-                {
-                    graph::mindmap(db, &project).map(|()| {
-                        rebuilt.insert(project);
-                    })
-                } else {
-                    Ok(())
-                }
             } else {
                 write(db, table, &key, desired)
             };
@@ -401,7 +377,7 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
                             params![table, entity],
                         )?;
                     }
-                    if !matches!(*table, "issue_subtasks" | "mindmap_nodes") {
+                    if !matches!(*table, "issue_subtasks") {
                         db.execute(
                             "DELETE FROM distributed_rejections WHERE table_name=?1 AND entity=?2",
                             params![table, entity],

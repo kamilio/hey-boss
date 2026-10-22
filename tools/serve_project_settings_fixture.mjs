@@ -26,7 +26,7 @@ const server = createServer((req, res) => {
       window.saved = []; window.failSave = false; window.failLoad = false;
       window.fixtureSettings = {version:1,prompt:'Fixture implementation',chief_prompt:'Fixture chief',
         chief_default_prompt:'Fixture chief',chief_enabled:false,prs_enabled:false,worktree_enabled:true,
-        drafts_enabled:true,artifacts_enabled:true,mindmaps_enabled:true,
+        drafts_enabled:true,artifacts_enabled:true,
         prompt_defaults:${JSON.stringify(promptDefaults)},prompt_sections:${JSON.stringify(Object.keys(promptDefaults).map(key => ({key,title:key,help:'Fixture prompt section'})))},prompt_overrides:{chief_wrapper:'Legacy {{project}} wrapper: {{prompt}}'}};
       async function api(request) {
         if (request.action === 'project_settings') {

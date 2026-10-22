@@ -1503,7 +1503,7 @@ fn inbox_clear_is_protected_and_forwards_only_valid_snapshots() {
 #[test]
 fn every_page_uses_the_issues_design_library_and_shell() {
     let web = Web::start();
-    for path in ["/", "/mm", "/workers"] {
+    for path in ["/", "/workers"] {
         let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
         for component in [
             "/components.css",
@@ -1537,51 +1537,11 @@ fn every_page_uses_the_issues_design_library_and_shell() {
 }
 
 #[test]
-fn main_navigation_includes_mindmaps_on_every_page() {
-    let web = Web::start();
-    for path in ["/", "/workers", "/mm"] {
-        let reply = web.http("GET", path, &[], b"");
-        assert_eq!(reply.status, 200);
-        let html = String::from_utf8(reply.body).unwrap();
-        let navigation = html
-            .split("aria-label=\"Main navigation\"")
-            .nth(1)
-            .unwrap_or_else(|| panic!("Missing main navigation on {path}"))
-            .split("</nav>")
-            .next()
-            .unwrap();
-        for (href, label) in [("/mm", "Mindmaps")] {
-            assert!(
-                navigation.contains(&format!("href=\"{href}\"")) && navigation.contains(label),
-                "Missing {label} in main navigation on {path}"
-            );
-        }
-        assert!(navigation.contains("Inbox") && navigation.contains("Issues"));
-        assert_eq!(html.matches("href=\"/mm\"").count(), 1);
-        assert!(!navigation.contains("nav-workers"));
-        assert!(html.contains("id=\"nav-workers\" href=\"/workers\""));
-        if path == "/mm" {
-            assert!(
-                navigation
-                    .split("id=\"nav-mindmaps\"")
-                    .nth(1)
-                    .unwrap()
-                    .split('>')
-                    .next()
-                    .unwrap()
-                    .contains("aria-current=\"page\"")
-            );
-        }
-    }
-}
-
-#[test]
 fn secrets_are_in_the_shared_global_menu_on_every_page() {
     let web = Web::start();
     for path in [
         "/",
         "/workers",
-        "/mm",
         "/jobs",
         "/skills",
         "/artifacts",
@@ -1617,192 +1577,6 @@ fn secrets_are_in_the_shared_global_menu_on_every_page() {
             path == "/secrets"
         );
     }
-}
-
-#[test]
-fn mindmap_assets_reads_and_authoring_boundary() {
-    let web = Web::start();
-    for (path, kind) in [
-        ("/mm", "text/html"),
-        ("/mindmap.js", "text/javascript"),
-        ("/mindmap-map.js", "text/javascript"),
-        ("/mindmap.css", "text/css"),
-    ] {
-        let r = web.http("GET", path, &[], b"");
-        assert_eq!(r.status, 200);
-        assert!(r.headers.contains(kind));
-    }
-    let show = json!({"action":"mindmap","operation":{"command":"show"}});
-    let r = web.action(&web.project, show.clone(), None);
-    assert_eq!(r.status, 200);
-    assert!(r.json()["nodes"].as_array().unwrap().is_empty());
-    let add = json!({"action":"mindmap","operation":{"command":"add","title":"Forbidden","body":"","kind":"text","reference":null,"reference_project":null,"alias":"forbidden","under":null,"if_version":null}});
-    let r = web.action(&web.project, add.clone(), None);
-    assert_eq!(r.status, 403);
-    assert_eq!(r.json()["error"]["code"], "forbidden");
-    let headers = [
-        ("Content-Type", "application/json"),
-        ("X-Hey-Boss-CSRF", web.token.as_str()),
-    ];
-    for operation in [
-        add,
-        json!({"action":"create","title":"Forbidden","body":"","labels":[]}),
-    ] {
-        let body = serde_json::to_vec(
-            &json!({"project":web.project,"operation":operation,"request_id":null}),
-        )
-        .unwrap();
-        assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 403);
-    }
-    let body =
-        serde_json::to_vec(&json!({"project":web.project,"operation":show,"request_id":null}))
-            .unwrap();
-    assert_eq!(web.http("POST", "/api/mm", &headers, &body).status, 200);
-    assert_eq!(
-        web.http(
-            "POST",
-            "/api/mm",
-            &[("Content-Type", "application/json")],
-            &body
-        )
-        .status,
-        403
-    );
-}
-
-#[test]
-fn native_focus_is_available_without_inline_scripts_and_only_on_mindmaps() {
-    let web = Web::start();
-    for path in ["/mm?focus=1", "/mm?other=1&focus=1"] {
-        let response = web.http("GET", path, &[], b"");
-        assert_eq!(response.status, 200);
-        let html = String::from_utf8(response.body).unwrap();
-        assert!(html.contains("<html lang=\"en\" class=\"mindmap-focus\">"));
-        assert!(html.contains("id=\"project-trigger\""));
-        assert!(!html.contains("<script>"));
-    }
-    for path in ["/mm", "/mm?focus=0", "/?focus=1", "/workers?focus=1"] {
-        let response = web.http("GET", path, &[], b"");
-        assert_eq!(response.status, 200);
-        assert!(
-            !String::from_utf8(response.body)
-                .unwrap()
-                .contains("class=\"mindmap-focus\"")
-        );
-    }
-}
-
-#[path = "support/mindmap_inbox.rs"]
-mod mindmap_inbox_fixture;
-
-#[test]
-fn actual_web_mindmap_notification_completion_recovery_does_not_acknowledge_notices() {
-    let web = Web::start();
-    for args in [
-        vec!["notice", "review", "--id", "review"],
-        vec!["add", "Follow-up", "--id", "follow-up", "--under", "review"],
-    ] {
-        let o = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
-            .current_dir(&web.root)
-            .env("HEY_BOSS_ISSUE_DB", web.root.join("issues.db"))
-            .env("HEY_BOSS_INBOX_SOCKET", web.root.join("inbox.sock"))
-            .env_remove("HEY_BOSS_ISSUE_HOST")
-            .args([
-                "mm",
-                "--project",
-                &web.project,
-                "--agent",
-                "human:test",
-                "--json",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
-    }
-    let pending = json!([{"taskID":"review","status":"pending","title":"Review rollout","summary":"Pending review"}]);
-    let inbox = mindmap_inbox_fixture::Inbox::start(web.root.join("inbox.sock"), pending.clone());
-    let show = || web.ok(json!({"action":"mindmap","operation":{"command":"show"}}));
-    let g = show();
-    assert_eq!(g["nodes"].as_array().unwrap().len(), 2);
-    assert!(
-        g["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| n["title"] == "Review rollout" && n["state"] == "pending")
-    );
-    inbox.tasks(json!([{"taskID":"review","status":"cancelled","title":"Cancelled"}]));
-    let g = show();
-    assert_eq!(g["nodes"].as_array().unwrap().len(), 1);
-    assert!(g["nodes"][0]["parent_id"].is_null());
-    inbox.unavailable();
-    let g = show();
-    assert_eq!(g["notifications"]["available"], false);
-    inbox.tasks(pending);
-    assert_eq!(show()["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(inbox.requests().len(), 4);
-    assert!(
-        inbox
-            .requests()
-            .iter()
-            .all(|r| r["command"] == "inbox_list")
-    );
-    assert!(inbox.path().exists());
-}
-
-#[test]
-fn mindmap_preview_and_full_node_reads_preserve_markdown_and_web_authoring_boundary() {
-    let web = Web::start();
-    let body = "## Planning\n\n🧭 ".repeat(2000);
-    let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
-    db.execute("INSERT INTO mindmap_nodes(id,project_id,alias,parent_id,position,kind,title,body,reference,reference_project,created_at,updated_at) VALUES('n-long-web',?1,'long',NULL,0,'markdown','Long note',?2,NULL,NULL,1,1)",rusqlite::params![web.project,body]).unwrap();
-    let preview =
-        web.ok(json!({"action":"mindmap","operation":{"command":"show","body_mode":"preview"}}));
-    assert_eq!(preview["nodes"][0]["body_truncated"], true);
-    assert_eq!(
-        preview["nodes"][0]["body"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count(),
-        512
-    );
-    let full = web.ok(json!({"action":"mindmap","operation":{"command":"view","node":"long"}}));
-    assert_eq!(full["node"]["body"], body);
-    assert!(
-        full["node"]["body_html"]
-            .as_str()
-            .unwrap()
-            .contains("<h2>Planning</h2>")
-    );
-    let single_preview = web.ok(json!({"action":"mindmap","operation":{"command":"view","node":"long","body_mode":"preview"}}));
-    assert_eq!(single_preview["body_mode"], "preview");
-    assert_eq!(
-        single_preview["node"]["body"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .count(),
-        512
-    );
-    assert_eq!(single_preview["node"]["body_truncated"], true);
-    let single_omitted = web.ok(
-        json!({"action":"mindmap","operation":{"command":"view","node":"long","body_mode":"none"}}),
-    );
-    assert_eq!(single_omitted["node"]["body"], "");
-    assert_eq!(single_omitted["node"]["has_body"], true);
-    let edit = json!({"action":"mindmap","operation":{"command":"edit","node":"long","title":"Forbidden","body":null,"if_version":null}});
-    assert_eq!(web.action(&web.project, edit, None).status, 403);
-    assert_eq!(
-        db.query_row(
-            "SELECT body FROM mindmap_nodes WHERE id='n-long-web'",
-            [],
-            |r| r.get::<_, String>(0)
-        )
-        .unwrap(),
-        body
-    );
 }
 
 #[test]
@@ -2160,7 +1934,7 @@ fn file_attachments_share_authenticated_actions_and_all_page_assets() {
         assert_eq!(response.status, 200);
         assert!(!response.body.is_empty());
     }
-    for path in ["/", "/mm", "/artifacts"] {
+    for path in ["/", "/artifacts"] {
         let response = web.http("GET", path, &[], b"");
         let html = String::from_utf8(response.body).unwrap();
         assert!(html.contains("/attachments.js") && html.contains("/attachments.css"));
@@ -2274,4 +2048,45 @@ fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
         .execute("UPDATE error_groups SET issue=NULL WHERE id=?1", [id.as_str().unwrap()]).unwrap();
     assert_eq!(call(json!({"action":"promote","id":id,"prompt":"Changed retry"})).json()["issue"], 2);
     assert_eq!(w.ok(json!({"action":"view","number":2}))["issue"]["body"], "Edited task prompt");
+}
+
+#[test]
+fn removed_mindmap_routes_are_not_served_or_advertised() {
+    let web = Web::start();
+    for path in [
+        "/mm",
+        "/mm?focus=1",
+        "/mindmap.js",
+        "/mindmap-map.js",
+        "/mindmap.css",
+    ] {
+        assert_eq!(web.http("GET", path, &[], b"").status, 404, "{path}");
+    }
+    for path in ["/", "/workers", "/artifacts"] {
+        let reply = web.http("GET", path, &[], b"");
+        assert_eq!(reply.status, 200);
+        let html = String::from_utf8(reply.body).unwrap();
+        assert!(!html.contains("nav-mindmaps") && !html.contains("project-mindmaps"));
+    }
+    let reply = web.http(
+        "POST",
+        "/api/mm",
+        &[
+            ("X-Hey-Boss-CSRF", &web.token),
+            ("Content-Type", "application/json"),
+        ],
+        b"{}",
+    );
+    assert_eq!(reply.status, 404);
+    let reply = web.action(
+        &web.project,
+        json!({"action":"mindmap","operation":{"command":"show"}}),
+        None,
+    );
+    assert_eq!(reply.status, 400);
+    assert!(
+        web.ok(json!({"action":"project_settings"}))
+            .get("mindmaps_enabled")
+            .is_none()
+    );
 }

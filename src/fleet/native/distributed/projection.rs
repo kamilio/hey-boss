@@ -71,6 +71,9 @@ fn fields(table: &str, row: &Value) -> Result<BTreeMap<String, Value>> {
         .as_object()
         .ok_or_else(|| replica::invalid("Invalid distributed row"))?
     {
+        if table == "project_settings" && name == "mindmaps_enabled" {
+            continue;
+        }
         let group = group(table, name);
         if group.starts_with('@') {
             fields
@@ -94,6 +97,9 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         || fact.before.is_none() && fact.after.is_none()
     {
         return Err(replica::invalid("Invalid distributed revision"));
+    }
+    if capture::retired(&fact.table) {
+        return Ok(());
     }
     if fact.table == "worker_allocations" {
         let row = fact
@@ -138,7 +144,10 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         let object = row
             .as_object()
             .ok_or_else(|| replica::invalid("Invalid distributed row"))?;
-        if object.keys().any(|column| !columns.contains(column)) {
+        if object.keys().any(|column| {
+            !columns.contains(column)
+                && !(fact.table == "project_settings" && column == "mindmaps_enabled")
+        }) {
             return Err(replica::invalid(
                 "Unsupported distributed column; upgrade both peers",
             ));

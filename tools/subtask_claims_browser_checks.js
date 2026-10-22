@@ -25,7 +25,7 @@ async page => {
     const before = await page.evaluate(() => JSON.stringify(model.detail.issue));
     await page.locator('[data-create-subtask]').click();
     check(await page.locator('#editor-subtask-help').isVisible(),'Creation explains scheduling before submission');
-    check((await page.locator('#editor-subtask-help').innerText()).includes('mindmap'),'Creation offers mindmap grouping');
+    check((await page.locator('#editor-subtask-help').innerText()).includes('claim'),'Creation explains claim protection');
     await page.locator('#editor-subject').fill('Keep this follow-up draft');
     await page.locator('#editor-body').fill('## Unfinished work\n\nPreserve this text.');
     await page.locator('#editor-submit').click();
@@ -47,7 +47,7 @@ async page => {
     check((await page.locator('#subtask-picker-help').innerText()).includes('Blocked'),'Existing issue picker explains scheduling');
     await page.locator('[data-existing-subtask="3"]').click();
     await page.locator('#subtask-picker-error').waitFor({state:'visible'});
-    check((await page.locator('#subtask-picker-error').innerText()).includes('mindmap'),'Link rejection offers safe grouping');
+    check((await page.locator('#subtask-picker-error').innerText()).includes('claim'),'Link rejection explains claim protection');
     check(await page.locator('#subtask-picker-dialog').isVisible(),'Rejected link stays in the picker');
     check(await page.evaluate(() => pendingMutation.size === 0),'Rejected link is not queued for automatic replay');
     for (const width of [320,390,768,1440]) {

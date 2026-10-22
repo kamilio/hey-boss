@@ -148,8 +148,6 @@ fn command_help_does_not_expose_revision_flags() {
         vec!["artifact", "archive"],
         vec!["artifact", "restore"],
         vec!["artifact", "delete"],
-        vec!["mm"],
-        vec!["mm", "batch"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
             .args(&route)

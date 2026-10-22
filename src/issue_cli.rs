@@ -705,7 +705,7 @@ enum SubtaskAction {
     },
 }
 
-const SUBTASK_SCHEDULING_HELP: &str = "Declare intentional sequences with `issue blocked-by CHILD PREDECESSOR`.\nReady handoff and parent completion are unchanged.\nSubtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner. For organization only, prefer ownership-preserving mindmap nesting:\n  hey-boss mm issue PARENT --id parent-work\n  hey-boss mm issue CHILD --under parent-work\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
+const SUBTASK_SCHEDULING_HELP: &str = "Declare intentional sequences with `issue blocked-by CHILD PREDECESSOR`.\nReady handoff and parent completion are unchanged.\nSubtasks affect scheduling: unfinished descendants put the parent in Blocked.\nChanges that would release an existing parent or ancestor claim are rejected atomically,\neven for the claim owner.\nFor a scheduling dependency, have the owner explicitly unassign the affected issue first.";
 
 #[derive(Subcommand)]
 enum CommitAction {
@@ -791,10 +791,6 @@ enum SettingsAction {
         artifacts_enabled: bool,
         #[arg(long)]
         no_artifacts: bool,
-        #[arg(long, conflicts_with = "no_mindmaps")]
-        mindmaps_enabled: bool,
-        #[arg(long)]
-        no_mindmaps: bool,
     },
 }
 #[derive(Subcommand)]
@@ -993,8 +989,6 @@ impl Options {
                     no_drafts,
                     artifacts_enabled,
                     no_artifacts,
-                    mindmaps_enabled,
-                    no_mindmaps,
                 } => {
                     if boss_name.is_none()
                         && worker_model.is_none()
@@ -1012,8 +1006,6 @@ impl Options {
                         && !no_drafts
                         && !artifacts_enabled
                         && !no_artifacts
-                        && !mindmaps_enabled
-                        && !no_mindmaps
                     {
                         return Err(Error::invalid(
                             "Specify a setting to change; see `hey-boss issue settings set --help`",
@@ -1037,13 +1029,6 @@ impl Options {
                         artifacts_enabled: if *artifacts_enabled {
                             Some(true)
                         } else if *no_artifacts {
-                            Some(false)
-                        } else {
-                            None
-                        },
-                        mindmaps_enabled: if *mindmaps_enabled {
-                            Some(true)
-                        } else if *no_mindmaps {
                             Some(false)
                         } else {
                             None
@@ -1592,7 +1577,6 @@ pub fn run(options: &Options) -> Result<()> {
                     .filter(|s| !s.is_empty())
             }),
             json: options.json,
-            mindmap: false,
         });
     }
     let rpc = matches!(options.action, Action::Rpc);
@@ -2037,7 +2021,6 @@ pub(crate) fn print_text(value: &Value) {
         for (key, label) in [
             ("drafts_enabled", "Drafts enabled"),
             ("artifacts_enabled", "Artifacts enabled"),
-            ("mindmaps_enabled", "Mindmaps enabled"),
         ] {
             if let Some(enabled) = value[key].as_bool() {
                 println!("{label}: {enabled}");
