@@ -7,48 +7,8 @@ import ImageIO
 import WebKit
 import Darwin
 import QuartzCore
-import IOKit
 import Carbon
 import CryptoKit
-
-/// Only aggregate input idle time is sampled. No keys, cursor positions or app
-/// contents are recorded or sent to the hub.
-final class MacPresence {
-    private let lock = NSLock()
-    private var locked = false
-    private var sleeping = false
-    private let hidService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOHIDSystem"))
-    private var observers: [NSObjectProtocol] = []
-    private var distributed: [NSObjectProtocol] = []
-    init() {
-        locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false
-        let center = DistributedNotificationCenter.default()
-        distributed.append(center.addObserver(forName: .init("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in self?.setLocked(true) })
-        distributed.append(center.addObserver(forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in self?.setLocked(false) })
-        let workspace = NSWorkspace.shared.notificationCenter
-        observers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.setSleeping(true) })
-        observers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in self?.setSleeping(false) })
-
-    }
-    private func setLocked(_ value: Bool) { lock.lock(); locked = value; lock.unlock() }
-    private func setSleeping(_ value: Bool) { lock.lock(); sleeping = value; lock.unlock() }
-    var snapshot: [String: Any] {
-        lock.lock(); let unavailable = locked || sleeping; lock.unlock()
-        let sample = hidIdleSeconds
-        return ["idleSeconds": min(604800, max(0, sample ?? 0)), "idleReliable": sample != nil, "unavailable": unavailable]
-    }
-    var hidIdleSeconds: Double? {
-        guard hidService != 0,
-              let value = IORegistryEntryCreateCFProperty(hidService, "HIDIdleTime" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? NSNumber else { return nil }
-        let seconds = value.doubleValue / 1_000_000_000
-        return seconds.isFinite && seconds >= 0 ? seconds : nil
-    }
-    deinit {
-        for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
-        for observer in distributed { DistributedNotificationCenter.default().removeObserver(observer) }
-        if hidService != 0 { IOObjectRelease(hidService) }
-    }
-}
 
 @_silgen_name("launch_activate_socket")
 func launchActivateSocket(_ name: UnsafePointer<CChar>, _ fds: UnsafeMutablePointer<UnsafeMutablePointer<Int32>?>, _ count: UnsafeMutablePointer<Int>) -> Int32
@@ -3714,45 +3674,6 @@ final class AgentOverviewWindow: NSWindow {
     }
 }
 
-enum MenuActivity: String {
-    case active, idle, confirming, away, locked, offline, unknown
-    static func state(_ routing: [String: Any]) -> Self {
-        guard let state = routing["macState"] as? String else { return .unknown }
-        if state == "active" {
-            guard let idle = routing["macIdleSeconds"] as? Double, idle.isFinite, idle >= 0 else { return .unknown }
-            return idle >= 30 ? .idle : .active
-        }
-        return Self(rawValue: state) ?? .unknown
-    }
-    var label: String {
-        switch self {
-        case .active: return "Mac active"
-        case .idle: return "Mac idle"
-        case .confirming: return "Confirming away"
-        case .away: return "Mac away"
-        case .locked: return "Mac locked or asleep"
-        case .offline: return "Mac disconnected"
-        case .unknown: return "Activity status unavailable"
-        }
-    }
-}
-// A status affordance beside the existing SF Symbol, not a second icon.
-final class ActivityBadge: NSView {
-    var state: MenuActivity = .unknown { didSet { if state != oldValue { needsDisplay = true } } }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
-    override func draw(_ dirtyRect: NSRect) {
-        let dot = NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1))
-        NSColor.windowBackgroundColor.setStroke(); dot.lineWidth = 2; dot.stroke()
-        switch state {
-        case .active: NSColor.systemGreen.setFill(); dot.fill()
-        case .confirming: NSColor.systemOrange.setFill(); dot.fill()
-        case .away: NSColor.systemIndigo.setFill(); dot.fill()
-        case .locked, .offline: NSColor.secondaryLabelColor.setFill(); dot.fill()
-        case .idle, .unknown: NSColor.secondaryLabelColor.setStroke(); dot.lineWidth = 1; dot.stroke()
-        }
-    }
-}
 final class SteeringTextView: NSTextView {
     var send: (() -> Void)?
     override func draw(_ dirtyRect: NSRect) {
@@ -4946,28 +4867,11 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func menuWillOpen(_ menu: NSMenu) { subscriptionQuota.open(cli: cli) }
     func menuDidClose(_ menu: NSMenu) { subscriptionQuota.close() }
     let statusMenu = NSMenu()
-    let activityMenuItem = NSMenuItem(title: "Activity status unavailable", action: nil, keyEquivalent: "")
-    let activityBadge = ActivityBadge(frame: NSRect(x: 15, y: 2, width: 7, height: 7))
     var inboxCount = 0
-    var activityRouting: [String: Any] = [:]
     func updateInboxCount(_ count: Int) {
         inboxCount = max(0, count)
-        inboxMenuItem.title = count == 0 ? "Inbox…" : "Inbox · \(count) unread…"
-        updateActivity(activityRouting)
-    }
-    func updateActivity(_ routing: [String: Any]) {
-        activityRouting = routing
-        let state = MenuActivity.state(routing)
-        activityBadge.state = state
-        let phone = routing["notifyPhone"] as? Bool
-        let delivery = phone == true ? "Phone pushes enabled" : phone == false ? "Phone pushes paused" : "Phone routing unknown"
-        activityMenuItem.title = "\(state.label) · \(delivery.lowercased())"
-        var parts = ["Hey Boss", state.label, delivery]
-        if let idle = routing["macIdleSeconds"] as? Double, idle.isFinite, idle >= 0 {
-            parts.append(idle < 60 ? "Last input \(Int(idle))s ago" : "Last input \(Int(min(idle, 604800) / 60))m ago")
-        }
-        if inboxCount > 0 { parts.append("\(inboxCount) unread") }
-        let description = parts.joined(separator: " · ")
+        inboxMenuItem.title = inboxCount == 0 ? "Inbox…" : "Inbox · \(inboxCount) unread…"
+        let description = inboxCount == 0 ? "Hey Boss" : "Hey Boss · \(inboxCount) unread"
         statusItem?.button?.toolTip = description
         statusItem?.button?.setAccessibilityLabel(description)
     }
@@ -5138,17 +5042,12 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
             button.title = ""
             button.imagePosition = .imageLeading
             button.toolTip = "hey-boss · Agent overview"
-            activityBadge.frame.origin.x = button.bounds.maxX - activityBadge.frame.width
-            activityBadge.autoresizingMask = [.minXMargin, .maxYMargin]
-            button.addSubview(activityBadge)
         }
         let menu = statusMenu
-        activityMenuItem.isEnabled = false
         let quickAdd = NSMenuItem(title: "Quick add issue…", action: #selector(showQuickIssue), keyEquivalent: "i")
         quickAdd.keyEquivalentModifierMask = [.command, .control, .option, .shift]
         quickAdd.target = self
         menu.addItem(quickAdd)
-        menu.addItem(activityMenuItem)
         menu.addItem(.separator())
         inboxMenuItem.action = #selector(showInbox)
         inboxMenuItem.target = self
