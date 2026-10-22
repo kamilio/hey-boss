@@ -8,6 +8,18 @@ public struct TalkError: LocalizedError {
 
 public enum Phase: String, Codable { case idle, recording, processing, failed }
 
+/// One app-side decision: callers never race a separate status read against a toggle.
+public enum DictationToggle: Equatable {
+    case start(submit: Bool), stop(submit: Bool), busy
+    public static func resolve(phase: Phase, currentSubmit: Bool, requestedSubmit: Bool?) -> Self {
+        switch phase {
+        case .idle, .failed: return .start(submit: requestedSubmit ?? false)
+        case .recording: return .stop(submit: requestedSubmit ?? currentSubmit)
+        case .processing: return .busy
+        }
+    }
+}
+
 public struct RecordingSession {
     public private(set) var phase: Phase = .idle
     public private(set) var generation: UInt64 = 0

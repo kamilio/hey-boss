@@ -5,7 +5,7 @@ press Hyper+E to stop and paste, or Hyper+R to stop, paste, and press Enter.
 The shortcut used to stop chooses the behavior. Caps Lock must already be mapped
 to Hyper (Control + Command + Option + Shift). Click the pill to toggle recording,
 drag to move it, or press Esc to discard. Clicking to stop keeps the starting
-shortcut's behavior; recordings started by clicking or the CLI only paste.
+shortcut's behavior; clicking to start and CLI commands without `--submit` paste by default.
 
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
@@ -141,6 +141,7 @@ hey-talk input default
 hey-talk start --no-overlay --no-paste
 hey-talk stop --json
 hey-talk cancel
+hey-talk toggle --submit                    # Same start/stop + submit behavior as Hyper+R
 hey-talk overlay show
 hey-talk history show
 hey-talk history --json
@@ -148,9 +149,16 @@ hey-talk warm
 hey-talk auto                               # Show mode and allowed apps
 hey-talk auto on                            # Also available in the menu or Hyper+V
 hey-talk auto off
+hey-talk auto toggle                        # App-side toggle; no status/read race
 hey-talk auto add com.example.Editor        # Allow another desktop app
 hey-talk auto remove com.example.Editor
 ```
+
+Karabiner `shell_command` and LinearMouse `run` can call these commands directly,
+without simulating a keyboard shortcut. `--submit` also works with `start`, `stop`,
+and `record`; the stopping command chooses submission when it specifies the flag.
+Ordinary `toggle` preserves the current recording's delivery mode. Per-app Enter
+exceptions and focus-change protection still apply. `--submit` rejects `--no-paste`.
 
 Suppress Enter in specific desktop apps, even with Hyper+R:
 
