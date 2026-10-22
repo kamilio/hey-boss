@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "job_summary_tests.rs"]
+mod job_summary;
+
 struct Fixture(std::path::PathBuf);
 impl Fixture {
     fn new() -> Self {
