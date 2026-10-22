@@ -71,9 +71,10 @@ fn hello(engine: &Engine) -> Hello {
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
     if peer.protocol != 3 {
-        return Err(invalid(
-            "Queue ordering requires upgraded sync peers; run hey-boss upgrade on the supervisor and reconnect both peers",
-        ));
+        return Err(invalid(&format!(
+            "Incompatible sync protocol: local 3, peer {}. Queue ordering requires upgraded sync peers; run hey-boss upgrade on the supervisor and reconnect both peers",
+            peer.protocol,
+        )));
     }
     if peer.replica.len() != 32
         || !peer.replica.bytes().all(|b| b.is_ascii_hexdigit())
@@ -237,7 +238,9 @@ mod tests {
             let result = serve_next(&mut engine, &mut frame.as_slice(), &mut output, |_| {
                 panic!("must reject before preparation")
             });
-            assert!(result.err().unwrap().to_string().contains("upgrade"));
+            let error = result.err().unwrap().to_string();
+            assert!(error.contains("upgrade"));
+            assert!(error.contains(&format!("local 3, peer {protocol}")));
             assert!(output.is_empty());
             assert_eq!(engine.head().unwrap(), 1);
             assert_eq!(engine.received(&"a".repeat(32)).unwrap(), 0);

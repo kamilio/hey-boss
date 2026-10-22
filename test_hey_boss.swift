@@ -3722,6 +3722,16 @@ func auditFleetSync() {
     precondition(ui.title.stringValue == "Offline · changes kept on this Mac")
     ui.update(["health": ["state": "rejected", "conflicts": 2]])
     precondition(ui.title.stringValue == "Sync needs attention" && ui.detail.stringValue.contains("2 rejected"))
+    ui.update(["health": ["state": "error", "outgoing_pending": 9000, "message": "old-mac: Incompatible sync protocol"]])
+    precondition(ui.title.stringValue == "Sync needs attention" && ui.detail.stringValue.contains("Incompatible sync protocol"), "Queued counts must not hide a transport failure")
+    if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_SYNC_SNAPSHOT_DIR"] {
+        for dark in [false, true] {
+            ui.content.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let bitmap = ui.content.bitmapImageRepForCachingDisplay(in: ui.content.bounds)!
+            ui.content.cacheDisplay(in: ui.content.bounds, to: bitmap)
+            try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent("sync-error-\(dark ? "dark" : "light").png"))
+        }
+    }
     ui.update(["health": healthy]); ui.update(nil)
     precondition(ui.title.stringValue == "Sync status unavailable", "A failed read must clear the previous green state")
     ui.update([:])

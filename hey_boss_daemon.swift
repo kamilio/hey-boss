@@ -4840,8 +4840,8 @@ final class FleetSyncController {
             guard let count = health[key] as? NSNumber, count.int64Value > 0 else { return nil }
             return "\(formatter.string(from: count) ?? count.stringValue) \(label)"
         }
-        detail.stringValue = counts.isEmpty ? (health["message"] as? String ?? "Open the menu to check again") : counts.joined(separator: " · ")
-        detail.toolTip = [detail.stringValue, health["message"] as? String].compactMap { $0 }.joined(separator: "\n")
+        detail.stringValue = state == "error" || counts.isEmpty ? (health["message"] as? String ?? "Open the menu to check again") : counts.joined(separator: " · ")
+        detail.toolTip = [detail.stringValue, health["message"] as? String, counts.isEmpty ? nil : counts.joined(separator: " · ")].compactMap { $0 }.joined(separator: "\n")
         if let seconds = health["last_exchange"] as? Double, seconds.isFinite {
             let date = Date(timeIntervalSince1970: seconds)
             exchanged.stringValue = "Last exchange \(DateFormatter.localizedString(from: date, dateStyle: .short, timeStyle: .medium))"
