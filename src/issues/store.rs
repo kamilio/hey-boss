@@ -48,6 +48,8 @@ pub(super) mod attempts;
 mod batch;
 #[path = "matching.rs"]
 mod matching;
+#[path = "ordering.rs"]
+mod ordering;
 #[path = "pr_monitor.rs"]
 mod pr_monitor;
 pub(crate) use pr_monitor::TrackedPullRequest;
@@ -2318,7 +2320,7 @@ impl Store {
                 };
                 let changed = old != target;
                 if changed {
-                    tx.execute("UPDATE issues SET sort_order=CASE WHEN number=?2 THEN ?3 WHEN ?3<?4 THEN sort_order+1 ELSE sort_order-1 END WHERE project_id=?1 AND sort_order BETWEEN min(?3,?4) AND max(?3,?4)", params![project.id,number,target,old])?;
+                    ordering::rotate(&tx, &project.id, old, target)?;
                     tx.execute("UPDATE issues SET updated_at=?3,version=version+1 WHERE project_id=?1 AND number=?2",params![project.id,number,now])?;
                     tx.execute(
                         "UPDATE projects SET issue_order_version=issue_order_version+1 WHERE id=?1",

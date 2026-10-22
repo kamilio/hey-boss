@@ -89,6 +89,20 @@ pub(super) fn upgrade_retry_metadata(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn upgrade_ordering(db: &Connection) -> Result<()> {
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_order_capture')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    install(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub(super) fn upgrade_worker_execution(db: &Connection) -> Result<()> {
     let current = |db: &Connection| {
         db.query_row("SELECT count(*)=3 FROM sqlite_master WHERE type='trigger' AND name IN ('distributed_capture_project_settings_INSERT','distributed_capture_project_settings_UPDATE','distributed_capture_project_settings_DELETE') AND instr(sql,'''worker_execution''')>0", [], |r| r.get::<_, bool>(0))
@@ -136,6 +150,7 @@ fn row_json(columns: &[String], prefix: &str) -> String {
 }
 
 pub(super) fn install(db: &Connection) -> Result<()> {
+    ordering::install(db)?;
     // Canonical merges can reopen an archived task without changing its cold
     // content. Only the active projector may update that compact header.
     db.execute_batch("DROP TRIGGER IF EXISTS issue_archive_mutation_guard;
@@ -159,8 +174,35 @@ pub(super) fn install(db: &Connection) -> Result<()> {
             ("UPDATE", Some("OLD"), Some("NEW")),
             ("DELETE", Some("OLD"), None),
         ] {
-            let before = old.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
-            let after = new.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
+            let mut before = old.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
+            let mut after = new.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
+            let order_guard = if *table == "issues" && operation == "UPDATE" {
+                let unchanged = columns
+                    .iter()
+                    .filter(|c| !matches!(c.as_str(), "sort_order" | "updated_at" | "version"))
+                    .map(|c| format!("OLD.\"{c}\" IS NEW.\"{c}\""))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let compact = [
+                    "project_id",
+                    "number",
+                    "sort_order",
+                    "updated_at",
+                    "version",
+                ]
+                .map(String::from);
+                before = format!(
+                    "CASE WHEN {unchanged} THEN {} ELSE {before} END",
+                    row_json(&compact, "OLD")
+                );
+                after = format!(
+                    "CASE WHEN {unchanged} THEN {} ELSE {after} END",
+                    row_json(&compact, "NEW")
+                );
+                " AND (SELECT active FROM distributed_order_capture)=0"
+            } else {
+                ""
+            };
             let different = if operation == "UPDATE" {
                 format!(
                     " AND NOT ({})",
@@ -197,7 +239,7 @@ pub(super) fn install(db: &Connection) -> Result<()> {
             // Fleet imports are captured during shadowing. After activation,
             // only the distributed projector sets the existing syncing guard.
             let sql = format!("CREATE TRIGGER IF NOT EXISTS distributed_capture_{table}_{operation} AFTER {operation} ON {table}
-                WHEN ((SELECT active FROM distributed_meta WHERE id=1)=0 OR (SELECT syncing FROM fleet_meta WHERE id=1)=0){different}{logical_delete}{no_feedback} BEGIN
+                WHEN ((SELECT active FROM distributed_meta WHERE id=1)=0 OR (SELECT syncing FROM fleet_meta WHERE id=1)=0){order_guard}{different}{logical_delete}{no_feedback} BEGIN
                 UPDATE distributed_meta SET clock=clock+1 WHERE id=1;
                 INSERT INTO distributed_outbox SELECT clock,'{table}',{before},{after} FROM distributed_meta WHERE id=1; {observation} END;");
             db.execute_batch(&sql)?;

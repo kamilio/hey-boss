@@ -748,6 +748,10 @@ advances beyond its base commit (or a normal upgrade is requested). Deployment
 reports must verify the requested published build and source receipt; a different
 release is retried with the normal failure backoff without interrupting sync.
 An already matching companion connection stays open after a no-change upgrade.
+Priority moves replicate one compact queue rotation and small metadata records,
+without resending crossed issues or their text. Older sync peers must upgrade
+before reconnecting; the handshake rejects them before exchanging facts. Existing
+immutable history and reconnect cursors remain intact.
 Verified installations remain current while reconnecting; a stale runtime build
 cannot trigger repeated installs or terminate a replacement connection before hello.
 Companions keep reporting liveness while database work delays configuration,

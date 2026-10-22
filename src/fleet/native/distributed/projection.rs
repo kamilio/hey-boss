@@ -101,6 +101,9 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
     if capture::retired(&fact.table) {
         return Ok(());
     }
+    if fact.table == "issue_order" {
+        return ordering::reduce(db, fact);
+    }
     if fact.table == "worker_allocations" {
         let row = fact
             .after
@@ -213,6 +216,7 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         changes.insert("@alive".into(), json!(false));
     }
     let mut changed = false;
+    let mut order_changed = false;
     for (field, value) in changes {
         let encoded = value.to_string();
         let previous: Option<String> = db.query_row("SELECT value FROM distributed_fields WHERE table_name=?1 AND entity=?2 AND field=?3 AND clock=?4 AND origin=?5",
@@ -220,8 +224,13 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         if previous.is_some_and(|v| v != encoded) {
             return Err(replica::invalid("A replica reused a logical revision"));
         }
-        changed |= db.execute("INSERT INTO distributed_fields VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(table_name,entity,field) DO UPDATE SET clock=excluded.clock,origin=excluded.origin,value=excluded.value WHERE (excluded.clock,excluded.origin)>(clock,origin)",
+        let accepted = db.execute("INSERT INTO distributed_fields VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(table_name,entity,field) DO UPDATE SET clock=excluded.clock,origin=excluded.origin,value=excluded.value WHERE (excluded.clock,excluded.origin)>(clock,origin)",
             params![fact.table,entity,field,fact.clock,fact.origin,encoded])?>0;
+        changed |= accepted;
+        order_changed |= accepted && fact.table == "issues" && field == "sort_order";
+    }
+    if order_changed {
+        ordering::seed(db, &serde_json::from_str(&entity)?)?;
     }
     db.execute(
         "UPDATE distributed_meta SET clock=max(clock,?1) WHERE id=1",
@@ -344,6 +353,9 @@ pub(super) fn row(db: &Connection, table: &str, key: &Value) -> Result<Option<Va
         return Ok(None);
     }
     if table == "issues" {
+        if let Some(position) = ordering::position(db, key)? {
+            result["sort_order"] = json!(position);
+        }
         let archived_body = result.as_object_mut().unwrap().remove("@archived_body");
         if !result["archive_key"].is_null() && archived_body != Some(result["body"].clone()) {
             // The winning body is newer/different than the chosen cold copy.

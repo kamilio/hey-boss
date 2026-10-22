@@ -10,6 +10,7 @@ mod identity;
 mod local;
 pub(super) use local::request as local_request;
 mod materialize;
+mod ordering;
 mod projection;
 pub(super) mod reconcile;
 mod resources;
@@ -156,6 +157,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         activation::protect_role(db)?;
         capture::upgrade_retry_metadata(db)?;
         capture::upgrade_worker_execution(db)?;
+        capture::upgrade_ordering(db)?;
         capture::retire_mindmaps(db)?;
         crate::issues::worker_retry::migrate(db)?;
         return Ok(());
@@ -313,6 +315,17 @@ pub(super) fn baseline(
                 .unwrap()
                 .as_i64()
                 .unwrap();
+            if *table == "issues" {
+                // A baseline must retain the pre-rotation coordinate. Giving
+                // the already rotated hot row clock zero would apply moves twice.
+                use rusqlite::OptionalExtension;
+                let key = projection::key(&tx, table, &row)?;
+                if let Some(value) = tx.query_row("SELECT value FROM distributed_fields WHERE table_name='issues' AND entity=?1 AND field='sort_order'", [key.to_string()], |r| r.get::<_,String>(0)).optional()? {
+                    row["sort_order"] = serde_json::from_str(&value)?;
+                } else if let Some(position) = tx.query_row("SELECT json_extract(after_json,'$.sort_order') FROM distributed_outbox WHERE table_name='issues' AND before_json IS NULL AND json_extract(after_json,'$.project_id')=?1 AND json_extract(after_json,'$.number')=?2 ORDER BY clock LIMIT 1", rusqlite::params![row["project_id"].as_str(),row["number"].as_i64()], |r| r.get::<_,i64>(0)).optional()? {
+                    row["sort_order"] = json!(position);
+                }
+            }
             let mut fact = Revision {
                 protocol: PROTOCOL,
                 origin: origin.clone(),
