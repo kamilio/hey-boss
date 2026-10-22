@@ -9,10 +9,6 @@ async page => {
  await page.route('**/*',route=>route.continue());
  const expected=['On track','At risk','In trouble','At risk','On track'];
  const fits=locator=>locator.evaluateAll(elements=>elements.every(el=>{const r=el.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&el.scrollWidth<=el.clientWidth+1;}));
- const fixture='http://127.0.0.1:52094';
- await page.goto(fixture);
- const {code}=await (await page.request.get(fixture+'/fixture/pairing')).json();
- check((await page.request.post(fixture+'/api/pair',{data:{code}})).ok(),'Paired device connected');
  for(const theme of ['light','dark'])for(const width of [1440,768,390,320]){
   await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
   const mode='desktop',base=`http://127.0.0.1:4798/?qa=${theme}-${width}-${Date.now()}#project=named%3AStatus%20Dot%20QA`;
@@ -58,17 +54,6 @@ async page => {
   check(await page.locator('.progress-comment').textContent()==='The fix passes tests. Checking the phone layout next.','Detail preserves full status');
   await page.locator('.progress-history summary').click();await page.locator('.progress-history-list li').waitFor();
   check(await page.locator('.progress-history-list li p').textContent()==='The fix passes tests. Checking the phone layout next.','History stays intact');
- }
- // Paired devices use the shared detail card rather than the desktop list.
- for(const theme of ['light','dark'])for(const width of [390,320,768]){
-  await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme:theme});
-  await page.goto(fixture+`/project-resource?qa=${theme}-${width}-${Date.now()}#project=named%3AStatus%20Dot%20QA&issue=1`,{waitUntil:'commit'});
-  await page.locator('.progress-comment').waitFor();
-  check(await page.locator('.progress-comment').textContent()==='The fix passes tests. Checking the phone layout next.',`paired/${theme}/${width}: full status preserved`);
-  await page.locator('.progress-history summary').click();await page.locator('.progress-history-list li').waitFor();
-  check(await page.locator('.progress-history-list li p').textContent()==='The fix passes tests. Checking the phone layout next.','Paired history preserved');
-  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Paired detail fits viewport');
-  await page.screenshot({path:`output/playwright/issue94/paired-${theme}-${width}-detail.png`});
  }
  await page.goto('http://127.0.0.1:4798/#project=named%3AStatus%20Dot%20QA');
  await page.locator('.issue-progress').first().focus();await page.mouse.move(0,0);

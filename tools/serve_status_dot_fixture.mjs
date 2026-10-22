@@ -1,9 +1,7 @@
-// Isolated desktop and paired-device QA; never uses the real issue store.
+// Isolated web QA; never uses the real issue store.
 import {mkdirSync,mkdtempSync,copyFileSync} from 'node:fs';
 import {spawn,spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
-import {createApp} from '../mobile/server/index.mjs';
-import {HubStore} from '../mobile/server/store.mjs';
 const output=resolve('output/playwright/issue94');mkdirSync(output,{recursive:true});
 const root=mkdtempSync(output+'/runtime-');
 const binary=root+'/hey-boss';copyFileSync(resolve(process.argv[2]||'target/debug/hey-boss'),binary);
@@ -23,16 +21,8 @@ for(const [title,level,comment] of [
  if(level){cli(['claim',String(number)]);cli(['status',String(number),level,'--comment',comment]);}
 }
 const web=spawn(binary,['issue','--project',project.id,'web','--port','4798','--no-discovery','--json'],{env,stdio:['ignore','inherit','inherit']});
-const store=new HubStore();store.setIssueProjects([project]);
-const app=createApp({store,hubToken:'synthetic-status-dot-fixture-'.repeat(4),secure:false,origin:'http://127.0.0.1:52094'});
-app.get('/fixture/pairing',(_req,res)=>res.json({code:store.pairing()}));
-const server=app.listen(52094,'127.0.0.1');
-const timer=setInterval(()=>{for(const row of store.pendingArtifacts()){
- const request={version:1,project,project_override:row.project,actor:null,operation:row.operation,request_id:null};
- const r=spawnSync(binary,['issue','rpc'],{env,encoding:'utf8',input:JSON.stringify(request)});
- store.finishArtifact(row.id,JSON.parse(r.stdout));
-}},100);
 let closing=false;
-function close(){if(closing)return;closing=true;clearInterval(timer);app.locals.close();web.kill('SIGTERM');server.close(()=>store.close());}
+function close(){if(closing)return;closing=true;web.kill('SIGTERM');}
 for(const signal of ['SIGTERM','SIGINT'])process.on(signal,close);
 web.on('exit',close);
+console.log(JSON.stringify({fixture_pid:process.pid,native:'http://127.0.0.1:4798'}));

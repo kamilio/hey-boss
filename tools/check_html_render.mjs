@@ -1,4 +1,4 @@
-// cargo build --bin hey-boss; npm --prefix mobile run build
+// cargo build --bin hey-boss; npm --prefix tools/web-assets run build
 // PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node tools/check_html_render.mjs
 import assert from 'node:assert/strict';
 import {readFileSync, mkdirSync} from 'node:fs';
@@ -11,13 +11,12 @@ for(const engine of [chromium,webkit]){
  const fixture=await startFixture();let browser;
  try{
   browser=await engine.launch({headless:true,...(engine===chromium?{channel:'chrome'}:{})});
-  for(const mobile of [false,true]){
-   const context=await browser.newContext({viewport:{width:1280,height:900}}),page=await context.newPage();
-   const base=mobile?fixture.mobile:fixture.native,label=engine.name()+'-'+(mobile?'paired':'desktop');
+  for(const width of [1280,390]){
+   const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage();
+   const base=fixture.native,label=engine.name()+'-'+width;
    const errors=[];page.on('pageerror',error=>errors.push(error.message));
-   if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();assert((await page.request.post(base+'/api/pair',{data:{code:pair.code}})).ok());}
    const artifact=id=>base+'/artifacts#'+new URLSearchParams({project:fixture.project,artifact:id});
-   for(const [kind,url] of [['artifact',artifact(fixture.artifact)],['issue',base+(mobile?'/issues':'/')+'#'+new URLSearchParams({project:fixture.project,issue:fixture.issue})]]){
+   for(const [kind,url] of [['artifact',artifact(fixture.artifact)],['issue',base+'/'+'#'+new URLSearchParams({project:fixture.project,issue:fixture.issue})]]){
     await page.goto(url);await check(page);console.log('PASS',label,kind);
     if(kind==='issue'){
      await page.locator('#comment-body').fill('Issue preview state '+label);
@@ -53,8 +52,7 @@ for(const engine of [chromium,webkit]){
    assert.equal(await page.locator('.html-preview').frameLocator('iframe').locator('#counter').innerText(),'1','Commenting preserves the running preview');
    await page.goto(artifact(fixture.full));
    await page.locator('.html-preview[data-state="ready"]').waitFor();
-   if(mobile)await page.locator('#artifact-edit').click();
-   else{await page.getByLabel('More actions',{exact:true}).click();await page.locator('#artifact-edit-browser').click();}
+   await page.getByLabel('More actions',{exact:true}).click();await page.locator('#artifact-edit-browser').click();
    const field=page.locator('#artifact-body'),source=await field.inputValue();
    assert(source.startsWith('<!doctype html>'));
    const edited=source+'\n<!-- Saved from '+label+' -->\n';await field.fill(edited);

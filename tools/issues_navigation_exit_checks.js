@@ -7,14 +7,10 @@ async page => {
   page.on('dialog', dialog => { dialogs.push(dialog.type()); dialog.accept().catch(() => {}); });
   page.on('pageerror', error => errors.push(error.message));
   const base = await page.evaluate(() => location.origin);
-  if (!['http://127.0.0.1:59661', 'http://127.0.0.1:52061'].includes(base)) throw Error('Synthetic fixture required');
-  const paired = base.endsWith(':52061'), path = paired ? '/issues' : '/';
-  const surface = paired ? 'paired' : 'native';
+  if (!['http://127.0.0.1:59661'].includes(base)) throw Error('Synthetic fixture required');
+  const path = '/';
+  const surface = 'native';
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
-  if (paired) {
-    const {code} = await (await page.request.get(base + '/fixture-pairing')).json();
-    await page.request.post(base + '/api/pair', {data:{code}});
-  }
   const ready = () => page.waitForFunction(() => model.csrf && model.project && (model.route.issue ? model.detail : model.signature));
   await page.goto(base + path); await ready();
   const project = await page.evaluate(async () => (await api({action:'create',title:'Exit navigation fixture',body:'Saved description',labels:[]},'Exit navigation '+crypto.randomUUID())).project.id);

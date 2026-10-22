@@ -4,10 +4,7 @@ async page => {
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  await page.goto('about:blank');
  const project='named%3ATimeline%20QA',suffix='#project='+project+'&issue=1';
- const mobile='http://127.0.0.1:52947';
- const {code}=await(await page.request.get(mobile+'/fixture/pairing')).json();
- check((await page.request.post(mobile+'/api/pair',{data:{code}})).ok(),'Paired phone authenticated');
- for(const [mode,base] of [['desktop','http://127.0.0.1:48948/'],['phone',mobile+'/issues']]){
+ for(const [mode,base] of [['desktop','http://127.0.0.1:48948/']]){
   await page.goto(base+suffix);await page.locator('.issue-activity').first().waitFor();
   check(await page.locator('#history-toggle').count()===0,mode+': activity visible by default');
   check(await page.locator('#comments .comment-card').count()===2,mode+': comments appear once');

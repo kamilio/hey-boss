@@ -156,21 +156,6 @@ let web;
         await page.keyboard.press('Escape');
         if (process.env.FILTER_SCREENSHOTS) await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-${scheme}-${width}.png`)});
       }
-      // The phone hub ships these same files with a different page shell.
-      execFileSync(process.execPath, ['mobile/sync-issue-web.mjs'], {cwd:resolve('.')});
-      await page.route('**/issue-web/*', route => {
-        const name = new URL(route.request().url()).pathname.split('/').pop();
-        route.fulfill({body:readFileSync(resolve('mobile/public/issue-web',name)),contentType:name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':'image/png'});
-      });
-      await page.route('**/issues', route => route.fulfill({body:readFileSync('mobile/public/issue-web/index.html'),contentType:'text/html'}));
-      await page.goto(`${base}/issues#project=named%3AFilter+QA&state=blocked`);
-      await preset('blocked').click(); await preset('min_launches').click(); await expect([4,6]);
-      for (const width of [390,320]) {
-        await page.setViewportSize({width,height:900});
-        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Phone shell fits');
-        await choose('label','reliability'); await expect([4,6]);
-        if (process.env.FILTER_SCREENSHOTS) await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-phone-${width}.png`)});
-      }
       assert.deepEqual(errors, [], 'No browser exceptions');
       console.log(`${engine.name()}: presets, combinations, lookup, history, keyboard, copy command, light/dark and four widths passed`);
       await context.close();

@@ -1,18 +1,15 @@
 async page => {
  const checks=[];
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
- const fixture='http://127.0.0.1:52070';
- const {code}=await (await page.request.get(fixture+'/fixture/pairing')).json();
- check((await page.request.post(fixture+'/api/pair',{data:{code}})).ok(),'Fixture device paired');
- for(const mode of ['paired','desktop'])for(const theme of ['light','dark'])for(const width of [1440,768,390,320]){
+ for(const mode of ['desktop'])for(const theme of ['light','dark'])for(const width of [1440,768,390,320]){
   await page.setViewportSize({width,height:1000});
   await page.emulateMedia({colorScheme:theme,reducedMotion:'reduce'});
-  const base=mode==='desktop'?'http://127.0.0.1:4796/':fixture+'/project-resource';
+  const base='http://127.0.0.1:4796/';
   for(const number of [1,4,5]){
    const label=`${mode}/${theme}/${width}/issue-${number}`;
    await page.goto(base+'?qa='+Date.now()+'#project=named%3AProgress%20Studio&issue='+number,{waitUntil:'commit'});
    await page.locator('.issue-progress-card').waitFor();
-   const mainSelector=mode==='desktop'?'.detail-main':'#resource-content';
+   const mainSelector='.detail-main';
    const order=await page.locator(mainSelector).evaluate(main=>{
     const description=main.querySelector(':scope > article');
     const progress=main.querySelector(':scope > .issue-progress-card');

@@ -21,13 +21,10 @@ The browser suite, `tools/issues_list_actions_browser_checks.js`, runs with
 `playwright-cli run-code --filename` against an isolated issue web server. It
 creates synthetic issues and must never be pointed at the live issue database.
 
-Build with `cargo build --locked --bin hey-boss` and `npm --prefix mobile run build`,
+Build with `cargo build --locked --bin hey-boss` and `npm --prefix tools/web-assets run build`,
 then start `node tools/serve_issue_list_actions_fixture.mjs`. The fixture exposes
-the native UI at `http://127.0.0.1:59639` and the paired UI at
-`http://127.0.0.1:52039/issues`. For the paired UI, retrieve the synthetic code from
-`/fixture-pairing` and POST it to `/api/pair` using the browser's request context.
-Run the suite on each surface; each must finish normally with `COMPLETE` and
-**68/68** checks against the compiled assets. Review the light/dark desktop and phone screenshots in
+the web UI at `http://127.0.0.1:59639`. Run the suite against the compiled assets.
+Review the light/dark desktop and phone screenshots in
 `output/playwright/issue139`, including the short phone viewport and ownership
 confirmation. Close the browser session, stop the fixture with Ctrl+C, and remove
 the generated screenshots and CLI reports. The fixture shuts down its own database

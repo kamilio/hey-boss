@@ -1,15 +1,12 @@
 // Run with playwright-cli --session=issue121 run-code --filename this file.
-// Start serve_issue_architecture_fixture.mjs first, after building mobile assets.
+// Start serve_issue_architecture_fixture.mjs first.
 async page => {
   const errors = [], checks = [];
   const onError = error => errors.push(error.message);
   page.on('pageerror', onError);
   const check = (ok, name) => {if (!ok) throw Error(name); checks.push(name);};
-  const mobile = 'http://127.0.0.1:52121';
-  const {code} = await (await page.request.get(mobile + '/fixture/pairing')).json();
-  check((await page.request.post(mobile + '/api/pair', {data: {code}})).ok(), 'Paired fixture authenticated');
   try {
-    for (const [mode, base] of [['desktop', 'http://127.0.0.1:48122/'], ['paired', mobile + '/issues']]) {
+    for (const [mode, base] of [['desktop', 'http://127.0.0.1:48122/']]) {
       for (const number of [1, 2, 3, 4, 5, 6, 8]) {
         await page.goto(base + '?qa=' + Date.now() + '#project=named%3AIssue%20Design%20QA&issue=' + number);
         await page.locator('.issue-description').waitFor();

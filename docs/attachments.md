@@ -48,6 +48,6 @@ Removed resources do not delete attachments implicitly: files remain accessible 
 ID until explicitly removed. Phones access these files directly through the local web interface on allowed Wi-Fi networks; see [local mobile access](mobile.md).
 
 Verification: `cargo test --locked --test attachments --test issues_web --test artifacts`,
-`npm --prefix mobile test`, and `tools/attachments_browser_checks.js` against an
+`tools/attachments_browser_checks.js` against an
 isolated Attachment Studio fixture cover storage, remote materialization, authority,
 project/device isolation, upload retries, downloads, deletion and responsive themes.

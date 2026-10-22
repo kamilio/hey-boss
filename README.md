@@ -151,7 +151,8 @@ Open the issue interface with `hey-boss issue web`, then visit
 [hey-boss.test](http://hey-boss.test/). It shares the CLI's SQLite database and
 includes a project switcher, Markdown editing, comments, claims, search, history,
 and light/dark themes. All web assets are embedded in the binary; no frontend
-build or separate service is needed. See the [web interface guide](docs/issues.md#web-interface)
+build or separate service is needed. To rebuild the bundled editor and diagram assets,
+run `npm ci --prefix tools/web-assets` and `npm run build --prefix tools/web-assets`. See the [web interface guide](docs/issues.md#web-interface)
 and [verification results](docs/issues-web-verification.md).
 
 Issue filters combine search, labels, assignment, and minimum agent launches. Quick
@@ -359,7 +360,7 @@ allocation. `--force` is an explicit takeover override; never use it to resolve
 a synchronization or allocation denial. Ordinary claims protect an offline
 device's reservation.
 The supervisor and companion run natively in Rust, including replication,
-allocation, worker controls, and the mobile bridge. Restarting either fleet
+allocation and worker controls. Restarting either fleet
 service leaves independently running workers and agents alive. Python remains
 required for the source upgrade and GitHub import utilities; the old fleet
 implementation is retained only as a regression-test reference.

@@ -1,11 +1,9 @@
-// Isolated production native/mobile servers for Mermaid browser checks.
+// Isolated production web server for Mermaid browser checks.
 import {mkdtempSync,rmSync,copyFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';
 import {createInterface} from 'node:readline';
-import {createApp} from '../mobile/server/index.mjs';
-import {HubStore} from '../mobile/server/store.mjs';
 
 const root=mkdtempSync(join(tmpdir(),'hey-boss-diagrams-'));
 // A build in the shared checkout must not auto-reload this server mid-test.
@@ -18,27 +16,7 @@ execFileSync(binary,['artifact','create','--project','Flowchart QA','--title','R
 const child=spawn(binary,['issue','web','--project','Flowchart QA','--no-discovery','--port','59549','--json'],{env,stdio:['ignore','pipe','inherit']});
 const lines=createInterface({input:child.stdout});
 const ready=await new Promise((resolve,reject)=>{lines.once('line',line=>resolve(JSON.parse(line)));child.once('exit',code=>reject(Error('Native server exited '+code)));});
-const native=ready.url.replace(/\/$/,''),base='http://127.0.0.1:59550';
-const boot=await(await fetch(native+'/api/bootstrap')).json();
-const store=new HubStore();store.setIssueProjects(boot.projects);
-const app=createApp({store,hubToken:'synthetic-diagram-fixture-token'.repeat(2),origin:base,secure:false});
-app.get('/fixture-pairing',(req,res)=>res.json({code:store.pairing()}));
-const server=app.listen(59550,'127.0.0.1');
-let syncing=false;
-const timer=setInterval(async()=>{
- if(syncing)return;syncing=true;
- try{for(const request of store.pendingArtifacts()){
-  const current=await(await fetch(native+'/api/bootstrap')).json();
-  store.setIssueProjects(current.projects);
-  const read=['list','view','links','preview'].includes(request.operation.operation?.command);
-  const response=await fetch(native+'/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':current.csrf},body:JSON.stringify({project:request.project,operation:request.operation,request_id:read?null:request.id})});
-  store.finishArtifact(request.id,await response.json());
- }}catch(e){console.error(e.message);}finally{syncing=false;}
-},100);
-console.log(JSON.stringify({native,mobile:base,project:'named:Flowchart QA'}));
-let closing=false;
-function close(){
- if(closing)return;closing=true;clearInterval(timer);child.kill('SIGTERM');app.locals.close();server.closeAllConnections();
- server.close(()=>{store.close();child.once('exit',()=>{rmSync(root,{recursive:true,force:true});process.exit(0);});if(child.exitCode!==null){rmSync(root,{recursive:true,force:true});process.exit(0);}});
-}
-for(const signal of ['SIGTERM','SIGINT'])process.on(signal,close);
+const native=ready.url.replace(/\/$/,'');
+console.log(JSON.stringify({native,project:'named:Flowchart QA'}));
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>child.kill('SIGTERM'));
+child.on('exit',()=>rmSync(root,{recursive:true,force:true}));

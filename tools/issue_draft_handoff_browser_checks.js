@@ -5,17 +5,9 @@ async page => {
   page.setDefaultTimeout(30000);
   page.on('pageerror',e=>errors.push(e.message));
   const base=await page.evaluate(()=>location.origin);
-  if(!['http://127.0.0.1:59661','http://127.0.0.1:52061'].includes(base))throw Error('Synthetic fixture required');
-  const paired=base.endsWith(':52061'),path=paired?'/issues':'/',surface=paired?'paired':'native';
+  if(!['http://127.0.0.1:59661'].includes(base))throw Error('Synthetic fixture required');
+  const path = '/',surface = 'native';
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
-  if(paired){
-    const {code}=await(await page.request.get(base+'/fixture-pairing')).json();
-    await page.request.post(base+'/api/pair',{data:{code}});
-    for(const name of ['app.js','app.css']){
-      const response=await page.request.get('http://127.0.0.1:59661/'+name),body=await response.body();
-      await page.route(base+'/issue-web/'+name,r=>r.fulfill({body,contentType:name.endsWith('.js')?'text/javascript':'text/css'}));
-    }
-  }
   await page.goto(base+path);
   await page.waitForFunction(()=>model.csrf&&model.project&&model.signature);
   const project='named:Draft handoff QA '+Date.now();

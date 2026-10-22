@@ -1,11 +1,10 @@
 // Run against serve_jobs_ui_fixture.mjs; all mutations stay in its disposable store.
 async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
- const origin=new URL(page.url()).origin,paired=origin.endsWith('52049'),project='named:Jobs UI QA';
- if(!['http://127.0.0.1:59649','http://127.0.0.1:52049'].includes(origin))throw Error('Isolated fixture required');
+ const origin=new URL(page.url()).origin,project='named:Jobs UI QA';
+ if(!['http://127.0.0.1:59649'].includes(origin))throw Error('Isolated fixture required');
  const checks=[],errors=[];
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
  page.on('pageerror',error=>errors.push(error.message));page.on('dialog',dialog=>dialog.accept());page.setDefaultTimeout(15000);
- if(paired){const {code}=await(await page.request.get(origin+'/fixture-pairing')).json();await page.request.post(origin+'/api/pair',{data:{code}});}
  await page.route('**/api/jobs/runtime',route=>route.fulfill({json:{ok:true,machine:'fixture',machines:[],catalog:{models:[]}}}));
  const markdown=await(await page.request.get('http://127.0.0.1:52049/fixture-instructions.md')).text();
  await page.goto(origin+'/jobs#project='+encodeURIComponent(project));
@@ -37,7 +36,7 @@ async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
   check(await page.locator('#job-panel').evaluate(el=>el.scrollWidth<=el.clientWidth),`${width} ${theme}: schedule fits modal`);
   for(const selector of ['#job-close','#job-save','#job-minute','#job-interval']){const box=await page.locator(selector).boundingBox();check(box.x>=0&&box.x+box.width<=width&&box.y>=0&&box.y+box.height<=800,`${width} ${theme}: ${selector} is visible`);}
   const box=await page.locator('#job-dialog').boundingBox();check(Math.abs(box.x-(width-box.width)/2)<2,'Job dialog is centered');
-  await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-hours-${width}-${theme}.png`});
+  await page.screenshot({path:`${outputDir}/${'desktop'}-hours-${width}-${theme}.png`});
  }
  await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
  await page.locator('#job-save').focus();await page.keyboard.press('Tab');check(await page.locator('#job-reload').evaluate(el=>el===document.activeElement),'Footer actions follow keyboard order');
@@ -79,15 +78,15 @@ async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
   await page.locator('.job-schedule-editor').evaluate(el=>el.scrollIntoView({block:'start'}));
   check(await page.locator('#job-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth),`${width} ${theme}: editor fits`);
   for(const selector of ['#job-cron','.job-weekdays','.job-cron-legend','#job-preview']){const box=await page.locator(selector).boundingBox();check(box.x>=0&&box.x+box.width<=width,`${width} ${theme}: ${selector} fits`);}
-  await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-cron-${width}-${theme}.png`});
+  await page.screenshot({path:`${outputDir}/${'desktop'}-cron-${width}-${theme}.png`});
  }
  await page.setViewportSize({width:1440,height:1000});await page.emulateMedia({colorScheme:'light'});
- await page.locator('.job-cron-reference summary').click();await page.locator('.job-schedule-editor').evaluate(el=>el.scrollIntoView({block:'start'}));await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-cron-guide.png`});
+ await page.locator('.job-cron-reference summary').click();await page.locator('.job-schedule-editor').evaluate(el=>el.scrollIntoView({block:'start'}));await page.screenshot({path:`${outputDir}/${'desktop'}-cron-guide.png`});
  await page.locator('#job-close').click();await page.waitForFunction(()=>!document.querySelector('#job-dialog').open);await page.locator('#jobs-search').fill('30 9 * * 1,3,5');
  await page.locator('.job-card[href$="job='+id+'"]').waitFor({state:'visible'});
  check((await page.locator('.job-cron-caption').allTextContents()).every(value=>value==='30 9 * * 1,3,5'),'List searches the raw cron expression');check((await page.locator('.job-row').filter({has:page.locator('.job-card[href$="job='+id+'"]')}).locator('.job-cron-caption').textContent())==='30 9 * * 1,3,5','List displays the saved cron');
- await page.screenshot({path:`${outputDir}/${paired?'paired':'desktop'}-cron-list.png`});
+ await page.screenshot({path:`${outputDir}/${'desktop'}-cron-list.png`});
  await page.reload();await page.locator('.job-card[href$="job='+id+'"]').click();await preview();check(await page.locator('#job-cron').inputValue()==='30 9 * * 1,3,5','Reload retains persisted schedule');
  await page.locator('#job-delete').click();await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Deleted'));
- check(await page.locator('#job-cron').isDisabled(),'Deleted cron is read-only');check(errors.length===0,'No JavaScript errors');return {surface:paired?'paired':'desktop',checks:checks.length};
+ check(await page.locator('#job-cron').isDisabled(),'Deleted cron is read-only');check(errors.length===0,'No JavaScript errors');return {surface:'desktop',checks:checks.length};
 }

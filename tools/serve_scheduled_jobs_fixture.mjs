@@ -1,11 +1,10 @@
-// Isolated native and paired issue UI. Stop with Ctrl+C to remove the fixture.
+// Isolated native issue UI. Stop with Ctrl+C to remove the fixture.
 import {mkdtempSync, rmSync, existsSync, realpathSync} from 'node:fs';
 import {spawn,spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {createApp} from '../mobile/server/index.mjs';
-import {HubStore} from '../mobile/server/store.mjs';
+import {createServer} from 'node:http';
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'hey-boss-scheduled-jobs-')));
 const database = join(root, 'issues.db');
@@ -22,12 +21,10 @@ const start = args => {
 const owner = start(['fleet','companion']);
 const identity = createHash('sha256').update(database).digest('hex').slice(0,24);
 const socketBase = `/tmp/hey-boss-db-${process.getuid()}/${identity}`;
-let timer, app, server, store, closing = false;
+let server, closing = false;
 async function close() {
   if (closing) return;
   closing = true;
-  clearTimeout(timer);
-  app?.locals.close();
   server?.closeAllConnections();
   server?.close();
   await Promise.all(children.map(child => new Promise(resolve => {
@@ -35,7 +32,6 @@ async function close() {
     child.once('exit', resolve);
     child.kill('SIGTERM');
   })));
-  store?.close();
   rmSync(root, {recursive:true,force:true});
   for (const suffix of ['.sock','.lock','.startup','.log']) rmSync(socketBase+suffix,{force:true});
   console.log('COMPLETE: fixture processes stopped and temporary data removed');
@@ -69,31 +65,20 @@ try {
   }
   console.log(JSON.stringify({records}));
   start(['issue','--project','Quick action QA','web','--port','59639','--no-discovery','--json']);
-  const native='http://127.0.0.1:59639', paired='http://127.0.0.1:52039';
+  const native='http://127.0.0.1:59639';
   let boot;
   for (let attempt=0; !boot; attempt++) {
     if (attempt === 200) throw Error('Fixture web server did not start');
     try {boot=await (await fetch(native+'/api/bootstrap')).json();}
     catch {await new Promise(resolve=>setTimeout(resolve,50));}
   }
-  store=new HubStore();store.setIssueProjects(boot.projects);
-  const headers={'Content-Type':'application/json',Authorization:'Bearer '+'synthetic-quick-actions-fixture'.repeat(2)};
-  app=createApp({store,hubToken:'synthetic-quick-actions-fixture'.repeat(2),origin:paired,secure:false});
-  app.get('/fixture-runs.json',(_req,res)=>res.json(records));
-  app.get('/fixture-pairing',(_req,res)=>res.json({code:store.pairing()}));
-  server=app.listen(52039,'127.0.0.1');
-  async function relay() {
-    try {
-      const queue=await (await fetch(paired+'/api/bridge/web',{headers})).json();
-      for (const request of queue.requests) {
-        const response=request.kind==='inbox'?{ok:true,tasks:[]}:
-          await (await fetch(native+'/api/'+request.kind,request.kind==='bootstrap'?{}:{method:'POST',
-            headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':boot.csrf},body:JSON.stringify(request.payload)})).json();
-        await fetch(paired+'/api/bridge/web/'+request.id+'/result',{method:'POST',headers,body:JSON.stringify(response)});
-      }
-    } catch(error) {if(!closing) console.error(error);}
-    if(!closing) timer=setTimeout(relay,50);
-  }
-  relay();
-  console.log(JSON.stringify({fixture_pid:process.pid,owner_pid:owner.pid,native,paired:paired+'/issues'}));
+  server=createServer(async(req,res)=>{
+    const send=(status,value)=>{res.writeHead(status,{'Content-Type':'application/json'});res.end(JSON.stringify(value));};
+    try{
+      if(req.method==='GET'&&req.url==='/fixture-runs.json')return send(200,records);
+      send(404,{ok:false});
+    }catch(error){send(500,{error:error.message});}
+  });
+  server.listen(52039,'127.0.0.1');
+  console.log(JSON.stringify({fixture_pid:process.pid,owner_pid:owner.pid,native}));
 } catch(error) {console.error(error);process.exitCode=1;await close();}

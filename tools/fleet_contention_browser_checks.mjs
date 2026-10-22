@@ -22,12 +22,10 @@ const server=createServer((req,res)=>{
   }
   if(path==='/api/action')return json({ok:true,pull_requests:[]});
   try{
-    const paired=url.searchParams.has('paired');
-    const assets=paired||path.startsWith('/agent-web/')?'mobile/public/agent-web':path.startsWith('/artifact-web/')?'mobile/public/artifact-web':source;
     const name=path==='/workers'?'fleet.html':path.split('/').pop();
     if(!/^[\w.-]+$/.test(name))throw Error('Not found');
-    let body=readFileSync(resolve(assets,name));
-    if(name==='fleet.html'&&!paired)body=body.toString().replace('<!--app-shell-->',readFileSync(resolve(source,'app-shell.html'),'utf8').replace(/<!--[^]*?-->/g,''));
+    let body=readFileSync(resolve(source,name));
+    if(name==='fleet.html')body=body.toString().replace('<!--app-shell-->',readFileSync(resolve(source,'app-shell.html'),'utf8').replace(/<!--[^]*?-->/g,''));
     if(name==='routes.js')body=body.toString().replace('/* ROUTE_DEFINITIONS */ []',readFileSync(resolve(source,'routes.json'),'utf8'));
     res.setHeader('Content-Type',name.endsWith('.css')?'text/css':name.endsWith('.js')?'text/javascript':name.endsWith('.png')?'image/png':'text/html');res.end(body);
   }catch{res.writeHead(404);res.end();}
@@ -39,9 +37,9 @@ try{
   browser=await chromium.launch({channel:'chrome',headless:true});
   const page=await browser.newPage({hasTouch:true}),errors=[];
   page.setDefaultTimeout(10000);page.on('pageerror',error=>errors.push(error.message));
-  for(const paired of [false,true])for(const colorScheme of ['light','dark'])for(const width of [1440,768,390,320]){
+  for(const colorScheme of ['light','dark'])for(const width of [1440,768,390,320]){
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
-    await page.goto(`http://127.0.0.1:${server.address().port}/workers${paired?'?paired=1':''}`);
+    await page.goto(`http://127.0.0.1:${server.address().port}/workers`);
     await page.locator('.activity-machine').waitFor();
     for(const next of ['healthy','syncing','waiting','sync_waiting','recovered','offline']){
       state=next;await page.locator('#refresh').click();
@@ -61,7 +59,7 @@ try{
       if(['waiting','sync_waiting'].includes(state))assert.match(await page.locator('#fleet-attention').innerText(),/Database busy; data sync will retry/);
       if(process.env.FLEET_SCREENSHOTS&&[1440,390,320].includes(width)){
         mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});
-        await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`${paired?'paired':'desktop'}-${colorScheme}-${width}-${state}.png`),fullPage:true});
+        await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`desktop-${colorScheme}-${width}-${state}.png`),fullPage:true});
       }
       checks++;
     }
@@ -92,10 +90,10 @@ try{
     await page.evaluate(()=>window.noticeObserver.disconnect());
     if(process.env.FLEET_SCREENSHOTS&&[1440,390].includes(width)){
       await review.locator('summary').click();
-      await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`${paired?'paired':'desktop'}-${colorScheme}-${width}-saved-edits.png`),fullPage:true});
+      await page.screenshot({path:resolve(process.env.FLEET_SCREENSHOTS,`desktop-${colorScheme}-${width}-saved-edits.png`),fullPage:true});
     }
     retained=false;
   }
   assert.deepEqual(mutations,[],'Visual tests never send worker controls');assert.deepEqual(errors,[]);
-  console.log(`PASS: ${checks} desktop/paired light/dark layouts, waiting/recovery/offline states, stable saved-edit notices during sync, preserved tasks and keyboard focus, no API mutations or runtime errors`);
+  console.log(`PASS: ${checks} desktop/phone light/dark layouts, waiting/recovery/offline states, stable saved-edit notices during sync, preserved tasks and keyboard focus, no API mutations or runtime errors`);
 }finally{await browser?.close();await new Promise(done=>server.close(done));}

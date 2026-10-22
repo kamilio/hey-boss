@@ -4,8 +4,7 @@ const {readFileSync} = require('node:fs');
 const {createServer} = require('node:http');
 const {resolve} = require('node:path');
 const {chromium, webkit} = require('playwright');
-const paired = process.env.BADGE_PAIRED === '1';
-const root = resolve(paired ? 'mobile/public/issue-web' : 'src/issues/web');
+const root = resolve('src/issues/web');
 const project = {id:'named:Badge QA',name:'Badge QA',open:7,closed:0,ready:0,blocked:0,deleted:0,unassigned:2,prs_enabled:true};
 const issues = [
   {title:'Recover the native stream after upstream closes',assignment:{kind:'agent',actor:'codex:astra',machine_name:'Devbox'},assignee:'codex:astra'},
@@ -46,18 +45,18 @@ const server=createServer(async(req,res)=>{
   try {
     const name=['/','/issues'].includes(req.url)?'index.html':decodeURIComponent(req.url.split('?')[0]).replace(/^\/(?:issue-web\/)?/,'');
     let text=readFileSync(resolve(root,name));
-    if(name.endsWith('.html') && !paired){
+    if(name.endsWith('.html')){
       let shell=readFileSync(root+'/app-shell.html','utf8');
       for(const [marker,file] of [['header-actions','issue-header-actions'],['profile','issue-profile'],['project-action','issue-project-action']]) shell=shell.replace('<!--'+marker+'-->',readFileSync(root+'/'+file+'.html','utf8'));
       text=String(text).replace('<!--app-shell-->',shell);
     }
-    if(name==='routes.js' && !paired) text=String(text).replace('/* ROUTE_DEFINITIONS */ []',readFileSync(root+'/routes.json','utf8'));
+    if(name==='routes.js') text=String(text).replace('/* ROUTE_DEFINITIONS */ []',readFileSync(root+'/routes.json','utf8'));
     res.setHeader('Content-Type',name.endsWith('.js')?'application/javascript':name.endsWith('.css')?'text/css':name.endsWith('.png')?'image/png':'text/html');res.end(text);
   }catch{res.statusCode=404;res.end();}
 });
 (async()=>{
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
-  const base='http://127.0.0.1:'+server.address().port+(paired?'/issues':'/')+'#project=named%3ABadge+QA';
+  const base='http://127.0.0.1:'+server.address().port+'/'+'#project=named%3ABadge+QA';
   try {
     for(const engine of [chromium,webkit]){
       const browser=await engine.launch({headless:true});

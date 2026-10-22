@@ -7,15 +7,13 @@ for(const engine of [chromium,webkit]){
  const fixture=await startFixture();let browser;
  try{
   browser=await engine.launch({headless:true,...(engine===chromium?{channel:'chrome'}:{})});
-  for(const mobile of [false,true]){
-   const context=await browser.newContext({viewport:{width:mobile?390:1280,height:900}}),page=await context.newPage();
-   const base=mobile?fixture.mobile:fixture.native,label=engine.name()+'-'+(mobile?'paired':'desktop');
+  for(const width of [1280,390]){
+   const context=await browser.newContext({viewport:{width,height:900}}),page=await context.newPage();
+   const base=fixture.native,label=engine.name()+'-'+width;
    const errors=[];page.on('pageerror',error=>errors.push(error.message));
-   if(mobile){const pair=await(await page.request.get(base+'/fixture-pairing')).json();assert((await page.request.post(base+'/api/pair',{data:{code:pair.code}})).ok());}
    await page.goto(base+'/artifacts#'+new URLSearchParams({project:fixture.project,artifact:fixture.full}));
    const edit=async()=>{
-    if(mobile)await page.locator('#artifact-edit').click();
-    else{await page.getByLabel('More actions',{exact:true}).click();await page.locator('#artifact-edit-browser').click();}
+    await page.getByLabel('More actions',{exact:true}).click();await page.locator('#artifact-edit-browser').click();
    };
    await edit();
    const field=page.locator('#artifact-body'),input=page.locator('#artifact-import');
