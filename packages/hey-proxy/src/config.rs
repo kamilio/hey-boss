@@ -65,6 +65,10 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
+    // Standalone proxy configs may retain this retired option. Accept its
+    // boolean shape without enabling approval overrides or changing policy.
+    #[serde(default, rename = "auto_approve", skip_serializing)]
+    _legacy_auto_approve: bool,
     #[serde(default)]
     routes: Vec<routes::Route>,
     #[serde(default)]
@@ -920,6 +924,24 @@ pub fn fingerprint(path: &Path) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_approval_setting_does_not_break_config_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for enabled in [false, true] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "listen": "127.0.0.1:8080", "auto_approve": enabled,
+                "providers": {"claude": {}}
+            }))
+            .unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let config = load(&path).unwrap();
+            assert!(config.claude.is_some());
+            assert!(!config.skip_blocked_security_work);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
     #[test]
     fn named_accounts_roundtrip_and_reject_invalid_connections() {
         let raw = serde_json::json!({"listen":"127.0.0.1:8080", "account_schema_version":1,
