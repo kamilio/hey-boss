@@ -73,10 +73,16 @@ try {
   assert.equal(target(),'machine:'+machine);
   db.exec('UPDATE fleet_allocation_deadlines SET expires_at=0');
   assert.equal(db.prepare('SELECT count(*) n FROM worker_runs').get().n,0);
+  db.prepare("INSERT INTO distributed_attempts VALUES('remote-before-reservation','remote',?,1,'running',1,NULL,'','{}')").run('named:Assignment deadline QA');
   // Two actual worker processes race for the same expired assignment.
   const workerArgs=['worker','run','--project','Assignment deadline QA','--directory',root,'--no-prs','--no-worktree','--concurrency','1'];
   const first=start([...workerArgs,'--name','Deadline first']);
   const second=start([...workerArgs,'--name','Deadline second']);
+  await wait(()=>db.prepare('SELECT count(*) n FROM issue_workers').get().n===2);
+  await delay(2500);
+  assert.equal(db.prepare('SELECT count(*) n FROM worker_runs').get().n,0,'Remote activity without its reservation still holds pickup');
+  assert.equal(db.prepare('SELECT count(*) n FROM fleet_allocation_deadlines').get().n,1);
+  db.exec("UPDATE distributed_attempts SET state='completed',finished_at=2 WHERE id='remote-before-reservation'");
   await wait(()=>db.prepare("SELECT count(*) n FROM worker_runs WHERE state='awaiting_claim' AND session_id IS NOT NULL").get().n===1);
   const attempt=db.prepare('SELECT * FROM worker_runs').get();
   assert.equal(db.prepare('SELECT count(*) n FROM worker_runs').get().n,1);

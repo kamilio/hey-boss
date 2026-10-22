@@ -215,7 +215,20 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
     // longer than the legacy allocator's fifteen-minute deadline for capacity.
     // Retire only that orphan deadline; keep the route and all pickup gates.
     // Attempts still in flight belong to their owner, even with stale presence.
-    db.execute_batch("DELETE FROM fleet_allocation_deadlines AS d
+    // Remote attempt history can arrive before reservation facts. The actual
+    // local owner is authoritative over an echoed copy of its own attempt.
+    let remote_hold = if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_attempts')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        "AND NOT EXISTS(SELECT 1 FROM distributed_attempts r
+            WHERE r.project_id=d.project_id AND r.issue_number=d.issue_number AND r.finished_at IS NULL
+            AND NOT EXISTS(SELECT 1 FROM worker_runs local WHERE local.id=r.id))"
+    } else {
+        ""
+    };
+    db.execute_batch(&format!("DELETE FROM fleet_allocation_deadlines AS d
         WHERE d.expires_at<=CAST(strftime('%s','now') AS INTEGER)*1000
         AND EXISTS(SELECT 1 FROM issues i JOIN fleet_allocations f
             ON f.project_id=i.project_id AND f.issue_number=i.number
@@ -224,7 +237,8 @@ pub(crate) fn reconcile(db: &Connection, clock: &Clock) -> Result<()> {
         AND NOT EXISTS(SELECT 1 FROM worker_runs r
             WHERE r.project_id=d.project_id AND r.issue_number=d.issue_number AND r.finished_at IS NULL)
         AND NOT EXISTS(SELECT 1 FROM worker_allocations a
-            WHERE a.project_id=d.project_id AND a.issue_number=d.issue_number AND a.released=0);")?;
+            WHERE a.project_id=d.project_id AND a.issue_number=d.issue_number AND a.released=0)
+        {remote_hold};"))?;
     Ok(())
 }
 
