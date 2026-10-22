@@ -88,7 +88,7 @@ fn new_configs_are_global_scoped_and_idempotent() {
     );
     assert_eq!(
         fs::read_to_string(fixture.0.join(".codex/config.toml")).unwrap(),
-        "model = 'custom'\n"
+        "model = 'custom'\n\n[features]\nworktrees = false\n"
     );
     let inode = fs::metadata(fixture.settings()).unwrap().ino();
     fixture.success();
@@ -104,6 +104,48 @@ fn new_configs_are_global_scoped_and_idempotent() {
             & 0o777,
         0o600
     );
+}
+
+#[test]
+fn codex_worktrees_are_disabled_without_changing_other_settings() {
+    for source in [
+        "",
+        "# Keep this\nmodel = 'custom'\n[features]\nworktrees = true # old default\nhooks = true\n",
+        "features = { worktrees = true, hooks = true }\n",
+    ] {
+        let fixture = Fixture::new();
+        let path = fixture.0.join(".codex/config.toml");
+        if !source.is_empty() {
+            fs::write(&path, source).unwrap();
+        }
+        fixture.success();
+        let changed = fs::read_to_string(&path).unwrap();
+        assert!(changed.contains("worktrees = false"), "{changed}");
+        if source.contains("hooks = true") {
+            assert!(changed.contains("hooks = true"));
+        }
+        if source.contains("# Keep this") {
+            assert!(changed.starts_with("# Keep this\nmodel = 'custom'\n"));
+            assert!(changed.contains("# old default"));
+        }
+        let inode = fs::metadata(&path).unwrap().ino();
+        fixture.success();
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    }
+}
+
+#[test]
+fn invalid_codex_config_prevents_all_configuration_writes() {
+    for source in ["[broken", "features = false\n"] {
+        let fixture = Fixture::new();
+        let path = fixture.0.join(".codex/config.toml");
+        fs::write(&path, source).unwrap();
+        assert!(!fixture.command().output().unwrap().status.success());
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+        assert!(!fixture.rules().exists());
+        assert!(!fixture.settings().exists());
+    }
 }
 
 #[test]

@@ -1610,6 +1610,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "tokio",
+ "toml_edit",
  "tungstenite 0.29.0",
  "unicode-normalization",
 ]
