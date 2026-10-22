@@ -45,6 +45,11 @@ fn classification(worker: &Value, build: &str) -> &'static str {
     if pending(worker) {
         return "restarting";
     }
+    // Idle exec briefly unregisters (and disables) the old registration.
+    // Its saved running intent survives; that gap is not a stopped worker.
+    if worker["pid"].is_null() && worker["intent"] == "running" {
+        return "restarting";
+    }
     let busy = worker["active"].as_u64().unwrap_or(0) > 0
         || worker["job_active"].as_u64().unwrap_or(0) > 0;
     let enabled = worker["config"]["enabled"] == true;
@@ -56,6 +61,9 @@ fn classification(worker: &Value, build: &str) -> &'static str {
     }
     if matches!(worker["intent"].as_str(), Some("pause" | "stop" | "drain")) || !enabled {
         return "paused";
+    }
+    if worker["pid"].is_number() || busy {
+        return "waiting_for_idle";
     }
     if matches!(
         worker["rollout_signal"]["state"].as_str(),
@@ -101,23 +109,27 @@ pub(super) fn run(build: &str, apply: bool) -> Result<Value> {
         }
         let mut requested = false;
         for worker in &workers {
-            if !matches!(classification(worker, build), "outdated" | "restarting") {
+            let state = classification(worker, build);
+            if !matches!(state, "outdated" | "restarting" | "waiting_for_idle") {
+                continue;
+            }
+            requested = true;
+            if state == "waiting_for_idle" {
                 continue;
             }
             let id = worker["id"].as_str().unwrap();
-            // Existing durable restart waits for the owned processes to stop.
-            // Retrying after a lost reply uses the same identity and cannot
-            // launch a second worker or resume an explicitly paused worker.
+            // Live workers reload themselves after their owned work finishes.
+            // The guarded signal only recovers an absent idle worker. Retrying
+            // cannot stop a live owner or resume an explicitly paused worker.
             control::apply_signal(
                 &ctx,
                 &json!({"id":request_id(build,id),"worker":id,"signal":"restart","upgrade_build":build}),
             )?;
-            requested = true;
         }
         if !requested {
             return Ok(result);
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
 
@@ -128,7 +140,7 @@ mod tests {
     #[test]
     fn paused_stopped_and_unknown_workers_cannot_be_misreported_or_resumed() {
         let mut w = json!({"id":"w","pid":12,"build":"old","config":{"enabled":true},"active":1});
-        assert_eq!(classification(&w, "new"), "outdated");
+        assert_eq!(classification(&w, "new"), "waiting_for_idle");
         w["intent"] = json!("pause");
         assert_eq!(classification(&w, "new"), "paused");
         assert_eq!(report(&[w.clone()], "new")["complete"], false);
@@ -140,10 +152,14 @@ mod tests {
         w["rollout_signal"] = json!({"state":"superseded"});
         w["intent"] = json!("running");
         w["config"]["enabled"] = json!(true);
-        assert_eq!(classification(&w, "new"), "failed");
+        assert_eq!(classification(&w, "new"), "waiting_for_idle");
         w["build"] = json!("new");
         assert_eq!(classification(&w, "new"), "current");
         w["pid"] = Value::Null;
-        assert_eq!(classification(&w, "new"), "failed");
+        assert_eq!(classification(&w, "new"), "restarting");
+        w["config"]["enabled"] = json!(false);
+        assert_eq!(report(&[w.clone()], "new")["complete"], false);
+        w["intent"] = json!("stop");
+        assert_eq!(classification(&w, "new"), "inactive");
     }
 }

@@ -797,9 +797,12 @@ resolve that cause and retry rather than deleting the store. Committed schema
 changes are retained if a later installation step fails, so recovery must use a
 build that supports the migrated schema. Existing state and issue databases are
 preserved. The desktop daemon and managed companion brokers restart after an
-upgrade. Rollouts also verify every running worker and use durable guarded
-restarts for outdated workers, retaining IDs, settings, and unfinished checkouts.
-Replacements start only after the previous owned processes stop. Paused workers
+upgrade. Rollouts also verify every running worker. Outdated workers load the
+installed binary at their next idle point, after both issue work and scheduled
+jobs finish, retaining IDs, settings, and unfinished checkouts. A rollout that
+times out reports incomplete and leaves active work running; retries observe
+the same owner. Durable guarded restarts only recover missing idle workers.
+Explicit Stop remains immediate. Paused workers
 are never resumed; paused old agents still finishing work keep rollout incomplete.
 `--check` observes worker versions without restarting them. Retrying a rollout
 continues the same restart. Matching installed files alone cannot mean success.

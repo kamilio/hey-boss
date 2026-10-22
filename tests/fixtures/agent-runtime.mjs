@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, appendFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -82,7 +82,17 @@ function prompt(text) {
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
   if (provider === 'claude') send({type:'stream_event',session_id:session,event:{type:'content_block_delta',delta:{type:'text_delta',text}}});
   if (provider === 'pi') send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:text}});
-  if (process.env.HEY_BOSS_FIXTURE_JOB_HOLD) return;
+  if (process.env.HEY_BOSS_FIXTURE_JOB_HOLD) {
+    if (process.env.HEY_BOSS_FIXTURE_JOB_RELEASE) {
+      const timer = setInterval(() => {
+        if (existsSync(process.env.HEY_BOSS_FIXTURE_JOB_RELEASE)) {
+          clearInterval(timer);
+          complete();
+        }
+      }, 50);
+    }
+    return;
+  }
   if (text === 'question fixture' && provider === 'claude') {
     send({type:'control_request',request_id:'question',request:{subtype:'can_use_tool',tool_name:'AskUserQuestion',input:{questions:[{question:'Choose a color',options:[{label:'Blue'},{label:'Green'}],multiSelect:false}]}}});
     return;

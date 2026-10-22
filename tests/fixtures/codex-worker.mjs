@@ -83,6 +83,9 @@ for await (const line of createInterface({input: process.stdin})) {
     continue;
   }
   if (mode === 'delay-model-start') await new Promise(resolve => setTimeout(resolve, 6000));
+  if (mode === 'delay-release') {
+    while (!existsSync('release')) await new Promise(resolve => setTimeout(resolve, 50));
+  }
   if (['delay', 'delay-unclaimed', 'delay-model-start'].includes(mode)) {
     send({method: 'item/started', params: {threadId: session, item: {type: 'reasoning'}}}); continue;
   }
@@ -118,7 +121,7 @@ for await (const line of createInterface({input: process.stdin})) {
     send({method: 'turn/completed', params: {threadId: session, turn: {id: turn, status: 'completed'}}});
     continue;
   }
-  const status = ['fresh-claim', 'resume-unavailable', 'unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered', 'database-outage-recovered', 'proxy-outage-recovered','transient-error-recovered'].includes(mode) ? 'completed' : mode;
+  const status = ['delay-release', 'fresh-claim', 'resume-unavailable', 'unclaimed', 'offline-updates', 'subtasks-completed', 'partial', 'partial-goal', 'approval-outage-recovered', 'database-outage-recovered', 'proxy-outage-recovered','transient-error-recovered'].includes(mode) ? 'completed' : mode;
   const workerArgs = existsSync('worker-args.json') ? JSON.parse(readFileSync('worker-args.json', 'utf8')) : [];
   const artifact = issue?.labels.some(label => ['task:plan', 'task:research'].includes(label));
   if (status === 'completed' && issue && !mode.startsWith('partial') && (!workerArgs.includes('--prs') || artifact)) {
