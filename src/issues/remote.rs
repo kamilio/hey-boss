@@ -1,9 +1,8 @@
 //! Synchronous issue RPC. Requests travel on stdin, never as remote shell text.
 use super::{Error, Request, Result, WIRE_LIMIT};
 use serde_json::Value;
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 const SCRIPT: &str = r#"export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; exec hey-boss issue rpc"#;
 
@@ -15,85 +14,115 @@ pub fn call(host: &str, request: &Request) -> Result<Value> {
     if input.len() > WIRE_LIMIT {
         return Err(Error::invalid("Issue request exceeds transport limit"));
     }
-    let mut child = Command::new("ssh")
-        .args([
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "ConnectionAttempts=1",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=2",
-            host,
-            SCRIPT,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let (status, bytes, errors, sent) = std::thread::scope(|scope| -> Result<_> {
-        let writer = scope.spawn(move || stdin.write_all(&input));
-        let reader = scope.spawn(move || bounded(stdout, 64 * 1024 * 1024));
-        let error_reader = scope.spawn(move || bounded(stderr, 64 * 1024));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break Some(status);
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        Ok((
-            status,
-            reader.join().unwrap(),
-            error_reader.join().unwrap(),
-            writer.join().unwrap(),
-        ))
-    })?;
+    let mut command = Command::new("ssh");
+    command.args([
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=2",
+        host,
+        SCRIPT,
+    ]);
+    exchange(host, &mut command, &input, Duration::from_secs(30))
+}
+
+fn exchange(host: &str, command: &mut Command, input: &[u8], timeout: Duration) -> Result<Value> {
+    let captured = crate::ssh::capture::exchange(
+        command,
+        input,
+        Some(timeout),
+        (64 * 1024 * 1024, 64 * 1024),
+    )?;
+    let result = captured.output;
     let hint = "No local fallback was used. A remote write may have completed; retry with the same --request-id to avoid duplicates.";
-    let Some(status) = status else {
+    if captured.timed_out {
         return Err(Error::new(
             "transport_error",
             format!("Issue host timed out. {hint}"),
         ));
     };
-    let bytes = bytes?;
+    if captured.stdout_exceeded {
+        return Err(Error::new(
+            "transport_error",
+            format!(
+                "Issue response exceeds transport limit; use a smaller --limit for history. {hint}"
+            ),
+        ));
+    }
+    let bytes = result.stdout;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
         if value["ok"] == false {
             return Err(serde_json::from_value(value["error"].clone())?);
         }
-        if status.success() && sent.is_ok() && value["ok"] == true {
+        if result.status.success() && captured.sent.is_ok() && value["ok"] == true {
             return Ok(value);
         }
     }
-    let detail = String::from_utf8_lossy(&errors.unwrap_or_default())
-        .trim()
-        .to_owned();
+    let detail = String::from_utf8_lossy(&result.stderr).trim().to_owned();
     Err(Error::new(
         "transport_error",
         format!("Issue host {host} failed or returned an incompatible response: {detail}. {hint}"),
     ))
 }
 
-fn bounded(reader: impl Read, limit: usize) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
-        return Err(Error::new(
-            "transport_error",
-            "Issue response exceeds transport limit; use a smaller --limit for history",
-        ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn rpc_reaps_exited_child_with_inherited_pipes() {
+        let start = Instant::now();
+        let value = exchange(
+            "fixture",
+            Command::new("sh").args(["-c", "cat >/dev/null; sleep 2 & printf '{\"ok\":true}'"]),
+            b"request",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(value["ok"], true);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
-    Ok(bytes)
+
+    #[test]
+    fn rpc_timeout_does_not_join_inherited_pipe_readers() {
+        let start = Instant::now();
+        let result = exchange(
+            "fixture",
+            Command::new("sh").args(["-c", "sleep 2 & wait"]),
+            b"request",
+            Duration::from_millis(50),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("same --request-id"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn rpc_failure_preserves_diagnostics_and_uncertain_write_guidance() {
+        let start = Instant::now();
+        let error = exchange(
+            "fixture",
+            Command::new("sh").args([
+                "-c",
+                "cat >/dev/null; sleep 2 >&2 & printf 'authentication failed' >&2; exit 255",
+            ]),
+            b"request",
+            Duration::from_secs(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("authentication failed"), "{error}");
+        assert!(error.contains("No local fallback"), "{error}");
+        assert!(error.contains("same --request-id"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
 }

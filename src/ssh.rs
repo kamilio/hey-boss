@@ -1,4 +1,5 @@
 //! Reuse the companion connector transport without owning its lifetime.
+pub mod capture;
 use std::{
     path::{Path, PathBuf},
     process::Command,
