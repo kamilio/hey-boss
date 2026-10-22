@@ -3716,6 +3716,8 @@ func auditFleetSync() {
     ui.update(["health": ["state": "catching_up", "pending_local": 2, "pending_projection": 7, "outgoing_pending": 1200]])
     precondition(ui.title.stringValue == "Syncing…")
     precondition(ui.detail.stringValue.contains("1,200 to send") && ui.detail.stringValue.contains("7 to apply"))
+    ui.update(["health": ["state": "catching_up", "exchange_age_ms": 60_000, "outgoing_pending": 42]])
+    precondition(ui.title.stringValue == "Sync incomplete · waiting for a machine", "A disconnected peer's backlog is not active progress")
     ui.update(["health": ["state": "disconnected", "outgoing_pending": 5]])
     precondition(ui.title.stringValue == "Offline · changes kept on this Mac")
     ui.update(["health": ["state": "rejected", "conflicts": 2]])

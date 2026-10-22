@@ -4827,7 +4827,9 @@ final class FleetSyncController {
         let state = health["state"] as? String ?? "unknown"
         switch state {
         case "healthy": title.stringValue = "Up to date"; title.textColor = .systemTeal
-        case "catching_up": title.stringValue = "Syncing…"; title.textColor = .labelColor
+        case "catching_up":
+            title.stringValue = (health["exchange_age_ms"] as? NSNumber).map { $0.doubleValue > 30_000 } == true ? "Sync incomplete · waiting for a machine" : "Syncing…"
+            title.textColor = .labelColor
         case "disconnected": title.stringValue = "Offline · changes kept on this Mac"; title.textColor = .secondaryLabelColor
         case "error", "rejected", "shadow": title.stringValue = "Sync needs attention"; title.textColor = .systemOrange
         case "waiting": title.stringValue = "Sync waiting · retrying automatically"; title.textColor = .secondaryLabelColor
@@ -4848,7 +4850,7 @@ final class FleetSyncController {
     }
     func refresh() {
         guard !loading else { return }
-        let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path].compactMap { $0 }
+        let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
         guard let executable = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { update(nil); return }
         loading = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
