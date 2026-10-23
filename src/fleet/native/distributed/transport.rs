@@ -386,6 +386,7 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
     errors.set_nonblocking(true)?;
     let mut child = command
         .args([
+            "-C",
             "-T",
             "-o",
             "BatchMode=yes",

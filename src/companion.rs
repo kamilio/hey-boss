@@ -333,7 +333,9 @@ echo 'Installed CLI and skill. Add ~/.local/bin to PATH; connect from your Mac.'
                 );
             }
             let mut connection = ssh(host)?;
+            // Multiplexed sync inherits the master's compression setting.
             connection
+                .arg("-C")
                 .args(["-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o"])
                 .arg(format!(
                     "ControlPath={}",
