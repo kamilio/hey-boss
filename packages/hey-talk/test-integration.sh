@@ -27,7 +27,7 @@ service_pid=$("$cli" status --json | jq -r .pid)
 for iteration in {1..20}; do
   "$cli" transcribe "$fixture" --json > ".build/inference-$iteration.json"
   remember_history ".build/inference-$iteration.json"
-  jq -e '.ok and .history_saved and (.original_text | ascii_downcase | contains("everything runs locally on this mac")) and (.text | ascii_downcase | contains("everything runs locally on this mac")) and .delivery == "stdout" and .real_time_factor < 1' ".build/inference-$iteration.json" >/dev/null
+  jq -e '.ok and .history_saved and .app_context == null and (.original_text | ascii_downcase | contains("everything runs locally on this mac")) and (.text | ascii_downcase | contains("everything runs locally on this mac")) and .delivery == "stdout" and .real_time_factor < 1' ".build/inference-$iteration.json" >/dev/null
   if [ "$iteration" = 3 ]; then baseline_rss=$(ps -o rss= -p "$service_pid" | tr -d ' '); fi
 done
 final_rss=$(ps -o rss= -p "$service_pid" | tr -d ' ')

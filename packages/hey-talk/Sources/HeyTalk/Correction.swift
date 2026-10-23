@@ -30,7 +30,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String]) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         guard let url = bundle.url(forResource: "correction", withExtension: "md") else {
             throw TalkError("Correction prompt is missing. Reinstall Hey Talk.")
@@ -40,7 +40,9 @@ final class Correction {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let input = try JSONSerialization.data(withJSONObject: ["transcript": text, "vocabulary": vocabulary], options: [.sortedKeys])
+        var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
+        if let appContext { values["app_context"] = appContext }
+        let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "gpt-6-luna", "reasoning": ["effort": "none"], "store": false,
             "instructions": prompt, "input": String(decoding: input, as: UTF8.self)
@@ -63,9 +65,9 @@ final class Correction {
         return text
     }
 
-    func correct(_ text: String, vocabulary: [String], completion: @escaping (Result<String, Error>) -> Void) {
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, completion: @escaping (Result<String, Error>) -> Void) {
         do {
-            let request = try Self.request(text: text, vocabulary: vocabulary)
+            let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext)
             task = session.dataTask(with: request) { data, response, error in
                 let result = Result<String, Error> {
                     if let error { throw error }

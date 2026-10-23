@@ -7,6 +7,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let capture = AudioCapture()
     private let inference = Inference()
     private let correction = Correction()
+    private let contextQueue = DispatchQueue(label: "hey-talk.app-context", qos: .userInitiated)
     private let correctionSettings = CorrectionSettings()
     private var correctionMenuItem: NSMenuItem?
     private var overlayMenuItem: NSMenuItem?
@@ -422,7 +423,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             else {
                 history.read { result in
                     switch result {
-                    case .success(let entries): reply((entries.first?.json ?? ["text": "", "original_text": NSNull()]).merging(["ok": true]) { _, new in new })
+                    case .success(let entries): reply((entries.first?.json ?? ["text": "", "original_text": NSNull(), "app_context": NSNull()]).merging(["ok": true]) { _, new in new })
                     case .failure(let error): reply(self.failure(error.localizedDescription))
                     }
                 }
@@ -573,36 +574,53 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let useCorrection = correctionSettings.enabled
         overlay?.processing(audioSeconds: audioSeconds, correction: useCorrection)
         hotkey?.captureEscape(true)
-        inference.transcribe(samples) { result in DispatchQueue.main.async {
+        let contextReady = DispatchGroup()
+        var appContext: String?
+        var contextMS = 0.0
+        if useCorrection, transcriptionSource == "microphone", let pid = target?.processIdentifier,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            contextReady.enter()
+            contextQueue.async {
+                let started = ProcessInfo.processInfo.systemUptime
+                let text = AppContext.capture(pid: pid)
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                DispatchQueue.main.async {
+                    appContext = text; contextMS = elapsed
+                    contextReady.leave()
+                }
+            }
+        }
+        inference.transcribe(samples) { result in contextReady.notify(queue: .main) {
             guard self.session.generation == id else { return }
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
                 guard useCorrection else {
-                    self.finish(text, originalText: text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
+                    self.finish(text, originalText: text, appContext: nil, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
                     return
                 }
                 let started = ProcessInfo.processInfo.systemUptime
-                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? []) { result in
+                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext) { result in
                     guard self.session.generation == id, self.session.phase == .processing else { return }
-                    var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000]
+                    var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
+                                             "context_ms": contextMS, "context_characters": appContext?.count ?? 0]
                     let corrected: String
                     switch result {
                     case .success(let value): corrected = value; info["status"] = "applied"
                     case .failure(let error):
                         corrected = text; info["status"] = "fallback"; info["error"] = error.localizedDescription
                     }
-                    self.finish(corrected, originalText: text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
+                    self.finish(corrected, originalText: text, appContext: appContext, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
                 }
             }
         } }
     }
-    private func finish(_ text: String, originalText: String, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
+    private func finish(_ text: String, originalText: String, appContext: String?, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
         guard self.session.finish(id, text: text) else { return }
         if self.autoTarget == nil { self.hotkey?.reset() }
         self.overlay?.finishProcessing()
-        let entry = Dictation(text: text, originalText: originalText, audioSeconds: audioSeconds, source: self.transcriptionSource)
+        let entry = Dictation(text: text, originalText: originalText, audioSeconds: audioSeconds, source: self.transcriptionSource, appContext: appContext)
         // Detach this result before disk IO: a new recording may start while saving.
         let reply = self.pendingReply; self.pendingReply = nil
         let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
@@ -612,6 +630,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
                 self.lastPasteBlock = reason
                 var response: [String: Any] = ["ok": true, "text": text, "original_text": originalText, "audio_seconds": audioSeconds,
+                        "app_context": appContext as Any? ?? NSNull(),
                         "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
                         "capture_start_ms": captureMS, "delivery": delivery,
                         "history_id": entry.id.uuidString, "history_saved": saved, "correction": correctionInfo]

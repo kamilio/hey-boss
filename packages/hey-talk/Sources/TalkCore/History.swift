@@ -7,23 +7,27 @@ public struct Dictation: Codable, Equatable, Identifiable {
     public let createdAt: Date
     public let text: String
     public let originalText: String? // Unknown for history saved before originals were retained.
+    public let appContext: String?
     public let audioSeconds: Double
     public let source: String
 
-    public init(text: String, originalText: String, audioSeconds: Double, source: String) {
+    public init(text: String, originalText: String, audioSeconds: Double, source: String, appContext: String? = nil) {
         id = UUID(); createdAt = Date()
         self.text = text; self.originalText = originalText; self.audioSeconds = audioSeconds; self.source = source
+        self.appContext = appContext
     }
 
-    private init(id: UUID, createdAt: Date, text: String, originalText: String?, audioSeconds: Double, source: String) {
+    private init(id: UUID, createdAt: Date, text: String, originalText: String?, audioSeconds: Double, source: String, appContext: String?) {
         self.id = id; self.createdAt = createdAt; self.text = text
         self.originalText = originalText
         self.audioSeconds = audioSeconds; self.source = source
+        self.appContext = appContext
     }
 
     public var json: [String: Any] {
         ["id": id.uuidString, "created_at": ISO8601DateFormatter().string(from: createdAt),
-         "text": text, "original_text": originalText as Any? ?? NSNull(), "audio_seconds": audioSeconds, "source": source]
+         "text": text, "original_text": originalText as Any? ?? NSNull(), "app_context": appContext as Any? ?? NSNull(),
+         "audio_seconds": audioSeconds, "source": source]
     }
 
     fileprivate static func read(_ statement: OpaquePointer) throws -> Dictation {
@@ -31,7 +35,8 @@ public struct Dictation: Codable, Equatable, Identifiable {
         guard let id = UUID(uuidString: string(0)) else { throw TalkError("Invalid dictation ID in history") }
         return Dictation(id: id, createdAt: Date(timeIntervalSinceReferenceDate: sqlite3_column_double(statement, 1)),
                          text: string(2), originalText: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : string(5),
-                         audioSeconds: sqlite3_column_double(statement, 3), source: string(4))
+                         audioSeconds: sqlite3_column_double(statement, 3), source: string(4),
+                         appContext: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : string(6))
     }
 }
 
@@ -59,11 +64,13 @@ public final class HistoryStore {
             sqlite3_busy_timeout(database, 2_000)
             try execute("PRAGMA synchronous = FULL")
             try execute("CREATE TABLE IF NOT EXISTS dictations (id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, text TEXT NOT NULL, audio_seconds REAL NOT NULL, source TEXT NOT NULL)")
-            let columns = try prepare("SELECT name FROM pragma_table_info('dictations') WHERE name = 'original_text'")
-            let result = sqlite3_step(columns)
-            sqlite3_finalize(columns)
-            if result == SQLITE_DONE { try execute("ALTER TABLE dictations ADD COLUMN original_text TEXT") }
-            else if result != SQLITE_ROW { throw failure() }
+            for column in ["original_text", "app_context"] {
+                let columns = try prepare("SELECT name FROM pragma_table_info('dictations') WHERE name = '\(column)'")
+                let result = sqlite3_step(columns)
+                sqlite3_finalize(columns)
+                if result == SQLITE_DONE { try execute("ALTER TABLE dictations ADD COLUMN \(column) TEXT") }
+                else if result != SQLITE_ROW { throw failure() }
+            }
         } catch {
             sqlite3_close(database); database = nil
             throw error
@@ -71,7 +78,7 @@ public final class HistoryStore {
     }
 
     public func append(_ entry: Dictation) throws {
-        let statement = try prepare("INSERT INTO dictations (id, created_at, text, audio_seconds, source, original_text) VALUES (?, ?, ?, ?, ?, ?)")
+        let statement = try prepare("INSERT INTO dictations (id, created_at, text, audio_seconds, source, original_text, app_context) VALUES (?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_text(statement, 1, entry.id.uuidString, -1, transient)
         sqlite3_bind_double(statement, 2, entry.createdAt.timeIntervalSinceReferenceDate)
@@ -80,11 +87,13 @@ public final class HistoryStore {
         sqlite3_bind_text(statement, 5, entry.source, -1, transient)
         if let original = entry.originalText { sqlite3_bind_text(statement, 6, original, -1, transient) }
         else { sqlite3_bind_null(statement, 6) }
+        if let context = entry.appContext { sqlite3_bind_text(statement, 7, context, -1, transient) }
+        else { sqlite3_bind_null(statement, 7) }
         guard sqlite3_step(statement) == SQLITE_DONE else { throw failure() }
     }
 
     public func recent(limit: Int = 50, before: UUID? = nil) throws -> [Dictation] {
-        let statement = try prepare("SELECT id, created_at, text, audio_seconds, source, original_text FROM dictations \(before == nil ? "" : "WHERE rowid < (SELECT rowid FROM dictations WHERE id = ?)") ORDER BY rowid DESC LIMIT ?")
+        let statement = try prepare("SELECT id, created_at, text, audio_seconds, source, original_text, app_context FROM dictations \(before == nil ? "" : "WHERE rowid < (SELECT rowid FROM dictations WHERE id = ?)") ORDER BY rowid DESC LIMIT ?")
         defer { sqlite3_finalize(statement) }
         if let before { sqlite3_bind_text(statement, 1, before.uuidString, -1, transient) }
         sqlite3_bind_int64(statement, before == nil ? 1 : 2, Int64(max(1, min(limit, 500))))
