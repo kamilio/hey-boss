@@ -9,6 +9,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let correction = Correction()
     private let correctionSettings = CorrectionSettings()
     private var correctionMenuItem: NSMenuItem?
+    private var overlayMenuItem: NSMenuItem?
+    private var speechMenuItem: NSMenuItem?
+    private let speechOffBadge = CALayer()
     private let speech = SpeechController()
     private var speechWasActive = false
     private let history = DictationHistory()
@@ -95,6 +98,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             self.hotkey?.enableSpeech(allowed && self.speech.settings.enabled)
         }
         speech.onNotice = { [weak self] message in self?.showOverlay(true); self?.overlay?.error(message) }
+        speech.onSettingsChanged = { [weak self] in self?.applySpeechMode() }
         speech.onActivityChanged = { [weak self] active in
             guard let self else { return }
             self.hotkey?.captureEscape(active || self.session.phase == .recording || self.session.phase == .processing)
@@ -111,15 +115,26 @@ final class TalkService: NSObject, NSApplicationDelegate {
         speech.start()
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
+        if let button = menuItem?.button {
+            button.wantsLayer = true
+            speechOffBadge.contents = TalkDesign.speechOffImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            speechOffBadge.contentsGravity = .resizeAspect
+            speechOffBadge.frame = CGRect(x: button.bounds.maxX - 11, y: 1, width: 10, height: 9)
+            button.layer?.addSublayer(speechOffBadge)
+        }
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Show / Hide Overlay", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
+            if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
         menuItem?.menu = menu
         let autoItem = NSMenuItem(title: "Auto Mode · Hyper+V", action: #selector(toggleAutoMode), keyEquivalent: "")
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
         let correctionItem = NSMenuItem(title: "AI Correction", action: #selector(toggleCorrection), keyEquivalent: "")
         correctionItem.target = self; menu.insertItem(correctionItem, at: 3); correctionMenuItem = correctionItem
+        let speechItem = NSMenuItem(title: "Read Aloud · Hyper+T", action: #selector(toggleSpeechMode), keyEquivalent: "")
+        speechItem.target = self; menu.insertItem(speechItem, at: 4); speechMenuItem = speechItem
+        applySpeechMode()
         applyCorrection()
         focusMonitor.onChange = { [weak self] input in self?.focusedInputChanged(input) }
         focusMonitor.onSuspend = { [weak self] in
@@ -149,7 +164,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         vocabularyTimer.schedule(deadline: .now(), repeating: .seconds(15), leeway: .seconds(3))
         vocabularyTimer.setEventHandler { [weak self] in self?.refreshVocabulary() }
         vocabularyTimer.resume(); self.vocabularyTimer = vocabularyTimer
-        if overlayEnabled { showOverlay(true) }
+        showOverlay(overlayEnabled)
         applyAutoMode()
         if CommandLine.arguments.contains("--show-history") { showHistory() }
         for number in [SIGTERM, SIGINT] {
@@ -170,13 +185,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         history.refresh(); historyWindow?.show()
     }
     private func showOverlay(_ show: Bool) {
-        if overlay == nil && show {
+        if overlay == nil {
             let view = Overlay()
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
-            view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
+            view.setSpeechEnabled(speech.settings.enabled)
             view.onOpenAccessibility = { [weak self] in
                 self?.accessibilitySetup.show()
                 self?.accessibilitySetup.openSettings()
@@ -187,8 +202,24 @@ final class TalkService: NSObject, NSApplicationDelegate {
             overlay = view
         }
         overlayEnabled = show; overlay?.show(show)
+        overlayMenuItem?.title = show ? "Hide Pill" : "Show Pill"
+        updateStatusTooltip()
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
+    @objc private func toggleSpeechMode() { speech.toggleEnabled() }
+    private func applySpeechMode() {
+        let enabled = speech.settings.enabled
+        speechMenuItem?.state = enabled ? .on : .off
+        speechMenuItem?.image = enabled ? NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Read aloud on") : TalkDesign.speechOffImage
+        speechOffBadge.isHidden = enabled
+        overlay?.setSpeechEnabled(enabled)
+        updateStatusTooltip()
+    }
+    private func updateStatusTooltip() {
+        let text = "Hey Talk is running · Pill \(overlayEnabled ? "visible" : "hidden") · Read aloud \(speech.settings.enabled ? "on" : "off")"
+        menuItem?.button?.toolTip = text
+        menuItem?.button?.setAccessibilityLabel(text)
+    }
     @objc private func toggleCorrection() {
         try? correctionSettings.command(["toggle"])
         applyCorrection()
