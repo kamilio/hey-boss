@@ -27,7 +27,7 @@ service_pid=$("$cli" status --json | jq -r .pid)
 for iteration in {1..20}; do
   "$cli" transcribe "$fixture" --json > ".build/inference-$iteration.json"
   remember_history ".build/inference-$iteration.json"
-  jq -e '.ok and .history_saved and (.text | ascii_downcase | contains("everything runs locally on this mac")) and .delivery == "stdout" and .real_time_factor < 1' ".build/inference-$iteration.json" >/dev/null
+  jq -e '.ok and .history_saved and (.original_text | ascii_downcase | contains("everything runs locally on this mac")) and (.text | ascii_downcase | contains("everything runs locally on this mac")) and .delivery == "stdout" and .real_time_factor < 1' ".build/inference-$iteration.json" >/dev/null
   if [ "$iteration" = 3 ]; then baseline_rss=$(ps -o rss= -p "$service_pid" | tr -d ' '); fi
 done
 final_rss=$(ps -o rss= -p "$service_pid" | tr -d ' ')
@@ -103,9 +103,12 @@ for attempt in {1..80}; do
 done
 if kill -0 "$worker_pid" 2>/dev/null; then printf 'Worker outlived service crash\n' >&2; exit 1; fi
 "$cli" last --json > .build/last-restarted.json
-jq -e --slurpfile last .build/after-cancel.json '.ok and .text == $last[0].text' .build/last-restarted.json >/dev/null
+jq -e --slurpfile last .build/after-cancel.json '.ok and .text == $last[0].text and .original_text == $last[0].original_text' .build/last-restarted.json >/dev/null
+"$cli" last --original > .build/original-restarted.txt
+jq -r '.original_text' .build/after-cancel.json > .build/original-expected.txt
+cmp .build/original-restarted.txt .build/original-expected.txt
 "$cli" history --json > .build/history-restarted.json
-jq -e --slurpfile last .build/after-cancel.json '.ok and .entries[0].id == $last[0].history_id and .entries[0].text == $last[0].text' .build/history-restarted.json >/dev/null
+jq -e --slurpfile last .build/after-cancel.json '.ok and .entries[0].id == $last[0].history_id and .entries[0].text == $last[0].text and .entries[0].original_text == $last[0].original_text' .build/history-restarted.json >/dev/null
 "$cli" history --before "$(jq -r .history_id .build/after-cancel.json)" --json | jq -e --slurpfile previous .build/inflight-recovery.json '.entries[0].id == $previous[0].history_id' >/dev/null
 "$cli" status --json | jq -e '.hotkey_registered and .hotkeys.paste == "Control+Command+Option+Shift+E" and .hotkeys.submit == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
 printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Hyper+E and Hyper+R toggle registration\n'

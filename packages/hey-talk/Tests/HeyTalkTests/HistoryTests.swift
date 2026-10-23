@@ -8,14 +8,14 @@ final class HistoryControllerTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try HistoryStore(directory: directory)
-        let previous = Dictation(text: "Previous", audioSeconds: 1, source: "file")
+        let previous = Dictation(text: "Previous", originalText: "Previous", audioSeconds: 1, source: "file")
         try store.append(previous)
         var lock: OpaquePointer?
         XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("history.sqlite3").path, &lock), SQLITE_OK)
         defer { sqlite3_exec(lock, "ROLLBACK", nil, nil, nil); sqlite3_close(lock) }
         XCTAssertEqual(sqlite3_exec(lock, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
         let history = DictationHistory(directory: directory)
-        let entry = Dictation(text: "Keep despite locked disk", audioSeconds: 1, source: "microphone")
+        let entry = Dictation(text: "Keep despite locked disk", originalText: "um keep despite locked disk", audioSeconds: 1, source: "microphone")
         let completed = expectation(description: "locked write returns failure")
         let responsive = expectation(description: "main queue stays responsive")
         history.save(entry) { saved in
@@ -35,7 +35,7 @@ final class HistoryControllerTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let history = DictationHistory(directory: directory)
-        let entry = Dictation(text: "Saved before paste", audioSeconds: 1, source: "microphone")
+        let entry = Dictation(text: "Saved before paste", originalText: "uh saved before paste", audioSeconds: 1, source: "microphone")
         let completed = expectation(description: "saved")
         history.save(entry) { saved in
             XCTAssertTrue(Thread.isMainThread)
@@ -52,7 +52,7 @@ final class HistoryControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         try Data("not a directory".utf8).write(to: directory)
         let history = DictationHistory(directory: directory)
-        let entry = Dictation(text: "Still available to copy", audioSeconds: 1, source: "microphone")
+        let entry = Dictation(text: "Still available to copy", originalText: "um still available to copy", audioSeconds: 1, source: "microphone")
         let completed = expectation(description: "failure handled")
         history.save(entry) { saved in
             XCTAssertFalse(saved)

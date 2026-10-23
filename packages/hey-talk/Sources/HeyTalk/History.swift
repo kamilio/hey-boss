@@ -92,7 +92,9 @@ private struct HistoryView: View {
     @ObservedObject var history: DictationHistory
     @State private var search = ""
     private var matching: [Dictation] {
-        search.isEmpty ? history.entries : history.entries.filter { $0.text.localizedStandardContains(search) }
+        search.isEmpty ? history.entries : history.entries.filter {
+            $0.text.localizedStandardContains(search) || $0.originalText?.localizedStandardContains(search) == true
+        }
     }
     var body: some View {
         let visible = matching
@@ -177,6 +179,7 @@ private struct DictationRow: View {
     let entry: Dictation
     let saved: Bool
     @State private var copied = false
+    @State private var copiedOriginal = false
     @State private var hovered = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -204,6 +207,37 @@ private struct DictationRow: View {
                 }
             }.font(.system(size: 11)).foregroundStyle(.secondary)
             TranscriptText(text: entry.text).frame(maxWidth: .infinity, alignment: .leading)
+            if let original = entry.originalText {
+                if original != entry.text {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Before AI correction").foregroundStyle(.secondary)
+                                Spacer()
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    copiedOriginal = NSPasteboard.general.setString(original, forType: .string)
+                                } label: {
+                                    Label(copiedOriginal ? "Copied" : "Copy original", systemImage: copiedOriginal ? "checkmark" : "doc.on.doc")
+                                }
+                                .buttonStyle(.bordered).controlSize(.small)
+                                .task(id: copiedOriginal) {
+                                    if copiedOriginal {
+                                        try? await Task.sleep(for: .seconds(2))
+                                        copiedOriginal = false
+                                    }
+                                }
+                            }
+                            TranscriptText(text: original).frame(maxWidth: .infinity, alignment: .leading)
+                        }.padding(.top, 8)
+                    } label: { Text("Original transcript") }
+                    .font(.system(size: 11))
+                } else {
+                    Text("Original unchanged").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Original not saved for this older entry").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
         }
         .padding(18)
         .background(.teal.opacity(hovered ? 0.055 : 0), in: RoundedRectangle(cornerRadius: 14))

@@ -15,7 +15,7 @@ enum CLI {
     hey-talk cancel                            Discard audio; never paste
     hey-talk transcribe FILE [--json]           Transcribe an audio file
     hey-talk status [--json]                    State, audio levels, worker PID
-    hey-talk last                              Last transcript, including after restart
+    hey-talk last [--original] [--json]         Last transcript; --original skips AI edits
     hey-talk history [--json]                  Latest 50 saved transcripts
     hey-talk history --before ID [--json]      Older saved transcripts
     hey-talk history show                      Open history with Copy buttons
@@ -53,10 +53,14 @@ enum CLI {
         if arguments.isEmpty || arguments == ["--help"] || arguments == ["help"] { print(help); return }
         if arguments == ["--version"] { print("hey-talk 0.1.0"); return }
         let json = arguments.contains("--json")
+        let original = arguments.contains("--original")
+        if original && (arguments.first != "last" || arguments.filter({ $0 == "--original" }).count != 1) {
+            throw TalkError("Use --original with last")
+        }
         let noOverlay = arguments.contains("--no-overlay")
         let noPaste = arguments.contains("--no-paste")
         let submit = try submitOption(arguments)
-        let args = arguments.filter { !["--json", "--no-overlay", "--no-paste", "--submit"].contains($0) }
+        let args = arguments.filter { !["--json", "--original", "--no-overlay", "--no-paste", "--submit"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
         let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "correction", "speech", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
@@ -128,7 +132,13 @@ enum CLI {
                 }
             }
             try output(ControlSocket.request(["command": "stop"]), json: json)
-        } else { try output(ControlSocket.request(request), json: json) }
+        } else {
+            let response = try ControlSocket.request(request)
+            if original && !json && response["ok"] as? Bool == true {
+                guard let text = response["original_text"] as? String else { throw TalkError("Original transcript was not saved for this entry.") }
+                print(text)
+            } else { try output(response, json: json) }
+        }
     }
     private static func output(_ response: [String: Any], json: Bool) throws {
         if json {
