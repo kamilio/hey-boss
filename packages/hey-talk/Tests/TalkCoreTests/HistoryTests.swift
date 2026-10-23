@@ -7,13 +7,16 @@ final class HistoryTests: XCTestCase {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let original = "um  deploy café's API\nuh tomorrow?"
-        let entry = Dictation(text: "Deploy café's API tomorrow?", originalText: original, audioSeconds: 3, source: "microphone")
+        let context = "Visible reference: café's API\nOnly these words were on screen."
+        let entry = Dictation(text: "Deploy café's API tomorrow?", originalText: original, audioSeconds: 3, source: "microphone", appContext: context)
         do { try HistoryStore(directory: directory).append(entry) }
         let restored = try XCTUnwrap(HistoryStore(directory: directory).recent().first)
         XCTAssertEqual(restored, entry)
         XCTAssertEqual(restored.originalText, original)
         XCTAssertEqual(restored.json["original_text"] as? String, original)
         XCTAssertEqual(restored.json["text"] as? String, entry.text)
+        XCTAssertEqual(restored.appContext, context)
+        XCTAssertEqual(restored.json["app_context"] as? String, context)
     }
 
     func testLegacyHistoryMigratesWithoutInventingOriginals() throws {
@@ -33,12 +36,28 @@ final class HistoryTests: XCTestCase {
             XCTAssertEqual(legacy.text, "Old corrected text")
             XCTAssertNil(legacy.originalText)
             XCTAssertTrue(legacy.json["original_text"] is NSNull)
+            XCTAssertNil(legacy.appContext)
+            XCTAssertTrue(legacy.json["app_context"] is NSNull)
             try store.append(Dictation(text: "Unchanged", originalText: "Unchanged", audioSeconds: 1, source: "file"))
         }
         let entries = try HistoryStore(directory: directory).recent()
         XCTAssertEqual(entries.count, 2)
         XCTAssertEqual(entries[0].originalText, "Unchanged")
         XCTAssertNil(entries[1].originalText)
+    }
+
+    func testContextMigrationPreservesAlreadySavedOriginals() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("history.sqlite3").path, &database), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "CREATE TABLE dictations (id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, text TEXT NOT NULL, audio_seconds REAL NOT NULL, source TEXT NOT NULL, original_text TEXT)", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "INSERT INTO dictations VALUES ('\(UUID().uuidString)', 0, 'Corrected', 2, 'microphone', 'um original')", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(database)
+        let entry = try XCTUnwrap(HistoryStore(directory: directory).recent().first)
+        XCTAssertEqual(entry.originalText, "um original")
+        XCTAssertNil(entry.appContext)
     }
 
     func testPagingWhileNewDictationsArriveDoesNotSkipOrDuplicate() throws {

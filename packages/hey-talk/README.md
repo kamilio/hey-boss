@@ -48,12 +48,21 @@ whether the pill is visible or hidden.
 punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. A tiny teal dot beside
 the waveform mark means it is on; no dot means it is off. It starts off and
 remembers your choice. `hey-talk correction on|off|toggle` controls the same setting.
-When enabled, the transcript and existing vocabulary list go to the existing
+When enabled, the transcript, existing vocabulary, and visible read-only text
+from the dictation's target window go to the existing
 Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, with reasoning disabled and storage off.
 The proxy's configured routing, model rewrites, and authentication remain authoritative.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
+Context is a spelling hint; the transcript takes priority. Capture uses macOS
+Accessibility alongside transcription, with a 200 ms budget and an 8,000-character
+cap. It skips editors, password fields, controls, and clipped or off-screen text.
+Missing context does not block correction. File transcription never reads app context.
+Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`;
+`history --json` also includes it. `null` means no context was attached.
+Context is saved locally with the original and final transcript, with the same
+user-only file permissions; it is not included in routine status output.
 Result JSON includes correction status (`off`, `applied`, or `fallback`), timing,
 and `original_text` alongside the final `text`, including when correction is off or fails.
 
