@@ -4,6 +4,56 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testCorrectionDotStaysBesideTheMarkWithoutResizingOrTakingClicks() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(try XCTUnwrap(panel.contentView))
+        let surface = try XCTUnwrap(views.first { $0.layer?.sublayers?.contains { $0.name == "correction-dot" } == true })
+        let dot = try XCTUnwrap(surface.layer?.sublayers?.first { $0.name == "correction-dot" })
+        XCTAssertTrue(dot.isHidden)
+        for phase in [Phase.idle, .recording, .processing] {
+            overlay.update(phase)
+            let size = panel.frame.size
+            overlay.setCorrection(true)
+            XCTAssertFalse(dot.isHidden)
+            XCTAssertEqual(dot.bounds.size, NSSize(width: 4, height: 4))
+            XCTAssertEqual(panel.frame.size, size)
+            XCTAssertTrue(surface.accessibilityLabel()?.contains("AI correction on") == true)
+            overlay.setCorrection(false)
+            XCTAssertTrue(dot.isHidden)
+        }
+        var toggles = 0
+        overlay.onToggleCorrection = { toggles += 1 }
+        let item = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "AI Correction" })
+        XCTAssertTrue(app.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        XCTAssertEqual(toggles, 1)
+    }
+
+    @MainActor func testProcessingRimAdvancesAndStopsOnCancellation() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let root = try XCTUnwrap(panel.contentView)
+        let rim = try XCTUnwrap(root.layer?.sublayers?.first { $0.name == "transcription-progress" } as? CAShapeLayer)
+        overlay.processing(audioSeconds: 30, correction: true)
+        XCTAssertFalse(rim.isHidden)
+        let initial = rim.strokeEnd
+        let tick = expectation(description: "progress advances")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { tick.fulfill() }
+        wait(for: [tick], timeout: 1)
+        XCTAssertGreaterThan(rim.strokeEnd, initial)
+        XCTAssertLessThan(rim.strokeEnd, 1)
+        overlay.update(.idle)
+        XCTAssertTrue(rim.isHidden)
+        XCTAssertNil(rim.animationKeys())
+    }
+
     @MainActor func testBubbleMenuShowsCurrentModesAndShortcutsAndDispatchesTheRightAction() throws {
         let overlay = Overlay()
         defer { overlay.show(false) }

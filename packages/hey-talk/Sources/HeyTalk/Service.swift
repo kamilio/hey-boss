@@ -6,6 +6,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let server = CommandServer()
     private let capture = AudioCapture()
     private let inference = Inference()
+    private let correction = Correction()
+    private let correctionSettings = CorrectionSettings()
+    private var correctionMenuItem: NSMenuItem?
     private let speech = SpeechController()
     private var speechWasActive = false
     private let history = DictationHistory()
@@ -115,6 +118,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem?.menu = menu
         let autoItem = NSMenuItem(title: "Auto Mode · Hyper+V", action: #selector(toggleAutoMode), keyEquivalent: "")
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
+        let correctionItem = NSMenuItem(title: "AI Correction", action: #selector(toggleCorrection), keyEquivalent: "")
+        correctionItem.target = self; menu.insertItem(correctionItem, at: 3); correctionMenuItem = correctionItem
+        applyCorrection()
         focusMonitor.onChange = { [weak self] input in self?.focusedInputChanged(input) }
         focusMonitor.onSuspend = { [weak self] in
             guard let self, self.autoTarget != nil || self.autoRestart != nil else { return }
@@ -153,7 +159,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.cancel(keepMicrophoneWarm: false) }
     }
-    func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); correction.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -169,6 +175,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
+            view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
             view.onOpenAccessibility = { [weak self] in
                 self?.accessibilitySetup.show()
@@ -176,11 +183,20 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
             view.level = { [weak self] in self?.capture.level ?? 0 }
             view.setAutoMode(autoSettings.enabled)
+            view.setCorrection(correctionSettings.enabled)
             overlay = view
         }
         overlayEnabled = show; overlay?.show(show)
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
+    @objc private func toggleCorrection() {
+        try? correctionSettings.command(["toggle"])
+        applyCorrection()
+    }
+    private func applyCorrection() {
+        correctionMenuItem?.state = correctionSettings.enabled ? .on : .off
+        overlay?.setCorrection(correctionSettings.enabled)
+    }
     @objc private func toggleAutoMode() {
         autoSettings.enabled.toggle()
         showOverlay(true)
@@ -264,6 +280,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V"],
             "enter_exceptions": enterExceptions.bundleIDs,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
+            "correction": correctionSettings.json,
             "auto_recording": autoTarget != nil, "auto_focused": focusMonitor.current != nil,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
@@ -348,6 +365,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 reply(["ok": true, "speech": speech.status])
             } catch { reply(failure(error.localizedDescription)) }
         case "status", "doctor": reply(status())
+        case "correction":
+            do {
+                guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing correction arguments") }
+                try correctionSettings.command(arguments)
+                applyCorrection()
+                reply(["ok": true, "correction": correctionSettings.json])
+            } catch { reply(failure(error.localizedDescription)) }
         case "auto":
             do {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing Auto arguments") }
@@ -537,50 +561,72 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func decode(_ samples: [Float], id: UInt64) {
         let audioSeconds = Double(samples.count) / 16_000
+        let useCorrection = correctionSettings.enabled
+        overlay?.processing(audioSeconds: audioSeconds, correction: useCorrection)
+        hotkey?.captureEscape(true)
         inference.transcribe(samples) { result in DispatchQueue.main.async {
             guard self.session.generation == id else { return }
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
-                guard self.session.finish(id, text: text) else { return }
-                if self.autoTarget == nil { self.hotkey?.reset() }
-                self.overlay?.update(.idle)
-                let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
-                // Detach this result before disk IO: a new recording may start while saving.
-                let reply = self.pendingReply; self.pendingReply = nil
-                let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
-                let targetName = self.targetName
-                let focusedInput = self.autoTarget
-                self.history.save(entry) { saved in
-                    let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
-                        self.lastPasteBlock = reason
-                        var response: [String: Any] = ["ok": true, "text": text, "audio_seconds": audioSeconds,
-                                "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
-                                "capture_start_ms": captureMS, "delivery": delivery,
-                                "history_id": entry.id.uuidString, "history_saved": saved]
-                        if let reason { response["paste_block"] = reason.rawValue }
-                        reply?(response)
-                        if self.session.generation == id {
-                            self.automatic = nil; self.hotkey?.reset()
-                            self.scheduleRelease()
-                            if !saved { self.overlay?.error("Not saved. Copy from History before quitting.") }
-                            else if let reason {
-                                let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
-                                self.overlay?.error(message, accessibilityAction: reason == .accessibility)
-                            }
-                            if saved, delivery == "submitted", focusedInput != nil { self.restartAutomatic(id: id) }
-                        }
+                guard useCorrection else {
+                    self.finish(text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
+                    return
+                }
+                let started = ProcessInfo.processInfo.systemUptime
+                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? []) { result in
+                    guard self.session.generation == id, self.session.phase == .processing else { return }
+                    var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000]
+                    let corrected: String
+                    switch result {
+                    case .success(let value): corrected = value; info["status"] = "applied"
+                    case .failure(let error):
+                        corrected = text; info["status"] = "fallback"; info["error"] = error.localizedDescription
                     }
-                    if shouldPaste, self.session.generation == id {
-                        let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
-                        Paste.deliver(text, target: target, pressEnter: submit,
-                                      targetStillFocused: { focusedInput.map { self.autoDeliveryValid && $0.isFocused() } ?? true },
-                                      isCurrent: { self.session.generation == id }, completion: complete)
-                    } else { complete(shouldPaste ? "history" : "stdout", nil) }
+                    self.finish(corrected, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
                 }
             }
         } }
+    }
+    private func finish(_ text: String, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
+        guard self.session.finish(id, text: text) else { return }
+        if self.autoTarget == nil { self.hotkey?.reset() }
+        self.overlay?.finishProcessing()
+        let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
+        // Detach this result before disk IO: a new recording may start while saving.
+        let reply = self.pendingReply; self.pendingReply = nil
+        let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
+        let targetName = self.targetName
+        let focusedInput = self.autoTarget
+        self.history.save(entry) { saved in
+            let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
+                self.lastPasteBlock = reason
+                var response: [String: Any] = ["ok": true, "text": text, "audio_seconds": audioSeconds,
+                        "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
+                        "capture_start_ms": captureMS, "delivery": delivery,
+                        "history_id": entry.id.uuidString, "history_saved": saved, "correction": correctionInfo]
+                if let reason { response["paste_block"] = reason.rawValue }
+                reply?(response)
+                if self.session.generation == id {
+                    self.automatic = nil; self.hotkey?.reset()
+                    self.scheduleRelease()
+                    if !saved { self.overlay?.error("Not saved. Copy from History before quitting.") }
+                    else if let reason {
+                        let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
+                        self.overlay?.error(message, accessibilityAction: reason == .accessibility)
+                    }
+                    if correctionInfo["status"] as? String == "fallback", saved, self.lastPasteBlock == nil { self.overlay?.error("AI unavailable. Original transcript kept.") }
+                    if saved, delivery == "submitted", focusedInput != nil { self.restartAutomatic(id: id) }
+                }
+            }
+            if shouldPaste, self.session.generation == id {
+                let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
+                Paste.deliver(text, target: target, pressEnter: submit,
+                              targetStillFocused: { focusedInput.map { self.autoDeliveryValid && $0.isFocused() } ?? true },
+                              isCurrent: { self.session.generation == id }, completion: complete)
+            } else { complete(shouldPaste ? "history" : "stdout", nil) }
+        }
     }
     private func noSpeechDetected(id: UInt64) {
         let message = "No speech detected. Check your microphone with hey-talk devices."
@@ -601,7 +647,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         captureReady = false
         clearAutomatic()
         session.cancel(); maximumDuration?.cancel(); maximumDuration = nil
-        capture.cancel(keepWarm: keepMicrophoneWarm); inference.cancel(); hotkey?.reset(); overlay?.update(.idle)
+        capture.cancel(keepWarm: keepMicrophoneWarm); inference.cancel(); correction.cancel(); hotkey?.reset(); overlay?.update(.idle)
         pendingStartReply?(failure("Cancelled")); pendingStartReply = nil
         pendingReply?(failure("Cancelled")); pendingReply = nil
     }
@@ -609,6 +655,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         captureReady = false
         clearAutomatic()
         capture.cancel(keepWarm: keepMicrophoneWarm); session.fail(session.generation); hotkey?.reset()
+        correction.cancel()
         maximumDuration?.cancel(); maximumDuration = nil
         error = message; overlay?.update(.failed); overlay?.error(OverlayNotice.concise(message))
         pendingStartReply?(failure(message)); pendingStartReply = nil

@@ -99,7 +99,12 @@ final class Overlay {
     private var connectingDelay: DispatchWorkItem?
     private let autoHalo = CAShapeLayer()
     private var autoMode = false
-    private let glow = CAGradientLayer()
+    private let glow = CAShapeLayer()
+    private let correctionDot = CALayer()
+    private var correctionEnabled = false
+    private var progress = TranscriptionProgress(audioSeconds: 0, correction: false)
+    private var processingStarted: TimeInterval = 0
+    private var completionDismiss: DispatchWorkItem?
     private let depth = CAShapeLayer()
     private let halo = CAShapeLayer()
     private var timer: Timer?
@@ -118,6 +123,7 @@ final class Overlay {
     var onOpenAccessibility: (() -> Void)?
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
+    var onToggleCorrection: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
@@ -145,14 +151,11 @@ final class Overlay {
         autoHalo.shadowOffset = .zero
         autoHalo.isHidden = true
         root.layer?.addSublayer(autoHalo)
-        glow.type = .conic
-        glow.startPoint = CGPoint(x: 0.5, y: 0.5); glow.endPoint = CGPoint(x: 0.5, y: 0)
-        glow.colors = [TalkDesign.accent.withAlphaComponent(0.15).cgColor, TalkDesign.accent.withAlphaComponent(0.3).cgColor, TalkDesign.accent.cgColor, TalkDesign.active.cgColor, NSColor.white.cgColor]
-        glow.locations = [0, 0.45, 0.75, 0.94, 1]
-        let mask = CAShapeLayer()
-        mask.path = CGPath(roundedRect: CGRect(x: 1, y: 1, width: 58, height: 38), cornerWidth: 19, cornerHeight: 19, transform: nil)
-        mask.fillColor = nil; mask.strokeColor = NSColor.white.cgColor; mask.lineWidth = 1.5
-        glow.mask = mask
+        glow.name = "transcription-progress"
+        glow.fillColor = nil; glow.strokeColor = TalkDesign.accent.cgColor
+        glow.lineWidth = 1.5; glow.lineCap = .round
+        glow.shadowColor = TalkDesign.accent.cgColor
+        glow.shadowOpacity = 0.5; glow.shadowRadius = 3; glow.shadowOffset = .zero
         halo.fillColor = TalkDesign.accent.withAlphaComponent(0.12).cgColor
         halo.shadowColor = TalkDesign.accent.cgColor; halo.shadowOpacity = 0.3; halo.shadowRadius = 6
         halo.shadowOffset = .zero
@@ -188,6 +191,13 @@ final class Overlay {
         wave.isHidden = true
         wave.identifier = NSUserInterfaceItemIdentifier("recording-waveform")
         pillContent.addSubview(identity); pillContent.addSubview(wave)
+        correctionDot.name = "correction-dot"
+        correctionDot.bounds = CGRect(x: 0, y: 0, width: 4, height: 4)
+        correctionDot.cornerRadius = 2
+        correctionDot.backgroundColor = TalkDesign.active.cgColor
+        correctionDot.isHidden = true
+        pillContent.wantsLayer = true
+        pillContent.layer?.addSublayer(correctionDot)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -220,7 +230,7 @@ final class Overlay {
         panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
     }
     deinit {
-        timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel(); dockMotion?.stop()
+        timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel(); completionDismiss?.cancel(); dockMotion?.stop()
     }
     func show(_ visible: Bool) {
         enabled = visible
@@ -296,6 +306,7 @@ final class Overlay {
         update(next, waitingForAudio: false)
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
+        completionDismiss?.cancel(); completionDismiss = nil
         connectingDelay?.cancel(); connectingDelay = nil
         if !modeNotice { clearNotice() }
         self.waitingForAudio = waitingForAudio
@@ -308,20 +319,35 @@ final class Overlay {
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
         glow.isHidden = next != .processing; halo.isHidden = next != .processing
+        if next == .processing { processingStarted = ProcessInfo.processInfo.systemUptime; glow.strokeEnd = 0.02 }
         updateAccessibilityLabel()
         layout(animated: true); updateTimer()
+        if next != .processing { glow.removeAllAnimations(); halo.removeAllAnimations() }
         if next == .processing {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-                let shimmer = CABasicAnimation(keyPath: "opacity")
-                shimmer.fromValue = 0.35; shimmer.toValue = 1; shimmer.duration = 0.9
-                shimmer.autoreverses = true; shimmer.repeatCount = .infinity
-                glow.add(shimmer, forKey: "shimmer")
                 let pulse = CABasicAnimation(keyPath: "opacity")
                 pulse.fromValue = 0.55; pulse.toValue = 1; pulse.duration = 0.95
                 pulse.autoreverses = true; pulse.repeatCount = .infinity
                 halo.add(pulse, forKey: "breathe")
             }
         }
+    }
+    func processing(audioSeconds: Double, correction: Bool) {
+        progress = TranscriptionProgress(audioSeconds: audioSeconds, correction: correction)
+        update(.processing)
+    }
+    func finishProcessing() {
+        update(.idle)
+        glow.isHidden = false; halo.isHidden = false
+        CATransaction.begin(); CATransaction.setAnimationDuration(0.12)
+        glow.strokeEnd = 1
+        CATransaction.commit()
+        let dismiss = DispatchWorkItem { [weak self] in
+            self?.glow.isHidden = true; self?.halo.isHidden = true
+            self?.completionDismiss = nil
+        }
+        completionDismiss = dismiss
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: dismiss)
     }
     func preparing() {
         guard !waitingForAudio else { return }
@@ -339,11 +365,17 @@ final class Overlay {
         autoHalo.isHidden = !enabled
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
+    func setCorrection(_ enabled: Bool) {
+        correctionEnabled = enabled
+        correctionDot.isHidden = !enabled
+        updateModeAppearance(); updateAccessibilityLabel()
+    }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
         for (title, action, enabled) in [
             ("Read Aloud · Hyper+T", #selector(toggleSpeechMode), speechEnabled()),
-            ("Auto Dictation · Hyper+V", #selector(toggleAutoMode), autoMode)
+            ("Auto Dictation · Hyper+V", #selector(toggleAutoMode), autoMode),
+            ("AI Correction", #selector(toggleCorrection), correctionEnabled)
         ] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
@@ -356,6 +388,7 @@ final class Overlay {
     @objc private func openAccessibility() { onOpenAccessibility?() }
     @objc private func toggleSpeechMode() { onToggleSpeech?() }
     @objc private func toggleAutoMode() { onToggleAuto?() }
+    @objc private func toggleCorrection() { onToggleCorrection?() }
     private func updateModeAppearance() {
         pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
@@ -363,10 +396,11 @@ final class Overlay {
         pillContent.toolTip = autoMode
             ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
             : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
+        if correctionEnabled { pillContent.toolTip = "AI correction on · " + (pillContent.toolTip ?? "") }
     }
     private func updateAccessibilityLabel() {
         let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
-        pillContent.setAccessibilityLabel(autoMode ? "Auto mode · \(action)" : action)
+        pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + (correctionEnabled ? " · AI correction on" : ""))
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
@@ -377,7 +411,18 @@ final class Overlay {
         let width = size.width, height = size.height
         let center = root.bounds.midX
         let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
-        glow.frame = CGRect(x: center - 30, y: 10, width: 60, height: 40)
+        // Clockwise from the top center, just outside the existing glass edge.
+        let rim = CGMutablePath()
+        let left = frame.minX - 1, right = frame.maxX + 1, bottom = frame.minY - 1, top = frame.maxY + 1
+        let radius: CGFloat = 19
+        rim.move(to: CGPoint(x: center, y: top))
+        rim.addLine(to: CGPoint(x: right - radius, y: top))
+        rim.addArc(tangent1End: CGPoint(x: right, y: top), tangent2End: CGPoint(x: right, y: bottom), radius: radius)
+        rim.addArc(tangent1End: CGPoint(x: right, y: bottom), tangent2End: CGPoint(x: left, y: bottom), radius: radius)
+        rim.addArc(tangent1End: CGPoint(x: left, y: bottom), tangent2End: CGPoint(x: left, y: top), radius: radius)
+        rim.addArc(tangent1End: CGPoint(x: left, y: top), tangent2End: CGPoint(x: right, y: top), radius: radius)
+        rim.closeSubpath()
+        glow.path = rim
         halo.frame = CGRect(x: center - 32, y: 8, width: 64, height: 44)
         halo.path = CGPath(roundedRect: CGRect(x: 4, y: 4, width: 56, height: 36), cornerWidth: 18, cornerHeight: 18, transform: nil)
         let outline = CGPath(roundedRect: frame, cornerWidth: 18, cornerHeight: 18, transform: nil)
@@ -410,6 +455,10 @@ final class Overlay {
             connecting.frame = NSRect(x: contentOrigin + 102, y: 10, width: 90, height: 17)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        let markX = expanded ? (width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2 + 9 : (width - 22) / 2
+        correctionDot.position = CGPoint(x: markX + 23, y: 26)
+        CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
@@ -435,6 +484,19 @@ final class Overlay {
     }
     private func updateTimer() {
         timer?.invalidate(); timer = nil
+        if phase == .processing, enabled {
+            let ticker = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                CATransaction.begin()
+                CATransaction.setDisableActions(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+                CATransaction.setAnimationDuration(0.1)
+                self.glow.strokeEnd = max(0.02, self.progress.fraction(elapsed: ProcessInfo.processInfo.systemUptime - self.processingStarted))
+                CATransaction.commit()
+            }
+            ticker.tolerance = 0.01
+            RunLoop.main.add(ticker, forMode: .common); timer = ticker
+            return
+        }
         guard phase == .recording, !waitingForAudio, enabled else { return }
         let ticker = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
             guard let self else { return }

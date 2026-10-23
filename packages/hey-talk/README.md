@@ -29,8 +29,10 @@ on the clipboard instead of pasting or submitting into another field or thread.
 The existing per-app Enter exceptions also apply in Auto.
 
 The floating control is a compact glass capsule with an indigo waveform mark.
-It expands to show live teal audio levels while recording, then a quiet indigo
-glow while transcribing. Accent colors match the shared Hey Boss design tokens.
+It expands to show live teal audio levels while recording, then a thin indigo
+progress rim while transcribing. Progress is estimated from recording length,
+includes AI correction when enabled, and gently advances if processing runs long.
+The rim completes when the transcript is ready. Accent colors match the shared Hey Boss design tokens.
 “Connecting…” appears only if opening the microphone takes more than 700 ms.
 With Accessibility enabled, the bubble lifts above the bottom Dock when it opens
 and returns to its previous position when the Dock hides.
@@ -38,6 +40,18 @@ macOS 26 uses native Liquid Glass with a fine reflective edge and soft shadow;
 macOS 15–25 uses a native translucent surface. There is no web renderer or account.
 Recording is silent on every microphone. The capsule provides the start and stop
 indicators.
+
+**AI Correction** in the waveform menu or the pill's right-click menu toggles
+punctuation and typo correction with OpenAI GPT-6 Luna. A tiny teal dot beside
+the waveform mark means it is on; no dot means it is off. It starts off and
+remembers your choice. `hey-talk correction on|off|toggle` controls the same setting.
+When enabled, the transcript and existing vocabulary list go to the existing
+Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, with reasoning disabled and storage off.
+The proxy's configured routing, model rewrites, and authentication remain authoritative.
+Audio stays local. Correction applies before History, copy, paste, or submission,
+including file transcription. If it fails or exceeds eight seconds, the original
+transcript is kept with a brief notice. Escape discards pending correction too.
+Result JSON includes correction status (`off`, `applied`, or `fallback`) and timing.
 
 ## Read aloud
 
@@ -263,7 +277,8 @@ fallback is disabled when the laptop lid is closed or the input reports mute.
 With the MacBook lid closed, choose an external microphone as the system input.
 A separate disposable process runs Orukeet v0.1.0 INT8 through sherpa-onnx and
 ONNX Runtime. Private pipes carry PCM; the CLI uses a same-user Unix socket
-with mode 0600. No network listener or inference network request is used.
+with mode 0600. Hey Talk opens no network listener. Recognition runs locally;
+optional AI correction sends text through the local proxy as described above.
 An inference crash retries once without restarting the recording service.
 
 Audio is bounded to five minutes, held only in memory, and discarded on cancel.
