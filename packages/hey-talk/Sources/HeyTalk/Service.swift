@@ -409,11 +409,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
         case "cancel": cancel(); reply(status())
         case "last":
-            if !session.lastText.isEmpty { reply(["ok": true, "text": session.lastText]) }
+            if let entry = history.entries.first { reply(entry.json.merging(["ok": true]) { _, new in new }) }
             else {
                 history.read { result in
                     switch result {
-                    case .success(let entries): reply(["ok": true, "text": entries.first?.text ?? ""])
+                    case .success(let entries): reply((entries.first?.json ?? ["text": "", "original_text": NSNull()]).merging(["ok": true]) { _, new in new })
                     case .failure(let error): reply(self.failure(error.localizedDescription))
                     }
                 }
@@ -571,7 +571,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
                 guard useCorrection else {
-                    self.finish(text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
+                    self.finish(text, originalText: text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
                     return
                 }
                 let started = ProcessInfo.processInfo.systemUptime
@@ -584,16 +584,16 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     case .failure(let error):
                         corrected = text; info["status"] = "fallback"; info["error"] = error.localizedDescription
                     }
-                    self.finish(corrected, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
+                    self.finish(corrected, originalText: text, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
                 }
             }
         } }
     }
-    private func finish(_ text: String, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
+    private func finish(_ text: String, originalText: String, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
         guard self.session.finish(id, text: text) else { return }
         if self.autoTarget == nil { self.hotkey?.reset() }
         self.overlay?.finishProcessing()
-        let entry = Dictation(text: text, audioSeconds: audioSeconds, source: self.transcriptionSource)
+        let entry = Dictation(text: text, originalText: originalText, audioSeconds: audioSeconds, source: self.transcriptionSource)
         // Detach this result before disk IO: a new recording may start while saving.
         let reply = self.pendingReply; self.pendingReply = nil
         let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
@@ -602,7 +602,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         self.history.save(entry) { saved in
             let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
                 self.lastPasteBlock = reason
-                var response: [String: Any] = ["ok": true, "text": text, "audio_seconds": audioSeconds,
+                var response: [String: Any] = ["ok": true, "text": text, "original_text": originalText, "audio_seconds": audioSeconds,
                         "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
                         "capture_start_ms": captureMS, "delivery": delivery,
                         "history_id": entry.id.uuidString, "history_saved": saved, "correction": correctionInfo]

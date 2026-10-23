@@ -51,7 +51,8 @@ The proxy's configured routing, model rewrites, and authentication remain author
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
-Result JSON includes correction status (`off`, `applied`, or `fallback`) and timing.
+Result JSON includes correction status (`off`, `applied`, or `fallback`), timing,
+and `original_text` alongside the final `text`, including when correction is off or fails.
 
 ## Read aloud
 
@@ -222,8 +223,12 @@ Only the word list is shared; recordings, history, Auto mode and login startup s
 on each Mac. Hints favor terms but do not guarantee spelling or replace text afterward.
 
 Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
-history show`. Each transcript has a timestamp and Copy button. Closing this
-window with ⌘W leaves dictation running. Standard copy, paste, cut, select-all,
+history show`. Each transcript has a timestamp and Copy button. Expand **Original
+transcript** to inspect and copy the text before AI correction. Search matches
+both versions. `hey-talk last --original` prints the latest original;
+`last --json` and `history --json` include both `text` and `original_text`.
+Older entries have `original_text: null` because their originals were not saved.
+Closing this window with ⌘W leaves dictation running. Standard copy, paste, cut, select-all,
 and undo commands work in native text fields. Select part of any transcript
 and press ⌘C, or use its Copy button for the whole text. The search field filters
 loaded entries. macOS 26 windows use native Liquid Glass. Notices expand inside
