@@ -4,6 +4,33 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testSpeechOffBadgeIsDistinctAndDoesNotChangeRecordingStateOrSize() throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(try XCTUnwrap(panel.contentView))
+        let surface = try XCTUnwrap(views.first { $0.layer?.sublayers?.contains { $0.name == "speech-off-badge" } == true })
+        let badge = try XCTUnwrap(surface.layer?.sublayers?.first { $0.name == "speech-off-badge" })
+        overlay.show(false)
+        overlay.update(.recording)
+        let size = panel.frame.size
+        overlay.setSpeechEnabled(false)
+        XCTAssertFalse(badge.isHidden)
+        XCTAssertNotNil(badge.contents)
+        XCTAssertTrue(surface.accessibilityLabel()?.contains("Read aloud off") == true)
+        overlay.show(true)
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertTrue(surface.accessibilityLabel()?.contains("Stop dictation") == true)
+        XCTAssertEqual(panel.frame.size, size)
+        overlay.setSpeechEnabled(true)
+        XCTAssertTrue(badge.isHidden)
+        XCTAssertTrue(surface.accessibilityLabel()?.contains("Read aloud on") == true)
+        XCTAssertEqual(panel.frame.size, size)
+    }
+
     @MainActor func testCorrectionDotStaysBesideTheMarkWithoutResizingOrTakingClicks() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))
@@ -58,8 +85,8 @@ final class OverlayTests: XCTestCase {
         let overlay = Overlay()
         defer { overlay.show(false) }
         var speech = true, auto = false, dictationStarts = 0
-        overlay.speechEnabled = { speech }
-        overlay.onToggleSpeech = { speech.toggle() }
+        overlay.setSpeechEnabled(speech)
+        overlay.onToggleSpeech = { speech.toggle(); overlay.setSpeechEnabled(speech) }
         overlay.onToggleAuto = { auto.toggle(); overlay.setAutoMode(auto) }
         overlay.onToggle = { dictationStarts += 1 }
         let menu = overlay.contextMenu()

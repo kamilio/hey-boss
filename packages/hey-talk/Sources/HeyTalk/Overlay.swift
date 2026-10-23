@@ -101,6 +101,8 @@ final class Overlay {
     private var autoMode = false
     private let glow = CAShapeLayer()
     private let correctionDot = CALayer()
+    private let speechOffBadge = CALayer()
+    private var speechEnabled = false
     private var correctionEnabled = false
     private var progress = TranscriptionProgress(audioSeconds: 0, correction: false)
     private var processingStarted: TimeInterval = 0
@@ -124,7 +126,6 @@ final class Overlay {
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
     var onToggleCorrection: (() -> Void)?
-    var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
     init() {
@@ -198,6 +199,11 @@ final class Overlay {
         correctionDot.isHidden = true
         pillContent.wantsLayer = true
         pillContent.layer?.addSublayer(correctionDot)
+        speechOffBadge.name = "speech-off-badge"
+        speechOffBadge.bounds = CGRect(x: 0, y: 0, width: 10, height: 9)
+        speechOffBadge.contents = TalkDesign.speechOffImage?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        speechOffBadge.contentsGravity = .resizeAspect
+        pillContent.layer?.addSublayer(speechOffBadge)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -370,10 +376,15 @@ final class Overlay {
         correctionDot.isHidden = !enabled
         updateModeAppearance(); updateAccessibilityLabel()
     }
+    func setSpeechEnabled(_ enabled: Bool) {
+        speechEnabled = enabled
+        speechOffBadge.isHidden = enabled
+        updateModeAppearance(); updateAccessibilityLabel()
+    }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
         for (title, action, enabled) in [
-            ("Read Aloud · Hyper+T", #selector(toggleSpeechMode), speechEnabled()),
+            ("Read Aloud · Hyper+T", #selector(toggleSpeechMode), speechEnabled),
             ("Auto Dictation · Hyper+V", #selector(toggleAutoMode), autoMode),
             ("AI Correction", #selector(toggleCorrection), correctionEnabled)
         ] {
@@ -397,10 +408,11 @@ final class Overlay {
             ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
             : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
         if correctionEnabled { pillContent.toolTip = "AI correction on · " + (pillContent.toolTip ?? "") }
+        pillContent.toolTip = "Read aloud \(speechEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
     private func updateAccessibilityLabel() {
         let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
-        pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + (correctionEnabled ? " · AI correction on" : ""))
+        pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + (correctionEnabled ? " · AI correction on" : "") + " · Read aloud \(speechEnabled ? "on" : "off")")
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
@@ -458,6 +470,7 @@ final class Overlay {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let markX = expanded ? (width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2 + 9 : (width - 22) / 2
         correctionDot.position = CGPoint(x: markX + 23, y: 26)
+        speechOffBadge.position = CGPoint(x: markX + 24, y: 9)
         CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)

@@ -40,6 +40,10 @@ macOS 26 uses native Liquid Glass with a fine reflective edge and soft shadow;
 macOS 15–25 uses a native translucent surface. There is no web renderer or account.
 Recording is silent on every microphone. The capsule provides the start and stop
 indicators.
+The waveform status-bar menu offers **Hide Pill** / **Show Pill**; hiding the pill
+keeps Hey Talk and its shortcuts running. A tiny red speaker-off marker on the
+pill and status-bar icon means **Read Aloud** is off. Toggle it from either menu;
+dictation still works. Hover over the status-bar icon to see both states.
 
 **AI Correction** in the waveform menu or the pill's right-click menu toggles
 punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. A tiny teal dot beside
