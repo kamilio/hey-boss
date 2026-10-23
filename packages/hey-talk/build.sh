@@ -33,6 +33,7 @@ fi
 install_name_tool -change '@rpath/libonnxruntime.dylib' '@loader_path/libonnxruntime.dylib' "$app/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
 cp THIRD_PARTY.md "$app/Contents/Resources/"
 cp vocabulary.md "$app/Contents/Resources/"
+cp Sources/HeyTalk/Prompts/correction.md "$app/Contents/Resources/"
 cp -R Licenses "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
