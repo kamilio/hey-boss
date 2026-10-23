@@ -313,6 +313,22 @@ mod tests {
     }
 
     #[test]
+    fn caught_up_exchanges_do_not_rewrite_durable_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        a.put("fact").unwrap();
+        for _ in 0..3 {
+            exchange(&mut a, &mut b);
+        }
+        let before = (a.db.total_changes(), b.db.total_changes());
+        for _ in 0..5 {
+            exchange(&mut a, &mut b);
+        }
+        assert_eq!((a.db.total_changes(), b.db.total_changes()), before);
+    }
+
+    #[test]
     fn delayed_initial_message_is_included_in_received_presence_age() {
         let root = tempfile::tempdir().unwrap();
         let mut a = Engine::open(&root.path().join("a.db")).unwrap();

@@ -164,6 +164,9 @@ impl Engine {
         if position < 0 || position > self.head()? {
             return Err(invalid("Peer acknowledged an invalid position"));
         }
+        if position <= self.sent(replica)? {
+            return Ok(());
+        }
         self.db.execute("INSERT INTO sent VALUES(?1,?2) ON CONFLICT(replica) DO UPDATE SET position=max(position,excluded.position)", params![replica, position])?;
         Ok(())
     }
@@ -244,6 +247,11 @@ impl Engine {
             {
                 return Err(invalid("Invalid or corrupt replication record"));
             }
+        }
+        // Idle exchanges carry presence but no durable changes. Avoid acquiring
+        // SQLite's writer (and rewriting receipts) on every peer's two-second tick.
+        if batch.records.is_empty() && batch.through <= self.received(&batch.replica)? {
+            return Ok(());
         }
         let tx = self
             .db
