@@ -1,1 +1,1 @@
-Fix punctuation and typos in this speech-to-text transcript, using the vocabulary for spelling; return only the corrected text.
+Fix punctuation and typos in this speech-to-text transcript; remove fillers such as "um", "uh", and empty "like" or "basically", but keep meaningful uses ("I like it", "basically identical"); use the vocabulary for spelling and return only the corrected text.

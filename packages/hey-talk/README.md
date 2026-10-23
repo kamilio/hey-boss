@@ -42,7 +42,7 @@ Recording is silent on every microphone. The capsule provides the start and stop
 indicators.
 
 **AI Correction** in the waveform menu or the pill's right-click menu toggles
-punctuation and typo correction with OpenAI GPT-6 Luna. A tiny teal dot beside
+punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. A tiny teal dot beside
 the waveform mark means it is on; no dot means it is off. It starts off and
 remembers your choice. `hey-talk correction on|off|toggle` controls the same setting.
 When enabled, the transcript and existing vocabulary list go to the existing
