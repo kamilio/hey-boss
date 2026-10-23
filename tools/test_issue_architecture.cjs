@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('src/issues/web/app.js', 'utf8');
 const context = vm.createContext({
+  URLSearchParams,
   esc: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
   icon: () => '', avatar: () => '', date: () => 'today', actorName: id => id || 'Unassigned',
   model: {project: {id: 'named:QA', name: 'QA'}, boss: {name: 'Boss'}},
@@ -10,9 +11,10 @@ const context = vm.createContext({
   assigneeActions: () => '<button>Assign</button>', renderReadiness: () => '<div>Readiness</div>',
   renderTagSidebar: () => '<div>Tags</div>',
   IssueBlockers: {card: () => '<button>Add blocker</button>', description: () => 'Blocked'},
-  HeyBossOrigin: {card: () => '<section>Origin</section>'},
+  HeyBossOrigin: {card: () => '<section>Origin</section>', conversation: origin => origin?.conversation || null},
   agentLaunchCount: () => '<button>Agent launches</button>',
 });
+vm.runInContext(source.slice(source.indexOf('function traceLinkForOrigin('), source.indexOf('function listAssignment(')), context);
 const start = source.indexOf('function renderIssueWork(');
 assert.ok(start >= 0, 'Issue work has an explicit group');
 vm.runInContext(source.slice(start, source.indexOf('function renderDetail(', start)), context);
@@ -34,6 +36,13 @@ assert.match(details, /Agent launches/);
 assert.doesNotMatch(details, /<details[^>]*\bopen\b/);
 const closed = context.renderIssueContext({...value.issue, closed_by: 'human:boss'});
 assert.match(closed, /Closed by human:boss/);
+assert.doesNotMatch(closed, /Last agent conversation/);
+for (const history of [{closed_by:'codex:previous'}, {commits:[{added_by:'codex:previous'}]}]) {
+  const details = context.renderIssueContext({...value.issue, ...history});
+  assert.match(details, /History[\s\S]*agent=codex%3Aprevious[\s\S]*Last agent conversation/);
+  assert.doesNotMatch(details, /assignment-badge/);
+}
+assert.match(context.renderIssueContext({...value.issue, commits:[{origin:{conversation:'/agents/session#recorded'}}]}), /href="\/agents\/session#recorded"/);
 context.renderAllocation = () => '';
 vm.runInContext(source.slice(source.indexOf('function draftUnavailable('), source.indexOf('function issueStateActions(')), context);
 const readiness = issue => context.renderReadiness({issue, drafts_enabled: true});

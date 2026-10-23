@@ -46,12 +46,15 @@ test('released watcher shows unassigned ownership and keeps status accessible', 
   assert.match(html,/data-open-watcher="7"/);
   assert.doesNotMatch(html,/Open agent conversation|Filter by GitHub PR watcher/);
 });
-test('names are escaped and historical traces remain accessible', () => {
+test('names are escaped', () => {
   assert.doesNotMatch(context.render({number:1,assignment:{kind:'machine',machine:'box',machine_name:'<img src=x>'}}),/<img/);
+});
+test('past agent work never appears as a current assignment', () => {
   assert.equal(context.render({number:2,assignment:{kind:'unassigned'}}),'');
-  const html=context.render({number:3,assignment:{kind:'unassigned'},closed_by:'codex:old'});
-  assert.match(html,/Open agent/);
-  assert.doesNotMatch(html,/Filter by/);
+  for (const state of ['open','closed']) {
+    assert.equal(context.render({number:3,state,assignment:{kind:'unassigned'},closed_by:'codex:old'}),'');
+    assert.equal(context.render({number:4,state,assignment:{kind:'unassigned'},commits:[{added_by:'codex:old'}]}),'');
+  }
 });
 
 test('scheduled service ownership never invents an agent session', () => {
