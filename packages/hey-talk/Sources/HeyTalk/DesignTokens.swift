@@ -8,10 +8,6 @@ enum TalkDesign {
     static let automatic = adaptive(light: 0x8250ad, dark: 0xd4b0ff)
     static let idleSize = NSSize(width: 56, height: 36)
     static let recordingSize = NSSize(width: 104, height: 36)
-    static var speechOffImage: NSImage? {
-        NSImage(systemSymbolName: "speaker.slash.fill", accessibilityDescription: "Read aloud off")?
-            .withSymbolConfiguration(.init(paletteColors: [.systemRed]))
-    }
     private static func adaptive(light: UInt32, dark: UInt32) -> NSColor {
         NSColor(name: nil) { appearance in
             let value = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light

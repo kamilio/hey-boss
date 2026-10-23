@@ -31,7 +31,6 @@ final class SpeechController {
     var onActivityChanged: ((Bool) -> Void)?
     var onAllowedChanged: ((Bool) -> Void)?
     var onNotice: ((String) -> Void)?
-    var onSettingsChanged: (() -> Void)?
     var active: Bool { playback.active }
     var status: [String: Any] {
         var result = settings.json
@@ -89,7 +88,7 @@ final class SpeechController {
         onNotice?(settings.enabled ? "Read aloud on · Hyper+S to play" : "Read aloud off")
     }
     func pause() { if active && playback.state != .paused { playback.togglePause() } }
-    func settingsChanged() { stop(); refresh(); onSettingsChanged?() }
+    func settingsChanged() { stop(); refresh() }
     func toggle(fromOverlay: Bool = false, completion: @escaping (Result<Void, Error>) -> Void = { _ in }) {
         if active { playback.togglePause(); completion(.success(())); return }
         let anchor = (fromOverlay || overlay.containsPointer) ? candidate ?? reading : nil
