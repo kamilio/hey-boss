@@ -761,6 +761,10 @@ before reconnecting; the handshake rejects them before exchanging facts. Existin
 immutable history and reconnect cursors remain intact, including the earlier
 position-only rotations; new rotations also identify the moved issue so tied
 positions preserve issue identity.
+Sync uses SSH compression, including on the shared companion connection; an
+existing connection picks it up when it reconnects. Caught-up peers exchange
+presence without rewriting durable journal receipts. The wire protocol,
+retained history and reconnect cursors stay unchanged.
 Verified installations remain current while reconnecting; a stale runtime build
 cannot trigger repeated installs or terminate a replacement connection before hello.
 Companions keep reporting liveness while database work delays configuration,
