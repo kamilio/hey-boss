@@ -395,30 +395,25 @@ function listAssignment(issue) {
   const remote = issue.state === 'open' && !issue.deleted_at && ['unassigned', 'machine'].includes(a.kind) ? issue.remote_attempts?.find(run => run.machine === a.machine) || issue.remote_attempts?.[0] : null;
   if (remote) a = {kind:'agent', actor:remote.actor, machine:remote.machine, machine_name:remote.host};
   const watching = IssueAssignments.current(issue).kind === 'github';
+  if (a.kind === 'unassigned' && !watching) return '';
   const actor = a.actor || issue.assignee;
-  const historical = a.kind === 'unassigned' && !watching;
-  const lastCommit = issue.commits?.at(-1);
-  const trace = historical
-    ? traceLinkForOrigin(lastCommit?.origin, issue.number, issue.closed_by || lastCommit?.added_by)
-    : actor && !actor.startsWith('human:') && !actor.startsWith('job:') && actor !== 'watcher:github'
+  const trace = actor && !actor.startsWith('human:') && !actor.startsWith('job:') && actor !== 'watcher:github'
       ? '/agents/session#' + new URLSearchParams({project:model.project.id, issue:issue.number, agent:actor}) : null;
-  if (historical && !trace) return '';
   const description = remote ? {label:actorName(remote.actor), detail:(remote.host || remote.machine) + (issue.remote_attempts.length > 1 ? ` · ${issue.remote_attempts.length} agents working on this task` : '')}
-    : historical ? {label:'Agent conversation', detail:'Last recorded work on this issue.'}
     : IssueAssignments.describe(issue, {actorName, bossName:model.boss.name});
   const owner = a.kind === 'github' ? 'watcher:github' : a.kind === 'machine' ? 'machine:' + a.machine : a.kind === 'unassigned' ? 'unassigned' : actor || 'human:boss';
   const href = routeHash({...model.route, issue:null, owner});
-  const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request' : a.kind === 'unassigned' && !historical ? 'user'
+  const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request' : a.kind === 'unassigned' ? 'user'
     : actor?.startsWith('claude:') ? 'spark' : actor?.startsWith('codex:') ? 'codex' : 'code';
   const id = 'assignment-card-' + issue.number;
   const attrs = 'class="assignment-badge" data-assignment-kind="' + esc(a.kind) + '" data-assignment-card="' + id + '" aria-controls="' + id + '" aria-expanded="false" aria-haspopup="dialog" aria-keyshortcuts="ArrowDown"';
   const badge = '<span class="assignment-avatar" data-assignment-icon="' + symbol + '">' + icon(symbol) + '</span>';
-  const trigger = historical || remote ? '<button type="button" ' + attrs + ' aria-label="' + esc(remote ? description.detail : 'Agent conversation details') + '">' + badge + '</button>'
+  const trigger = remote ? '<button type="button" ' + attrs + ' aria-label="' + esc(description.detail) + '">' + badge + '</button>'
     : '<a ' + attrs + ' href="' + esc(href) + '" aria-label="Filter by ' + esc(description.label) + '; show assignment details">' + badge + '</a>';
-  const activity = !historical && trace ? '<span class="assignment-activity" data-assignment-agent="' + esc(actor) + '" data-assignment-issue="' + issue.number + '"><span class="assignment-activity-status">Loading activity…</span><span class="assignment-runtime-label">Elapsed time</span><span class="assignment-runtime">—</span><span class="assignment-started">Checking this attempt</span></span>' : '';
+  const activity = trace ? '<span class="assignment-activity" data-assignment-agent="' + esc(actor) + '" data-assignment-issue="' + issue.number + '"><span class="assignment-activity-status">Loading activity…</span><span class="assignment-runtime-label">Elapsed time</span><span class="assignment-runtime">—</span><span class="assignment-started">Checking this attempt</span></span>' : '';
   return '<span class="list-assignee">' + trigger + '<span class="assignment-card" id="' + id + '" popover="manual" role="dialog" aria-label="' + esc(description.label) + '"><span class="assignment-card-heading"><span class="assignment-card-avatar">' + icon(symbol) + '</span><span><strong>' + esc(description.label) + '</strong><span class="assignment-card-detail">' + esc(activity && !remote ? a.machine_name || a.machine || 'Agent session' : description.detail) + '</span></span></span>' + activity
     + (trace ? '<a class="assignment-card-action assignment-card-primary" href="' + esc(trace) + '">' + icon('arrow-right') + '<span>Open agent conversation</span></a>' : '')
-    + (historical || remote ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
+    + (remote ? '' : '<a class="assignment-card-action" href="' + esc(href) + '">' + icon('search') + '<span>Filter by ' + esc(description.label) + '</span></a>')
     + (watching ? '<button type="button" class="assignment-card-action" data-open-watcher="' + issue.number + '">' + icon('pull-request') + '<span>Open GitHub watcher</span></button>' : '')
     + '</span></span>';
 }
@@ -1418,7 +1413,9 @@ function renderIssueWork(value) {
   return `<section class="issue-work" aria-label="Work"><h2 class="issue-section-heading">Work</h2>${assignment}${renderReadiness(value)}${IssueAssignments.status(i,{icon})}${renderTagSidebar(i)}${IssueBlockers.card(i)}</section>`;
 }
 function renderIssueContext(i) {
-  return `<details class="issue-context"><summary>Issue details</summary>${HeyBossOrigin.card(i.origin, model.project.id, actorName)}<div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">History</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p>${agentLaunchCount(i, true)}</div></details>`;
+  const lastCommit = i.commits?.at(-1);
+  const trace = traceLinkForOrigin(lastCommit?.origin, i.number, i.closed_by || lastCommit?.added_by);
+  return `<details class="issue-context"><summary>Issue details</summary>${HeyBossOrigin.card(i.origin, model.project.id, actorName)}<div class="side-section"><h2 class="side-heading">Project</h2><div class="side-project">${icon("folder")}${esc(model.project.name)}</div><p>${esc(model.project.id.startsWith("local:") ? "Local directory" : model.project.id.replace(/^named:/, ""))}</p></div><div class="side-section"><h2 class="side-heading">History</h2><p>Updated ${date(i.updated_at)}</p>${i.closed_by ? `<p>Closed by ${esc(actorName(i.closed_by))}</p>` : ""}<p data-issue-version>Revision ${i.version}</p>${agentLaunchCount(i, true)}${trace ? `<p><a href="${esc(trace)}">Last agent conversation</a></p>` : ""}</div></details>`;
 }
 function placeIssueWork() {
   const work = $("#detail-view .issue-work"), main = $("#detail-view .detail-main"), sidebar = $("#detail-view .sidebar");

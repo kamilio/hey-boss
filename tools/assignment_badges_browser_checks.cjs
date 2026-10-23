@@ -18,6 +18,7 @@ const issues = [
   {title:'Draft without comments keeps its actions aligned',draft:true,comment_count:0,assignment:{kind:'unassigned'}},
   {title:'Unassigned issue without comments keeps its actions aligned',comment_count:0,assignment:{kind:'unassigned'}},
   {title:'An agent on another machine shows elapsed time',comment_count:0,assignment:{kind:'machine',machine:'box',machine_name:'Devbox'},remote_attempts:[{actor:'codex:astra',machine:'box',host:'Devbox',state:'running'},{actor:'codex:other',machine:'other',host:'Other',state:'running'}]},
+  {title:'Past agent work belongs in history',assignment:{kind:'unassigned'},closed_by:'codex:previous'},
 ].map((i,index)=>({number:index+1,state:'open',version:1,labels:['needs-boss'],created_at:Date.now()-86400000,updated_at:Date.now(),created_by:'human:boss',comment_count:[26,1,0,888,8][index],body:'Fixture issue',body_html:'<p>Inspect the current owner and PR status.</p>',comments:[],events:[],pull_requests:[],...i}));
 for (const number of [3,6,7]) {
   const issue=issues[number-1], url=`https://github.com/example/project/pull/${number}`;
@@ -70,6 +71,15 @@ const server=createServer(async(req,res)=>{
           const badge=n=>page.locator(`[data-issue-number="${n}"] .assignment-badge`);
           const card=n=>page.locator('#assignment-card-'+n);
           await list();
+          assert.equal(await badge(12).count(),0,'Past work does not look assigned');
+          await page.locator('[data-issue-number="12"] .issue-title').click();
+          await page.locator('.issue-context > summary').click();
+          const historicalConversation=page.locator('.issue-context').getByRole('link',{name:'Last agent conversation'});
+          assert(await historicalConversation.isVisible());
+          assert.match(await historicalConversation.getAttribute('href'),/agent=codex%3Aprevious/);
+          assert.equal(await page.locator('#issue-assignment').inputValue(),'unassigned');
+          if(process.env.BADGE_SCREENSHOTS) await page.screenshot({path:`${process.env.BADGE_SCREENSHOTS}/${engine.name()}-${width}-history.png`,fullPage:true});
+          await list();
           const alignment = await page.locator('.issue-row-end').evaluateAll(ends => ends.map(end => {
             const badge = end.querySelector('.assignment-badge')?.getBoundingClientRect();
             const comments = end.querySelector('.comment-count')?.getBoundingClientRect();
@@ -93,6 +103,8 @@ const server=createServer(async(req,res)=>{
           }
           for (const number of [1,3,5,8,9,10]) {
             const trigger=page.locator(`[data-list-actions="${number}"]`);
+            await trigger.scrollIntoViewIfNeeded();
+            await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
             await trigger.click();
             const menu=page.getByRole('menu',{name:`Actions for issue #${number}`});
             await menu.waitFor({state:'visible'});
