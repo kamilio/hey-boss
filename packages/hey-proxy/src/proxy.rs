@@ -139,6 +139,10 @@ pub(crate) fn build_client(config: &Config) -> Result<reqwest::Client> {
         .no_zstd()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15));
+    let builder = match &config.proxy_url {
+        Some(url) => builder.proxy(reqwest::Proxy::all(url)?),
+        None => builder,
+    };
     let builder = if unbounded_model_wait(config) {
         builder
     } else {
@@ -443,6 +447,7 @@ impl Service {
                 config.logging = previous.logging.clone();
             }
             let client = if config.ip_version == previous.ip_version
+                && config.proxy_url == previous.proxy_url
                 && unbounded_model_wait(&config) == unbounded_model_wait(&previous)
             {
                 client
@@ -1688,6 +1693,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_url_forwards_rewritten_requests_and_client_relays() {
+        let egress = Router::new().fallback(any(|request: Request| async move {
+            let (parts, body) = request.into_parts();
+            axum::Json(json!({"uri":parts.uri.to_string(), "authorization":parts.headers["authorization"].to_str().unwrap(),
+                "body":serde_json::from_slice::<Value>(&to_bytes(body, 10000).await.unwrap()).unwrap()}))
+        }));
+        let (egress_url, egress_task) = serve(egress).await;
+        for mode in [Mode::Standalone, Mode::Client] {
+            let mut config = if mode == Mode::Client {
+                Config::default()
+            } else {
+                Config::test_fixture()
+            };
+            config.mode = mode;
+            config.proxy_url = Some(egress_url.clone());
+            if mode == Mode::Client {
+                config.connection = Some(crate::config::ClientConnection {
+                    url: "http://relay.invalid".into(),
+                    api_key: "relay-key".into(),
+                });
+            } else {
+                config.upstream_url = "http://upstream.invalid".into();
+                config.aliases = serde_json::from_value(json!([
+                    {"from":"gpt-6-astra", "to":"ultima-alpha"}
+                ]))
+                .unwrap();
+            }
+            let (url, task) = serve(router(config).unwrap()).await;
+            let result: Value = reqwest::Client::new()
+                .post(format!("{url}/v1/responses"))
+                .json(&json!({"model":"gpt-6-astra", "input":"test"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if mode == Mode::Client {
+                assert_eq!(result["uri"], "http://relay.invalid/v1/responses");
+                assert_eq!(result["authorization"], "Bearer relay-key");
+                assert_eq!(result["body"]["model"], "gpt-6-astra");
+            } else {
+                assert_eq!(result["uri"], "http://upstream.invalid/v1/responses");
+                assert_eq!(result["authorization"], "Bearer something");
+                assert_eq!(result["body"]["model"], "ultima-alpha");
+            }
+            task.abort();
+        }
+        egress_task.abort();
+    }
+
+    #[tokio::test]
     async fn routes_keys_models_reasoning_and_query_and_strips_credentials() {
         let upstream = Router::new().fallback(any(|request: Request| async move {
             let (parts, body) = request.into_parts();
@@ -2471,6 +2528,15 @@ mod tests {
         config.api_keys.insert("default".into(), "third".into());
         std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
         wait_for("Bearer third").await;
+        let (egress_url, egress_task) =
+            serve(Router::new().fallback(any(|| async { "via proxy" }))).await;
+        config.proxy_url = Some(egress_url);
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        wait_for("via proxy").await;
+        config.proxy_url = None;
+        std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        wait_for("Bearer third").await;
+        egress_task.abort();
         proxy_task.abort();
         upstream_task.abort();
     }

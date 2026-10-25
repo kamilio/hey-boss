@@ -65,6 +65,8 @@ The registry configures Pi; it does not clamp arbitrary proxy requests or discov
 
 ## Applying edits
 
+Set top-level `"proxy_url": "socks5h://127.0.0.1:18083"` to send outbound HTTP and WebSocket connections through a proxy, including client-to-host relay traffic. Start a private SSH SOCKS tunnel with `ssh -N -D 127.0.0.1:18083 devbox`; upstream services then see the dev box's public IP. `socks5h` resolves upstream names on the dev box. HTTP(S) proxy URLs also work. Set `proxy_url` to `null` or remove it to restore the previous connection behavior. Edits reload automatically; an unavailable explicit proxy fails without falling back to a direct connection. This setting affects all providers and is machine-local, so rollout does not copy it to other machines.
+
 Routing, providers, credentials, and fallback rules reload in the background, normally within 250 ms. New requests use the most recently published configuration. In-flight requests keep their original snapshot. Invalid changes keep the previous configuration active and print an error. Changing `listen` or persistent logging options requires a restart.
 
 Persistent accounting snapshots are enabled by default. Full lifecycle timelines are opt-in with `"logging": {"detailed": true}`. To disable persistence entirely:
