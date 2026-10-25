@@ -48,7 +48,8 @@ whether the pill is visible or hidden.
 punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. A tiny teal dot beside
 the waveform mark means it is on; no dot means it is off. It starts off and
 remembers your choice. `hey-talk correction on|off|toggle` controls the same setting.
-When enabled, the transcript, existing vocabulary, and visible read-only text
+When enabled, the transcript, existing vocabulary, visible conversation text,
+and the current input
 from the dictation's target window go to the existing
 Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, with reasoning disabled and storage off.
 The proxy's configured routing, model rewrites, and authentication remain authoritative.
@@ -57,14 +58,24 @@ including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
 Context is a spelling hint; the transcript takes priority. Capture uses macOS
 Accessibility alongside transcription, with a 200 ms budget and an 8,000-character
-cap. It skips editors, password fields, controls, and clipped or off-screen text.
+cap. It skips password fields, unrelated editors, controls, navigation trees, and
+clipped or off-screen text; cmux's rendered terminal viewport is included.
+Named regions and message headings separate the captured text into sections.
+T3 and Slack capture keep conversations and the current input, excluding navigation
+and workspace status text. The focused input or message composer appears under **Current input**.
 Missing context does not block correction. File transcription never reads app context.
+Press **Hyper+M** (Control+Command+Option+Shift+M) in any app, or choose
+**Context Preview** in the waveform or pill's right-click menu, to inspect a fresh local snapshot.
+The preview shows the source app, section labels, character count, capture time,
+and the exact context text. It works without recording or enabling AI correction;
+opening the preview makes no model request. Press Hyper+M again to close it.
 Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`;
 `history --json` also includes it. `null` means no context was attached.
 Context is saved locally with the original and final transcript, with the same
 user-only file permissions; it is not included in routine status output.
 Result JSON includes correction status (`off`, `applied`, or `fallback`), timing,
 and `original_text` alongside the final `text`, including when correction is off or fails.
+Explicit “new line” or `\n` commands produce line breaks in corrected text.
 
 ## Read aloud
 

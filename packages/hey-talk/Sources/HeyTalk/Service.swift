@@ -31,6 +31,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var autoRestart: DispatchWorkItem?
     private var autoMenuItem: NSMenuItem?
     private var historyWindow: HistoryWindow?
+    private var contextWindow: ContextWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
     private var session = RecordingSession()
     private var overlay: Overlay?
@@ -73,6 +74,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .toggleAuto: self.toggleAutoMode()
             case .toggleSpeech: self.speech.toggle()
             case .toggleSpeechMode: self.speech.toggleEnabled()
+            case .previewContext: self.previewContext()
             case .cancel:
                 if self.speech.active { self.speech.stop() }
                 else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
@@ -114,7 +116,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Context Preview · Hyper+M", #selector(previewContext)), ("Automatic Paste…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -172,6 +174,22 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if historyWindow == nil { historyWindow = HistoryWindow(history: history) }
         history.refresh(); historyWindow?.show()
     }
+    @objc private func previewContext() {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() {
+            if contextWindow?.isVisible == true { contextWindow?.close() }
+            return
+        }
+        guard let source = NSWorkspace.shared.frontmostApplication else { return }
+        contextQueue.async {
+            let started = ProcessInfo.processInfo.systemUptime
+            let text = AppContext.capture(pid: source.processIdentifier)
+            let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            DispatchQueue.main.async {
+                if self.contextWindow == nil { self.contextWindow = ContextWindow() }
+                self.contextWindow?.show(source: source, text: text, milliseconds: elapsed)
+            }
+        }
+    }
     private func showOverlay(_ show: Bool) {
         if overlay == nil {
             let view = Overlay()
@@ -179,6 +197,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
+            view.onPreviewContext = { [weak self] in self?.previewContext() }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
             view.onOpenAccessibility = { [weak self] in
                 self?.accessibilitySetup.show()
@@ -287,7 +306,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
-            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V"],
+            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "context": "Control+Command+Option+Shift+M"],
             "enter_exceptions": enterExceptions.bundleIDs,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,
