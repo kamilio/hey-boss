@@ -31,7 +31,7 @@ final class Hotkey {
             }
             return noErr
         }, 2, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        let codes = DictationShortcut.allCases.map(\.keyCode) + [9] // Hyper+V toggles Auto.
+        let codes = DictationShortcut.allCases.map(\.keyCode) + [9, 46] // Hyper+V: Auto; Hyper+M: context preview.
         for code in codes {
             var ref: EventHotKeyRef?
             let id = EventHotKeyID(signature: 0x48544C4B, id: UInt32(code))

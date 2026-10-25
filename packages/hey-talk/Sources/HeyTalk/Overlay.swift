@@ -124,6 +124,7 @@ final class Overlay {
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
     var onToggleCorrection: (() -> Void)?
+    var onPreviewContext: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
@@ -381,6 +382,8 @@ final class Overlay {
             item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
         }
         menu.addItem(.separator())
+        let context = NSMenuItem(title: "Context Preview · Hyper+M", action: #selector(previewContext), keyEquivalent: "")
+        context.target = self; menu.addItem(context)
         let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
         return menu
@@ -389,6 +392,7 @@ final class Overlay {
     @objc private func toggleSpeechMode() { onToggleSpeech?() }
     @objc private func toggleAutoMode() { onToggleAuto?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
+    @objc private func previewContext() { onPreviewContext?() }
     private func updateModeAppearance() {
         pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent

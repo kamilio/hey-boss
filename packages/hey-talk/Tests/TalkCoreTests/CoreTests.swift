@@ -105,6 +105,16 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle(.submit))
     }
 
+    func testHyperMPreviewsContextOncePerPress() {
+        var hotkey = HotkeyState()
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: false, repeated: false), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .previewContext)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .none)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: true), .none)
+        _ = hotkey.keyUp(code: 46)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .previewContext)
+    }
+
     func testEscCancelsWithoutRetriggeringHeldShortcut() {
         var hotkey = HotkeyState()
         _ = hotkey.keyDown(code: 15, hyper: true, repeated: false)

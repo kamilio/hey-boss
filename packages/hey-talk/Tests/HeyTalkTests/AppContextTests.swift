@@ -30,14 +30,26 @@ final class AppContextTests: XCTestCase {
                 Node("AXStaticText", "Visible link", frame: CGRect(x: 10, y: 50, width: 100, height: 20))
             ])
         ])
-        XCTAssertEqual(capture(root), "Visible product name\nVisible link")
+        XCTAssertEqual(capture(root), "## Visible text\nVisible product name\nVisible link")
     }
     func testNestedScrollAreaClipsLoadedButOffscreenText() {
         let scroll = Node("AXScrollArea", frame: CGRect(x: 0, y: 0, width: 300, height: 100), children: [
             Node("AXStaticText", "on screen"),
             Node("AXStaticText", "loaded but scrolled away", frame: CGRect(x: 0, y: 120, width: 100, height: 20))
         ])
-        XCTAssertEqual(capture(Node("AXWindow", frame: window, children: [scroll])), "on screen")
+        XCTAssertEqual(capture(Node("AXWindow", frame: window, children: [scroll])), "## Visible text\non screen")
+    }
+    func testVirtualMessageWrappersDoNotHideVisibleMessages() {
+        let root = Node("AXWindow", frame: window, children: [
+            Node("AXGroup", frame: .zero, children: [
+                Node("AXList", frame: CGRect(x: 0, y: 0, width: 1, height: 1), children: [
+                    Node("AXStaticText", "visible message"),
+                    Node("AXStaticText", "offscreen message", frame: CGRect(x: 0, y: 600, width: 100, height: 20)),
+                    Node("AXStaticText", "clamped message", frame: CGRect(x: 0, y: 499, width: 100, height: 1))
+                ])
+            ])
+        ])
+        XCTAssertEqual(capture(root), "## Visible text\nvisible message")
     }
     func testChromiumClampedOffscreenNodesAndGenericScrollGroupsAreExcluded() {
         let root = Node("AXWindow", frame: window, children: [
@@ -47,7 +59,64 @@ final class AppContextTests: XCTestCase {
                 Node("AXStaticText", "clamped offscreen", frame: CGRect(x: 10, y: 99, width: 100, height: 1))
             ])
         ])
-        XCTAssertEqual(capture(root), "visible")
+        XCTAssertEqual(capture(root), "## Visible text\nvisible")
+    }
+    func testNamedRegionsAndMessageHeadingsPreserveTheirSources() {
+        let sidebar = Node("AXGroup", children: [Node("AXStaticText", "Project")])
+        sidebar.attributes["AXDescription"] = "Sidebar"
+        let conversation = Node("AXGroup", children: [
+            Node("AXHeading", children: [Node("AXStaticText", "You")]),
+            Node("AXStaticText", "Use the existing library."),
+            Node("AXHeading", children: [Node("AXStaticText", "Assistant")]),
+            Node("AXStaticText", "The library is named ExampleKit.")
+        ])
+        conversation.attributes["AXDescription"] = "Conversation"
+        XCTAssertEqual(capture(Node("AXWindow", frame: window, children: [sidebar, conversation, Node("AXStaticText", "Footer")])),
+                       "## Sidebar\nProject\n\n## Conversation / You\nUse the existing library.\n\n## Conversation / Assistant\nThe library is named ExampleKit.\n\n## Visible text\nFooter")
+    }
+    func testTerminalUsesOnlyExplicitVisibleTextAndStillRejectsEditors() {
+        let terminal = Node("AXTextArea", "full scrollback")
+        terminal.attributes["AXVisibleText"] = "visible terminal output"
+        terminal.attributes["AXEditable"] = true
+        let editor = Node("AXTextArea", "draft")
+        XCTAssertEqual(capture(Node("AXWindow", frame: window, children: [Node("AXStaticText", "workspace chrome"), terminal, editor])),
+                       "## Terminal\nvisible terminal output")
+        terminal.attributes["AXFrame"] = CGRect(x: 0, y: 600, width: 100, height: 20)
+        XCTAssertNil(capture(Node("AXWindow", frame: window, children: [terminal])))
+    }
+    func testConversationCaptureKeepsSpeakerMetadataAndCurrentInputButSkipsSidebar() {
+        let speaker = Node("AXHeading", frame: CGRect(x: 0, y: 0, width: 1, height: 1), children: [Node("AXStaticText", "You")])
+        speaker.attributes["AXHidden"] = true
+        let sidebar = Node("AXGroup", children: [Node("AXStaticText", "laptop-name")])
+        sidebar.attributes["AXDescription"] = "Thread details"
+        let input = Node("AXTextArea", "Existing draft")
+        input.attributes["AXDescription"] = "Message"
+        input.attributes["AXTitle"] = ""
+        input.attributes["AXEditable"] = true
+        let root = Node("AXWindow", frame: window, children: [
+            sidebar, Node("AXGroup", children: [speaker, Node("AXStaticText", "What is ExampleKit?")]),
+            Node("AXStaticText", "status chrome"), Node("AXGroup", frame: CGRect(x: 14, y: 14, width: 92, height: 12), children: [input])
+        ])
+        XCTAssertEqual(AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1, conversationOnly: true) { $0.attributes[$1] },
+                       "## Conversation / You\nWhat is ExampleKit?\n\n## Current input\nExisting draft")
+    }
+    func testCurrentInputExcludesPasswordsAndUnfocusedEditors() {
+        let focused = Node("AXTextField", "search words")
+        focused.attributes["AXFocused"] = true
+        let password = Node("AXTextField", "secret")
+        password.attributes["AXFocused"] = true
+        password.attributes["AXSubrole"] = "AXSecureTextField"
+        let outline = Node("AXOutline", children: [Node("AXStaticText", "unrelated channel")])
+        XCTAssertEqual(capture(Node("AXWindow", frame: window, children: [focused, password, outline, Node("AXTextArea", "unfocused editor")])),
+                       "## Current input\nsearch words")
+    }
+    func testSlackMessageListIsCapturedWithoutNavigationChrome() {
+        let messages = Node("AXList", frame: .zero, children: [Node("AXStaticText", "Please use ExampleKit.")])
+        messages.attributes["AXTitle"] = ""
+        messages.attributes["AXDescription"] = "Example (channel)"
+        let root = Node("AXWindow", frame: window, children: [Node("AXStaticText", "Messages"), messages])
+        XCTAssertEqual(AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1, conversationOnly: true) { $0.attributes[$1] },
+                       "## Conversation / Example (channel)\nPlease use ExampleKit.")
     }
     func testContextIsBoundedAndExpiredCaptureReturnsNothing() {
         let root = Node("AXWindow", frame: window, children: [Node("AXStaticText", String(repeating: "x", count: 9000)), Node("AXStaticText", "last visible words")])
