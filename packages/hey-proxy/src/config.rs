@@ -60,6 +60,8 @@ pub struct Config {
     /// prefers IPv6 when the upstream has AAAA records.
     #[serde(default)]
     pub ip_version: IpVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -115,6 +117,8 @@ struct ConfigFile {
     /// prefers IPv6 when the upstream has AAAA records.
     #[serde(default)]
     ip_version: IpVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proxy_url: Option<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -194,6 +198,7 @@ impl TryFrom<ConfigFile> for Config {
             logging: file.logging,
             skip_blocked_security_work: file.skip_blocked_security_work,
             ip_version: file.ip_version,
+            proxy_url: file.proxy_url,
         })
     }
 }
@@ -218,6 +223,9 @@ impl Serialize for Config {
             }
         };
         let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
+        if let Some(url) = &self.proxy_url {
+            value["proxy_url"] = serde_json::json!(url);
+        }
         if self.mode != Mode::Client {
             if !self.worker_candidates.is_empty() {
                 value["worker_candidates"] = serde_json::to_value(&self.worker_candidates)
@@ -525,6 +533,7 @@ impl Default for Config {
             logging: Logging::default(),
             skip_blocked_security_work: false,
             ip_version: IpVersion::Auto,
+            proxy_url: None,
         }
     }
 }
@@ -742,6 +751,19 @@ impl Config {
         Ok(())
     }
     fn validate_routing(&self) -> Result<()> {
+        if let Some(proxy) = &self.proxy_url {
+            let url = reqwest::Url::parse(proxy).context("Invalid proxy_url")?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && matches!(url.path(), "" | "/")
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "proxy_url must be an HTTP(S) or SOCKS5 URL without credentials, path, query, or fragment"
+            );
+        }
         hey_proxy::fallback::validate(&self.fallbacks)?;
         if !(1..=86400).contains(&self.credential_cache_seconds) {
             bail!("OpenAI credential_cache_seconds must be 1..86400");
@@ -924,6 +946,35 @@ pub fn fingerprint(path: &Path) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn proxy_url_roundtrips_for_standalone_and_relay_and_rejects_invalid_urls() {
+        for mode in ["standalone", "client"] {
+            let mut raw = serde_json::json!({"listen":"127.0.0.1:8080", "mode":mode,
+                "proxy_url":"socks5h://127.0.0.1:18083"});
+            if mode == "client" {
+                raw["connection"] =
+                    serde_json::json!({"url":"https://host.example", "api_key":"synthetic"});
+            }
+            let config: Config = serde_json::from_value(raw.clone()).unwrap();
+            config.validate().unwrap();
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["proxy_url"],
+                raw["proxy_url"]
+            );
+            for url in [
+                "",
+                "ftp://example.com",
+                "http://user:secret@example.com",
+                "http://example.com/path",
+                "http://example.com?query",
+                "http://example.com#fragment",
+            ] {
+                raw["proxy_url"] = serde_json::json!(url);
+                let config: Config = serde_json::from_value(raw.clone()).unwrap();
+                assert!(config.validate().is_err(), "accepted {url}");
+            }
+        }
+    }
     #[test]
     fn legacy_approval_setting_does_not_break_config_loading() {
         let dir = tempfile::tempdir().unwrap();

@@ -585,6 +585,8 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
     remote.connection = None;
     // Filesystem paths belong to their machine, not the controller.
     remote.logging.database = None;
+    // A local egress tunnel belongs to the machine that configured it.
+    remote.proxy_url = None;
     if settings.is_some_and(|s| s.gemini_via_controller) {
         if mode != Mode::Standalone || config.mode != Mode::Standalone {
             bail!("gemini_via_controller requires standalone controller and remote modes");
@@ -1502,6 +1504,7 @@ mod tests {
     fn remote_sync_omits_host_inventory_and_preserves_routes() {
         let mut config = Config {
             ssh_hosts: vec![SshHost::Name("builder".into())],
+            proxy_url: Some("socks5h://127.0.0.1:18083".into()),
             ..Config::test_fixture()
         };
         config.fallbacks =
@@ -1509,6 +1512,7 @@ mod tests {
                 .unwrap();
         let remote = remote_config(&config, &config.ssh_hosts[0]).unwrap();
         assert!(remote.ssh_hosts.is_empty());
+        assert!(remote.proxy_url.is_none());
         assert_eq!(remote.aliases[1].to, config.aliases[1].to);
         assert_eq!(remote.api_keys, config.api_keys);
         assert_eq!(
