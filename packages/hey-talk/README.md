@@ -92,8 +92,9 @@ button or require holding still. **Hyper+S**
 plays or pauses it; selected text takes priority. **Hyper+T** turns the feature
 on or off. Both shortcuts belong to allowlisted apps only, initially T3.
 Escape stops playback. Editors, buttons, toolbars and password fields are excluded.
-Right-click the main waveform bubble to toggle **Read Aloud · Hyper+T** or
-**Auto Dictation · Hyper+V**. Checkmarks show the current modes.
+Right-click the main waveform bubble for **Dictation**, **Speech**, and **Setup**
+sections. Checkmarks show the current modes, with shortcuts aligned on the right.
+Click anywhere outside the menu to close it.
 
 The Listen capsule shows how many paragraphs will be read. Playback continues
 through subsequent readable paragraphs, including paragraphs after a list or

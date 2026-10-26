@@ -199,6 +199,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
+            view.onToggleAutoSubmit = { [weak self] in self?.toggleAutoSubmit() }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
             view.onPreviewContext = { [weak self] in self?.previewContext() }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
