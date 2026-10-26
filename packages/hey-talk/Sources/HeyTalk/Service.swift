@@ -72,7 +72,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         hotkey?.onAction = { [weak self] action in
             guard let self else { return }
             switch action {
-            case .toggle(let shortcut): self.toggleDictation(shortcut: shortcut)
+            case .toggle(.submit): self.toggle()
+            case .toggle(.autoSubmit): self.toggleAutoSubmit()
             case .toggleAuto: self.toggleAutoMode()
             case .toggleSpeech: self.speech.toggle()
             case .toggleSpeechMode: self.speech.toggleEnabled()
@@ -298,14 +299,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: restart)
     }
     @objc private func toggle() {
-        toggleDictation(shortcut: nil)
-    }
-    private func toggleDictation(shortcut: DictationShortcut?) {
-        switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: shortcut.map { $0 == .submit }) {
+        switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: true) {
         case .stop(let submit): pressEnter = submit; stop { _ in }
         case .start(let submit): start(showOverlay: overlayEnabled, paste: true, pressEnter: submit) { _ in }
         case .busy: break
         }
+    }
+    private func toggleAutoSubmit() {
+        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return }
+        do {
+            _ = try enterExceptions.command([enterExceptions.bundleIDs.contains(bundleID) ? "remove" : "add", bundleID])
+            updateSubmitIndicator()
+        } catch { overlay?.error(error.localizedDescription) }
     }
     @objc private func cancelMenu() { cancel() }
     @objc private func quit() { NSApp.terminate(nil) }
@@ -315,7 +320,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
-            "hotkeys": ["paste": DictationShortcut.paste.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "context": "Control+Command+Option+Shift+M"],
+            "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "context": "Control+Command+Option+Shift+M"],
             "enter_exceptions": enterExceptions.bundleIDs,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,

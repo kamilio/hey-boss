@@ -197,10 +197,11 @@ final class Overlay {
         pillContent.wantsLayer = true
         for (indicator, name, symbol) in [(correctionIndicator, "ai-disabled", "brain"), (submitIndicator, "auto-submit", "return")] {
             indicator.name = name
-            let configuration = NSImage.SymbolConfiguration(pointSize: 4, weight: .semibold)
+            let configuration = NSImage.SymbolConfiguration(pointSize: 6, weight: .semibold)
                 .applying(.init(paletteColors: [.systemRed]))
             let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
             indicator.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            indicator.bounds = NSRect(origin: .zero, size: image?.size ?? .zero)
             indicator.contentsGravity = .resizeAspect
             indicator.isHidden = true
             pillContent.layer?.addSublayer(indicator)
@@ -473,8 +474,8 @@ final class Overlay {
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let markX = expanded ? (width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2 + 9 : (width - 22) / 2
-        correctionIndicator.frame = CGRect(x: markX + 21, y: 24, width: 4, height: 4)
-        submitIndicator.frame = CGRect(x: markX + 21, y: 8, width: 4, height: 4)
+        correctionIndicator.position = CGPoint(x: markX + 23, y: 26)
+        submitIndicator.position = CGPoint(x: markX + 23, y: 10)
         CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)

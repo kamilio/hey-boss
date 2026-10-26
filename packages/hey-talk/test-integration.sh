@@ -110,5 +110,5 @@ cmp .build/original-restarted.txt .build/original-expected.txt
 "$cli" history --json > .build/history-restarted.json
 jq -e --slurpfile last .build/after-cancel.json '.ok and .entries[0].id == $last[0].history_id and .entries[0].text == $last[0].text and .entries[0].original_text == $last[0].original_text' .build/history-restarted.json >/dev/null
 "$cli" history --before "$(jq -r .history_id .build/after-cancel.json)" --json | jq -e --slurpfile previous .build/inflight-recovery.json '.entries[0].id == $previous[0].history_id' >/dev/null
-"$cli" status --json | jq -e '.hotkey_registered and .hotkeys.paste == "Control+Command+Option+Shift+E" and .hotkeys.submit == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
-printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Hyper+E and Hyper+R toggle registration\n'
+"$cli" status --json | jq -e '.hotkey_registered and .hotkeys.auto_submit == "Control+Command+Option+Shift+E" and .hotkeys.submit == "Control+Command+Option+Shift+R" and .hotkey_mode == "toggle"' >/dev/null
+printf 'PASS: repeated transcription, concurrent clients, worker crash before/during decode, cancellation, bad input, crash-persistent history, responsive history window, orphan cleanup, Auto Submit and dictation shortcut registration\n'

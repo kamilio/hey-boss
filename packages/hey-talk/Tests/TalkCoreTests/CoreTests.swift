@@ -67,9 +67,9 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try PCMFrame.encode([]))
     }
 
-    func testBothShortcutsToggleOncePerPressWithTheirDeliveryMode() {
+    func testDictationAndAutoSubmitShortcutsToggleOncePerPress() {
         var hotkey = HotkeyState()
-        XCTAssertEqual(DictationShortcut.paste.keyCode, 14)
+        XCTAssertEqual(DictationShortcut.autoSubmit.keyCode, 14)
         XCTAssertEqual(DictationShortcut.submit.keyCode, 15)
         XCTAssertEqual(hotkey.keyDown(code: 12, hyper: true, repeated: false), .none)
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: false, repeated: false), .none)
@@ -85,7 +85,7 @@ final class CoreTests: XCTestCase {
 
     func testReleasingOtherKeyDoesNotRetriggerHeldShortcut() {
         var hotkey = HotkeyState()
-        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .toggle(.paste))
+        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .toggle(.autoSubmit))
         _ = hotkey.keyUp(code: 15)
         XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .none)
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .none)
@@ -100,7 +100,7 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(hotkey.keyDown(code: 9, hyper: true, repeated: true), .none)
         XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .none)
         _ = hotkey.keyUp(code: 9)
-        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .toggle(.paste))
+        XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .toggle(.autoSubmit))
         _ = hotkey.keyUp(code: 14)
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle(.submit))
     }

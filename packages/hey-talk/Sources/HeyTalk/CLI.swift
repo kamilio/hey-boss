@@ -35,8 +35,8 @@ enum CLI {
     hey-talk quit                              Stop only Hey Talk and its worker
 
     Hyper+V toggles Auto mode. In Auto: focus a message field, speak, Enter to submit.
-    Press Hyper+E or Hyper+R to start; press again to finish. Esc cancels.
-    \(DictationShortcut.help). The shortcut used to stop chooses the behavior.
+    Press Hyper+R to start; press again to finish. Esc cancels.
+    \(DictationShortcut.help).
     Commands start the app on demand. No login service or account is required.
     Audio stays in memory. File transcription never modifies your clipboard.
     """
