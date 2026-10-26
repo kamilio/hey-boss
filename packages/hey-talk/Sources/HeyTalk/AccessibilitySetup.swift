@@ -13,7 +13,7 @@ final class AccessibilitySetup: NSObject, ObservableObject, NSWindowDelegate {
         if window == nil {
             let panel = NativeWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
                                  styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-            panel.title = "Hey Talk — Automatic Paste"
+            panel.title = "Hey Talk — Paste Permissions"
             panel.isReleasedWhenClosed = false
             panel.delegate = self
             panel.host(AccessibilitySetupView(setup: self))
