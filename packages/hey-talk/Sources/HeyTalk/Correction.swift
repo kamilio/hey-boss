@@ -4,7 +4,7 @@ import TalkCore
 struct CorrectionSettings {
     private let defaults: UserDefaults
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
-    var enabled: Bool { defaults.bool(forKey: "correctionEnabled") }
+    var enabled: Bool { defaults.object(forKey: "correctionEnabled") as? Bool ?? true }
     var json: [String: Any] { ["enabled": enabled, "model": "gpt-6-luna"] }
     static func validate(_ args: [String]) throws {
         guard args.isEmpty || (args.count == 1 && ["on", "off", "toggle"].contains(args[0])) else {

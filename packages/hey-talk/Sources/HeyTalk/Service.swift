@@ -33,16 +33,16 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var historyWindow: HistoryWindow?
     private var contextWindow: ContextWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
-    private var session = RecordingSession()
+    private var session = RecordingSession() { didSet { updateSubmitIndicator() } }
     private var overlay: Overlay?
     private var hotkey: Hotkey?
     private var menuItem: NSStatusItem?
     private var pendingReply: (([String: Any]) -> Void)?
     private var pendingStartReply: (([String: Any]) -> Void)?
-    private var target: NSRunningApplication?
+    private var target: NSRunningApplication? { didSet { updateSubmitIndicator() } }
     private var targetName: String?
     private var paste = true
-    private var pressEnter = false
+    private var pressEnter = false { didSet { updateSubmitIndicator() } }
     private var transcriptionSource = "microphone"
     private var overlayEnabled: Bool
     private var error: String?
@@ -61,6 +61,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         do { try server.start() }
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(updateSubmitIndicator),
+            name: NSWorkspace.didActivateApplicationNotification, object: nil)
         capture.onFailure = { [weak self] message in self?.fail(message) }
         capture.onReadinessChanged = { [weak self] ready in
             guard let self, self.session.phase == .recording else { return }
@@ -208,11 +210,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.setCorrection(correctionSettings.enabled)
             overlay = view
         }
+        updateSubmitIndicator()
         overlayEnabled = show; overlay?.show(show)
         overlayMenuItem?.title = show ? "Hide Pill" : "Show Pill"
         updateStatusTooltip()
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
+    @objc private func updateSubmitIndicator() {
+        let active = session.phase == .recording || session.phase == .processing
+        let app = active ? target : NSWorkspace.shared.frontmostApplication
+        let requested = !active || (paste && (pressEnter || (automatic != nil && session.phase == .recording)))
+        overlay?.setAutoSubmit(enterExceptions.shouldPressEnter(requested: requested, bundleID: app?.bundleIdentifier))
+    }
     private func updateStatusTooltip() {
         let text = "Hey Talk is running · Pill \(overlayEnabled ? "visible" : "hidden")"
         menuItem?.button?.toolTip = text
@@ -418,7 +427,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case "enter-exceptions":
             do {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
-                reply(["ok": true, "enter_exceptions": try enterExceptions.command(arguments)])
+                let exceptions = try enterExceptions.command(arguments)
+                updateSubmitIndicator()
+                reply(["ok": true, "enter_exceptions": exceptions])
             } catch { reply(failure(error.localizedDescription)) }
         case "start", "stop", "toggle":
             let submit = request["submit"] as? Bool
@@ -482,7 +493,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             do {
                 let id = try session.begin(); try session.processing(id)
                 clearAutomatic()
-                paste = false; transcriptionSource = "file"; error = nil; pendingReply = reply
+                paste = false; pressEnter = false; transcriptionSource = "file"; error = nil; pendingReply = reply
                 idleRelease?.cancel(); overlay?.update(.processing)
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {

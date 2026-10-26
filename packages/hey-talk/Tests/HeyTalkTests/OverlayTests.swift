@@ -4,7 +4,7 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
-    @MainActor func testCorrectionDotStaysBesideTheMarkWithoutResizingOrTakingClicks() throws {
+    @MainActor func testDashboardIndicatorsFollowModesWithoutTakingClicks() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))
         let overlay = Overlay()
@@ -12,20 +12,40 @@ final class OverlayTests: XCTestCase {
         let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         let views = descendants(try XCTUnwrap(panel.contentView))
-        let surface = try XCTUnwrap(views.first { $0.layer?.sublayers?.contains { $0.name == "correction-dot" } == true })
-        let dot = try XCTUnwrap(surface.layer?.sublayers?.first { $0.name == "correction-dot" })
-        XCTAssertTrue(dot.isHidden)
+        let surface = try XCTUnwrap(views.first { $0.layer?.sublayers?.contains { $0.name == "ai-disabled" } == true })
+        let ai = try XCTUnwrap(surface.layer?.sublayers?.first { $0.name == "ai-disabled" })
+        let submit = try XCTUnwrap(surface.layer?.sublayers?.first { $0.name == "auto-submit" })
+        XCTAssertTrue(ai.isHidden)
+        XCTAssertTrue(submit.isHidden)
+        XCTAssertNotNil(ai.contents)
+        XCTAssertNotNil(submit.contents)
         for phase in [Phase.idle, .recording, .processing] {
             overlay.update(phase)
             let size = panel.frame.size
             overlay.setCorrection(true)
-            XCTAssertFalse(dot.isHidden)
-            XCTAssertEqual(dot.bounds.size, NSSize(width: 4, height: 4))
-            XCTAssertEqual(panel.frame.size, size)
+            XCTAssertTrue(ai.isHidden)
             XCTAssertTrue(surface.accessibilityLabel()?.contains("AI correction on") == true)
             overlay.setCorrection(false)
-            XCTAssertTrue(dot.isHidden)
+            XCTAssertFalse(ai.isHidden)
+            XCTAssertTrue(surface.accessibilityLabel()?.contains("AI correction off") == true)
+            overlay.setAutoSubmit(false)
+            XCTAssertFalse(submit.isHidden)
+            XCTAssertTrue(surface.accessibilityLabel()?.contains("Auto Submit off") == true)
+            XCTAssertFalse(ai.frame.intersects(submit.frame))
+            XCTAssertTrue(surface.bounds.contains(ai.frame))
+            XCTAssertTrue(surface.bounds.contains(submit.frame))
+            XCTAssertEqual(ai.bounds.size, NSSize(width: 4, height: 4))
+            XCTAssertEqual(submit.bounds.size, NSSize(width: 4, height: 4))
+            XCTAssertEqual(panel.frame.size, size, "Indicators must not enlarge the pill")
+            overlay.setAutoMode(true)
+            XCTAssertFalse(submit.isHidden, "Auto Dictation must not override an app's Enter exception")
+            overlay.setAutoMode(false)
+            overlay.setAutoSubmit(true)
+            XCTAssertTrue(submit.isHidden)
         }
+        overlay.setAutoSubmit(false)
+        overlay.update(.idle)
+        XCTAssertFalse(submit.isHidden, "App exceptions remain visible while idle")
         var toggles = 0
         overlay.onToggleCorrection = { toggles += 1 }
         let item = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "AI Correction" })
