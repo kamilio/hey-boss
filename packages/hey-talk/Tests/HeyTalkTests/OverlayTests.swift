@@ -79,24 +79,35 @@ final class OverlayTests: XCTestCase {
     @MainActor func testBubbleMenuShowsCurrentModesAndShortcutsAndDispatchesTheRightAction() throws {
         let overlay = Overlay()
         defer { overlay.show(false) }
-        var speech = true, auto = false, dictationStarts = 0
+        var speech = true, auto = false, submit = true, dictationStarts = 0
         overlay.speechEnabled = { speech }
         overlay.onToggleSpeech = { speech.toggle() }
         overlay.onToggleAuto = { auto.toggle(); overlay.setAutoMode(auto) }
+        overlay.onToggleAutoSubmit = { submit.toggle(); overlay.setAutoSubmit(submit) }
         overlay.onToggle = { dictationStarts += 1 }
         let menu = overlay.contextMenu()
-        let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud · Hyper+T" })
-        let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation · Hyper+V" })
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "", "Speech", "Read Aloud", "", "Setup", "Context Preview", "Automatic Paste…"])
+        let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud" })
+        let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation" })
+        let submission = try XCTUnwrap(menu.items.first { $0.title == "Auto Submit" })
+        for (item, key) in [(read, "t"), (automatic, "v"), (submission, "e")] {
+            XCTAssertEqual(item.keyEquivalent, key)
+            XCTAssertEqual(item.keyEquivalentModifierMask, [.control, .command, .option, .shift])
+        }
         XCTAssertEqual(read.state, .on)
         XCTAssertEqual(automatic.state, .off)
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(read.action), to: read.target, from: read))
         XCTAssertFalse(speech)
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(automatic.action), to: automatic.target, from: automatic))
         XCTAssertTrue(auto)
+        XCTAssertEqual(submission.state, .on)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(submission.action), to: submission.target, from: submission))
+        XCTAssertFalse(submit)
         XCTAssertEqual(dictationStarts, 0, "Opening and using the menu must not start manual recording")
         let refreshed = overlay.contextMenu()
         XCTAssertEqual(refreshed.items.first { $0.title == read.title }?.state, .off)
         XCTAssertEqual(refreshed.items.first { $0.title == automatic.title }?.state, .on)
+        XCTAssertEqual(refreshed.items.first { $0.title == submission.title }?.state, .off)
     }
     @MainActor func testCompactModeNoticeSurvivesCaptureStartingAndCloses() throws {
         let app = NSApplication.shared

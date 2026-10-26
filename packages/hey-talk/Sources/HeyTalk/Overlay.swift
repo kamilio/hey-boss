@@ -81,6 +81,11 @@ private final class ClickSurface: GlassFace {
     override func mouseUp(with event: NSEvent) { if !dragged { onClick?() }; start = nil; dragged = false }
     override func rightMouseDown(with event: NSEvent) {
         guard let menu = menu(for: event) else { return }
+        // This panel never activates the app, so AppKit can miss clicks in other apps.
+        let outsideClick = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak menu] _ in
+            menu?.cancelTracking()
+        }
+        defer { if let outsideClick { NSEvent.removeMonitor(outsideClick) } }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
     override func menu(for event: NSEvent) -> NSMenu? { makeMenu?() }
@@ -125,6 +130,7 @@ final class Overlay {
     var onOpenAccessibility: (() -> Void)?
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
+    var onToggleAutoSubmit: (() -> Void)?
     var onToggleCorrection: (() -> Void)?
     var onPreviewContext: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
@@ -386,16 +392,26 @@ final class Overlay {
     }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
-        for (title, action, enabled) in [
-            ("Read Aloud · Hyper+T", #selector(toggleSpeechMode), speechEnabled()),
-            ("Auto Dictation · Hyper+V", #selector(toggleAutoMode), autoMode),
-            ("AI Correction", #selector(toggleCorrection), correctionEnabled)
+        for (section, items) in [
+            ("Dictation", [
+                ("AI Correction", #selector(toggleCorrection), correctionEnabled, ""),
+                ("Auto Submit", #selector(toggleAutoSubmit), autoSubmitEnabled, "e"),
+                ("Auto Dictation", #selector(toggleAutoMode), autoMode, "v")
+            ]),
+            ("Speech", [("Read Aloud", #selector(toggleSpeechMode), speechEnabled(), "t")])
         ] {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(.sectionHeader(title: section))
+            for (title, action, enabled, key) in items {
+                let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+                item.keyEquivalentModifierMask = [.control, .command, .option, .shift]
+                item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
+            }
         }
         menu.addItem(.separator())
-        let context = NSMenuItem(title: "Context Preview · Hyper+M", action: #selector(previewContext), keyEquivalent: "")
+        menu.addItem(.sectionHeader(title: "Setup"))
+        let context = NSMenuItem(title: "Context Preview", action: #selector(previewContext), keyEquivalent: "m")
+        context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         context.target = self; menu.addItem(context)
         let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
@@ -404,6 +420,7 @@ final class Overlay {
     @objc private func openAccessibility() { onOpenAccessibility?() }
     @objc private func toggleSpeechMode() { onToggleSpeech?() }
     @objc private func toggleAutoMode() { onToggleAuto?() }
+    @objc private func toggleAutoSubmit() { onToggleAutoSubmit?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
     @objc private func previewContext() { onPreviewContext?() }
     private func updateModeAppearance() {
