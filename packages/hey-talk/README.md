@@ -45,9 +45,13 @@ keeps Hey Talk and its shortcuts running. Hover over the status-bar icon to see
 whether the pill is visible or hidden.
 
 **AI Correction** in the waveform menu or the pill's right-click menu toggles
-punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. A tiny teal dot beside
-the waveform mark means it is on; no dot means it is off. It starts off and
-remembers your choice. `hey-talk correction on|off|toggle` controls the same setting.
+punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. It starts on
+and remembers your choice. A tiny red brain beside the waveform means AI is off;
+there is no indicator when it is on. `hey-talk correction on|off|toggle` controls the same setting.
+A matching red Return symbol means Auto Submit is off. While idle it follows the
+focused app's Enter exceptions, so an excluded app such as Slack shows red even
+before recording. During dictation it also reflects paste-only versus submit;
+Hyper+R and Auto Dictation cannot override an app exception.
 When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing

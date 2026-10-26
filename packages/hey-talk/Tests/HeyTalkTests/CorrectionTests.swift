@@ -67,12 +67,14 @@ final class CorrectionTests: XCTestCase {
         wait(for: [done], timeout: 2)
     }
 
-    func testCorrectionIsOptInAndPersistsWithoutAcceptingInvalidCommands() throws {
+    func testCorrectionDefaultsOnAndPersistsWithoutAcceptingInvalidCommands() throws {
         let suite = "hey-talk-correction-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = CorrectionSettings(defaults: defaults)
-        XCTAssertFalse(settings.enabled)
+        XCTAssertTrue(settings.enabled)
+        try settings.command(["off"])
+        XCTAssertFalse(CorrectionSettings(defaults: defaults).enabled)
         try settings.command(["on"])
         XCTAssertTrue(CorrectionSettings(defaults: defaults).enabled)
         for args in [["yes"], ["on", "extra"]] {

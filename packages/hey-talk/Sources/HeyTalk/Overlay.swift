@@ -100,8 +100,10 @@ final class Overlay {
     private let autoHalo = CAShapeLayer()
     private var autoMode = false
     private let glow = CAShapeLayer()
-    private let correctionDot = CALayer()
-    private var correctionEnabled = false
+    private let correctionIndicator = CALayer()
+    private let submitIndicator = CALayer()
+    private var correctionEnabled = true
+    private var autoSubmitEnabled = true
     private var progress = TranscriptionProgress(audioSeconds: 0, correction: false)
     private var processingStarted: TimeInterval = 0
     private var completionDismiss: DispatchWorkItem?
@@ -192,13 +194,17 @@ final class Overlay {
         wave.isHidden = true
         wave.identifier = NSUserInterfaceItemIdentifier("recording-waveform")
         pillContent.addSubview(identity); pillContent.addSubview(wave)
-        correctionDot.name = "correction-dot"
-        correctionDot.bounds = CGRect(x: 0, y: 0, width: 4, height: 4)
-        correctionDot.cornerRadius = 2
-        correctionDot.backgroundColor = TalkDesign.active.cgColor
-        correctionDot.isHidden = true
         pillContent.wantsLayer = true
-        pillContent.layer?.addSublayer(correctionDot)
+        for (indicator, name, symbol) in [(correctionIndicator, "ai-disabled", "brain"), (submitIndicator, "auto-submit", "return")] {
+            indicator.name = name
+            let configuration = NSImage.SymbolConfiguration(pointSize: 4, weight: .semibold)
+                .applying(.init(paletteColors: [.systemRed]))
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(configuration)
+            indicator.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            indicator.contentsGravity = .resizeAspect
+            indicator.isHidden = true
+            pillContent.layer?.addSublayer(indicator)
+        }
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -368,8 +374,14 @@ final class Overlay {
     }
     func setCorrection(_ enabled: Bool) {
         correctionEnabled = enabled
-        correctionDot.isHidden = !enabled
-        updateModeAppearance(); updateAccessibilityLabel()
+        correctionIndicator.isHidden = enabled
+        updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
+    }
+    func setAutoSubmit(_ enabled: Bool) {
+        guard autoSubmitEnabled != enabled else { return }
+        autoSubmitEnabled = enabled
+        submitIndicator.isHidden = enabled
+        updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
@@ -400,11 +412,11 @@ final class Overlay {
         pillContent.toolTip = autoMode
             ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
             : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
-        if correctionEnabled { pillContent.toolTip = "AI correction on · " + (pillContent.toolTip ?? "") }
+        pillContent.toolTip = "AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
     private func updateAccessibilityLabel() {
         let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
-        pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + (correctionEnabled ? " · AI correction on" : ""))
+        pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + " · AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off")")
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
@@ -461,7 +473,8 @@ final class Overlay {
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let markX = expanded ? (width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2 + 9 : (width - 22) / 2
-        correctionDot.position = CGPoint(x: markX + 23, y: 26)
+        correctionIndicator.frame = CGRect(x: markX + 21, y: 24, width: 4, height: 4)
+        submitIndicator.frame = CGRect(x: markX + 21, y: 8, width: 4, height: 4)
         CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
