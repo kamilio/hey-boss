@@ -59,11 +59,11 @@ public enum Waveform {
 }
 
 public enum DictationShortcut: Int, CaseIterable {
-    case paste = 14, submit = 15
+    case autoSubmit = 14, submit = 15
     public var keyCode: Int { rawValue }
-    public var name: String { "Control+Command+Option+Shift+\(self == .paste ? "E" : "R")" }
-    public static let hint = "Caps Lock + E / R"
-    public static let help = "Hyper+E: paste · Hyper+R: paste + Enter"
+    public var name: String { "Control+Command+Option+Shift+\(self == .autoSubmit ? "E" : "R")" }
+    public static let hint = "Caps Lock + R"
+    public static let help = "Hyper+E: toggle Auto Submit for this app · Hyper+R: start / stop dictation"
 }
 
 public enum HotkeyAction: Equatable { case none, toggle(DictationShortcut), toggleAuto, toggleSpeech, toggleSpeechMode, previewContext, cancel }

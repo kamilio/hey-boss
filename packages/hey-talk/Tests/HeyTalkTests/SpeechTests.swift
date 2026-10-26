@@ -43,6 +43,6 @@ final class SpeechTests: XCTestCase {
         XCTAssertEqual(state.keyDown(code: 17, hyper: true, repeated: false), .toggleSpeechMode)
         _ = state.keyUp(code: 17)
         XCTAssertEqual(state.keyDown(code: 1, hyper: false, repeated: false), .none)
-        XCTAssertEqual(state.keyDown(code: 14, hyper: true, repeated: false), .toggle(.paste))
+        XCTAssertEqual(state.keyDown(code: 14, hyper: true, repeated: false), .toggle(.autoSubmit))
     }
 }

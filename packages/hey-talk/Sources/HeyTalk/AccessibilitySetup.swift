@@ -60,7 +60,7 @@ private struct AccessibilitySetupView: View {
                 }
             }
             if setup.granted {
-                Text("Hyper+E finishes with paste. Hyper+R finishes with paste + Enter. Press either shortcut to start. Every transcript is also saved in Dictation History.")
+                Text("Hyper+R starts and finishes dictation. Hyper+E toggles Auto Submit for the focused app. Every transcript is also saved in Dictation History.")
                     .font(.body).lineSpacing(4)
                 Spacer()
             } else {

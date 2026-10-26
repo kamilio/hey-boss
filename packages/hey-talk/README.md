@@ -1,11 +1,12 @@
 # hey-talk
 
-Native macOS dictation, controlled from the CLI. Press Hyper+E or Hyper+R to start;
-press Hyper+E to stop and paste, or Hyper+R to stop, paste, and press Enter.
-The shortcut used to stop chooses the behavior. Caps Lock must already be mapped
+Native macOS dictation, controlled from the CLI. Press Hyper+R to start;
+press it again to stop and paste. Hyper+E toggles Auto Submit for the focused app:
+on sends Enter after pasting; off only pastes. The choice persists per app.
+Caps Lock must already be mapped
 to Hyper (Control + Command + Option + Shift). Click the pill to toggle recording,
-drag to move it, or press Esc to discard. Clicking to stop keeps the starting
-shortcut's behavior; clicking to start and CLI commands without `--submit` paste by default.
+drag to move it, or press Esc to discard. Clicking the pill follows the same
+per-app Auto Submit setting. CLI commands without `--submit` paste by default.
 
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
@@ -17,8 +18,8 @@ without stopping recording. Shift+Enter still inserts a newline. You can move be
 allowed inputs while speaking: Enter chooses the destination. Leaving the inputs
 for more than two seconds discards the recording; shorter gaps keep it running.
 Escape or turning Auto off discards immediately. After Escape, leave and refocus
-the field to resume. Hyper+E, Hyper+R, and clicking the
-pill still work; the stopping shortcut chooses paste or submit as usual.
+the field to resume. Hyper+R and clicking the pill still start and stop dictation;
+Hyper+E changes Auto Submit without interrupting recording.
 A small three-second drawer says “Auto mode on” or “Auto mode off” when toggled.
 
 Auto starts off and remembers your choice. T3 is the initial allowed app;
@@ -218,7 +219,8 @@ hey-talk enter-exceptions remove com.tinyspeck.slackmacgap
 
 Changes apply immediately and persist across restarts in the app's macOS
 preferences. Match the original target app's bundle ID; Slack in a browser is
-not covered by the Slack desktop exception. Hyper+E remains paste-only everywhere.
+not covered by the Slack desktop exception. Hyper+E adds or removes the focused
+app from this same exception list without starting or stopping dictation.
 
 `record` stops on Enter or Ctrl-C. `stop` returns the transcript; `--json` also
 reports capture latency, inference duration, and real-time factor. `status
@@ -367,8 +369,8 @@ Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
 check recording starts; Escape or focus a search field and check it stops.
 Refocus, dictate, and press Enter: exactly one message should submit and the
 microphone should reopen. Move between inputs while speaking and verify the
-recording continues; leaving them for two seconds should cancel. Also check Hyper+E pastes without submitting,
-Hyper+R submits, and switching fields during transcription prevents delivery.
+recording continues; leaving them for two seconds should cancel. Also check Hyper+E toggles
+Auto Submit without interrupting recording, Hyper+R respects that setting, and switching fields during transcription prevents delivery.
 
 See [THIRD_PARTY.md](THIRD_PARTY.md) for the retained OpenWhispr, sherpa-onnx,
 ONNX Runtime, and Orukeet licenses.
