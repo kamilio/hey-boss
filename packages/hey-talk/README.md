@@ -273,7 +273,7 @@ your user. Canceled work is never saved. If saving fails, the window keeps the
 text in memory and marks it **Unsaved** so you can copy it before quitting.
 
 Allow microphone access when macOS asks. For automatic paste, choose
-**Automatic Paste…** in the waveform menu or the floating capsule’s right-click
+**Paste Permissions…** in the waveform menu or the floating capsule’s right-click
 menu, or run `hey-talk permissions accessibility`. A paste-permission error also
 has an **Enable Accessibility** button and stays visible until dismissed
 or recording resumes. The guide opens the Accessibility settings page, reveals

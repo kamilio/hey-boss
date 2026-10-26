@@ -86,7 +86,7 @@ final class OverlayTests: XCTestCase {
         overlay.onToggleAutoSubmit = { submit.toggle(); overlay.setAutoSubmit(submit) }
         overlay.onToggle = { dictationStarts += 1 }
         let menu = overlay.contextMenu()
-        XCTAssertEqual(menu.items.map(\.title), ["Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "", "Speech", "Read Aloud", "", "Setup", "Context Preview", "Automatic Paste…"])
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "", "Speech", "Read Aloud", "", "Setup", "Context Preview", "Paste Permissions…"])
         let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud" })
         let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation" })
         let submission = try XCTUnwrap(menu.items.first { $0.title == "Auto Submit" })

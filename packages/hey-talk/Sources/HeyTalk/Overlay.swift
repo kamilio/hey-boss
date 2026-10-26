@@ -413,7 +413,7 @@ final class Overlay {
         let context = NSMenuItem(title: "Context Preview", action: #selector(previewContext), keyEquivalent: "m")
         context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         context.target = self; menu.addItem(context)
-        let item = NSMenuItem(title: "Automatic Paste…", action: #selector(openAccessibility), keyEquivalent: "")
+        let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
         return menu
     }
