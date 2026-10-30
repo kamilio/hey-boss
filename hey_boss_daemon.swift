@@ -1,3 +1,6 @@
+import os
+import AVFoundation
+import Speech
 import AppKit
 import CryptoKit
 import UniformTypeIdentifiers
@@ -6568,6 +6571,318 @@ final class ArtifactHTMLReader: NSObject, WKNavigationDelegate, WKUIDelegate, NS
     }
 }
 
+// The player and microphone share a voice-processing graph: narration is the
+// echo canceller's reference rather than a second voice in the transcript.
+// Delegate and detector callbacks hand off to the main run loop before touching session state.
+final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
+    let engine = AVAudioEngine()
+    let player = AVAudioPlayerNode()
+    let synth = AVSpeechSynthesizer()
+    private let worker = Process(), input = Pipe(), output = Pipe()
+    private var tapped = false
+    private var micWatch: Timer?
+    private var routeObserver: NSObjectProtocol?
+    private var utterance = 0
+    private var phrase: AVSpeechUtterance?
+    private var generatedFrames = 0
+    private var words: [(Int, NSRange)] = []
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange, utterance: AVSpeechUtterance) {
+        onMain { [weak self] in
+            guard let self, self.phrase === utterance else { return }
+            self.words.append((self.generatedFrames, range))
+        }
+    }
+    private var timer: Timer?
+    let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)!
+    enum Event { case candidate, began, ended, pcm(Data) }
+    var event: (Event) -> Void = { _ in }
+    var failed: (String) -> Void = { _ in }
+    private(set) var stopped = false
+
+    func start(cli: String, ready: @escaping () -> Void) throws {
+        let lastInput = OSAllocatedUnfairLock(initialState: TimeInterval.zero)
+        let mic = engine.inputNode
+        try mic.setVoiceProcessingEnabled(true)
+        mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        let source = mic.outputFormat(forBus: 0)
+        guard source.sampleRate > 0, source.channelCount > 0, let converter = AVAudioConverter(from: source, to: format) else {
+            throw StorageError(description: "No microphone available. Check Sound settings.")
+        }
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        let writer = try listen(cli: cli)
+        let target = format
+        mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
+            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * target.sampleRate / source.sampleRate)) + 32
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+            var fed = false, error: NSError?
+            converter.convert(to: pcm, error: &error) { _, status in
+                if fed { status.pointee = .noDataNow; return nil }
+                fed = true; status.pointee = .haveData; return buffer
+            }
+            let size = Int(pcm.frameLength) * 2
+            if size > 0 { lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime } }
+            if error != nil || (size > 0 && Darwin.write(writer.fileDescriptor, pcm.int16ChannelData![0], size) != size) {
+                onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Restart review.") }
+            }
+        }
+        tapped = true
+        try engine.start()
+        let started = ProcessInfo.processInfo.systemUptime
+        var waiting = true
+        micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, !self.stopped else { return }
+            let last = lastInput.withLock { $0 }
+            if ProcessInfo.processInfo.systemUptime - max(started, last) > 3 {
+                self.failed("No audio from the microphone. Check the input in Sound settings.")
+            } else if waiting && last > 0 {
+                waiting = false; ready()
+            }
+        }
+        routeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            guard let self, !self.stopped else { return }; self.failed("Sound device changed. Restart review.")
+        }
+    }
+
+    func listen(cli: String) throws -> FileHandle {
+        worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = ["review-audio"]
+        worker.standardInput = input; worker.standardOutput = output; worker.standardError = FileHandle.nullDevice
+        try worker.run()
+        let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
+        _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
+        // Never wait on a child process in the audio callback.
+        let flags = fcntl(writer.fileDescriptor, F_GETFL)
+        _ = fcntl(writer.fileDescriptor, F_SETFL, flags | O_NONBLOCK)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            func read(_ count: Int) throws -> Data {
+                var bytes = Data()
+                while bytes.count < count {
+                    guard let part = try reader.read(upToCount: count - bytes.count), !part.isEmpty else { throw CocoaError(.fileReadUnknown) }
+                    bytes.append(part)
+                }
+                return bytes
+            }
+            do {
+                while true {
+                    let header = try read(2)
+                    let count = Int(header[0]) + Int(header[1]) * 256
+                    let event: Event
+                    switch count {
+                    case 0: event = .began
+                    case 1: event = .ended
+                    case 2: event = .candidate
+                    case 640: event = .pcm(try read(count))
+                    default: throw CocoaError(.fileReadCorruptFile)
+                    }
+                    onMain { [weak self] in guard let self, !self.stopped else { return }; self.event(event) }
+                }
+            } catch { onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Speech detector disconnected.") } }
+        }
+        return writer
+    }
+
+    func speak(_ text: String, highlight: @escaping (NSRange) -> Void, finished: @escaping () -> Void) {
+        utterance += 1
+        let ticket = utterance, phrase = AVSpeechUtterance(string: text)
+        self.phrase = phrase; generatedFrames = 0; words = []; synth.delegate = self
+        var next = 0, outstanding = 0, exhausted = false
+        func checkEnd() {
+            if exhausted && outstanding == 0 && self.phrase === phrase {
+                self.phrase = nil
+                self.timer?.invalidate(); self.player.stop(); finished()
+            }
+        }
+        synth.write(phrase, toBufferCallback: { [weak self] audio in
+            guard let buffer = audio as? AVAudioPCMBuffer else { return }
+            onMain { [weak self] in
+                guard let self, !self.stopped, ticket == self.utterance else { return }
+                guard buffer.frameLength > 0 else { exhausted = true; checkEnd(); return }
+                if self.generatedFrames == 0 && self.player.outputFormat(forBus: 0) != buffer.format {
+                    self.engine.connect(self.player, to: self.engine.mainMixerNode, format: buffer.format)
+                }
+                self.generatedFrames += Int(buffer.frameLength)
+                outstanding += 1
+                self.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+                    onMain { [weak self] in
+                        guard let self, !self.stopped, ticket == self.utterance else { return }
+                        outstanding -= 1; checkEnd()
+                    }
+                }
+                if !self.paused && !self.player.isPlaying { self.player.play() }
+            }
+        })
+        timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
+            guard let self, !self.paused, let rendered = self.player.lastRenderTime,
+                  let time = self.player.playerTime(forNodeTime: rendered) else { return }
+            let position = Int(time.sampleTime)
+            var current: NSRange?
+            while next < self.words.count, self.words[next].0 <= position { current = self.words[next].1; next += 1 }
+            if let current { highlight(current) }
+        }
+    }
+    private var paused = false
+    func pause() { paused = true; if player.engine != nil { player.pause() } }
+    func resume() { paused = false; if engine.isRunning { player.play() } }
+    func stop() {
+        guard !stopped else { return }; stopped = true
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        micWatch?.invalidate(); timer?.invalidate(); synth.stopSpeaking(at: .immediate)
+        if player.engine != nil { player.stop() }
+        engine.stop()
+        if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
+        try? input.fileHandleForWriting.close()
+        if worker.isRunning { worker.terminate() }
+    }
+}
+
+struct SpokenComment: Codable {
+    let requestID: String
+    let id: String
+    let line: Int
+    let version: Int
+    let quote: String
+    let text: String
+    var operation: String {
+        get throws {
+            let payload = ["command": "comment", "id": id, "quote": quote, "body": "Line \(line) · revision \(version)\n\n\(text)"]
+            return String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
+        }
+    }
+}
+
+final class SpokenReview {
+    let audio = ReviewAudio()
+    let recognizer = SFSpeechRecognizer()
+    weak var editor: NativeArtifactEditor?
+    let cli: String
+    var position: Int
+    var phrase = NSRange()
+    var word = NSRange()
+    var anchor: (line: Int, passage: NSRange, word: NSRange, version: Int)?
+    var recording: Data?
+    var decoding: SFSpeechRecognitionTask?
+    var watchdog: Timer?
+    var holding = false
+    var phraseFinished = false
+    init(_ editor: NativeArtifactEditor) {
+        self.editor = editor; cli = editor.backend.cli
+        position = editor.reader.selectedRange().location
+    }
+    func start() {
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            onMain {
+                guard let self, !self.audio.stopped else { return }
+                guard granted else { self.finish("Allow microphone access in System Settings to review by voice."); return }
+                guard let recognizer = self.recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
+                    self.finish("On-device dictation is unavailable. Enable Dictation in Keyboard settings."); return
+                }
+                do {
+                    self.audio.failed = { [weak self] message in self?.finish(message) }
+                    self.audio.event = { [weak self] data in self?.receive(data) }
+                    try self.audio.start(cli: self.cli) { [weak self] in self?.readNext() }
+                } catch { self.finish(error.localizedDescription) }
+            }
+        }
+    }
+    static func passage(in string: NSString, from offset: Int) -> NSRange? {
+        let skip = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{fffc}"))
+        var pos = min(offset, string.length)
+        while pos < string.length {
+            let search = NSRange(location: pos, length: string.length - pos)
+            let first = string.rangeOfCharacter(from: skip.inverted, options: [], range: search)
+            guard first.location != NSNotFound else { return nil }
+            pos = first.location
+            let line = string.lineRange(for: first)
+            let end = min(NSMaxRange(line), pos + 360)
+            var range = string.rangeOfComposedCharacterSequences(for: NSRange(location: pos, length: end - pos))
+            if end < NSMaxRange(line) {
+                let gap = string.rangeOfCharacter(from: .whitespaces, options: .backwards, range: range)
+                if gap.location > pos, gap.location != NSNotFound { range.length = gap.location - pos }
+            }
+            let text = string.substring(with: range)
+            if let marker = text.range(of: #"^(?:[•☑☐]|[0-9]+\.)\t"#, options: .regularExpression) {
+                pos += text[marker].utf16.count; continue
+            }
+            let trimmed = text.trimmingCharacters(in: skip)
+            if !trimmed.isEmpty { return NSRange(location: pos, length: trimmed.utf16.count) }
+            pos = NSMaxRange(range)
+        }
+        return nil
+    }
+    func readNext() {
+        guard let editor, !audio.stopped else { return }
+        guard let range = Self.passage(in: editor.reader.string as NSString, from: position) else { finish("Finished reading."); return }
+        phrase = range; word = NSRange(location: range.location, length: 0)
+        position = NSMaxRange(range); phraseFinished = false
+        editor.reviewStatus("Reading · speak to comment")
+        editor.highlightReview(range)
+        audio.speak((editor.reader.string as NSString).substring(with: range), highlight: { [weak self] relative in
+            guard let self, !self.holding, relative.location >= 0, NSMaxRange(relative) <= range.length else { return }
+            self.word = NSRange(location: range.location + relative.location, length: relative.length)
+            self.editor?.highlightReview(self.word)
+        }, finished: { [weak self] in
+            guard let self else { return }
+            if self.holding { self.phraseFinished = true } else { self.readNext() }
+        })
+    }
+    func receive(_ event: ReviewAudio.Event) {
+        guard let editor, !audio.stopped else { return }
+        switch event {
+        case .candidate:
+            if !holding, phrase.length > 0 {
+                anchor = (line, phrase, word.length > 0 ? word : phrase, editor.session.version)
+            }
+            return
+        case .began:
+            guard !holding, let anchor, phrase.length > 0 else { return }
+            holding = true; audio.pause(); recording = Data()
+            editor.highlightReview(anchor.word)
+            editor.reviewStatus("Listening · line \(anchor.line)")
+            return
+        case .pcm(let data):
+            guard recording != nil else { return }
+            guard recording!.count + data.count <= 32000 * 60 else { finish("Comment exceeded one minute. Nothing was posted."); return }
+            recording!.append(data); return
+        case .ended: guard recording != nil else { return }
+        }
+        let samples = recording!; recording = nil
+        guard let recognizer, let buffer = AVAudioPCMBuffer(pcmFormat: audio.format, frameCapacity: AVAudioFrameCount(samples.count / 2)) else { finish("Could not transcribe audio."); return }
+        buffer.frameLength = buffer.frameCapacity
+        samples.copyBytes(to: UnsafeMutableRawBufferPointer(start: buffer.int16ChannelData![0], count: samples.count))
+        editor.reviewStatus("Transcribing · line \(anchor!.line)")
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = false; request.addsPunctuation = true
+        request.append(buffer); request.endAudio()
+        watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
+        decoding = recognizer.recognitionTask(with: request) { [weak self] result, error in onMain {
+            guard let self, !self.audio.stopped, self.decoding != nil, result?.isFinal == true || error != nil else { return }
+            self.watchdog?.invalidate(); self.decoding = nil
+            if let error, (error as NSError).domain == "kAFAssistantErrorDomain", (error as NSError).code == 1110 { self.resume(); return }
+            if let error { self.finish(error.localizedDescription); return }
+            let text = result?.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if text.isEmpty { self.resume(); return }
+            self.submit(text)
+        } }
+    }
+    var line: Int { editor?.reader.textStorage?.attribute(.sourceStart, at: word.location, effectiveRange: nil) as? Int ?? 1 }
+    func submit(_ text: String) {
+        guard let editor, let id = editor.session.launch.id, let anchor else { return }
+        let comment = SpokenComment(requestID: UUID().uuidString, id: id, line: anchor.line, version: anchor.version,
+                                    quote: (editor.reader.string as NSString).substring(with: anchor.passage), text: text)
+        editor.saveSpoken(comment)
+    }
+    func resume(_ message: String = "Reading · speak to comment") {
+        guard !audio.stopped else { return }
+        holding = false; anchor = nil
+        editor?.highlightReview(word.length > 0 ? word : phrase)
+        editor?.reviewStatus(message)
+        audio.resume()
+        if phraseFinished { readNext() }
+    }
+    func finish(_ message: String) { editor?.endReview(message) }
+    func stop() { watchdog?.invalidate(); decoding?.cancel(); decoding = nil; recording = nil; audio.stop() }
+}
+
 final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     let window: ArtifactEditorWindow
     let session: ArtifactEditingSession
@@ -6577,6 +6892,12 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let scroll = NSScrollView()
     let readerScroll = NSScrollView()
     let htmlReader = ArtifactHTMLReader()
+    let reviewButton = NSButton(title: "Play review", target: nil, action: nil)
+    let commentsButton = NSButton(title: "Comments", target: nil, action: nil)
+    var review: SpokenReview?
+    var reviewHighlight: NSRange?
+    var pendingSpoken: SpokenComment?
+    var postingSpoken = false
     let split = NSSplitView()
     let sidebar = NSVisualEffectView(frame: .zero)
     let paper = NSView()
@@ -6709,7 +7030,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         ])
         recovery.target = self; recovery.action = #selector(exportCopy); recovery.toolTip = "Export your current text as Markdown (⌘⇧S)"
         reload.target = self; reload.action = #selector(reloadDocument); reload.toolTip = "Load the latest saved revision; a recovery copy keeps unsent edits"
-        let footer = NSStackView(views: [status, NSView(), reload, recovery]); footer.spacing = 10
+        reviewButton.target = self; reviewButton.action = #selector(playReview); reviewButton.imagePosition = .imageLeading
+        reviewButton.toolTip = "Read aloud. Speak to pause and comment on the highlighted passage."
+        commentsButton.target = self; commentsButton.action = #selector(showReviewComments)
+        reviewButton.isHidden = true; commentsButton.isHidden = true
+        let footer = NSStackView(views: [reviewButton, status, NSView(), commentsButton, reload, recovery]); footer.spacing = 10
         status.font = .systemFont(ofSize: 11); status.textColor = .tertiaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
@@ -6859,6 +7184,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         loading = false; titleField.stringValue = session.title; titleField.isEditable = session.launch.file == nil
         text.string = session.body; bodyByteCount = session.body.utf8.count; text.isEditable = true; text.undoManager?.removeAllActions()
         text.setSelectedRange(NSRange(location: 0, length: 0)); text.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        if session.launch.file == nil, !(session.launch.id ?? "").isEmpty, FileManager.default.fileExists(atPath: spokenDraft.path) {
+            pendingSpoken = try? JSONDecoder().decode(SpokenComment.self, from: Data(contentsOf: spokenDraft))
+        }
         if let file = session.launch.file { if originalFile == nil { originalFile = Data(session.savedBody.utf8) }; window.representedURL = URL(fileURLWithPath: file) }
         updateStatus(); updateOutline(); highlightVisible()
         if present { window.makeFirstResponder(text) }
@@ -6904,7 +7232,101 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             } catch { completion(.failure(error)) }
         }
     }
+    var sharedReview: Bool {
+        previewing && gallery.isHidden && session.launch.file == nil && !(session.launch.id ?? "").isEmpty
+    }
+    var spokenDraft: URL {
+        // Newly created notes can reopen with a different editor recovery ID.
+        let key = [session.launch.project, session.launch.host ?? "", session.launch.id ?? ""].joined(separator: "\0")
+        let name = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        return session.journal.deletingLastPathComponent().appendingPathComponent(name + ".spoken")
+    }
+    func updateReviewControls() {
+        reviewButton.isHidden = !sharedReview || htmlReader.document != nil
+        commentsButton.isHidden = !sharedReview
+        reviewButton.isEnabled = review != nil || (!postingSpoken && !session.dirty && previewSource == text.string && !reader.string.isEmpty)
+        reviewButton.title = review != nil ? "Stop" : pendingSpoken != nil ? "Retry comment" : "Play review"
+        reviewButton.image = NSImage(systemSymbolName: review != nil ? "stop.fill" : pendingSpoken != nil ? "arrow.clockwise" : "play.fill", accessibilityDescription: nil)
+    }
+    func reviewStatus(_ message: String) {
+        status.stringValue = message; status.toolTip = message; status.textColor = .secondaryLabelColor
+    }
+    func highlightReview(_ range: NSRange) {
+        if let old = reviewHighlight { reader.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old) }
+        reviewHighlight = range
+        reader.layoutManager?.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.42), forCharacterRange: range)
+        reader.scrollRangeToVisible(range)
+    }
+    func endReview(_ message: String = "") {
+        review?.stop(); review = nil
+        if let old = reviewHighlight, NSMaxRange(old) <= (reader.string as NSString).length {
+            reader.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old)
+        }
+        reviewHighlight = nil; updateReviewControls()
+        if !message.isEmpty { reviewStatus(message) }
+    }
+    @objc func playReview() {
+        guard sharedReview else { return }
+        if review != nil { endReview("Review stopped."); return }
+        if let pendingSpoken { saveSpoken(pendingSpoken); return }
+        guard reviewButton.isEnabled else { return }
+        let session = SpokenReview(self); review = session
+        reviewStatus("Preparing microphone…"); updateReviewControls(); session.start()
+    }
+    func saveSpoken(_ comment: SpokenComment) {
+        guard !postingSpoken, comment.id == session.launch.id else { return }
+        let draft = spokenDraft
+        pendingSpoken = comment
+        do {
+            try JSONEncoder().encode(comment).write(to: draft, options: .atomic)
+            let operation = try comment.operation
+            postingSpoken = true; updateReviewControls(); reviewStatus("Saving comment · line \(comment.line)")
+            backend.request(["--request-id", comment.requestID, "rpc"], body: operation) { [weak self] result in
+                if case .success = result { try? FileManager.default.removeItem(at: draft) }
+                guard let self else { return }
+                self.postingSpoken = false
+                switch result {
+                case .success:
+                    self.pendingSpoken = nil; self.reviewStatus("Comment saved · line \(comment.line)")
+                    self.review?.resume("Saved on line \(comment.line) · reading")
+                case .failure(let error):
+                    self.endReview("Comment kept for retry · \(error.localizedDescription)")
+                }
+                self.updateReviewControls()
+            }
+        } catch { endReview("Could not save comment · \(error.localizedDescription)") }
+    }
+    @objc func showReviewComments() {
+        guard sharedReview, let id = session.launch.id else { return }
+        let popover = NSPopover(), controller = NSViewController(), scroll = NSScrollView(), list = NSTextView()
+        list.isEditable = false; list.textContainerInset = NSSize(width: 14, height: 12)
+        list.autoresizingMask = [.width]; list.textContainer?.widthTracksTextView = true
+        list.string = "Loading comments…"; scroll.documentView = list; scroll.hasVerticalScroller = true
+        controller.view = scroll; controller.preferredContentSize = NSSize(width: 370, height: 290)
+        popover.behavior = .transient; popover.contentViewController = controller
+        popover.show(relativeTo: commentsButton.bounds, of: commentsButton, preferredEdge: .maxY)
+        backend.request(["view", id]) { result in
+            do {
+                struct Entry: Decodable { let author: String; let quote: String?; let body: String; let resolved: Bool; let outdated: Bool }
+                struct View: Decodable { let comments: [Entry] }
+                let entries = try JSONDecoder().decode(View.self, from: result.get()).comments
+                let content = NSMutableAttributedString()
+                func append(_ text: String, _ font: NSFont, _ color: NSColor) {
+                    content.append(NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color]))
+                }
+                append("Comments\n\n", .systemFont(ofSize: 17, weight: .semibold), .labelColor)
+                if entries.isEmpty { append("No comments yet. Play the review and speak to leave one.", .systemFont(ofSize: 13), .secondaryLabelColor) }
+                for entry in entries {
+                    append(entry.author + (entry.resolved ? " · Resolved" : "") + (entry.outdated ? " · Outdated selection" : "") + "\n", .systemFont(ofSize: 11, weight: .medium), .secondaryLabelColor)
+                    if let quote = entry.quote { append("“" + quote + "”\n", NSFontManager.shared.convert(.systemFont(ofSize: 13), toHaveTrait: .italicFontMask), .secondaryLabelColor) }
+                    append(entry.body + "\n\n", .systemFont(ofSize: 14), .labelColor)
+                }
+                list.textStorage?.setAttributedString(content)
+            } catch { list.string = error.localizedDescription }
+        }
+    }
     func updateStatus() {
+        updateReviewControls()
         window.title = session.title
         recovery.isHidden = session.failure == nil; reload.isHidden = session.failure == nil
         if let failure = imageFailure ?? session.failure { status.stringValue = failure; status.textColor = .systemRed }
@@ -6964,6 +7386,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func showFailure(_ error: Error) { session.failure = error.localizedDescription; updateStatus() }
     func textDidChange(_ notification: Notification) {
         guard notification.object as? NSTextView === text else { return }
+        if review != nil { endReview("Document changed. Restart review.") }
         session.change(title: titleField.stringValue, body: text.string)
         outlineGeneration += 1
         highlightVisible(); renderTimer?.invalidate()
@@ -7100,12 +7523,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     @objc func modeChanged() { if (modeControl.selectedSegment == 1) != previewing { togglePreview() } }
     func togglePreview() {
         guard session.ready && gallery.isHidden else { return }; previewing.toggle()
+        endReview(); updateStatus()
         modeControl.selectedSegment = previewing ? 1 : 0
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
         if !previewing { htmlReader.clear() }
         if previewing { renderPreview(); window.makeFirstResponder(reader) } else { window.makeFirstResponder(text); highlightVisible() }
     }
     func renderPreview() {
+        endReview()
         renderGeneration += 1; let generation = renderGeneration, source = session.body, executable = backend.cli
         let selection = reader.selectedRange(), position = readerScroll.contentView.bounds.origin
         if previewSource == nil { reader.string = "Rendering…" }
@@ -7133,6 +7558,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     func installPreview(_ node: NativeMarkdownNode, source: String) {
+        defer { updateReviewControls() }
         if let web = node.web {
             readerScroll.isHidden = true; htmlReader.container.isHidden = !previewing
             htmlReader.load(web); previewSource = source
@@ -7288,7 +7714,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         window.toolbar?.items.first { $0.itemIdentifier.rawValue == "format" }?.isEnabled = enabled
     }
     @objc func showLibrary() {
-        session.flush(); gallery.isHidden = false; page.isHidden = true
+        endReview(); session.flush(); gallery.isHidden = false; page.isHidden = true
         titleField.stringValue = "Your writing space"; titleField.isEditable = false
         setDocumentControls(false)
         if focusMode { toggleFocus() }
@@ -7372,6 +7798,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     @objc func reloadDocument() {
         guard !session.saving else { return }
+        endReview()
+        if previewing { togglePreview() }
         do {
             try session.persist()
             if session.dirty { try FileManager.default.copyItem(at: session.journal, to: session.journal.deletingPathExtension().appendingPathExtension("conflict-" + UUID().uuidString + ".json")) }
@@ -7495,7 +7923,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         default: break
         }
     }
-    func windowDidResignKey(_ notification: Notification) { session.flush() }
+    func windowDidMiniaturize(_ notification: Notification) { endReview("Review stopped.") }
+    func windowDidResignKey(_ notification: Notification) {
+        if review?.audio.engine.isRunning == true { endReview("Review stopped.") }
+        session.flush()
+    }
     func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor"); resizePreviewImages() }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if !imageQueue.isEmpty { status.stringValue = "Wait for images to finish attaching."; return false }
@@ -7506,7 +7938,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         return true
     }
     func windowWillClose(_ notification: Notification) {
-        window.saveFrame(usingName: "hey-boss-artifact-editor")
+        endReview(); window.saveFrame(usingName: "hey-boss-artifact-editor")
         closed = true
         htmlReader.clear()
         if !session.dirty { session.timer?.invalidate() }
