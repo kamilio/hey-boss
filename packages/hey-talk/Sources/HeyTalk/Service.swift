@@ -709,7 +709,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                               }, onWait: (!t3 || originalField != nil) ? { timer in
                                   self.waitingPaste = timer
                                   self.hotkey?.captureEscape(true)
-                                  self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(targetName ?? "the original app")")
+                                  self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(targetName ?? "the original app")", while: timer)
                                   report("waiting", nil)
                               } : nil,
                               isCurrent: { self.session.generation == id }, completion: complete)

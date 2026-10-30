@@ -70,6 +70,7 @@ final class Hotkey {
 
 enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
+    case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
 
     static func check(trusted: Bool, targetAlive: Bool, targetIsSelf: Bool, targetIsFrontmost: Bool) -> Self? {
@@ -87,6 +88,7 @@ enum PasteBlockReason: String {
         case .accessibility: return "Text copied. Allow automatic paste."
         case .targetClosed: return "Reopen \(app). Press ⌘V."
         case .focusChanged: return "Return to \(app). Press ⌘V."
+        case .unidentifiedField: return "Text copied. Choose the field and press ⌘V."
         case .ownWindow: return "Choose an app, then press ⌘V."
         case .eventUnavailable: return "Couldn’t paste. Press ⌘V."
         case .clipboardUnavailable: return "Clipboard unavailable. Open History."
@@ -103,7 +105,7 @@ enum Paste {
             PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
                 targetIsSelf: target?.processIdentifier == getpid(),
                 targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
-                ?? (targetStillFocused() ? nil : .focusChanged)
+                ?? (targetStillFocused() ? nil : onWait == nil ? .unidentifiedField : .focusChanged)
         }
         func paste() {
             let board = NSPasteboard.general
@@ -113,9 +115,12 @@ enum Paste {
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
             },
-                 afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }, completion: completion)
+                 afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
+                if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
+                else { completion(delivery, reason) }
+            }
         }
-        if let onWait, check() == .focusChanged {
+        func retry(_ onWait: (Timer) -> Void) {
             let timer = Timer(timeInterval: 0.35, repeats: true) { timer in
                 guard isCurrent() else { timer.invalidate(); return }
                 guard check() != .focusChanged else { return }
@@ -125,7 +130,8 @@ enum Paste {
             timer.tolerance = 0.05
             RunLoop.main.add(timer, forMode: .common)
             onWait(timer)
-        } else { paste() }
+        }
+        if let onWait, check() == .focusChanged { retry(onWait) } else { paste() }
     }
 
     static func send(pressEnter: Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,

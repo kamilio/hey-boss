@@ -369,7 +369,13 @@ final class Overlay {
         completionDismiss = dismiss
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: dismiss)
     }
-    func waitToPaste(_ instruction: String) {
+    func waitToPaste(_ instruction: String, while retry: Timer) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard retry.isValid else { return }
+            self?.showPasteWait(instruction)
+        }
+    }
+    private func showPasteWait(_ instruction: String) {
         update(.idle); clearNotice()
         if #available(macOS 26, *) { (pill as? NSGlassEffectView)?.style = .regular }
         let view = PasteWaitView(instruction: instruction) { [weak self] in self?.onCancelPaste?() }

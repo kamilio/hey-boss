@@ -8,16 +8,29 @@ final class OverlayTests: XCTestCase {
         let app = NSApplication.shared, windows = Set(app.windows.map(\.windowNumber))
         let overlay = Overlay()
         defer { overlay.show(false) }
-        overlay.show(true)
-        overlay.waitToPaste("Focus Design review in T3")
+        let retry = Timer(timeInterval: 10, repeats: false) { _ in }
         let panel = try XCTUnwrap(app.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
         func find(_ view: NSView) -> PasteWaitView? {
             (view as? PasteWaitView) ?? view.subviews.compactMap(find).first
         }
-        let root = try XCTUnwrap(panel.contentView), wait = try XCTUnwrap(find(root))
+        let root = try XCTUnwrap(panel.contentView)
+        let brief = Timer(timeInterval: 10, repeats: false) { _ in }
+        overlay.waitToPaste("Transient focus loss", while: brief)
+        brief.invalidate()
+        func settle() {
+            let settled = expectation(description: "Focus has settled")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { settled.fulfill() }
+            wait(for: [settled], timeout: 2)
+        }
+        settle()
+        XCTAssertNil(find(root), "A recovered or cancelled paste must never show the waiting pill")
+        overlay.waitToPaste("Focus Design review in T3", while: retry)
+        XCTAssertNil(find(root), "The first missed focus check must be silent")
+        settle()
+        let waitView = try XCTUnwrap(find(root))
         XCTAssertFalse(panel.canBecomeKey)
-        XCTAssertTrue(wait.accessibilityLabel()?.contains("Focus Design review in T3") == true)
-        let cancel = try XCTUnwrap(wait.subviews.compactMap { $0 as? NSButton }.first)
+        XCTAssertTrue(waitView.accessibilityLabel()?.contains("Focus Design review in T3") == true)
+        let cancel = try XCTUnwrap(waitView.subviews.compactMap { $0 as? NSButton }.first)
         overlay.onCancelPaste = { overlay.update(.idle) }
         cancel.performClick(nil)
         XCTAssertNil(find(root))
