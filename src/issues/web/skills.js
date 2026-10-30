@@ -10,12 +10,18 @@ function library(data) {
     if (!skill.versions.some(v=>v.digest===copy.digest)) skill.versions.push(copy);
     if (!skill.machines.includes(machine.host)) skill.machines.push(machine.host);
   }
+  for (const name of data.disabled || []) {
+    const key = `global:${name}`;
+    if (!entries.has(key)) entries.set(key, {key,name,scope:'global',copies:[],versions:[],machines:[]});
+    entries.get(key).disabled = true;
+  }
   return [...entries.values()].sort((a,b)=>{
     const rank = n => n === 'AGENTS.md' ? 0 : n === 'hey-boss' ? 1 : 2;
     return rank(a.name) - rank(b.name) || a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope);
   });
 }
 function needsAttention(skill, machines) {
+  if (skill.disabled) return skill.copies.length > 0 || (machines || []).some(m=>m.error);
   if (Array.isArray(machines) && machines.length > 1) {
     return !machineCoverage(skill, machines).allGreen || skill.copies.some(c => c.stale);
   }
@@ -24,11 +30,11 @@ function needsAttention(skill, machines) {
 function visibleSkills(skills, query, filter, selected, machines) {
   query = query.trim().toLocaleLowerCase();
   return skills.filter(s=>(filter==='project'?s.scope==='project':s.scope==='global') &&
-    (filter!=='selected'||selected.has(s.name)) && (filter!=='attention'||needsAttention(s, machines)) &&
+    (filter!=='selected'||(!s.disabled&&selected.has(s.name))) && (filter!=='disabled'||s.disabled) && (filter!=='attention'||needsAttention(s, machines)) &&
     `${s.name} ${s.copies.map(c=>`${c.description} ${c.host} ${c.hostname}`).join(' ')}`.toLocaleLowerCase().includes(query));
 }
 function unresolved(skills, selected, choices) {
-  return skills.filter(s=>s.scope==='global'&&selected.has(s.name)&&
+  return skills.filter(s=>!s.disabled&&s.scope==='global'&&selected.has(s.name)&&
     (choices[s.name]?!s.versions.some(v=>v.digest===choices[s.name]):s.versions.length>1)).map(s=>s.name);
 }
 function computeDiff(oldText, newText, contextLines = 3) {
@@ -281,6 +287,7 @@ if(typeof document!=='undefined') (()=>{
   function use(value,reset=false){
     data=value;skills=library(data);
     if(reset||!dirty){selected=new Set(data.selected);choices={...data.choices};maxWords=data.max_words||400;}
+    for(const name of data.disabled||[])selected.delete(name);
     if(!editingMarkdown&&!skills.some(s=>s.key===active))active=skills[0]?.key||'';
     render();
     clearTimeout(timer);if(data.busy)timer=setTimeout(poll,1200);
@@ -323,6 +330,7 @@ if(typeof document!=='undefined') (()=>{
     $('#library-count').textContent=visible.length;
     $('#skills-filters').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.filter===filter)));
     $('#skills-list').innerHTML=visible.map(s=>{
+      if(s.disabled)return `<div class="skill-row ${active===s.key?'is-active':''}"><span class="skill-project-icon">${icon('instructions')}</span><button class="skill-open" data-open="${esc(s.key)}" aria-current="${active===s.key}"><span class="skill-row-title">${esc(s.name)}<span class="skill-required">DISABLED</span></span><span class="skill-row-description">${needsAttention(s,data.machines)?'Some machines need attention':'Archived · Enable to restore'}</span></button><span class="skill-row-arrow">${icon('arrow-right')}</span></div>`;
       const version=current(s)||s.versions[0];
       const badge = s.name==='hey-boss'?'<span class="skill-required">CORE</span>':s.name==='AGENTS.md'?'<span class="skill-required codex-badge">CODEX</span>':'';
       const canDelete = s.scope==='global' && s.name!=='hey-boss';
@@ -367,6 +375,11 @@ if(typeof document!=='undefined') (()=>{
     destroyEditor();
     const skill=skills.find(s=>s.key===active);
     if(!skill){$('#skills-detail').innerHTML='<div class="skills-empty"><h2>Select a skill</h2><p>Scan your machines to build the library.</p></div>';return;}
+    if(skill.disabled){
+      const attention=needsAttention(skill,data.machines);
+      $('#skills-detail').innerHTML=`<div class="skill-detail-heading"><div class="skill-mark">${icon('instructions')}</div><div><span class="skills-eyebrow">GLOBAL SKILL · DISABLED</span><h2>${esc(skill.name)}</h2></div><div class="skill-header-actions"><button type="button" class="button small primary" data-enable-skill="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Enable skill</button>${attention?`<button type="button" class="button small" data-disable-skill="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Retry disable</button>`:''}</div></div><p class="skill-description">The complete folders are kept in a private archive on each machine. Enable restores them to their original locations.</p>${attention?'<p class="skill-draft-notice">Some machines may still have installed copies. Review the machine errors below and retry.</p>':''}<div data-rollout-feedback></div>`;
+      renderFeedback();return;
+    }
     const chosen=current(skill), preview=skill.versions.find(v=>v.digest===previewDigest)||chosen||skill.versions[0], warnings=preview.warnings||[];
     const copies=skill.copies.filter(c=>c.digest===preview.digest), hasAgent=a=>copies.some(c=>c.agent===a||(a==='codex'&&c.agent==='agents'));
     const mdFiles = getMarkdownFiles(preview);
@@ -385,6 +398,7 @@ if(typeof document!=='undefined') (()=>{
         <button type="button" class="button small primary" data-open-native-editor="${esc(currentFileObj.path)}" title="Open in Hey Boss native Markdown editor" ${pending||data.busy?'disabled':''}>Edit</button>
         <button type="button" class="button small" data-toggle-editor="${esc(currentFileObj.path)}" ${pending||data.busy?'disabled':''}>Edit in browser</button>
         <button type="button" class="button small" data-open-dir="${esc(skill.name)}" title="Open directory in Finder" ${pending||data.busy?'disabled':''}>${icon('folder')||''}Open folder</button>
+        ${canDelete&&skill.name!=='AGENTS.md'?`<button type="button" class="button small" data-disable-skill="${esc(skill.name)}" ${pending||data.busy?'disabled':''} title="Archive the complete folders and remove them from all agent skill locations">Disable skill</button>`:''}
         ${canDelete?`<button type="button" class="button small danger" data-delete-prompt="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Delete skill</button>`:''}
       </div>
     </div>
@@ -511,6 +525,10 @@ if(typeof document!=='undefined') (()=>{
     if(e.target.closest('[data-refresh-inventory]')){await action('scan');return;}
     const skill=skills.find(s=>s.key===active);
     if(!skill)return;
+    if(e.target.closest('[data-disable-skill], [data-enable-skill]')){
+      keepDraft();editingMarkdown=false;skipDraftRestore=true;
+      await action(e.target.closest('[data-enable-skill]')?'enable':'disable',{skill:skill.name});return;
+    }
     if(e.target.closest('[data-rebase-draft]')&&editorContext){
       editorContext.baseDigest=(skill.versions.find(v=>v.digest===previewDigest)||current(skill)||skill.versions[0]).digest;keepDraft();renderDetail();return;
     }
@@ -647,7 +665,7 @@ if(typeof document!=='undefined') (()=>{
       }
       // Choosing a version is local, even while a write is awaiting its reply.
       // That reply acknowledges the submitted choice, not a later selection.
-      const resetSelection=selectionRevision===submittedSelectionRevision&&(kind==='distribute'||kind==='save_file'||kind==='delete');
+      const resetSelection=selectionRevision===submittedSelectionRevision&&['distribute','save_file','delete','enable','disable'].includes(kind);
       if(resetSelection)dirty=false;
       use(value,resetSelection);
     }

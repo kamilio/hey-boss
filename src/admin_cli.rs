@@ -46,6 +46,10 @@ pub struct SkillOptions {
 #[derive(Subcommand)]
 pub enum SkillAction {
     #[command(hide = true)]
+    IsEnabled { name: String },
+    #[command(hide = true)]
+    ApplyEnabled,
+    #[command(hide = true)]
     ApplyRename,
     #[command(hide = true)]
     ApplyCopy,
@@ -106,6 +110,19 @@ pub fn skill(options: &SkillOptions) -> io::Result<()> {
     let home_os = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is missing"))?;
     let home = Path::new(&home_os);
     match &options.action {
+        SkillAction::IsEnabled { name } => {
+            if hey_boss::skill::disabled::is_disabled(home, name).map_err(io::Error::other)? {
+                return Err(io::Error::other("Skill is disabled"));
+            }
+        }
+        SkillAction::ApplyEnabled => {
+            let mut bytes = Vec::new();
+            io::stdin().take(4096).read_to_end(&mut bytes)?;
+            let input: Value = serde_json::from_slice(&bytes)?;
+            let value = hey_boss::skill::manager::apply_enabled(home, &input)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            println!("{value}");
+        }
         SkillAction::EditorSave { session } => {
             let mut bytes = Vec::new();
             io::stdin().take(6 * 1024 * 1024).read_to_end(&mut bytes)?;

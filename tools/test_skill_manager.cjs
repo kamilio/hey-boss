@@ -19,6 +19,11 @@ assert.deepEqual(unresolved(skills,new Set(['stacked-prs']),{'stacked-prs':'dele
 assert.equal(visibleSkills(skills,'desktop','all',new Set()).length,2);
 assert.equal(visibleSkills(skills,'','selected',new Set(['stacked-prs'])).length,1);
 assert.equal(visibleSkills(skills,'','project',new Set()).length,1);
+const archived = library({...data,disabled:['stacked-prs','archived-only']});
+assert.equal(visibleSkills(archived,'','disabled',new Set()).length,2);
+assert.equal(visibleSkills(archived,'','selected',new Set(['stacked-prs'])).length,0);
+assert.deepEqual(unresolved(archived,new Set(['stacked-prs']),{}),[]);
+assert.equal(archived.find(s=>s.name==='archived-only').copies.length,0);
 
 const diff = computeDiff('Line 1\nLine 2\nOld line\nLine 4', 'Line 1\nLine 2\nNew line\nExtra line\nLine 4');
 assert.equal(diff.additions, 2);
