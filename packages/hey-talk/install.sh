@@ -10,7 +10,8 @@ mkdir -p "$HOME/Applications" "$HOME/.local/bin"
 if [ -e "$destination" ]; then
   status=$("$destination/Contents/MacOS/hey-talk" status --json)
   state=$(printf '%s' "$status" | plutil -extract state raw -o - -)
-  if [ "$state" = recording ] || [ "$state" = processing ]; then
+  waiting=$(printf '%s' "$status" | plutil -extract waiting_to_paste raw -o - - 2>/dev/null || true)
+  if [ "$state" = recording ] || [ "$state" = processing ] || [ "$waiting" = true ]; then
     printf 'Finish or cancel the current dictation before installing.\n' >&2
     exit 1
   fi

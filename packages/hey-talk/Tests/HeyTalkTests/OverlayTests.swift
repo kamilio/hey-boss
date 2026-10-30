@@ -4,6 +4,25 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testWaitingPillNamesDestinationAndLetsUserCancelWithoutTakingFocus() throws {
+        let app = NSApplication.shared, windows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        overlay.show(true)
+        overlay.waitToPaste("Focus Design review in T3")
+        let panel = try XCTUnwrap(app.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func find(_ view: NSView) -> PasteWaitView? {
+            (view as? PasteWaitView) ?? view.subviews.compactMap(find).first
+        }
+        let root = try XCTUnwrap(panel.contentView), wait = try XCTUnwrap(find(root))
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertTrue(wait.accessibilityLabel()?.contains("Focus Design review in T3") == true)
+        let cancel = try XCTUnwrap(wait.subviews.compactMap { $0 as? NSButton }.first)
+        overlay.onCancelPaste = { overlay.update(.idle) }
+        cancel.performClick(nil)
+        XCTAssertNil(find(root))
+    }
+
     @MainActor func testDashboardIndicatorsFollowModesWithoutTakingClicks() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))

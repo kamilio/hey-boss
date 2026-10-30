@@ -122,6 +122,8 @@ final class Overlay {
     private var phase: Phase = .idle
     private var expanded = false
     private var enabled = true
+    private var pasteWait: PasteWaitView?
+    var onCancelPaste: (() -> Void)?
     private var notice: OverlayNotice?
     private var modeNotice = false
     private var noticeDismiss: DispatchWorkItem?
@@ -226,7 +228,7 @@ final class Overlay {
         pillContent.setAccessibilityElement(true); pillContent.setAccessibilityRole(.button)
         pillContent.setAccessibilityLabel("Start dictation")
         updateModeAppearance()
-        pillContent.onClick = { [weak self] in self?.onToggle?() }
+        pillContent.onClick = { [weak self] in if self?.pasteWait == nil { self?.onToggle?() } }
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
         pillContent.onHover = { [weak self] hover in self?.pillContent.emphasized = hover }
         pillContent.onDrag = { [weak self] in
@@ -320,6 +322,10 @@ final class Overlay {
         update(next, waitingForAudio: false)
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
+        if pasteWait != nil, #available(macOS 26, *) { (pill as? NSGlassEffectView)?.style = .clear }
+        pasteWait?.removeFromSuperview(); pasteWait = nil
+        identity.isHidden = false
+        correctionIndicator.isHidden = correctionEnabled; submitIndicator.isHidden = autoSubmitEnabled
         completionDismiss?.cancel(); completionDismiss = nil
         connectingDelay?.cancel(); connectingDelay = nil
         if !modeNotice { clearNotice() }
@@ -363,6 +369,14 @@ final class Overlay {
         completionDismiss = dismiss
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: dismiss)
     }
+    func waitToPaste(_ instruction: String) {
+        update(.idle); clearNotice()
+        if #available(macOS 26, *) { (pill as? NSGlassEffectView)?.style = .regular }
+        let view = PasteWaitView(instruction: instruction) { [weak self] in self?.onCancelPaste?() }
+        pasteWait = view; pillContent.addSubview(view)
+        identity.isHidden = true; correctionIndicator.isHidden = true; submitIndicator.isHidden = true
+        updateAccessibilityLabel(); layout(animated: true)
+    }
     func preparing() {
         guard !waitingForAudio else { return }
         update(.recording, waitingForAudio: true)
@@ -381,13 +395,13 @@ final class Overlay {
     }
     func setCorrection(_ enabled: Bool) {
         correctionEnabled = enabled
-        correctionIndicator.isHidden = enabled
+        correctionIndicator.isHidden = enabled || pasteWait != nil
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func setAutoSubmit(_ enabled: Bool) {
         guard autoSubmitEnabled != enabled else { return }
         autoSubmitEnabled = enabled
-        submitIndicator.isHidden = enabled
+        submitIndicator.isHidden = enabled || pasteWait != nil
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func contextMenu() -> NSMenu {
@@ -433,13 +447,18 @@ final class Overlay {
         pillContent.toolTip = "AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
     private func updateAccessibilityLabel() {
+        if let pasteWait {
+            pillContent.setAccessibilityRole(.group)
+            pillContent.setAccessibilityLabel(pasteWait.accessibilityLabel())
+            return
+        }
         let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
         pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + " · AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off")")
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
         let showConnecting = !connecting.isHidden
-        let size = notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
+        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
         resizePanel(for: size)
         let width = size.width, height = size.height
@@ -563,7 +582,7 @@ final class Overlay {
         presentNotice(message, accessibilityAction: false, isModeNotice: true)
     }
     private func presentNotice(_ message: String, accessibilityAction: Bool, isModeNotice: Bool) {
-        guard enabled else { return }
+        guard enabled, pasteWait == nil else { return }
         clearNotice()
         modeNotice = isModeNotice
         let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil

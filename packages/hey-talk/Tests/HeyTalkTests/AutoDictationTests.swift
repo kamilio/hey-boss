@@ -37,7 +37,7 @@ final class AutoDictationTests: XCTestCase {
     }
 
     func testRecordingSurvivesSwitchingFieldsAndUsesTheFieldWhereItFinishes() {
-        var recording = AutoRecording(target: "first composer")
+        var recording = AutoRecording(target: "first composer", followsFocus: true)
         recording.focusChanged(nil, at: 10)
         XCTAssertFalse(recording.shouldCancel(at: 11.9))
         recording.focusChanged("second composer", at: 11.9)
@@ -53,8 +53,33 @@ final class AutoDictationTests: XCTestCase {
         XCTAssertFalse(recording.deliveryValid, "Returning must not undo a focus change during decoding")
     }
 
+    func testPinnedRecordingWaitsForItsStartingThread() {
+        var recording = AutoRecording(target: "first thread", followsFocus: false)
+        recording.focusChanged("second thread", at: 1)
+        recording.finish(in: "second thread")
+        XCTAssertEqual(recording.target, "first thread")
+        XCTAssertTrue(recording.deliveryValid)
+        recording.focusChanged("first thread", at: 2)
+        XCTAssertTrue(recording.deliveryValid)
+    }
+
+    func testRemountedComposerMatchesOnlyItsOwnWindowThreadAndField() {
+        let app = NSRunningApplication.current, pid = app.processIdentifier
+        let first = AXUIElementCreateApplication(pid), other = AXUIElementCreateSystemWide()
+        func field(_ element: AXUIElement, _ route: String?, _ label: String?, window: AXUIElement? = nil) -> FocusedInput {
+            FocusedInput(app: app, element: element, window: window ?? first, document: route, composerLabel: label)
+        }
+        let start = field(first, "/thread/A", "Message A")
+        XCTAssertEqual(start, field(other, "/thread/A", "Message A"))
+        XCTAssertNotEqual(start, field(first, "/thread/B", "Message A"))
+        XCTAssertNotEqual(start, field(other, "/thread/A", nil))
+        XCTAssertNotEqual(start, field(first, "/thread/A", "Message B"))
+        XCTAssertNotEqual(start, field(other, "/thread/A", "Message A", window: other))
+        XCTAssertNotEqual(field(first, nil, "Message A"), field(other, nil, "Message A"))
+    }
+
     func testFocusGraceExpiresOnceAndResetsAfterReturningToAnInput() {
-        var recording = AutoRecording(target: "composer")
+        var recording = AutoRecording(target: "composer", followsFocus: false)
         recording.focusChanged(nil, at: 10)
         recording.focusChanged(nil, at: 11)
         XCTAssertTrue(recording.shouldCancel(at: 12))
@@ -83,10 +108,12 @@ final class AutoDictationTests: XCTestCase {
 
     func testOnlyEditableNonSecureInputsQualifyAndT3SearchDoesNot() {
         func qualifies(_ role: String = "AXTextArea", subrole: String? = nil, enabled: Bool = true,
-                       editable: Bool = true, label: String = "Message", app: String = "com.t3tools.t3code") -> Bool {
-            FocusedInput.isEligible(bundleID: app, role: role, subrole: subrole, enabled: enabled, editable: editable, label: label)
+                       editable: Bool = true, label: String = "Message", app: String = "com.t3tools.t3code", forAuto: Bool = true) -> Bool {
+            FocusedInput.isEligible(bundleID: app, role: role, subrole: subrole, enabled: enabled, editable: editable, label: label, forAuto: forAuto)
         }
         XCTAssertTrue(qualifies())
+        XCTAssertTrue(qualifies(label: "Message New thread"))
+        XCTAssertTrue(qualifies("AXTextField", label: "Search threads", forAuto: false))
         XCTAssertFalse(qualifies(label: "Search threads"))
         XCTAssertFalse(qualifies("AXButton"))
         XCTAssertFalse(qualifies(enabled: false))
