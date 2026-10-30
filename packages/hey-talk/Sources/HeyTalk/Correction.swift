@@ -44,7 +44,7 @@ final class Correction {
         if let appContext { values["app_context"] = appContext }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": "gpt-6-luna", "reasoning": ["effort": "none"], "store": false,
+            "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false,
             "instructions": prompt, "input": String(decoding: input, as: UTF8.self)
         ])
         return request
