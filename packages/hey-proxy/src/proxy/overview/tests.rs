@@ -265,3 +265,20 @@ async fn overview_host_login_guards_metadata_and_returns_to_landing_page() {
     assert_eq!(login.headers()[header::LOCATION], "/logs");
     task.abort();
 }
+
+#[test]
+fn overview_console_routes_show_account_and_override_without_credentials() {
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"PRIVATE.json"}},
+        "routes":[{"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}],
+        "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test"}}}
+    })).unwrap();
+    let data = catalog(&config);
+    let claude = api(&data, "claude");
+    assert_eq!(claude["configured"], true);
+    let route = &model(claude, "workspace-model").unwrap()["routes"][0];
+    assert_eq!(route["target"], "claude-test");
+    assert_eq!(route["when"], "workspace");
+    assert!(!data.to_string().contains("PRIVATE"));
+    assert!(!data.to_string().contains("wrkspc_example"));
+}

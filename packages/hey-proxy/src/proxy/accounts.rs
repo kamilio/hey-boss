@@ -80,7 +80,13 @@ impl Proxy {
             ),
             None => (provider, account, account),
         };
-        let billing = if matches!(provider, "codex" | "claude") {
+        let console = provider == "claude"
+            && self
+                .config
+                .claude
+                .as_ref()
+                .is_some_and(|p| p.auth == crate::claude_auth::Auth::Console);
+        let billing = if matches!(provider, "codex" | "claude") && !console {
             "subscription"
         } else {
             "api"
@@ -209,6 +215,7 @@ impl Proxy {
                     &self.client,
                     &provider.upstream_url,
                     &token,
+                    provider.workspace_id.as_deref(),
                 )
                 .await?;
                 (token, id, None)
@@ -317,10 +324,7 @@ pub(super) async fn bind(proxy: &Proxy, request: &mut Request) -> Result<Option<
     );
     let path = request.uri().path();
     match binding.implementation {
-        "claude" => anyhow::ensure!(
-            claude::is_path(path),
-            "Claude subscription requires the Messages API"
-        ),
+        "claude" => anyhow::ensure!(claude::is_path(path), "Claude requires the Messages API"),
         "codex" => {
             anyhow::ensure!(
                 matches!(

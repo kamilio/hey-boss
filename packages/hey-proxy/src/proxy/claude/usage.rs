@@ -161,6 +161,9 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
     } else {
         return json!({"state":"disabled"});
     };
+    if provider.auth == crate::claude_auth::Auth::Console {
+        return json!({"state":"disabled"});
+    }
     let path = match proxy
         .claude
         .paths
@@ -192,6 +195,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
                 &proxy.client,
                 &provider.upstream_url,
                 &token,
+                provider.workspace_id.as_deref(),
             )
             .await?;
             proxy.quota_for("claude", &id).await

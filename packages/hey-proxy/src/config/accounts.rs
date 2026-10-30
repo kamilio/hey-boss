@@ -14,8 +14,10 @@ pub enum AccountConfig {
         issuer: Option<String>,
     },
     Claude {
-        auth: Subscription,
+        auth: crate::claude_auth::Auth,
         credentials_file: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint: Option<String>,
     },
@@ -55,6 +57,10 @@ impl AccountConfig {
     pub fn auth(&self) -> &'static str {
         match self {
             Self::Openai { .. } => "api",
+            Self::Claude {
+                auth: crate::claude_auth::Auth::Console,
+                ..
+            } => "console",
             _ => "subscription",
         }
     }
@@ -91,11 +97,15 @@ impl AccountConfig {
                 selected.codex = Some(p);
             }
             Self::Claude {
+                auth,
                 credentials_file,
+                workspace_id,
                 endpoint,
                 ..
             } => {
                 let mut p = crate::proxy::claude::ProviderConfig {
+                    auth: *auth,
+                    workspace_id: workspace_id.clone(),
                     credentials_file: Some(credentials_file.clone()),
                     ..Default::default()
                 };
