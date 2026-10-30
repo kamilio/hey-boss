@@ -6824,7 +6824,17 @@ final class SpokenReview {
     }
     func readNext() {
         guard let editor, !audio.stopped else { return }
-        guard let range = Self.passage(in: editor.reader.string as NSString, from: position) else { finish("Finished reading."); return }
+        guard let range = Self.passage(in: editor.reader.string as NSString, from: position) else {
+            guard phrase.length > 0, !phraseFinished else { finish("Finished reading."); return }
+            // The last audible word can precede microphone delivery and the
+            // detector's 160 ms onset confirmation. Keep its anchor until both arrive.
+            phraseFinished = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self, !self.audio.stopped, !self.holding else { return }
+                self.finish("Finished reading.")
+            }
+            return
+        }
         phrase = range; word = NSRange(location: range.location, length: 0)
         position = NSMaxRange(range); phraseFinished = false
         editor.reviewStatus("Reading · speak to comment")
