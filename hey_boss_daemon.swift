@@ -6750,6 +6750,19 @@ struct SpokenComment: Codable {
     }
 }
 
+// Apple can finalize several phrases within one detected comment. A later
+// cumulative result replaces earlier audio; a disjoint one extends it.
+struct ReviewTranscript {
+    private var phrases: [(end: TimeInterval, text: String)] = []
+    var text: String { phrases.map(\.text).joined(separator: " ") }
+    mutating func accept(_ text: String, from start: TimeInterval, through end: TimeInterval) {
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return }
+        phrases.removeAll { $0.end > start + 0.01 }
+        phrases.append((end, words))
+    }
+}
+
 final class SpokenReview {
     let audio = ReviewAudio()
     let recognizer = SFSpeechRecognizer()
@@ -6851,15 +6864,24 @@ final class SpokenReview {
         samples.copyBytes(to: UnsafeMutableRawBufferPointer(start: buffer.int16ChannelData![0], count: samples.count))
         editor.reviewStatus("Transcribing · line \(anchor!.line)")
         let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = false; request.addsPunctuation = true
+        request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
         request.append(buffer); request.endAudio()
         watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
+        var transcript = ReviewTranscript()
         decoding = recognizer.recognitionTask(with: request) { [weak self] result, error in onMain {
-            guard let self, !self.audio.stopped, self.decoding != nil, result?.isFinal == true || error != nil else { return }
+            guard let self, !self.audio.stopped, self.decoding != nil else { return }
+            if let result, result.speechRecognitionMetadata != nil || result.isFinal {
+                let transcription = result.bestTranscription
+                if let first = transcription.segments.first, let last = transcription.segments.last {
+                    transcript.accept(transcription.formattedString, from: first.timestamp, through: last.timestamp + last.duration)
+                }
+            }
+            guard result?.isFinal == true || error != nil else { return }
             self.watchdog?.invalidate(); self.decoding = nil
-            if let error, (error as NSError).domain == "kAFAssistantErrorDomain", (error as NSError).code == 1110 { self.resume(); return }
-            if let error { self.finish(error.localizedDescription); return }
-            let text = result?.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let error, !((error as NSError).domain == "kAFAssistantErrorDomain" && (error as NSError).code == 1110) {
+                self.finish(error.localizedDescription); return
+            }
+            let text = transcript.text
             if text.isEmpty { self.resume(); return }
             self.submit(text)
         } }

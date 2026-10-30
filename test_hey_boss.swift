@@ -4120,6 +4120,12 @@ func auditSkillEditor(_ path: String) {
 // Runs against a disposable project; narrated audio is muted and microphone
 // input is replaced with a known PCM stream at the detector boundary.
 func auditSpokenReview(_ id: String) {
+    var transcript = ReviewTranscript()
+    transcript.accept("Move the paragraph.", from: 0.2, through: 1.5)
+    transcript.accept("Keep the example.", from: 1.9, through: 2.7)
+    precondition(transcript.text == "Move the paragraph. Keep the example.", "An internal recognizer pause cannot drop the opening instruction")
+    transcript.accept("Move the paragraph. Keep both examples.", from: 0.2, through: 2.8)
+    precondition(transcript.text == "Move the paragraph. Keep both examples.", "Cumulative finals replace overlapping phrases without duplication")
     let env = ProcessInfo.processInfo.environment, root = URL(fileURLWithPath: env["HEY_BOSS_FLEET_STATE"]!)
     let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:SpokenReview", id: id), journalRoot: root, present: false)
     func wait(_ label: String, _ ready: () -> Bool) {
@@ -4152,7 +4158,8 @@ func auditSpokenReview(_ id: String) {
     DispatchQueue.global().async {
         for part in [Data(count: 9600), captured, Data(count: 38400)] {
             for start in stride(from: 0, to: part.count, by: 640) {
-                try! writer.write(contentsOf: part[start..<min(start + 640, part.count)])
+                do { try writer.write(contentsOf: part[start..<min(start + 640, part.count)]) }
+                catch { return } // Switching to Edit closes the synthetic input too.
                 Thread.sleep(forTimeInterval: 0.018)
             }
         }
