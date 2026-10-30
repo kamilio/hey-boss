@@ -31,6 +31,8 @@ struct State {
     max_words: usize,
     #[serde(default)]
     pending_renames: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    #[serde(default)]
+    disabled: BTreeSet<String>,
     #[serde(skip)]
     busy: bool,
     #[serde(default)]
@@ -312,6 +314,9 @@ fn control_socket(home: &Path, host: &str) -> PathBuf {
         .join(format!("ssh-{:016x}.sock", hash.finish()))
 }
 pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value> {
+    if host == "local" && input["action"] == "set_enabled" {
+        return apply_enabled(home, input);
+    }
     if host == "local"
         && matches!(
             input["action"].as_str(),
@@ -355,6 +360,8 @@ pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value>
             Some("apply_copy" | "apply_copies")
         ) {
             c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-copy'"#);
+        } else if input["action"] == "set_enabled" {
+            c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-enabled'"#);
         } else if input["action"] == "rename" {
             c.arg(r#"exec "${SHELL:-/bin/sh}" -lic 'exec hey-boss skill apply-rename'"#);
         } else {
@@ -406,7 +413,8 @@ pub(super) fn transport(home: &Path, host: &str, input: &Value) -> Result<Value>
     }
     Ok(serde_json::from_slice(&bytes)?)
 }
-fn public_report(state: &State, selected: BTreeSet<String>) -> Value {
+fn public_report(state: &State, mut selected: BTreeSet<String>) -> Value {
+    selected.retain(|name| !state.disabled.contains(name));
     let machines: Vec<Value> = state
         .machines
         .iter()
@@ -441,7 +449,7 @@ fn public_report(state: &State, selected: BTreeSet<String>) -> Value {
             Value::Object(result)
         })
         .collect();
-    json!({"ok":true,"revision":state.revision,"busy":state.busy,"message":state.message,"machines":machines,"selected":selected,"choices":state.choices,"max_words":state.max_words})
+    json!({"ok":true,"revision":state.revision,"busy":state.busy,"message":state.message,"machines":machines,"selected":selected,"choices":state.choices,"max_words":state.max_words,"disabled":state.disabled})
 }
 pub fn report() -> Result<Value> {
     let home = home()?;
@@ -852,6 +860,8 @@ pub fn act(action: Action) -> Result<Value> {
         "scan",
         "distribute",
         "delete",
+        "disable",
+        "enable",
         "save_file",
         "open_dir",
         "open_editor",
@@ -865,6 +875,63 @@ pub fn act(action: Action) -> Result<Value> {
         if saved.revision > state.revision {
             *state = saved;
         }
+    }
+
+    if state.disabled.contains(&action.skill)
+        && !matches!(action.action.as_str(), "enable" | "disable" | "scan")
+    {
+        return Err(Error::conflict("This skill is disabled. Enable it first."));
+    }
+
+    if matches!(action.action.as_str(), "disable" | "enable") {
+        if !is_valid_skill_name(&action.skill)
+            || matches!(action.skill.as_str(), "hey-boss" | "AGENTS.md")
+            || action.skill.len() > 128
+        {
+            return Err(Error::invalid("Cannot disable this skill"));
+        }
+        let hosts = hosts(&home)?;
+        let enabled = action.action == "enable";
+        state.disabled.insert(action.skill.clone());
+        state.choices.remove(&action.skill);
+        state.revision += 1;
+        state.busy = true;
+        state.message = format!(
+            "{} {} across your machines…",
+            if enabled { "Enabling" } else { "Disabling" },
+            action.skill
+        );
+        if let Err(error) = persist(&home, &state) {
+            state.busy = false;
+            return Err(error);
+        }
+        let initial = public_report(&state, super::selected_skills(&home));
+        std::thread::spawn(move || {
+            let _lock = lock;
+            let outcome =
+                std::panic::catch_unwind(|| run_enabled(&home, &hosts, &action.skill, enabled));
+            let mut current = self::state().lock().unwrap();
+            if matches!(outcome, Ok(true)) && enabled {
+                current.disabled.remove(&action.skill);
+            }
+            current.busy = false;
+            current.revision += 1;
+            current.message = if matches!(outcome, Ok(true)) {
+                format!(
+                    "{} {} on all machines.",
+                    if enabled { "Enabled" } else { "Disabled" },
+                    action.skill
+                )
+            } else {
+                format!(
+                    "{} needs attention on some machines. Retry {} when they are available.",
+                    action.skill,
+                    if enabled { "Enable" } else { "Disable" }
+                )
+            };
+            let _ = persist(&home, &current);
+        });
+        return Ok(initial);
     }
 
     if action.action == "open_dir" || action.action == "open_editor" {
@@ -1150,6 +1217,14 @@ pub fn act(action: Action) -> Result<Value> {
         } else {
             action.selected.clone()
         };
+        if target_skills
+            .iter()
+            .any(|name| state.disabled.contains(name))
+        {
+            return Err(Error::conflict(
+                "Enable disabled skills before distributing them.",
+            ));
+        }
         let sources = chosen_sources(&state, &target_skills, &action.choices)?;
         if !action.skill.is_empty() {
             let mut merged = super::selected_skills(&home);
@@ -1219,6 +1294,86 @@ pub fn act(action: Action) -> Result<Value> {
         }
     });
     Ok(initial)
+}
+
+pub fn apply_enabled(home: &Path, input: &Value) -> Result<Value> {
+    let name = input["skill"]
+        .as_str()
+        .ok_or_else(|| Error::invalid("Missing skill name"))?;
+    let enabled = input["enabled"]
+        .as_bool()
+        .ok_or_else(|| Error::invalid("Missing enabled state"))?;
+    super::disabled::apply(home, name, enabled)?;
+    transport(home, "local", &json!({"action":"scan"}))
+}
+
+fn run_enabled(home: &Path, hosts: &[String], skill: &str, enabled: bool) -> bool {
+    let mut success = true;
+    for batch in hosts.chunks(4) {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|host| {
+                    scope.spawn(move || {
+                        (
+                            host,
+                            transport(
+                                home,
+                                host,
+                                &json!({"action":"set_enabled","skill":skill,"enabled":enabled}),
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            for handle in handles {
+                let (host, result) = handle.join().unwrap();
+                let mut current = state().lock().unwrap();
+                let index = current.machines.iter().position(|m| m["host"] == *host);
+                let mut machine = match result {
+                    Ok(mut value) => {
+                        if let Some(index) = index {
+                            let projects: Vec<_> = current.machines[index]["copies"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter(|c| c["scope"] == "project")
+                                .cloned()
+                                .collect();
+                            value["copies"].as_array_mut().unwrap().extend(projects);
+                        }
+                        value["state"] = json!("online");
+                        value["error"] = Value::Null;
+                        value["scanned_at"] = json!(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                        );
+                        value
+                    }
+                    Err(error) => {
+                        success = false;
+                        let mut value = index
+                            .map(|i| current.machines[i].clone())
+                            .unwrap_or(json!({"copies":[]}));
+                        value["state"] = json!("attention");
+                        value["error"] = json!(error.to_string());
+                        value
+                    }
+                };
+                machine["host"] = json!(host);
+                annotate(&mut machine, current.max_words);
+                if let Some(index) = index {
+                    current.machines[index] = machine;
+                } else {
+                    current.machines.push(machine);
+                }
+                let _ = persist(home, &current);
+            }
+        });
+    }
+    success
 }
 
 fn run_delete(home: &Path, hosts: &[String], skill: &str) {

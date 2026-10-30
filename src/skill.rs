@@ -1,4 +1,5 @@
 //! Canonical agent skill, cross-agent/fleet skill sync, and skill policy audit.
+pub mod disabled;
 pub mod manager;
 pub mod manager_rename;
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,20 @@ pub fn references() -> Vec<Value> {
 
 fn sync_config_path(home: &Path) -> PathBuf {
     home.join(".hey-boss/skill-sync.json")
+}
+
+pub(super) fn lock_install(home: &Path) -> io::Result<fs::File> {
+    use std::os::fd::AsRawFd;
+    fs::create_dir_all(home.join(".hey-boss"))?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join(".hey-boss/skill-install.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(lock)
 }
 
 pub fn selected_skills(home: &Path) -> BTreeSet<String> {
@@ -493,7 +508,7 @@ fn install_global_instructions(home: &Path, selected: bool) -> io::Result<Vec<Pa
 }
 
 fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<SkillBundle>> {
-    if name == "AGENTS.md" {
+    if name == "AGENTS.md" || disabled::is_disabled(home, name).map_err(io::Error::other)? {
         return Ok(None);
     }
     let managed = home.join(".hey-boss/skills").join(name);
@@ -528,6 +543,7 @@ fn load_canonical_skill_bundle(home: &Path, name: &str) -> io::Result<Option<Ski
 }
 
 pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result<Vec<PathBuf>> {
+    let _lock = lock_install(home)?;
     let names: BTreeSet<String> = match explicit_names {
         Some(list) if !list.is_empty() => {
             let mut current = selected_skills(home);
@@ -560,6 +576,7 @@ pub fn sync_skills(home: &Path, explicit_names: Option<&[String]>) -> io::Result
 }
 
 pub fn install(home: &Path) -> io::Result<Vec<PathBuf>> {
+    let _lock = lock_install(home)?;
     let names = selected_skills(home);
     let mut paths = install_global_instructions(home, names.contains("AGENTS.md"))?;
     for name in names {
@@ -670,6 +687,10 @@ for root in .codex .agents .claude; do
     [ -d "$skill_dir" ] || continue
     skill_name=$(basename "$skill_dir")
     [ "$skill_name" != AGENTS.md ] || continue
+    if [ "$skill_name" != hey-boss ] && [ -f "$HOME/.hey-boss/disabled-skills.db" ]; then
+      skill_cli=$(command -v hey-boss || printf '%s' "$HOME/.local/bin/hey-boss")
+      "$skill_cli" skill is-enabled "$skill_name" >/dev/null 2>&1 || continue
+    fi
     (
       cd "$skill_dir"
       find . -type f | while IFS= read -r rel; do

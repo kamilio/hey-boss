@@ -142,16 +142,7 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
             .map(Ok)
             .unwrap_or_else(|| transport(home, "local", &json!({"action":"scan"})));
     }
-    use std::os::fd::AsRawFd;
-    fs::create_dir_all(home.join(".hey-boss"))?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(home.join(".hey-boss/skill-install.lock"))?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+    let _lock = super::lock_install(home)?;
     let source = &input["source"];
     let name = source["name"]
         .as_str()
@@ -162,6 +153,13 @@ pub fn apply(home: &Path, input: &Value) -> Result<Value> {
     } else {
         serde_json::from_value(input["previous_names"].clone())?
     };
+    for candidate in std::iter::once(name).chain(previous.iter().map(String::as_str)) {
+        if super::disabled::is_disabled(home, candidate)? {
+            return Err(Error::conflict(format!(
+                "{candidate} is disabled. Enable it before saving or distributing."
+            )));
+        }
+    }
     if previous.is_empty()
         || previous.len() > 128
         || source["scope"] != "global"
