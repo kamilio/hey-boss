@@ -15,7 +15,10 @@ pub enum AccountConfig {
     },
     Claude {
         auth: crate::claude_auth::Auth,
-        credentials_file: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials_file: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        federation: Option<crate::claude_auth::wif::Config>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +64,10 @@ impl AccountConfig {
                 auth: crate::claude_auth::Auth::Console,
                 ..
             } => "console",
+            Self::Claude {
+                auth: crate::claude_auth::Auth::Wif,
+                ..
+            } => "wif",
             _ => "subscription",
         }
     }
@@ -100,13 +107,15 @@ impl AccountConfig {
                 auth,
                 credentials_file,
                 workspace_id,
+                federation,
                 endpoint,
                 ..
             } => {
                 let mut p = crate::proxy::claude::ProviderConfig {
                     auth: *auth,
                     workspace_id: workspace_id.clone(),
-                    credentials_file: Some(credentials_file.clone()),
+                    federation: federation.clone(),
+                    credentials_file: credentials_file.clone(),
                     ..Default::default()
                 };
                 if let Some(endpoint) = endpoint {
@@ -151,21 +160,32 @@ impl AccountConfig {
             }
             Self::Codex {
                 credentials_file, ..
-            }
-            | Self::Claude {
-                credentials_file, ..
             } => {
                 anyhow::ensure!(
                     !credentials_file.as_os_str().is_empty(),
                     "Account credential store is required"
                 );
-                let selected = self.apply(&Config::default());
-                if let Some(p) = selected.codex {
-                    p.validate(Mode::Standalone)?;
-                }
-                if let Some(p) = selected.claude {
-                    p.validate(Mode::Standalone)?;
-                }
+                self.apply(&Config::default())
+                    .codex
+                    .unwrap()
+                    .validate(Mode::Standalone)?;
+            }
+            Self::Claude {
+                auth,
+                credentials_file,
+                ..
+            } => {
+                anyhow::ensure!(
+                    *auth == crate::claude_auth::Auth::Wif
+                        || credentials_file
+                            .as_ref()
+                            .is_some_and(|p| !p.as_os_str().is_empty()),
+                    "Account credential store is required"
+                );
+                self.apply(&Config::default())
+                    .claude
+                    .unwrap()
+                    .validate(Mode::Standalone)?;
             }
         }
         Ok(())
@@ -234,6 +254,9 @@ impl Config {
             let path = if let Some(p) = selected.codex {
                 p.credentials_path(Some(source))?
             } else if let Some(p) = selected.claude {
+                if p.auth == crate::claude_auth::Auth::Wif {
+                    continue;
+                }
                 p.credentials_path(Some(source))?
             } else {
                 continue;

@@ -282,3 +282,35 @@ fn overview_console_routes_show_account_and_override_without_credentials() {
     assert!(!data.to_string().contains("PRIVATE"));
     assert!(!data.to_string().contains("wrkspc_example"));
 }
+
+#[test]
+fn wif_account_has_no_oauth_store_and_uses_workspace_api_billing() {
+    let value = json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"workspace":{"implementation":"claude","auth":"wif","workspace_id":"wrkspc_example",
+            "federation":{"organization_id":"org-test","service_account_id":"svac_test","federation_rule_id":"fdrl_test","identity_token":"sh://printf synthetic.jwt.assertion"}}},
+        "routes":[{"model":"workspace","api_shape":"messages","legs":[{"provider":"workspace","model":"claude-test"}]}]
+    });
+    let config: Config = serde_json::from_value(value.clone()).unwrap();
+    config.validate().unwrap();
+    config
+        .validate_account_paths(std::path::Path::new("/tmp/config.json"))
+        .unwrap();
+    assert_eq!(config.accounts["workspace"].auth(), "wif");
+    assert_eq!(
+        config.routes[0]
+            .resolve(&config, 0, "workspace", None)
+            .unwrap()
+            .billing_mode,
+        config::routes::BillingMode::PayPerToken
+    );
+    assert_eq!(api(&catalog(&config), "claude")["configured"], true);
+    for (key, replacement) in [
+        ("credentials_file", json!("wrong.json")),
+        ("workspace_id", Value::Null),
+        ("federation", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid["accounts"]["workspace"][key] = replacement;
+        assert!(serde_json::from_value::<Config>(invalid).map_or(true, |c| c.validate().is_err()));
+    }
+}

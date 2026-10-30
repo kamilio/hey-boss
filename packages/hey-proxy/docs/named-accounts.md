@@ -65,4 +65,22 @@ Login and refresh use the [official Anthropic CLI OAuth flow](https://github.com
 
 Client relays hold no provider credentials or routing policy. Enroll once on their host; all its relays use the same host-owned account selection and model overrides. Do not copy one rotating refresh token to independent servers.
 
-For unattended workloads, use [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation). AWS uses regional STS `GetWebIdentityToken`, an enabled outbound-federation account setting, and an IAM role allowed to call that API. Bind the exact role to a service account in the target workspace. See [Anthropic's AWS setup](https://platform.claude.com/docs/en/manage-claude/wif-providers/aws) and [official SDK federation provider](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/lib/credentials/oidc-federation.ts). The SDK re-exchanges a fresh identity token at expiry; federation grants have no refresh token. This proxy's Console login does not implement WIF.
+For unattended workloads, use [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation). AWS uses regional STS `GetWebIdentityToken`, an enabled outbound-federation account setting, and an IAM role allowed to call that API. Bind the exact role to a service account in the target workspace. See [Anthropic's AWS setup](https://platform.claude.com/docs/en/manage-claude/wif-providers/aws) and [official SDK federation provider](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/lib/credentials/oidc-federation.ts). The SDK re-exchanges a fresh identity token at expiry; federation grants have no refresh token. Use a separate named connection with `auth: "wif"` for these jobs:
+
+```json
+"workload": {
+  "implementation": "claude",
+  "auth": "wif",
+  "workspace_id": "wrkspc_YOUR_WORKSPACE",
+  "federation": {
+    "organization_id": "YOUR_ORGANIZATION_ID",
+    "service_account_id": "svac_YOUR_SERVICE_ACCOUNT",
+    "federation_rule_id": "fdrl_YOUR_RULE",
+    "identity_token": "sh:///usr/local/bin/aws sts get-web-identity-token --region us-east-1 --audience https://api.anthropic.com --signing-algorithm RS256 --duration-seconds 900 --query WebIdentityToken --output text"
+  }
+}
+```
+
+Choose the AWS CLI path and regional STS endpoint for your servers. Each server uses its own ambient IAM credentials. The proxy caches the exchanged token in memory, re-exchanges before expiry or after rejection, and never writes a federation refresh-token store. Exchange failures back off and never fall through to a browser account. A protected `file:///absolute/path/to/jwt` also works when an identity provider rotates that file; it must be a regular file owned by the proxy user with mode 0600. JWT sources are read again at each exchange, not copied by rollout.
+
+Route jobs to `workload` using the same `routes` and `overrides` contract as browser accounts. Config rollout supports accounts that have not yet been enrolled; run `check-credentials` on the destination afterward to verify browser enrollment or the live WIF exchange. WIF issuer/rule/service-account setup must be completed before that check can succeed.

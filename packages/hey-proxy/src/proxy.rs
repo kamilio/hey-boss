@@ -56,6 +56,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 struct Service {
     accounts: accounts::Registry,
     credentials: hey_proxy::credentials::CredentialResolver,
+    federation: crate::claude_auth::wif::Manager,
     gemini: gemini::GeminiState,
     logs: Arc<logs::Store>,
     access_config: Option<PathBuf>,
@@ -170,6 +171,7 @@ pub(crate) fn local_snapshot(config: Config, source: Option<PathBuf>) -> Result<
     let service = Arc::new(Service {
         accounts,
         credentials: Default::default(),
+        federation: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: Arc::new(logs::Store::memory(&config)),
         access_keys: RwLock::new((Instant::now(), None)),
@@ -204,6 +206,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     let service = Arc::new(Service {
         accounts,
         credentials: Default::default(),
+        federation: Default::default(),
         gemini: gemini::GeminiState::new(source.as_deref())?,
         logs: match options.logs {
             Some(logs) => logs,

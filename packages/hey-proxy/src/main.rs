@@ -57,7 +57,11 @@ enum Command {
         host: Vec<String>,
     },
     /// Check configured credential sources without printing their values
-    CheckCredentials,
+    CheckCredentials {
+        /// Installer preflight: OAuth enrollment happens separately on each destination.
+        #[arg(long, hide = true)]
+        sources_only: bool,
+    },
     /// Sign in to Claude; the proxy stores and refreshes its own OAuth tokens
     ClaudeLogin {
         /// Named provider connection (credentials remain on this host)
@@ -308,15 +312,30 @@ async fn main() -> Result<()> {
     if let Some(Command::Rollout { host }) = args.command {
         return rollout::run(&config, &host).await;
     }
-    if matches!(args.command, Some(Command::CheckCredentials)) {
+    if let Some(Command::CheckCredentials { sources_only }) = args.command {
         rollout::check_credentials(&config).await?;
+        if sources_only {
+            println!("Credential sources ready");
+            return Ok(());
+        }
         if let Some(provider) = &config.claude {
-            claude_auth::TokenManager::default()
-                .token(
-                    &provider.credentials_path(Some(&path))?,
-                    &proxy::build_client(&config)?,
-                )
-                .await?;
+            if provider.auth == claude_auth::Auth::Wif {
+                claude_auth::wif::Manager::default()
+                    .token(
+                        provider,
+                        &proxy::build_client(&config)?,
+                        &hey_proxy::credentials::CredentialResolver::default(),
+                        None,
+                    )
+                    .await?;
+            } else {
+                claude_auth::TokenManager::default()
+                    .token(
+                        &provider.credentials_path(Some(&path))?,
+                        &proxy::build_client(&config)?,
+                    )
+                    .await?;
+            }
         }
         if let Some(provider) = &config.codex {
             codex_auth::TokenManager::default()

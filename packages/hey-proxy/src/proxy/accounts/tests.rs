@@ -541,3 +541,81 @@ fn route_plans_keep_provider_overrides_and_revision_across_atomic_reload() {
     assert_eq!(new_leg.upstream_model, "after-reload");
     assert_ne!(new_leg.config_revision, old_leg.config_revision);
 }
+
+#[tokio::test]
+async fn wif_named_routes_forward_native_messages_and_keep_workspace_in_exchange() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let calls = exchanges.clone();
+    let (url, upstream) = serve(Router::new().fallback(axum::routing::any(
+        move |request: Request| {
+            let calls = calls.clone();
+            async move {
+                let path = request.uri().path().to_owned();
+                let headers = request.headers().clone();
+                let body: Value = serde_json::from_slice(
+                    &axum::body::to_bytes(request.into_body(), 65536)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                if path == "/v1/oauth/token" {
+                    assert_eq!(body["workspace_id"], "wrkspc_example");
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(json!({"access_token":"sk-ant-oat01-federated","expires_in":3600}))
+                        .into_response()
+                } else {
+                    assert_eq!(path, "/v1/messages/count_tokens");
+                    assert_eq!(headers["authorization"], "Bearer sk-ant-oat01-federated");
+                    assert!(!headers.contains_key("anthropic-workspace-id"));
+                    assert_eq!(body["model"], "claude-test");
+                    axum::Json(json!({"input_tokens":1})).into_response()
+                }
+            }
+        },
+    )))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"workspace":{"implementation":"claude","auth":"wif","workspace_id":"wrkspc_example","endpoint":url,
+            "federation":{"organization_id":"org-test","service_account_id":"svac_test","federation_rule_id":"fdrl_test","identity_token":"sh://printf synthetic.jwt.assertion"}}},
+        "routes":[{"model":"workspace","api_shape":"messages","legs":[{"provider":"workspace","model":"claude-test"}]}]
+    })).unwrap();
+    config.validate().unwrap();
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let access = crate::access::ensure(&path, &[]).unwrap();
+    let mut host = config.clone();
+    host.mode = Mode::Host;
+    let (host_url, host_task) = serve(
+        router_with(
+            host,
+            Options {
+                source: Some((path.clone(), config::fingerprint(&path))),
+                access_config: Some(path.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let relay: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","mode":"client","connection":{"url":host_url,"api_key":access.local}})).unwrap();
+    let (relay_url, relay_task) = serve(router(relay).unwrap()).await;
+    for _ in 0..2 {
+        let response = reqwest::Client::new()
+            .post(format!("{relay_url}/v1/messages/count_tokens"))
+            .header("anthropic-workspace-id", "wrkspc_untrusted")
+            .json(&json!({"model":"workspace","messages":[{"role":"user","content":"hello"}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(exchanges.load(Ordering::SeqCst), 1);
+    assert!(!path.with_extension("claude.json").exists());
+    assert!(!path.with_extension("claude.key").exists());
+    assert!(subscription::configured_accounts(&config, Some(&path)).is_empty());
+    host_task.abort();
+    relay_task.abort();
+    upstream.abort();
+}

@@ -161,7 +161,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
     } else {
         return json!({"state":"disabled"});
     };
-    if provider.auth == crate::claude_auth::Auth::Console {
+    if provider.auth != crate::claude_auth::Auth::Subscription {
         return json!({"state":"disabled"});
     }
     let path = match proxy
