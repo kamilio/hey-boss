@@ -18,6 +18,9 @@ fn default_routing() -> bool {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ProviderConfig {
+    pub auth: crate::claude_auth::Auth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     pub upstream_url: String,
     /// Proxy-owned encrypted OAuth store. Relative paths resolve beside the config.
     pub credentials_file: Option<PathBuf>,
@@ -29,6 +32,8 @@ pub(crate) struct ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
+            auth: crate::claude_auth::Auth::Subscription,
+            workspace_id: None,
             upstream_url: "https://api.anthropic.com".into(),
             credentials_file: None,
             usage_cache_seconds: 60,
@@ -38,6 +43,21 @@ impl Default for ProviderConfig {
 }
 impl ProviderConfig {
     pub(crate) fn validate(&self, _mode: Mode) -> Result<()> {
+        match self.auth {
+            crate::claude_auth::Auth::Console => ensure!(
+                self.workspace_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("wrkspc_")
+                        && id.len() > 7
+                        && id.len() <= 128
+                        && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')),
+                "Console authentication requires a workspace_id (wrkspc_...)"
+            ),
+            crate::claude_auth::Auth::Subscription => ensure!(
+                self.workspace_id.is_none(),
+                "Subscription authentication cannot select a Console workspace"
+            ),
+        }
         let url = url::Url::parse(&self.upstream_url).context("Invalid Claude upstream URL")?;
         let loopback = url.host_str().is_some_and(|h| {
             h == "localhost" || h.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) || h == "[::1]"
@@ -127,6 +147,7 @@ fn request_headers(mut headers: HeaderMap) -> HeaderMap {
         "cookie",
         "openai-project",
         "openai-organization",
+        "anthropic-workspace-id",
         "content-length",
         "accept-encoding",
         "forwarded",
@@ -260,8 +281,27 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         provider.upstream_url.trim_end_matches('/'),
         parts.uri.path().trim_end_matches('/')
     );
-    let headers = request_headers(parts.headers);
+    let mut headers = request_headers(parts.headers);
+    if let Some(workspace) = &provider.workspace_id {
+        headers.insert(
+            "anthropic-workspace-id",
+            workspace.parse().expect("validated workspace ID"),
+        );
+    }
     for index in 0..2 {
+        if proxy.binding.is_none() && provider.workspace_id.is_some() {
+            if let Err(error) = crate::claude_auth::account_identity(
+                &path,
+                &proxy.client,
+                &provider.upstream_url,
+                &token,
+                provider.workspace_id.as_deref(),
+            )
+            .await
+            {
+                return messages::error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string());
+            }
+        }
         let mut attempt = logs::Attempt::new(proxy.service.logs.clone(), proxy.log_id, "claude");
         let mut upstream = match proxy
             .client

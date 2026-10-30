@@ -138,6 +138,7 @@ mod tests {
         let cache = Cache::default();
         let path = PathBuf::from("synthetic.json");
         let old = Tokens {
+            workspace_id: None,
             account_id: None,
             access_token: "sk-ant-oat01-old".into(),
             refresh_token: "old".into(),
@@ -146,6 +147,7 @@ mod tests {
         cache.store(path.clone(), &old);
         let version = cache.0.lock().unwrap().version;
         let fresh = Tokens {
+            workspace_id: None,
             account_id: None,
             access_token: "sk-ant-oat01-new".into(),
             ..old.clone()
@@ -173,6 +175,7 @@ mod tests {
         let cache = Arc::new(Cache::default());
         let path = PathBuf::from("synthetic.json");
         let tokens = Tokens {
+            workspace_id: None,
             account_id: None,
             access_token: "sk-ant-oat01-synthetic".into(),
             refresh_token: "synthetic".into(),

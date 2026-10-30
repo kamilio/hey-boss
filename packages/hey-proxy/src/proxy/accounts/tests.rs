@@ -132,6 +132,134 @@ async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
+async fn claude_default_and_console_override_keep_separate_credentials_and_workspace() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let received = seen.clone();
+    let (url, task) = serve(
+        Router::new().fallback(axum::routing::any(move |request: Request| {
+            let received = received.clone();
+            async move {
+                assert!(
+                    matches!(
+                        request.uri().path(),
+                        "/v1/messages" | "/v1/messages/count_tokens"
+                    ),
+                    "Console routing must not fetch subscription profile or quota"
+                );
+                let path = request.uri().path().to_owned();
+                let auth = request.headers()["authorization"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                let workspace = request
+                    .headers()
+                    .get("anthropic-workspace-id")
+                    .map(|v| v.to_str().unwrap().to_owned());
+                let body = axum::body::to_bytes(request.into_body(), 65536)
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                received
+                    .lock()
+                    .unwrap()
+                    .push(json!({"path":path,"auth":auth,"workspace":workspace,"body":body}));
+                axum::Json(
+                    json!({"id":"test", "type":"message", "role":"assistant", "content":[],
+                "model":body["model"], "usage":{"input_tokens":1,"output_tokens":0}}),
+                )
+                .into_response()
+            }
+        })),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080", "account_schema_version":1,
+        "providers":{"claude":{"upstream_url":url}},
+        "accounts":{"workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example",
+            "credentials_file":"workspace.json","endpoint":url}},
+        "routes":[{"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}],
+        "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test-model"}}}
+    })).unwrap();
+    config.validate().unwrap();
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    crate::claude_auth::tests::fixture(
+        &path.with_extension("claude.json"),
+        crate::claude_auth::now() + 3600,
+    );
+    crate::claude_auth::tests::console_fixture(
+        &dir.path().join("workspace.json"),
+        "wrkspc_example",
+        crate::claude_auth::now() + 3600,
+    );
+    let proxy = Arc::new(local_snapshot(config.clone(), Some(path.clone())).unwrap());
+    let accounts = subscription::configured_accounts(&config, Some(&path));
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, "default");
+    assert!(
+        subscription::account_usage(&proxy, "claude", "workspace")
+            .await
+            .is_err()
+    );
+    for (model, endpoint) in [
+        ("claude-sonnet-5-5", "/v1/messages"),
+        ("workspace-model", "/v1/messages"),
+        ("workspace-model", "/v1/messages/count_tokens"),
+    ] {
+        let request = Request::builder().method("POST").uri(endpoint)
+            .header("content-type", "application/json").header("anthropic-workspace-id", "wrkspc_untrusted_client")
+            .body(Body::from(json!({"model":model,"max_tokens":1,"messages":[{"role":"user","content":"hello"}]}).to_string())).unwrap();
+        assert_eq!(
+            routes::forward(proxy.clone(), request).await.status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        claude::reading(&proxy.select("workspace").await.unwrap()).await["state"],
+        "disabled"
+    );
+    let access = crate::access::ensure(&path, &[]).unwrap();
+    let mut host = config;
+    host.mode = Mode::Host;
+    let (host_url, host_task) = serve(
+        router_with(
+            host,
+            Options {
+                source: Some((path.clone(), config::fingerprint(&path))),
+                access_config: Some(path),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    )
+    .await;
+    let relay: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","mode":"client", "connection":{"url":host_url,"api_key":access.local}})).unwrap();
+    let (relay_url, relay_task) = serve(router(relay).unwrap()).await;
+    let client = reqwest::Client::new();
+    for model in ["claude-sonnet-5-5", "workspace-model"] {
+        assert_eq!(client.post(format!("{relay_url}/v1/messages"))
+            .json(&json!({"model":model,"max_tokens":1,"messages":[{"role":"user","content":"hello"}]}))
+            .send().await.unwrap().status(), StatusCode::OK);
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    assert_eq!(seen[3]["auth"], seen[0]["auth"]);
+    assert_eq!(seen[4]["auth"], seen[1]["auth"]);
+    assert_eq!(seen[4]["workspace"], "wrkspc_example");
+    host_task.abort();
+    relay_task.abort();
+    assert_eq!(seen[0]["auth"], "Bearer sk-ant-oat01-synthetic-old");
+    assert!(seen[0]["workspace"].is_null());
+    assert_eq!(seen[0]["body"]["model"], "claude-sonnet-5-5");
+    for call in &seen[1..3] {
+        assert_eq!(call["auth"], "Bearer sk-ant-oat01-synthetic-console");
+        assert_eq!(call["workspace"], "wrkspc_example");
+        assert_eq!(call["body"]["model"], "claude-test-model");
+    }
+    task.abort();
+}
+
+#[tokio::test]
 async fn named_refresh_usage_cooldown_and_inference_are_account_scoped() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let refreshes = Arc::new(AtomicUsize::new(0));

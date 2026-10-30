@@ -6,6 +6,7 @@ pub(crate) fn fixture(path: &Path, expires_at: u64) {
     save(
         path,
         &Tokens {
+            workspace_id: None,
             account_id: None,
             access_token: "sk-ant-oat01-synthetic-old".into(),
             refresh_token: "synthetic-refresh-old".into(),
@@ -13,6 +14,141 @@ pub(crate) fn fixture(path: &Path, expires_at: u64) {
         },
     )
     .unwrap();
+}
+
+pub(crate) fn console_fixture(path: &Path, workspace: &str, expires_at: u64) {
+    save(
+        path,
+        &Tokens {
+            workspace_id: Some(workspace.into()),
+            account_id: Some("synthetic-org".into()),
+            access_token: "sk-ant-oat01-synthetic-console".into(),
+            refresh_token: "synthetic-console-refresh".into(),
+            expires_at,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn console_authorization_selects_workspace_without_requesting_api_keys() {
+    let url = authorization_url("state", "verifier", Some("wrkspc_example")).unwrap();
+    let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    assert_eq!(url.host_str(), Some("platform.claude.com"));
+    assert_eq!(params["client_id"], CONSOLE_CLIENT_ID);
+    assert_eq!(params["workspace_id"], "wrkspc_example");
+    assert_eq!(
+        params["scope"],
+        "user:profile user:inference user:developer"
+    );
+    assert_eq!(params["code_challenge_method"], "S256");
+    let old: Tokens = serde_json::from_value(
+        json!({"access_token":"synthetic", "refresh_token":"synthetic", "expires_at":1}),
+    )
+    .unwrap();
+    assert!(old.workspace_id.is_none());
+}
+
+#[tokio::test]
+async fn console_login_and_refresh_use_correct_client_and_preserve_binding() {
+    let app = Router::new().route("/token", post(|headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
+        let body: Value = if headers["content-type"] == "application/x-www-form-urlencoded" {
+            assert!(headers.get("anthropic-beta").is_none());
+            let form: std::collections::BTreeMap<_, _> = url::form_urlencoded::parse(&body).into_owned().collect();
+            assert_eq!(form["grant_type"], "authorization_code");
+            assert_eq!(form["state"], "state");
+            serde_json::to_value(form).unwrap()
+        } else {
+            assert_eq!(headers["anthropic-beta"], "oauth-2025-04-20");
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["grant_type"], "refresh_token");
+            assert_eq!(body["refresh_token"], "synthetic-console-refresh");
+            body
+        };
+        assert_eq!(body["client_id"], CONSOLE_CLIENT_ID);
+        Json(json!({"access_token":"sk-ant-oat01-console-new","refresh_token":"synthetic-console-refresh",
+            "expires_in":3600,"organization":{"uuid":"synthetic-org"},"workspace":{"id":"wrkspc_example"}}))
+    }));
+    let (url, server) = serve(app).await;
+    let tokens = exchange(
+        &client(),
+        &url,
+        json!({"grant_type":"authorization_code", "client_id":CONSOLE_CLIENT_ID,
+        "code":"code", "state":"state", "code_verifier":"verifier", "redirect_uri":REDIRECT}),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(tokens.workspace_id.as_deref(), Some("wrkspc_example"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.json");
+    console_fixture(&path, "wrkspc_example", 1);
+    let token = TokenManager::default()
+        .obtain(&path, &client(), None, Some(&url))
+        .await
+        .unwrap();
+    assert_eq!(token, "sk-ant-oat01-console-new");
+    assert_eq!(
+        load(&path).unwrap().workspace_id.as_deref(),
+        Some("wrkspc_example")
+    );
+    assert!(
+        account_identity(&path, &client(), "http://unused", &token, None)
+            .await
+            .is_err()
+    );
+    assert!(
+        account_identity(
+            &path,
+            &client(),
+            "http://unused",
+            &token,
+            Some("wrkspc_other")
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        account_identity(
+            &path,
+            &client(),
+            "http://unused",
+            &token,
+            Some("wrkspc_example")
+        )
+        .await
+        .unwrap(),
+        "console:synthetic-org:wrkspc_example"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn console_refresh_cannot_replace_workspace_or_organization() {
+    for (org, workspace) in [
+        ("other-org", "wrkspc_example"),
+        ("synthetic-org", "wrkspc_other"),
+    ] {
+        let app = Router::new().route("/token", post(move || async move {
+            Json(json!({"access_token":"sk-ant-oat01-wrong-binding","refresh_token":"rotated","expires_in":3600,
+                "organization":{"uuid":org},"workspace":{"id":workspace}}))
+        }));
+        let (url, server) = serve(app).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        console_fixture(&path, "wrkspc_example", 1);
+        assert!(
+            TokenManager::default()
+                .obtain(&path, &client(), None, Some(&url))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            load(&path).unwrap().access_token,
+            "sk-ant-oat01-synthetic-console"
+        );
+        server.abort();
+    }
 }
 
 #[test]
@@ -48,7 +184,7 @@ fn encrypted_store_is_private_authenticated_and_never_plaintext() {
 
 #[test]
 fn oauth_url_uses_pkce_profile_scope_and_random_state() {
-    let url = authorization_url("expected-state", "test-verifier").unwrap();
+    let url = authorization_url("expected-state", "test-verifier", None).unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
     assert_eq!(params["state"], "expected-state");
     assert_eq!(params["code_challenge_method"], "S256");
@@ -135,7 +271,7 @@ async fn concurrent_managers_rotate_once_and_persist_rotated_refresh_token() {
         // Independent managers must also synchronize via the file lock.
         jobs.push(tokio::spawn(async move {
             TokenManager::default()
-                .obtain(&path, &client(), None, &url)
+                .obtain(&path, &client(), None, Some(&url))
                 .await
                 .unwrap()
         }));
@@ -152,7 +288,7 @@ async fn concurrent_managers_rotate_once_and_persist_rotated_refresh_token() {
                 &path,
                 &client(),
                 Some("sk-ant-oat01-synthetic-old".into()),
-                &url
+                Some(&url)
             )
             .await
             .unwrap(),
@@ -178,7 +314,7 @@ async fn refresh_survives_caller_cancellation() {
     let owned = path.clone();
     let job = tokio::spawn(async move {
         TokenManager::default()
-            .obtain(&owned, &client(), None, &url)
+            .obtain(&owned, &client(), None, Some(&url))
             .await
     });
     called.notified().await;
@@ -219,7 +355,7 @@ async fn refresh_errors_are_redacted_and_backed_off_without_damaging_store() {
     let manager = TokenManager::default();
     for _ in 0..2 {
         let error = manager
-            .obtain(&path, &client(), None, &url)
+            .obtain(&path, &client(), None, Some(&url))
             .await
             .unwrap_err()
             .to_string();
