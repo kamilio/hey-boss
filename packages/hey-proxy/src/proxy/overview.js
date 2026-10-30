@@ -117,7 +117,7 @@
         card.append(node('h3', account.name));
         const meta = node('div', undefined, 'connection-meta');
         meta.append(node('span', account.implementation === 'openai' ? 'OpenAI compatible' : account.implementation === 'codex' ? 'Codex' : 'Claude'));
-        meta.append(node('span', account.auth === 'subscription' ? 'Subscription' : account.auth === 'console' ? 'Console workspace · API billing' : 'API billing'));
+        meta.append(node('span', account.auth === 'subscription' ? 'Subscription' : account.auth === 'wif' ? 'Workload identity · API billing' : account.auth === 'console' ? 'Console workspace · API billing' : 'API billing'));
         meta.append(node('span', account.ready ? 'Ready' : 'Needs sign-in or credentials', account.ready ? 'badge' : 'badge off'));
         card.append(meta);
         if (counts.get(account.account_ref) > 1) card.append(node('p', 'Shared subscription · limits also apply to its other aliases.', 'note'));

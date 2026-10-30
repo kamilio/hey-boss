@@ -80,13 +80,13 @@ impl Proxy {
             ),
             None => (provider, account, account),
         };
-        let console = provider == "claude"
+        let workspace_api = provider == "claude"
             && self
                 .config
                 .claude
                 .as_ref()
-                .is_some_and(|p| p.auth == crate::claude_auth::Auth::Console);
-        let billing = if matches!(provider, "codex" | "claude") && !console {
+                .is_some_and(|p| p.auth != crate::claude_auth::Auth::Subscription);
+        let billing = if matches!(provider, "codex" | "claude") && !workspace_api {
             "subscription"
         } else {
             "api"
@@ -114,6 +114,19 @@ impl Proxy {
                     )
                     .await;
             }
+        } else if let Some(provider) = &self.config.claude
+            && provider.auth == crate::claude_auth::Auth::Wif
+        {
+            let _ = self
+                .service
+                .federation
+                .token(
+                    provider,
+                    &self.client,
+                    &self.service.credentials,
+                    Some(&binding.token),
+                )
+                .await;
         } else if let Some(provider) = &self.config.claude
             && let Ok(path) = provider.credentials_path(self.service.source.as_deref())
             && let Ok(path) = canonical(path).await
@@ -203,6 +216,23 @@ impl Proxy {
                     .api_keys
                     .insert("default".into(), creds.access_token.clone());
                 (creds.access_token, id, creds.account_id)
+            }
+            AccountConfig::Claude {
+                auth: crate::claude_auth::Auth::Wif,
+                ..
+            } => {
+                let provider = config.claude.as_ref().unwrap();
+                let token = self
+                    .service
+                    .federation
+                    .token(provider, &self.client, &self.service.credentials, None)
+                    .await?;
+                let identity = provider
+                    .federation
+                    .as_ref()
+                    .unwrap()
+                    .identity(provider.workspace_id.as_deref().unwrap());
+                (token, identity, None)
             }
             AccountConfig::Claude { .. } => {
                 let provider = config.claude.as_ref().unwrap();

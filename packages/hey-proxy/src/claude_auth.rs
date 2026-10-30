@@ -1,5 +1,6 @@
 //! Proxy-owned Claude OAuth credentials. Never reads or writes Claude Code's login.
 mod cache;
+pub(crate) mod wif;
 use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -38,18 +39,19 @@ pub(crate) enum Auth {
     #[default]
     Subscription,
     Console,
+    Wif,
 }
 impl Auth {
     fn client_id(self) -> &'static str {
         match self {
             Self::Subscription => CLIENT_ID,
-            Self::Console => CONSOLE_CLIENT_ID,
+            Self::Console | Self::Wif => CONSOLE_CLIENT_ID,
         }
     }
     fn token_url(self) -> &'static str {
         match self {
             Self::Subscription => TOKEN_URL,
-            Self::Console => CONSOLE_TOKEN_URL,
+            Self::Console | Self::Wif => CONSOLE_TOKEN_URL,
         }
     }
 }
@@ -465,6 +467,10 @@ pub(crate) async fn login(
     no_browser: bool,
 ) -> Result<()> {
     let provider = config.claude.clone().unwrap_or_default();
+    ensure!(
+        provider.auth != Auth::Wif,
+        "WIF uses the workload identity source; browser login is not required"
+    );
     ensure!(
         config.mode != crate::config::Mode::Client,
         "Sign in on the proxy host, not a client relay"

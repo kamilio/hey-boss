@@ -1501,6 +1501,41 @@ mod tests {
     }
 
     #[test]
+    fn workspace_accounts_and_overrides_roll_out_without_resolving_host_credentials() {
+        let config: Config = serde_json::from_value(json!({
+            "listen":"127.0.0.1:8080","account_schema_version":1,
+            "accounts":{
+                "workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"workspace.json"},
+                "jobs":{"implementation":"claude","auth":"wif","workspace_id":"wrkspc_example",
+                    "federation":{"organization_id":"org-test","service_account_id":"svac_test","federation_rule_id":"fdrl_test","identity_token":"sh://false"}}
+            },
+            "routes":[{"model":"workspace","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}],
+            "overrides":{"workspace":{"model":{"from":"workspace","to":"claude-test"}}}
+        })).unwrap();
+        for mode in ["standalone", "host"] {
+            let host = serde_json::from_value(json!({"host":"server","mode":mode})).unwrap();
+            let remote = remote_config(&config, &host).unwrap();
+            let encoded = serde_json::to_value(&remote).unwrap();
+            assert_eq!(
+                encoded["accounts"],
+                serde_json::to_value(&config.accounts).unwrap()
+            );
+            assert_eq!(
+                encoded["accounts"]["workspace"]["credentials_file"],
+                "workspace.json"
+            );
+            assert!(
+                encoded["accounts"]["jobs"]
+                    .get("credentials_file")
+                    .is_none()
+            );
+            let leg = remote.routes[0].resolve(&remote, 0, "workspace", None).unwrap();
+            assert_eq!(leg.provider, "workspace");
+            assert_eq!(leg.upstream_model, "claude-test");
+        }
+    }
+
+    #[test]
     fn remote_sync_omits_host_inventory_and_preserves_routes() {
         let mut config = Config {
             ssh_hosts: vec![SshHost::Name("builder".into())],

@@ -89,7 +89,7 @@ pub(crate) fn deduplicate_accounts(
                 Some(AccountConfig::Claude {
                     credentials_file, ..
                 }) if provider == "claude" => claude::ProviderConfig {
-                    credentials_file: Some(credentials_file.clone()),
+                    credentials_file: credentials_file.clone(),
                     ..Default::default()
                 }
                 .credentials_path(source),

@@ -168,7 +168,7 @@ fn catalog(config: &Config) -> Value {
         Api {
             id: "claude",
             name: "Claude",
-            description: "Native Messages with separate subscription or Console workspace logins. Configured model routes select an account and apply its override. Other model names use the default Claude login.",
+            description: "Native Messages with separate subscription logins, Console workspace logins or workload identity. Configured model routes select an account and apply its override. Other model names use the default Claude login.",
             base_path: "",
             routes: vec![
                 ("POST", "/v1/messages", "Native JSON or SSE"),

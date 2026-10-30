@@ -20,6 +20,8 @@ fn default_routing() -> bool {
 pub(crate) struct ProviderConfig {
     pub auth: crate::claude_auth::Auth,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation: Option<crate::claude_auth::wif::Config>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     pub upstream_url: String,
     /// Proxy-owned encrypted OAuth store. Relative paths resolve beside the config.
@@ -34,6 +36,7 @@ impl Default for ProviderConfig {
         Self {
             auth: crate::claude_auth::Auth::Subscription,
             workspace_id: None,
+            federation: None,
             upstream_url: "https://api.anthropic.com".into(),
             credentials_file: None,
             usage_cache_seconds: 60,
@@ -44,19 +47,34 @@ impl Default for ProviderConfig {
 impl ProviderConfig {
     pub(crate) fn validate(&self, _mode: Mode) -> Result<()> {
         match self.auth {
-            crate::claude_auth::Auth::Console => ensure!(
+            crate::claude_auth::Auth::Console | crate::claude_auth::Auth::Wif => ensure!(
                 self.workspace_id
                     .as_deref()
                     .is_some_and(|id| id.starts_with("wrkspc_")
                         && id.len() > 7
                         && id.len() <= 128
                         && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')),
-                "Console authentication requires a workspace_id (wrkspc_...)"
+                "Console/WIF authentication requires a workspace_id (wrkspc_...)"
             ),
             crate::claude_auth::Auth::Subscription => ensure!(
                 self.workspace_id.is_none(),
                 "Subscription authentication cannot select a Console workspace"
             ),
+        }
+        if self.auth == crate::claude_auth::Auth::Wif {
+            ensure!(
+                self.credentials_file.is_none(),
+                "WIF does not use an OAuth credential store"
+            );
+            self.federation
+                .as_ref()
+                .context("WIF requires federation settings")?
+                .validate()?;
+        } else {
+            ensure!(
+                self.federation.is_none(),
+                "Federation settings require auth wif"
+            );
         }
         let url = url::Url::parse(&self.upstream_url).context("Invalid Claude upstream URL")?;
         let loopback = url.host_str().is_some_and(|h| {
@@ -246,25 +264,40 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
                 .map(|s| s.chars().take(32).collect());
             true
         });
-    let path = match proxy
-        .claude
-        .paths
-        .resolve(provider, proxy.service.source.as_deref())
-        .await
-    {
-        Ok(path) => path,
-        Err(_) => {
-            return messages::error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Claude credential store is not configured",
-            );
-        }
+    let path = if provider.auth == crate::claude_auth::Auth::Wif {
+        None
+    } else {
+        Some(
+            match proxy
+                .claude
+                .paths
+                .resolve(provider, proxy.service.source.as_deref())
+                .await
+            {
+                Ok(path) => path,
+                Err(_) => {
+                    return messages::error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Claude credential store is not configured",
+                    );
+                }
+            },
+        )
     };
     proxy.record_accounting_route("claude", "default");
     let mut token = if let Some(binding) = &proxy.binding {
         binding.token.clone()
     } else {
-        match proxy.claude.tokens.token(&path, &proxy.client).await {
+        let result = if let Some(path) = &path {
+            proxy.claude.tokens.token(path, &proxy.client).await
+        } else {
+            proxy
+                .service
+                .federation
+                .token(provider, &proxy.client, &proxy.service.credentials, None)
+                .await
+        };
+        match result {
             Ok(token) => token,
             Err(error) => {
                 return messages::error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string());
@@ -282,16 +315,18 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         parts.uri.path().trim_end_matches('/')
     );
     let mut headers = request_headers(parts.headers);
-    if let Some(workspace) = &provider.workspace_id {
+    if provider.auth == crate::claude_auth::Auth::Console
+        && let Some(workspace) = &provider.workspace_id
+    {
         headers.insert(
             "anthropic-workspace-id",
             workspace.parse().expect("validated workspace ID"),
         );
     }
     for index in 0..2 {
-        if proxy.binding.is_none() && provider.workspace_id.is_some() {
+        if proxy.binding.is_none() && provider.auth == crate::claude_auth::Auth::Console {
             if let Err(error) = crate::claude_auth::account_identity(
-                &path,
+                path.as_ref().unwrap(),
                 &proxy.client,
                 &provider.upstream_url,
                 &token,
@@ -333,12 +368,25 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
         );
         // Authentication was rejected before generation: rotate once, never replay a started stream.
         if status == StatusCode::UNAUTHORIZED && index == 0 && proxy.binding.is_none() {
-            token = match proxy
-                .claude
-                .tokens
-                .rejected(&path, &proxy.client, token)
-                .await
-            {
+            let result = if let Some(path) = &path {
+                proxy
+                    .claude
+                    .tokens
+                    .rejected(path, &proxy.client, token)
+                    .await
+            } else {
+                proxy
+                    .service
+                    .federation
+                    .token(
+                        provider,
+                        &proxy.client,
+                        &proxy.service.credentials,
+                        Some(&token),
+                    )
+                    .await
+            };
+            token = match result {
                 Ok(token) => token,
                 Err(error) => {
                     return messages::error(StatusCode::SERVICE_UNAVAILABLE, &error.to_string());
