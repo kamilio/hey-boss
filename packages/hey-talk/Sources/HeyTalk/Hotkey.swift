@@ -97,21 +97,35 @@ enum PasteBlockReason: String {
 enum Paste {
     static let eventTag: Int64 = 0x48544C4B
     static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool,
-                        targetStillFocused: @escaping () -> Bool = { true },
+                        targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
-        let board = NSPasteboard.general
-        board.clearContents()
-        guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
-        // Never redirect a dictation into an app the user switched to while decoding.
-        send(pressEnter: pressEnter, check: { PasteBlockReason.check(trusted: AXIsProcessTrusted(),
-            targetAlive: target.map { !$0.isTerminated } ?? false,
-            targetIsSelf: target?.processIdentifier == getpid(),
-            targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
+        func check() -> PasteBlockReason? {
+            PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
+                targetIsSelf: target?.processIdentifier == getpid(),
+                targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
                 ?? (targetStillFocused() ? nil : .focusChanged)
-        }, isCurrent: isCurrent, post: post, afterPaste: { action in
-            // Let the receiving app consume the paste before sending Return.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: action)
-        }, completion: completion)
+        }
+        func paste() {
+            let board = NSPasteboard.general
+            board.clearContents()
+            guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
+            send(pressEnter: pressEnter, check: check, isCurrent: isCurrent, post: { key, flags in
+                guard let target else { return false }
+                return post(key, flags: flags, to: target.processIdentifier)
+            },
+                 afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }, completion: completion)
+        }
+        if let onWait, check() == .focusChanged {
+            let timer = Timer(timeInterval: 0.35, repeats: true) { timer in
+                guard isCurrent() else { timer.invalidate(); return }
+                guard check() != .focusChanged else { return }
+                timer.invalidate()
+                paste()
+            }
+            timer.tolerance = 0.05
+            RunLoop.main.add(timer, forMode: .common)
+            onWait(timer)
+        } else { paste() }
     }
 
     static func send(pressEnter: Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
@@ -128,14 +142,14 @@ enum Paste {
         }
     }
 
-    private static func post(_ key: CGKeyCode, flags: CGEventFlags) -> Bool {
+    private static func post(_ key: CGKeyCode, flags: CGEventFlags, to pid: pid_t) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return false }
         down.flags = flags; up.flags = flags
         down.setIntegerValueField(.eventSourceUserData, value: eventTag)
         up.setIntegerValueField(.eventSourceUserData, value: eventTag)
-        down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+        down.postToPid(pid); up.postToPid(pid)
         return true
     }
 }

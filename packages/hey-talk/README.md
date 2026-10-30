@@ -8,15 +8,21 @@ to Hyper (Control + Command + Option + Shift). Click the pill to toggle recordin
 drag to move it, or press Esc to discard. Clicking the pill follows the same
 per-app Auto Submit setting. CLI commands without `--submit` paste by default.
 
+Switch apps before the transcript is ready and the pill shows **Waiting to paste**.
+Return to the original app to paste automatically. In T3, return to the starting
+thread **and focus the original field**. Esc or × cancels the pending paste;
+starting another dictation replaces it. The transcript stays in History.
+
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to start recording, then press plain Enter to transcribe,
 paste, and submit. It starts listening again after submitting if an allowed
 input still has focus. If no speech is detected, a brief notice appears and
 listening resumes. The next plain Enter in that input passes through to the app
-without stopping recording. Shift+Enter still inserts a newline. You can move between
-allowed inputs while speaking: Enter chooses the destination. Leaving the inputs
-for more than two seconds discards the recording; shorter gaps keep it running.
+without stopping recording. Shift+Enter still inserts a newline. In T3, moving to another
+thread leaves the destination pinned. Leaving the original field for two seconds
+finishes the T3 recording. In other allowed apps, Enter still chooses the
+destination and leaving allowed inputs for two seconds discards the recording.
 Escape or turning Auto off discards immediately. After Escape, leave and refocus
 the field to resume. Hyper+R and clicking the pill still start and stop dictation;
 Hyper+E changes Auto Submit without interrupting recording.
@@ -25,8 +31,7 @@ A small three-second drawer says “Auto mode on” or “Auto mode off” when 
 Auto starts off and remembers your choice. T3 is the initial allowed app;
 its search and settings fields do not start recording. Other allowed apps use
 editable text fields, excluding password fields. Accessibility permission is
-required. A focus change during transcription keeps the result in History and
-on the clipboard instead of pasting or submitting into another field or thread.
+required. Auto waits for the destination field before pasting or submitting.
 The existing per-app Enter exceptions also apply in Auto.
 
 The floating control is a compact glass capsule with an indigo waveform mark.
@@ -280,9 +285,8 @@ or recording resumes. The guide opens the Accessibility settings page, reveals
 the installed app in Finder if it needs adding, and detects when permission is on.
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
-that permission, dictation copies to the clipboard. If focus changes while
-transcribing, it leaves the text on the clipboard and names the original app
-in the notice. `--no-paste` and file
+that permission, dictation copies to the clipboard. While waiting for focus, the clipboard stays untouched.
+The stop response reports `delivery: "waiting"`; status reports `waiting_to_paste`. `--no-paste` and file
 transcription leave the clipboard untouched. Switching from the old ad-hoc
 signature to the persistent certificate requires one final permission approval.
 Subsequent release builds keep the same certificate and app identity. If Settings
@@ -370,8 +374,8 @@ Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
 check recording starts; Escape or focus a search field and check it stops.
 Refocus, dictate, and press Enter: exactly one message should submit and the
 microphone should reopen. Move between inputs while speaking and verify the
-recording continues; leaving them for two seconds should cancel. Also check Hyper+E toggles
-Auto Submit without interrupting recording, Hyper+R respects that setting, and switching fields during transcription prevents delivery.
+recording stays pinned to its starting T3 field; return there to receive it. Also check Hyper+E toggles
+Auto Submit without interrupting recording, Hyper+R respects that setting, and switching away after paste but before Enter never submits in the new field.
 
 See [THIRD_PARTY.md](THIRD_PARTY.md) for the retained OpenWhispr, sherpa-onnx,
 ONNX Runtime, and Orukeet licenses.

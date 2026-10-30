@@ -41,25 +41,26 @@ struct FocusTrigger<T: Equatable> {
     mutating func reset() { previous = nil }
 }
 
-/// The destination follows focus while speaking, then freezes when finishing.
+/// T3 stays pinned from the start; other Auto inputs follow focus until finishing.
 /// A brief gap between inputs must not discard the ongoing utterance.
 struct AutoRecording<T: Equatable> {
     static var focusGrace: TimeInterval { 2 }
     private(set) var target: T
     private(set) var deliveryValid = true
+    let followsFocus: Bool
     private var finished = false
     private var focusMissingSince: TimeInterval?
 
-    init(target: T) { self.target = target }
+    init(target: T, followsFocus: Bool) { self.target = target; self.followsFocus = followsFocus }
     mutating func focusChanged(_ input: T?, at time: TimeInterval) {
         if finished {
-            if input != target { deliveryValid = false }
-        } else if let input {
+            if followsFocus && input != target { deliveryValid = false }
+        } else if let input, followsFocus || input == target {
             target = input; focusMissingSince = nil
         } else if focusMissingSince == nil { focusMissingSince = time }
     }
-    mutating func finish(in input: T) {
-        target = input; finished = true; focusMissingSince = nil
+    mutating func finish(in input: T?) {
+        if followsFocus, let input { target = input }; finished = true; focusMissingSince = nil
     }
     func shouldCancel(at time: TimeInterval) -> Bool {
         focusMissingSince.map { time - $0 >= Self.focusGrace } ?? false
@@ -72,47 +73,66 @@ struct FocusedInput: Equatable {
     let window: AXUIElement?
     let document: String?
 
+    let composerLabel: String?
+
+    var returnInstruction: String {
+        if let label = composerLabel, label.hasPrefix("Message ") { return "Focus \(label.dropFirst(8)) in T3" }
+        return "Focus the original field in \(app.localizedName ?? "the original app")"
+    }
+
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.app.processIdentifier == rhs.app.processIdentifier && CFEqual(lhs.element, rhs.element)
-            && equal(lhs.window, rhs.window) && lhs.document == rhs.document
+        guard lhs.app.processIdentifier == rhs.app.processIdentifier,
+              equal(lhs.window, rhs.window), lhs.document == rhs.document else { return false }
+        if CFEqual(lhs.element, rhs.element) { return lhs.composerLabel == rhs.composerLabel }
+        // T3 remounts the message editor when returning to a thread.
+        return lhs.window != nil && lhs.document != nil && lhs.composerLabel != nil && lhs.composerLabel == rhs.composerLabel
     }
     private static func equal(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
         if let lhs, let rhs { return CFEqual(lhs, rhs) }
         return lhs == nil && rhs == nil
     }
-    static func isEligible(bundleID: String, role: String, subrole: String?, enabled: Bool, editable: Bool, label: String) -> Bool {
+    static func isEligible(bundleID: String, role: String, subrole: String?, enabled: Bool, editable: Bool, label: String, forAuto: Bool) -> Bool {
         guard enabled, editable, subrole != "AXSecureTextField", ["AXTextField", "AXTextArea"].contains(role) else { return false }
         // T3's search, rename, and settings fields must not open the microphone.
-        return bundleID != "com.t3tools.t3code" || (role == "AXTextArea" && label == "Message")
+        return !forAuto || bundleID != "com.t3tools.t3code" || (role == "AXTextArea" && (label == "Message" || label.hasPrefix("Message ")))
     }
-    static func read(app: NSRunningApplication) -> Self? {
+    static func read(app: NSRunningApplication, forAuto: Bool = true) -> Self? {
         guard AXIsProcessTrusted(), let bundleID = app.bundleIdentifier else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.1)
+        if !forAuto && bundleID == "com.t3tools.t3code" {
+            AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        }
         guard let field = axElement(application, kAXFocusedUIElementAttribute) else { return nil }
         AXUIElementSetMessagingTimeout(field, 0.1)
+        let role = value(field, kAXRoleAttribute) as? String ?? ""
+        let label = value(field, kAXDescriptionAttribute) as? String ?? ""
         var editable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(field, kAXValueAttribute as CFString, &editable) == .success,
-              isEligible(bundleID: bundleID, role: value(field, kAXRoleAttribute) as? String ?? "",
+              isEligible(bundleID: bundleID, role: role,
                          subrole: value(field, kAXSubroleAttribute) as? String,
                          enabled: value(field, kAXEnabledAttribute) as? Bool ?? false, editable: editable.boolValue,
-                         label: value(field, kAXDescriptionAttribute) as? String ?? "") else { return nil }
+                         label: label, forAuto: forAuto) else { return nil }
         var ancestor: AXUIElement? = field
         var document: String?
         // Electron may keep the same editor node when navigating to another thread.
         // Include the containing document URL so that cannot redirect a transcript.
-        for _ in 0..<20 {
+        for _ in 0..<48 {
             guard let current = ancestor else { break }
             let url = value(current, kAXURLAttribute)
             if let url = url as? URL { document = url.absoluteString; break }
             if let url = url as? String { document = url; break }
             ancestor = axElement(current, kAXParentAttribute)
         }
-        return Self(app: app, element: field, window: axElement(field, kAXWindowAttribute), document: document)
+        let window = axElement(field, kAXWindowAttribute)
+        let t3 = bundleID == "com.t3tools.t3code"
+        guard !t3 || (window != nil && document?.isEmpty == false) else { return nil }
+        let composer = t3 && role == "AXTextArea" && (value(field, "AXDOMClassList") as? [String])?.contains("composer-tiptap") == true
+        return Self(app: app, element: field, window: window, document: document, composerLabel: composer && !label.isEmpty ? label : nil)
     }
     func isFocused() -> Bool {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }
-        return Self.read(app: app) == self
+        return Self.read(app: app, forAuto: false) == self
     }
     static func current(bundleIDs: [String]) -> Self? {
         guard let app = NSWorkspace.shared.frontmostApplication, bundleIDs.contains(app.bundleIdentifier ?? "") else { return nil }
