@@ -244,8 +244,55 @@ fn catalog(config: &Config) -> Value {
             models: native_models(config),
         },
     ];
+    let claude_default = config
+        .routes
+        .iter()
+        .find(|r| r.model == "*" && r.api_shape == Some(config::ApiShape::Messages))
+        .and_then(|r| r.legs.first())
+        .and_then(|leg| {
+            config
+                .accounts
+                .get(&leg.provider)
+                .map(|a| json!({"name":leg.provider,"auth":a.auth()}))
+        })
+        .or_else(|| {
+            config
+                .claude
+                .as_ref()
+                .map(|p| json!({"name":"Claude","auth":p.auth}))
+        });
+    let account_routing: serde_json::Map<String, Value> = config
+        .accounts
+        .keys()
+        .map(|name| {
+            let mut defaults = Vec::new();
+            let mut models = BTreeSet::new();
+            let mut fallback = false;
+            for route in &config.routes {
+                for (index, _) in route
+                    .legs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, leg)| &leg.provider == name)
+                {
+                    if index > 0 {
+                        fallback = true;
+                    } else if route.model == "*" {
+                        defaults.push(route.api_shape);
+                    } else {
+                        models.insert(route.model.clone());
+                    }
+                }
+            }
+            (
+                name.clone(),
+                json!({"defaults":defaults,"models":models,"fallback":fallback}),
+            )
+        })
+        .collect();
     // Construct fields explicitly: Config contains credential sources and host keys.
-    json!({"mode":config.mode,"relay":relay,"apis":apis})
+    json!({"mode":config.mode,"relay":relay,"apis":apis,
+        "routing": if relay { Value::Null } else { json!({"claude_default":claude_default,"accounts":account_routing}) }})
 }
 
 pub(super) async fn page() -> Response {
