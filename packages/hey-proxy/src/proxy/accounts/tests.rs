@@ -163,6 +163,9 @@ async fn claude_default_and_console_override_keep_separate_credentials_and_works
                     .lock()
                     .unwrap()
                     .push(json!({"path":path,"auth":auth,"workspace":workspace,"body":body}));
+                if body["model"] == "claude-unavailable" {
+                    return (StatusCode::TOO_MANY_REQUESTS, axum::Json(json!({"error":{"type":"rate_limit_error","message":"Subscription unavailable"}}))).into_response();
+                }
                 axum::Json(
                     json!({"id":"test", "type":"message", "role":"assistant", "content":[],
                 "model":body["model"], "usage":{"input_tokens":1,"output_tokens":0}}),
@@ -241,8 +244,17 @@ async fn claude_default_and_console_override_keep_separate_credentials_and_works
             .json(&json!({"model":model,"max_tokens":1,"messages":[{"role":"user","content":"hello"}]}))
             .send().await.unwrap().status(), StatusCode::OK);
     }
+    assert_eq!(client.post(format!("{relay_url}/v1/messages"))
+        .json(&json!({"model":"claude-unavailable","max_tokens":1,"messages":[{"role":"user","content":"hello"}]}))
+        .send().await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 5);
+    assert_eq!(
+        seen.len(),
+        6,
+        "Subscription failure must not retry through the workspace"
+    );
+    assert_eq!(seen[5]["auth"], seen[0]["auth"]);
+    assert!(seen[5]["workspace"].is_null());
     assert_eq!(seen[3]["auth"], seen[0]["auth"]);
     assert_eq!(seen[4]["auth"], seen[1]["auth"]);
     assert_eq!(seen[4]["workspace"], "wrkspc_example");

@@ -314,3 +314,45 @@ fn wif_account_has_no_oauth_store_and_uses_workspace_api_billing() {
         assert!(serde_json::from_value::<Config>(invalid).map_or(true, |c| c.validate().is_err()));
     }
 }
+
+#[test]
+fn overview_distinguishes_subscription_defaults_from_workspace_overrides() {
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "providers":{"claude":{}},
+        "accounts":{
+            "personal":{"implementation":"codex","auth":"subscription","credentials_file":"PRIVATE-personal.json"},
+            "workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"PRIVATE-workspace.json"}
+        },
+        "routes":[
+            {"model":"*","api_shape":"responses","legs":[{"provider":"personal"}]},
+            {"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}
+        ],
+        "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test"}}}
+    })).unwrap();
+    config.validate().unwrap();
+    let data = catalog(&config);
+    assert_eq!(
+        data["routing"]["claude_default"],
+        json!({"name":"Claude","auth":"subscription"})
+    );
+    assert_eq!(
+        data["routing"]["accounts"]["personal"],
+        json!({"defaults":["responses"],"models":[],"fallback":false})
+    );
+    assert_eq!(
+        data["routing"]["accounts"]["workspace"],
+        json!({"defaults":[],"models":["workspace-model"],"fallback":false})
+    );
+    assert!(!data.to_string().contains("PRIVATE"));
+    assert!(!data.to_string().contains("wrkspc_example"));
+    let mut without_default = config;
+    without_default.claude = None;
+    assert!(catalog(&without_default)["routing"]["claude_default"].is_null());
+    without_default.routes[1].model = "*".into();
+    assert_eq!(
+        catalog(&without_default)["routing"]["claude_default"],
+        json!({"name":"workspace","auth":"console"})
+    );
+    without_default.mode = Mode::Client;
+    assert!(catalog(&without_default)["routing"].is_null());
+}

@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  let catalog, selected, timer;
+  let catalog, selected, timer, connections = [];
   let usageBusy = false, usageAccount = null, usageGeneration = 0, accountsBusy = false;
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -9,6 +9,29 @@
     if (className) element.className = className;
     return element;
   };
+  function renderAccountRouting() {
+    const routing = catalog?.routing;
+    $('default-routing').hidden = !routing;
+    if (routing) {
+      const account = routing.claude_default;
+      const auth = {subscription:'Subscription',console:'Console workspace · API billing',wif:'Workload identity · API billing',api:'API billing'};
+      $('default-routing').textContent = account
+        ? `Claude default: ${auth[account.auth] || account.auth}${account.name === 'Claude' ? '' : ' (' + account.name + ')'}. Model overrides take precedence.`
+        : 'Claude default: Not configured. A named workspace does not become the default.';
+    }
+    const shapes = {responses:'Responses',messages:'Messages',chat_completions:'Chat Completions',completions:'Completions',gemini:'Gemini',realtime:'Realtime'};
+    for (const [index, card] of [...$('connections').children].entries()) {
+      const route = routing?.accounts?.[connections[index]?.name];
+      const note = card.querySelector('.account-routing');
+      note.hidden = !route;
+      if (!route) continue;
+      const parts = [];
+      if (route.defaults.length) parts.push('Default for ' + route.defaults.map(shape => shapes[shape] || shape).join(', '));
+      if (route.models.length) parts.push((!route.defaults.length && !route.fallback ? 'Override only: ' : 'Model overrides: ') + route.models.join(', '));
+      if (route.fallback) parts.push('Used as a configured fallback');
+      note.textContent = parts.join(' · ') || 'Explicit selection only';
+    }
+  }
   async function copy(text) {
     try {
       await navigator.clipboard.writeText(text);
@@ -78,6 +101,7 @@
       }
       if (!response.ok) throw new Error(`Could not load config (HTTP ${response.status}).`);
       catalog = await response.json();
+      renderAccountRouting();
       $('mode').textContent = `${catalog.mode.charAt(0).toUpperCase() + catalog.mode.slice(1)} mode`;
       $('updated').textContent = `Config loaded ${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
       $('api-nav').replaceChildren();
@@ -109,6 +133,7 @@
       if (!response.ok) throw new Error(response.status === 404 ? 'Named accounts require an updated proxy host.' : 'Account status unavailable. Refresh to try again.');
       const data = await response.json();
       if (data.schema_version !== 1 || !Array.isArray(data.connections)) throw new Error('Update this client to read the host’s account format.');
+      connections = data.connections;
       $('connections').replaceChildren();
       const counts = new Map();
       for (const account of data.connections) if (account.account_ref) counts.set(account.account_ref, (counts.get(account.account_ref) || 0) + 1);
@@ -120,6 +145,7 @@
         meta.append(node('span', account.auth === 'subscription' ? 'Subscription' : account.auth === 'wif' ? 'Workload identity · API billing' : account.auth === 'console' ? 'Console workspace · API billing' : 'API billing'));
         meta.append(node('span', account.ready ? 'Ready' : 'Needs sign-in or credentials', account.ready ? 'badge' : 'badge off'));
         card.append(meta);
+        card.append(node('p', '', 'note account-routing'));
         if (counts.get(account.account_ref) > 1) card.append(node('p', 'Shared subscription · limits also apply to its other aliases.', 'note'));
         const actions = node('div', undefined, 'connection-actions');
         if (account.auth === 'subscription') {
@@ -142,6 +168,7 @@
         actions.append(connection); card.append(actions); $('connections').append(card);
       }
       $('connection-status').textContent = data.connections.length ? data.connections.length + ' connections · credentials stay on the host.' : 'No named accounts configured. Default connections remain available below.';
+      renderAccountRouting();
     } catch (error) {
       $('connections').replaceChildren();
       $('connection-status').textContent = error.message;

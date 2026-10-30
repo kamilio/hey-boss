@@ -41,7 +41,7 @@ OAuth managers and refresh backoffs are indexed by canonical credential-store pa
 
 ## Claude Console workspaces
 
-Keep `providers.claude` for the default subscription and add a separate named connection for a Console workspace. Console access uses workspace API billing, not subscription quota. No API key is created.
+Keep `providers.claude` for the default subscription and add a separate named connection for a Console workspace. Console access uses workspace API billing, not subscription quota. No API key is created. The account page shows the Claude default and labels accounts used only by model overrides. Adding a workspace account does not make it a default or a fallback when the subscription fails.
 
 ```json
 {
