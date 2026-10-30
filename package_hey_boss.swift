@@ -96,6 +96,7 @@ let info: [String: Any] = [
     "CFBundleIconFile": "hey-boss.icns",
     "LSMinimumSystemVersion": "15.0",
     "NSHighResolutionCapable": true,
+    "NSMicrophoneUsageDescription": "Hear your spoken comments while you review a document.",
     // The local Issues service intentionally uses HTTP. Keep ATS for all other hosts.
     "NSAppTransportSecurity": [
         "NSExceptionDomains": [

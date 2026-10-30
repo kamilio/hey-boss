@@ -44,3 +44,23 @@ renderer/copy path. Exact, documented dialect expectations distinguish CommonMar
 behavior from poe-code's parser without dropping cases. These regressions caught
 BOM handling, carriage-return frontmatter, empty frontmatter, and non-leading
 fences incorrectly hidden as metadata; the native builder now handles them.
+
+In a saved Markdown artifact, choose **Read → Play review**. Reading starts at
+the selection and highlights each spoken word. Speak over it to leave a comment;
+after a short pause, the reader transcribes on this Mac, saves the quote and
+source line to the artifact's discussion, and continues. **Comments** shows
+the same discussion as the web. **Stop**, switching to Edit, or leaving the
+window closes the microphone. An interrupted save offers **Retry comment**
+with the same request ID. Local files and HTML previews do not offer voice review.
+
+Narration plays through the microphone's echo-cancelling audio graph. WebRTC
+analyzes 20 ms frames: bookmark the first voiced frame, pause after 160 ms,
+keep 400 ms of pre-roll, and finish after 800 ms of quiet plus WebRTC hangover.
+For comparison, [LiveKit](https://github.com/livekit/agents/blob/main/livekit-plugins/livekit-plugins-silero/livekit/plugins/silero/vad.py)
+uses 50/550 ms and [Pipecat](https://github.com/pipecat-ai/pipecat/blob/main/src/pipecat/audio/vad/vad_analyzer.py)
+uses 200/200 ms. The longer pause here lets a reviewer think mid-sentence.
+
+Run `tools/spoken_review_checks.sh /path/to/hey-boss /path/to/hey-boss-test`
+to test with synthetic microphone audio, muted playback and a disposable project.
+`HEY_BOSS_AUDIT_REVIEW_ECHO=1` on a signed audit app additionally checks real
+speaker bleed in a quiet room, only with previously granted microphone access.

@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import Foundation
 import Darwin
@@ -66,6 +67,8 @@ func audit() {
         return
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
+    if let id = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPOKEN_REVIEW"] { auditSpokenReview(id); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HTML_READER"] == "1" { auditHTMLReader(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_LIBRARY"] == "1" { auditArtifactLibrary(); return }
@@ -4112,4 +4115,95 @@ func auditSkillEditor(_ path: String) {
     }
     editor.window.close()
     print("PASS native skill editor opens, autosaves through Rust, syncs the fleet and reports success")
+}
+
+// Runs against a disposable project; narrated audio is muted and microphone
+// input is replaced with a known PCM stream at the detector boundary.
+func auditSpokenReview(_ id: String) {
+    let env = ProcessInfo.processInfo.environment, root = URL(fileURLWithPath: env["HEY_BOSS_FLEET_STATE"]!)
+    let editor = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:SpokenReview", id: id), journalRoot: root, present: false)
+    func wait(_ label: String, _ ready: () -> Bool) {
+        let deadline = Date().addingTimeInterval(30)
+        while !ready() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        precondition(ready(), "\(label): \(editor.status.stringValue)")
+    }
+    wait("load") { editor.session.ready }
+    precondition(editor.reviewButton.isHidden)
+    editor.togglePreview()
+    wait("render") { !editor.reviewButton.isHidden && editor.reviewButton.isEnabled }
+    let range = (editor.reader.string as NSString).range(of: "Second passage")
+    editor.reader.setSelectedRange(NSRange(location: range.location, length: 0))
+    let review = SpokenReview(editor); editor.review = review
+    let audio = review.audio
+    audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0
+    try! audio.engine.start()
+    var starts = 0, ends = 0
+    audio.failed = { preconditionFailure($0) }
+    audio.event = { frame in
+        if case .began = frame { starts += 1 }
+        if case .ended = frame { ends += 1 }
+        review.receive(frame)
+    }
+    let writer = try! audio.listen(cli: editor.backend.cli)
+    review.readNext()
+    wait("word progress") { review.word.location > range.location }
+    let captured = try! Data(contentsOf: root.appendingPathComponent("voice.pcm"))
+    DispatchQueue.global().async {
+        for part in [Data(count: 9600), captured, Data(count: 38400)] {
+            for start in stride(from: 0, to: part.count, by: 640) {
+                try! writer.write(contentsOf: part[start..<min(start + 640, part.count)])
+                Thread.sleep(forTimeInterval: 0.018)
+            }
+        }
+    }
+    wait("interrupt") { review.holding }
+    let frozen = review.word
+    precondition(review.line == 4 && !audio.player.isPlaying)
+    wait("endpoint") { ends == 1 }
+    precondition(starts == 1 && review.word == frozen && !audio.player.isPlaying)
+    wait("submit and resume") { !review.holding && audio.player.isPlaying }
+    precondition(!FileManager.default.fileExists(atPath: editor.spokenDraft.path))
+    wait("highlight resumes") { review.word != frozen }
+    editor.togglePreview()
+    precondition(audio.stopped && editor.review == nil && editor.reviewButton.isHidden)
+    print("PASS spoken review: detected onset and endpoint, paused highlight, on-device transcription, shared comment save, resumed and stopped")
+
+    // Simulate losing the reply after the server committed a second comment.
+    // Reopening must offer a retry and must not duplicate that discussion.
+    let pending = SpokenComment(requestID: UUID().uuidString, id: id, line: 4, version: 1, quote: "Second passage", text: "Keep this quote.")
+    try! JSONEncoder().encode(pending).write(to: editor.spokenDraft, options: .atomic)
+    var committed = false
+    editor.backend.request(["--request-id", pending.requestID, "rpc"], body: try! pending.operation) { result in
+        _ = try! result.get(); committed = true
+    }
+    wait("uncertain submission") { committed }
+    let reopened = NativeArtifactEditor(launch: editor.session.launch, journalRoot: root, present: false)
+    wait("reopen") { reopened.pendingSpoken != nil }
+    reopened.togglePreview()
+    wait("retry available") { reopened.reviewButton.isEnabled && reopened.reviewButton.title == "Retry comment" }
+    reopened.playReview()
+    wait("retry acknowledged") { reopened.pendingSpoken == nil }
+    precondition(reopened.review == nil && !FileManager.default.fileExists(atPath: reopened.spokenDraft.path))
+    print("PASS uncertain comment recovered and retried without reopening the microphone")
+}
+
+// Opt-in acoustic check: no permission prompts, transcription, files, or posts.
+func auditReviewEcho() {
+    guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+        print("SKIP physical echo test: this app does not have microphone permission."); exit(77)
+    }
+    let audio = ReviewAudio()
+    var interruptions = 0, done = false
+    audio.event = { if case .began = $0 { interruptions += 1 } }
+    audio.failed = { preconditionFailure($0) }
+    try! audio.start(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!) {
+        audio.speak("This is a speaker echo check. The reader should continue when only its own voice is audible.", highlight: { _ in }, finished: { done = true })
+    }
+    let deadline = Date().addingTimeInterval(20)
+    while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    RunLoop.current.run(until: Date().addingTimeInterval(1))
+    audio.stop()
+    precondition(done && interruptions == 0, "Playback finished: \(done); detected interruptions: \(interruptions)")
+    print("PASS physical playback did not trigger the microphone detector")
 }
