@@ -1,6 +1,6 @@
 ---
 name: hey-boss
-description: Background notifications, project issues and documents, worker coordination, and secrets kept out of agent context.
+description: Configured utilities, project issues and documents, notifications, worker coordination, and private credentials.
 ---
 
 # Hey Boss
@@ -8,6 +8,8 @@ description: Background notifications, project issues and documents, worker coor
 Use `hey-boss COMMAND --help` for options. Commands default to readable text;
 use `--json` when available for structured results. Issue commands default to the
 current checkout's project; use `--project FULL_ID` to select another.
+
+List configured utilities with `hey-boss utils list [PREFIX]`; run one with `hey-boss utils NAME [ARGS...]`. For Poe email verification, use the installed `poe-login` skill.
 
 Change prompts only when the user explicitly requests a prompt change; task or queue instructions do not authorize changing prompts.
 
@@ -20,7 +22,7 @@ Add `--issue NUMBER` to link the current project's issue; use
 
 ## Secrets
 
-Use only `hey-boss notif secret`, never chat/ordinary prompts. Never inspect/screenshot the window or read, print, diff, or index the destination. Synthetic test values only.
+Check existing grants with `hey-boss secrets list` (metadata only). For a missing synthetic test secret, use `hey-boss notif secret`, never chat/ordinary prompts. Never inspect/screenshot the window or read, print, diff, or index the destination. Synthetic test values only.
 
 ```sh
 hey-boss notif secret --field API_KEY --env-file .env
