@@ -16,6 +16,7 @@ mod lookup_cli;
 mod notif_cli;
 mod project_cli;
 mod proxy_cli;
+mod review_audio;
 mod secret_cli;
 mod secrets_cli;
 #[cfg(test)]
@@ -267,6 +268,8 @@ enum Command {
         action: BrowserAction,
     },
     #[command(hide = true)]
+    ReviewAudio,
+    #[command(hide = true)]
     RenderMarkdown {
         input: std::path::PathBuf,
         output: std::path::PathBuf,
@@ -470,6 +473,12 @@ fn run() -> std::io::Result<()> {
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
+        Command::ReviewAudio => {
+            return review_audio::stream(
+                std::io::stdin().lock(),
+                std::io::BufWriter::new(std::io::stdout().lock()),
+            );
+        }
         Command::Utils(action) => return utils_cli::run(action, &git_args),
         Command::Admin(options) => return admin_cli::run(options),
         Command::Skill(options) => return admin_cli::skill(options),
