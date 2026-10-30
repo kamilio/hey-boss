@@ -118,7 +118,7 @@ def install(binary, source_config, base_url, codex_home="", model=""):
             config['providers']['gemini']['api_key'] = secret
     prepared = (json.dumps(config, indent=2) + '\n').encode()
     # stdin avoids another plaintext candidate config or secret process argument.
-    run(str(binary), '--config', '/dev/stdin', 'check-credentials', input=prepared, capture_output=True)
+    run(str(binary), '--config', '/dev/stdin', 'check-credentials', '--sources-only', input=prepared, capture_output=True)
     profile = deployment.get('gemini_profile')
     if profile:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

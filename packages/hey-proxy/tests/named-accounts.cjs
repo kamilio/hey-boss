@@ -18,21 +18,27 @@ const path = require('node:path');
     browser = await chromium.launch({channel:"chrome",headless:true});
     const page = await browser.newPage({viewport:{width:1440,height:1080}});
     const errors=[]; page.on('pageerror', e => errors.push(e.message));
-    const catalog={mode:'standalone',relay:false,apis:[{id:'responses',name:'Responses',description:'Connect clients using the Responses API.',configured:true,base_path:'/v1',routes:[['POST','/v1/responses','Create a response']],models:[]}]};
+    const catalog={mode:'standalone',relay:false,routing:{claude_default:{name:'Claude',auth:'subscription'},accounts:{'codex-personal':{defaults:['responses'],models:[],fallback:false},workspace:{defaults:[],models:['workspace-model'],fallback:false}}},apis:[{id:'responses',name:'Responses',description:'Connect clients using the Responses API.',configured:true,base_path:'/v1',routes:[['POST','/v1/responses','Create a response']],models:[]}]};
     let status=200;
     let connections=[
       {name:'codex-personal',implementation:'codex',auth:'subscription',ready:true,account_ref:'acct_synthetic_one'},
       {name:'codex-work',implementation:'codex',auth:'subscription',ready:true,account_ref:'acct_synthetic_two'},
       {name:'codex-personal-alias',implementation:'codex',auth:'subscription',ready:true,account_ref:'acct_synthetic_one'},
       {name:'claude-personal',implementation:'claude',auth:'subscription',ready:false,account_ref:null},
-      {name:'ultima',implementation:'openai',auth:'api',ready:true,account_ref:'acct_synthetic_api'}
+      {name:'ultima',implementation:'openai',auth:'api',ready:true,account_ref:'acct_synthetic_api'},
+      {name:'workspace',implementation:'claude',auth:'console',ready:true,account_ref:'acct_synthetic_workspace'}
     ];
     await page.route('**/overview/api',r=>r.fulfill({json:catalog}));
     await page.route('**/providers/v1',r=>r.fulfill({status,json:{schema_version:1,connections}}));
     await page.route('**/usage/v1/**',r=>r.fulfill({json:{state:'stale',updated_at:1790800000,error:'Rate limited; waiting before retrying',data:{windows:[{label:'Session · 5 hours',used_percent:93,remaining_percent:7,resets_at:null},{label:'Weekly',used_percent:null,remaining_percent:null,resets_at:null}]}}}));
     await page.goto(`http://127.0.0.1:${server.address().port}/apis`);
     await page.getByRole('button',{name:'View limits for codex-work',exact:true}).waitFor();
-    assert.equal(await page.locator('.connection-card').count(),5);
+    assert.equal(await page.locator('.connection-card').count(),6);
+    await page.getByText('Claude default: Subscription. Model overrides take precedence.',{exact:true}).waitFor();
+    await page.getByText('Default for Responses',{exact:true}).waitFor();
+    await page.getByText('Override only: workspace-model',{exact:true}).waitFor();
+    assert.match(await page.locator('.connection-card').filter({has:page.getByRole('heading',{name:'codex-personal',exact:true})}).innerText(), /Codex/);
+    assert.equal(await page.getByRole('button',{name:'View limits for workspace',exact:true}).count(),0);
     assert.equal(await page.getByText('Shared subscription · limits also apply to its other aliases.',{exact:true}).count(),2);
     assert(await page.getByRole('button',{name:'View limits for claude-personal',exact:true}).isDisabled());
     await page.getByRole('button',{name:'View limits for codex-work',exact:true}).click();
@@ -51,6 +57,9 @@ const path = require('node:path');
     await page.locator('#refresh-accounts').focus();
     assert.equal(await page.evaluate(()=>document.activeElement.id),'refresh-accounts');
     await page.keyboard.press('Enter');
+    catalog.routing.claude_default=null;
+    await page.getByRole('button',{name:'Refresh config',exact:true}).click();
+    await page.getByText('Claude default: Not configured. A named workspace does not become the default.',{exact:true}).waitFor();
     connections=[{name:'a'.repeat(128),implementation:'codex',auth:'subscription',ready:false,account_ref:null}];
     await page.getByRole('button',{name:'Refresh accounts',exact:true}).click();
     await page.getByRole('heading',{name:'a'.repeat(128),exact:true}).waitFor();

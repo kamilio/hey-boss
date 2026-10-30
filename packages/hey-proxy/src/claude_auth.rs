@@ -1,5 +1,6 @@
 //! Proxy-owned Claude OAuth credentials. Never reads or writes Claude Code's login.
 mod cache;
+pub(crate) mod wif;
 use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -24,14 +25,41 @@ use tokio::sync::Mutex;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const CONSOLE_CLIENT_ID: &str = "41077d10-94b8-4194-be48-d251e9eb21b4";
+const CONSOLE_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
 const REDIRECT: &str = "http://localhost:54545/callback";
 const SCOPES: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 const AAD: &[u8] = b"hey-proxy Claude OAuth v1";
 const MAX_BYTES: u64 = 1024 * 1024;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Auth {
+    #[default]
+    Subscription,
+    Console,
+    Wif,
+}
+impl Auth {
+    fn client_id(self) -> &'static str {
+        match self {
+            Self::Subscription => CLIENT_ID,
+            Self::Console | Self::Wif => CONSOLE_CLIENT_ID,
+        }
+    }
+    fn token_url(self) -> &'static str {
+        match self {
+            Self::Subscription => TOKEN_URL,
+            Self::Console | Self::Wif => CONSOLE_TOKEN_URL,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Tokens {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     pub access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
@@ -200,11 +228,22 @@ async fn exchange(
     body: Value,
     previous: Option<&Tokens>,
 ) -> Result<Tokens> {
-    let mut response = client
+    let console = body["client_id"] == CONSOLE_CLIENT_ID;
+    let request = client
         .post(endpoint)
         .timeout(Duration::from_secs(30))
-        .header("accept", "application/json")
-        .json(&body)
+        .header("accept", "application/json");
+    // Console authorization uses form encoding; refresh uses JSON and the OAuth beta.
+    let request = if console && body["grant_type"] == "authorization_code" {
+        request.form(&body)
+    } else if console {
+        request
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .json(&body)
+    } else {
+        request.json(&body)
+    };
+    let mut response = request
         .send()
         .await
         .map_err(|_| anyhow::anyhow!("Cannot reach Claude OAuth token endpoint"))?;
@@ -248,12 +287,32 @@ async fn exchange(
         .as_u64()
         .filter(|n| *n > 0 && *n <= 366 * 86400)
         .context("Invalid Claude OAuth token lifetime")?;
+    let workspace_id = value
+        .pointer("/workspace/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| previous.and_then(|p| p.workspace_id.clone()));
+    let account_id = value
+        .pointer("/organization/uuid")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| previous.and_then(|p| p.account_id.clone()));
+    if console {
+        ensure!(
+            workspace_id.as_deref().is_some_and(|id| !id.is_empty())
+                && account_id.as_deref().is_some_and(|id| !id.is_empty()),
+            "Console OAuth did not return a workspace and organization binding"
+        );
+        if let Some(previous) = previous {
+            ensure!(
+                previous.workspace_id == workspace_id && previous.account_id == account_id,
+                "Console OAuth workspace or organization changed; sign in again"
+            );
+        }
+    }
     Ok(Tokens {
-        account_id: value
-            .pointer("/organization/uuid")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| previous.and_then(|p| p.account_id.clone())),
+        workspace_id: if console { workspace_id } else { None },
+        account_id,
         access_token: access.into(),
         refresh_token: refresh.into(),
         expires_at: now().saturating_add(expires),
@@ -268,7 +327,7 @@ pub(crate) struct TokenManager {
 }
 impl TokenManager {
     pub async fn token(&self, path: &Path, client: &reqwest::Client) -> Result<String> {
-        self.obtain(path, client, None, TOKEN_URL).await
+        self.obtain(path, client, None, None).await
     }
     pub async fn rejected(
         &self,
@@ -276,21 +335,21 @@ impl TokenManager {
         client: &reqwest::Client,
         token: String,
     ) -> Result<String> {
-        self.obtain(path, client, Some(token), TOKEN_URL).await
+        self.obtain(path, client, Some(token), None).await
     }
     async fn obtain(
         &self,
         path: &Path,
         client: &reqwest::Client,
         rejected: Option<String>,
-        endpoint: &str,
+        endpoint: Option<&str>,
     ) -> Result<String> {
         if let Some(cached) = self.cache.get(path, rejected.as_deref()) {
             return cached;
         }
         let path = path.to_owned();
         let client = client.clone();
-        let endpoint = endpoint.to_owned();
+        let endpoint = endpoint.map(str::to_owned);
         let backoff = self.backoff.clone();
         let cache = self.cache.clone();
         // Finish rotating-token exchanges and durable saves even if the caller
@@ -313,8 +372,10 @@ impl TokenManager {
             if gate.as_ref().is_some_and(|(p, until)| p == &path && *until > Instant::now()) {
                 bail!("Claude OAuth refresh is cooling down; retry shortly or run hey-proxy claude-login");
             }
-            let body = json!({"grant_type":"refresh_token","refresh_token":tokens.refresh_token,"client_id":CLIENT_ID});
-            let fresh = match exchange(&client, &endpoint, body, Some(&tokens)).await {
+            let auth = if tokens.workspace_id.is_some() { Auth::Console } else { Auth::Subscription };
+            let endpoint = endpoint.as_deref().unwrap_or(auth.token_url());
+            let body = json!({"grant_type":"refresh_token","refresh_token":tokens.refresh_token,"client_id":auth.client_id()});
+            let fresh = match exchange(&client, endpoint, body, Some(&tokens)).await {
                 Ok(fresh) => fresh,
                 Err(error) => { *gate = Some((path, Instant::now() + Duration::from_secs(30))); return Err(error); }
             };
@@ -327,19 +388,39 @@ impl TokenManager {
     }
 }
 
-fn authorization_url(state: &str, verifier: &str) -> Result<url::Url> {
-    let mut url = url::Url::parse("https://claude.ai/oauth/authorize")?;
+fn authorization_url(state: &str, verifier: &str, workspace: Option<&str>) -> Result<url::Url> {
+    let auth = if workspace.is_some() {
+        Auth::Console
+    } else {
+        Auth::Subscription
+    };
+    let mut url = url::Url::parse(if workspace.is_some() {
+        "https://platform.claude.com/oauth/authorize"
+    } else {
+        "https://claude.ai/oauth/authorize"
+    })?;
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     url.query_pairs_mut().extend_pairs([
-        ("code", "true"),
-        ("client_id", CLIENT_ID),
+        ("client_id", auth.client_id()),
         ("response_type", "code"),
         ("redirect_uri", REDIRECT),
-        ("scope", SCOPES),
+        (
+            "scope",
+            if workspace.is_some() {
+                "user:profile user:inference user:developer"
+            } else {
+                SCOPES
+            },
+        ),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),
         ("state", state),
     ]);
+    if let Some(workspace) = workspace {
+        url.query_pairs_mut().append_pair("workspace_id", workspace);
+    } else {
+        url.query_pairs_mut().append_pair("code", "true");
+    }
     Ok(url)
 }
 
@@ -387,6 +468,10 @@ pub(crate) async fn login(
 ) -> Result<()> {
     let provider = config.claude.clone().unwrap_or_default();
     ensure!(
+        provider.auth != Auth::Wif,
+        "WIF uses the workload identity source; browser login is not required"
+    );
+    ensure!(
         config.mode != crate::config::Mode::Client,
         "Sign in on the proxy host, not a client relay"
     );
@@ -398,7 +483,7 @@ pub(crate) async fn login(
         .context("Cannot bind Claude OAuth callback on port 54545")?;
     let state = URL_SAFE_NO_PAD.encode(random::<32>()?);
     let verifier = URL_SAFE_NO_PAD.encode(random::<32>()?);
-    let url = authorization_url(&state, &verifier)?;
+    let url = authorization_url(&state, &verifier, provider.workspace_id.as_deref())?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let app = axum::Router::new()
         .route("/callback", axum::routing::get(callback))
@@ -428,10 +513,20 @@ pub(crate) async fn login(
         .context("Claude sign-in callback closed")??;
     let _lock = lock(&path).await?;
     let client = crate::proxy::build_client(config)?;
-    let tokens = exchange(&client, TOKEN_URL, json!({"grant_type":"authorization_code","code":code,"redirect_uri":REDIRECT,"client_id":CLIENT_ID,"code_verifier":verifier,"state":state}), None).await?;
+    let tokens = exchange(&client, provider.auth.token_url(), json!({"grant_type":"authorization_code","code":code,"redirect_uri":REDIRECT,"client_id":provider.auth.client_id(),"code_verifier":verifier,"state":state}), None).await?;
+    ensure!(
+        tokens.workspace_id == provider.workspace_id,
+        "Console signed in to a different workspace; credentials were not saved"
+    );
     crate::config::accounts::owned_store(&path)?;
     save(&path, &tokens)?;
-    println!("Claude subscription connected. hey-proxy owns and refreshes these credentials.");
+    if let Some(workspace) = &tokens.workspace_id {
+        println!(
+            "Claude Console workspace {workspace} connected. hey-proxy owns and refreshes these credentials."
+        );
+    } else {
+        println!("Claude subscription connected. hey-proxy owns and refreshes these credentials.");
+    }
     if config.claude.is_none() {
         println!("Enable it in your proxy config: \"providers\": {{\"claude\": {{}}}}");
     }
@@ -448,6 +543,7 @@ pub(crate) async fn account_identity(
     client: &reqwest::Client,
     endpoint: &str,
     token: &str,
+    workspace: Option<&str>,
 ) -> Result<String> {
     let disk = path.to_owned();
     let stored = tokio::task::spawn_blocking(move || load(&disk)).await??;
@@ -455,6 +551,17 @@ pub(crate) async fn account_identity(
         stored.access_token == token,
         "Account credentials changed; retry selection"
     );
+    ensure!(
+        stored.workspace_id.as_deref() == workspace,
+        "Claude credential workspace does not match the configured account; sign in again"
+    );
+    if let Some(workspace) = workspace {
+        let org = stored
+            .account_id
+            .filter(|id| !id.is_empty())
+            .context("Console organization identity unavailable; sign in again")?;
+        return Ok(format!("console:{org}:{workspace}"));
+    }
     if let Some(id) = stored.account_id.filter(|id| !id.is_empty()) {
         return Ok(id);
     }

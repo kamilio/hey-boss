@@ -610,3 +610,32 @@ fn routing_diagnostic_is_offline_redacted_and_does_not_rewrite_profiles() {
     );
     assert!(!missing.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn rollout_preflight_accepts_unenrolled_console_accounts_without_creating_stores() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    for sources_only in [true, false] {
+        let mut command = cli(dir.path());
+        command.args(["--config", "/dev/stdin", "check-credentials"]);
+        if sources_only {
+            command.arg("--sources-only");
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(br#"{"listen":"127.0.0.1:8080","account_schema_version":1,"accounts":{"workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"workspace.json"}}}"#).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert_eq!(
+            result.status.success(),
+            sources_only,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}

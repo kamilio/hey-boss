@@ -38,3 +38,49 @@ Codex subscription connections accept the Responses API; Claude subscriptions ac
 Legacy `providers.codex`, `providers.claude`, `providers.openai` and top-level OpenAI fields retain their endpoints, paths, aliases and default behavior. The deterministic compatibility adapter maps their default credential stores into the same path-indexed runtime registry; no credential files are moved or CLI logins changed. Named connections are opt-in and never become the default by insertion order. Config serialization retains all named definitions and the account schema version. Reload validates a complete config and publishes one immutable snapshot; invalid edits retain the last valid config.
 
 OAuth managers and refresh backoffs are indexed by canonical credential-store path, not by implementation singleton. Different stores never share mutable tokens. Quota readings and rate-limit cooldowns are shared by opaque provider-reported subscription identity, including aliases using independently stored tokens. The host's private `.credentials.key` makes references stable across restarts; preserve it with the encrypted stores. API key rotation changes its connection reference. Quota readings remain in-memory caches and refresh after service restart.
+
+## Claude Console workspaces
+
+Keep `providers.claude` for the default subscription and add a separate named connection for a Console workspace. Console access uses workspace API billing, not subscription quota. No API key is created. The account page shows the Claude default and labels accounts used only by model overrides. Adding a workspace account does not make it a default or a fallback when the subscription fails.
+
+```json
+{
+  "providers": {"claude": {}},
+  "account_schema_version": 1,
+  "accounts": {
+    "workspace": {"implementation":"claude", "auth":"console", "workspace_id":"wrkspc_YOUR_WORKSPACE", "credentials_file":"workspace.claude.json"}
+  },
+  "routes": [{"model":"workspace", "api_shape":"messages", "legs":[{"provider":"workspace", "override":"model"}]}],
+  "overrides": {"workspace":{"model":{"from":"workspace", "to":"YOUR_PROVISIONED_MODEL_ID"}}}
+}
+```
+
+Merge these fields with your existing accounts and routes. Run `hey-proxy claude-login --account workspace`, authorize the workspace in the browser, then use `workspace` as the Messages model. Ordinary Claude model names retain the default login. `hey-proxy resolve-route workspace --path /v1/messages` checks the mapping; `hey-proxy check-credentials` checks enrollment. A route does not grant access to a model: the workspace must already have access.
+
+Login and refresh use the [official Anthropic CLI OAuth flow](https://github.com/anthropics/anthropic-cli/blob/main/pkg/cmd/cmd_auth.go), with workspace and organization binding retained in the encrypted store. Refresh cannot switch that binding. Console accounts do not call subscription quota endpoints.
+
+## Multiple servers
+
+`hey-proxy rollout` distributes named account definitions, model routes and overrides to standalone/host servers. Relative stores resolve beside each server's config. OAuth stores and encryption keys are never copied: each independent server requires its own login. For interactive use, forward local port 54545 to the target server, then run `hey-proxy claude-login --account workspace --no-browser` there and open its URL locally. Keep the tunnel until login completes.
+
+Client relays hold no provider credentials or routing policy. Enroll once on their host; all its relays use the same host-owned account selection and model overrides. Do not copy one rotating refresh token to independent servers.
+
+For unattended workloads, use [Workload Identity Federation](https://platform.claude.com/docs/en/manage-claude/workload-identity-federation). AWS uses regional STS `GetWebIdentityToken`, an enabled outbound-federation account setting, and an IAM role allowed to call that API. Bind the exact role to a service account in the target workspace. See [Anthropic's AWS setup](https://platform.claude.com/docs/en/manage-claude/wif-providers/aws) and [official SDK federation provider](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/lib/credentials/oidc-federation.ts). The SDK re-exchanges a fresh identity token at expiry; federation grants have no refresh token. Use a separate named connection with `auth: "wif"` for these jobs:
+
+```json
+"workload": {
+  "implementation": "claude",
+  "auth": "wif",
+  "workspace_id": "wrkspc_YOUR_WORKSPACE",
+  "federation": {
+    "organization_id": "YOUR_ORGANIZATION_ID",
+    "service_account_id": "svac_YOUR_SERVICE_ACCOUNT",
+    "federation_rule_id": "fdrl_YOUR_RULE",
+    "identity_token": "sh:///usr/local/bin/aws sts get-web-identity-token --region us-east-1 --audience https://api.anthropic.com --signing-algorithm RS256 --duration-seconds 900 --query WebIdentityToken --output text"
+  }
+}
+```
+
+Choose the AWS CLI path and regional STS endpoint for your servers. Each server uses its own ambient IAM credentials. The proxy caches the exchanged token in memory, re-exchanges before expiry or after rejection, and never writes a federation refresh-token store. Exchange failures back off and never fall through to a browser account. A protected `file:///absolute/path/to/jwt` also works when an identity provider rotates that file; it must be a regular file owned by the proxy user with mode 0600. JWT sources are read again at each exchange, not copied by rollout.
+
+Route jobs to `workload` using the same `routes` and `overrides` contract as browser accounts. Config rollout supports accounts that have not yet been enrolled; run `check-credentials` on the destination afterward to verify browser enrollment or the live WIF exchange. WIF issuer/rule/service-account setup must be completed before that check can succeed.

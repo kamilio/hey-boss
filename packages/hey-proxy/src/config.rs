@@ -994,6 +994,50 @@ mod tests {
     }
 
     #[test]
+    fn claude_console_account_preserves_default_and_scopes_overrides() {
+        let raw = serde_json::json!({"listen":"127.0.0.1:8080", "account_schema_version":1,
+            "providers":{"claude":{}},
+            "accounts":{"workspace":{"implementation":"claude","auth":"console",
+                "workspace_id":"wrkspc_example","credentials_file":"workspace.claude.json"}},
+            "routes":[{"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}],
+            "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test-model"}}}
+        });
+        let config: Config = serde_json::from_value(raw.clone()).unwrap();
+        config.validate().unwrap();
+        assert!(config.claude.as_ref().unwrap().credentials_file.is_none());
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["accounts"],
+            raw["accounts"]
+        );
+        let config = std::sync::Arc::new(config);
+        let plan = config
+            .route_plan("workspace-model", "/v1/messages", None)
+            .unwrap();
+        let (_, resolved) = plan.select(0).unwrap();
+        assert_eq!(resolved.provider, "workspace");
+        assert_eq!(resolved.upstream_model, "claude-test-model");
+        assert_eq!(resolved.billing_mode, routes::BillingMode::PayPerToken);
+        assert!(
+            config
+                .route_plan("claude-sonnet-5-5", "/v1/messages", None)
+                .is_none()
+        );
+        for workspace in [
+            serde_json::Value::Null,
+            serde_json::json!("default"),
+            serde_json::json!("wrkspc_bad\nheader"),
+        ] {
+            let mut invalid = raw.clone();
+            invalid["accounts"]["workspace"]["workspace_id"] = workspace;
+            assert!(
+                serde_json::from_value::<Config>(invalid)
+                    .and_then(|c| c.validate().map_err(serde::de::Error::custom))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn named_accounts_roundtrip_and_reject_invalid_connections() {
         let raw = serde_json::json!({"listen":"127.0.0.1:8080", "account_schema_version":1,
         "accounts": {
