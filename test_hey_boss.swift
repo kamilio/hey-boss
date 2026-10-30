@@ -4193,6 +4193,29 @@ func auditSpokenReview(_ id: String) {
     wait("retry acknowledged") { reopened.pendingSpoken == nil }
     precondition(reopened.review == nil && !FileManager.default.fileExists(atPath: reopened.spokenDraft.path))
     print("PASS uncertain comment recovered and retried without reopening the microphone")
+
+    // Playback can deliver its last sample between first voice and confirmed onset.
+    // Reproduce both possible callback orders at that boundary.
+    for candidateFirst in [true, false] {
+        let last = (reopened.reader.string as NSString).range(of: "Final passage.")
+        let ending = SpokenReview(reopened); reopened.review = ending
+        ending.phrase = last; ending.word = last; ending.position = NSMaxRange(last)
+        if candidateFirst { ending.receive(.candidate) }
+        ending.readNext()
+        if !candidateFirst { ending.receive(.candidate) }
+        ending.receive(.began)
+        precondition(!ending.audio.stopped && ending.holding && ending.anchor?.line == 6, "A last-word interruption must retain the final source line")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        precondition(!ending.audio.stopped, "The end-of-document timer must not discard a confirmed comment")
+        ending.resume()
+        wait("finish after final comment") { reopened.review == nil }
+    }
+    let silent = SpokenReview(reopened); reopened.review = silent
+    silent.phrase = (reopened.reader.string as NSString).range(of: "Final passage.")
+    silent.position = NSMaxRange(silent.phrase)
+    silent.readNext()
+    wait("close microphone at silent ending") { reopened.review == nil }
+    print("PASS final-line interruption and silent completion")
 }
 
 // Opt-in acoustic check: no permission prompts, transcription, files, or posts.
