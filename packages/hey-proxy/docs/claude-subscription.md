@@ -1,5 +1,7 @@
 # Claude subscription
 
+For additional subscriptions, Console workspace login, WIF and model overrides, see [named provider accounts](named-accounts.md).
+
 hey-proxy owns an independent Claude OAuth login, encrypted token storage, and automatic refresh. Claude Code only receives the proxy base URL and a local token. No Claude Code credential files or Keychain entries are read or changed.
 
 ## Setup
@@ -37,7 +39,7 @@ Open **http://127.0.0.1:8080/** for RPM and estimated spend today, this week, an
 
 ## Transport and limits
 
-- `POST /v1/messages`: native Anthropic JSON and SSE, including tools, thinking signatures, cache controls and feature headers. Request bodies and response chunks pass through unchanged. Native Claude requests do not apply model aliases or cross-provider fallbacks.
+- `POST /v1/messages`: native Anthropic JSON and SSE, including tools, thinking signatures, cache controls and feature headers. Request bodies and response chunks pass through unchanged. The default native route does not apply legacy model aliases. Explicit named-account routes support model overrides.
 - `POST /v1/messages/count_tokens`: native Anthropic token counting.
 - `GET /usage/v1/accounts`: configured provider/account aliases; no provider fetch or OAuth-store access.
 - `GET /usage/v1/{provider}/{account}`: versioned, typed subscription quota and extra-spend reading. Currently `claude/default`.

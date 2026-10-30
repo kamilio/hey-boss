@@ -93,6 +93,7 @@ final class CorrectionTests: XCTestCase {
         XCTAssertLessThanOrEqual(request.timeoutInterval, 8)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         XCTAssertEqual(body["model"] as? String, "gpt-6-luna")
+        XCTAssertEqual(body["service_tier"] as? String, "priority")
         XCTAssertEqual((body["reasoning"] as? [String: String])?["effort"], "none")
         XCTAssertEqual(body["store"] as? Bool, false)
         let input = try XCTUnwrap(body["input"] as? String)

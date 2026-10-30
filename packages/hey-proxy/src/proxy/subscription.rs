@@ -22,7 +22,12 @@ fn failure(status: StatusCode, code: &str, message: &str) -> Response {
 
 pub(crate) fn configured_accounts(config: &Config, source: Option<&Path>) -> Vec<Account> {
     let mut list = Vec::new();
-    if claude::is_enabled(config, source) {
+    if claude::is_enabled(config, source)
+        && config
+            .claude
+            .as_ref()
+            .is_none_or(|p| p.auth == crate::claude_auth::Auth::Subscription)
+    {
         list.push(Account {
             provider: "claude".into(),
             id: "default".into(),
@@ -84,7 +89,7 @@ pub(crate) fn deduplicate_accounts(
                 Some(AccountConfig::Claude {
                     credentials_file, ..
                 }) if provider == "claude" => claude::ProviderConfig {
-                    credentials_file: Some(credentials_file.clone()),
+                    credentials_file: credentials_file.clone(),
                     ..Default::default()
                 }
                 .credentials_path(source),
@@ -126,7 +131,7 @@ pub(crate) async fn account_usage(
             .config
             .accounts
             .get(account)
-            .is_some_and(|a| a.implementation() == provider)
+            .is_some_and(|a| a.implementation() == provider && a.auth() == "subscription")
         {
             return Err((
                 StatusCode::NOT_FOUND,

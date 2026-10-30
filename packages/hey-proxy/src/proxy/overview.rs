@@ -132,6 +132,34 @@ fn native_models(config: &Config) -> Vec<Model> {
         .collect()
 }
 
+fn claude_models(config: &Config) -> Vec<Model> {
+    config
+        .routes
+        .iter()
+        .filter(|route| {
+            route.model != "*"
+                && route
+                    .api_shape
+                    .is_none_or(|shape| shape == config::ApiShape::Messages)
+        })
+        .filter_map(|route| {
+            let routes: Vec<_> = (0..route.legs.len())
+                .filter_map(|index| {
+                    let leg = route.resolve(config, index, &route.model, None).ok()?;
+                    (leg.implementation == "claude").then_some(ModelRoute {
+                        target: leg.upstream_model,
+                        when: leg.provider,
+                    })
+                })
+                .collect();
+            (!routes.is_empty()).then_some(Model {
+                id: route.model.clone(),
+                routes,
+            })
+        })
+        .collect()
+}
+
 fn catalog(config: &Config) -> Value {
     let relay = config.mode == Mode::Client;
     let openai = !relay && !config.api_keys.is_empty();
@@ -139,8 +167,8 @@ fn catalog(config: &Config) -> Value {
     let apis = vec![
         Api {
             id: "claude",
-            name: "Claude subscription",
-            description: "Native Claude Code Messages with proxy-owned subscription login and automatic token refresh. Model names, tools and signed content pass through unchanged. Aliases do not apply to this native route.",
+            name: "Claude",
+            description: "Native Messages with separate subscription logins, Console workspace logins or workload identity. Configured model routes select an account and apply its override. Other model names use the default Claude login.",
             base_path: "",
             routes: vec![
                 ("POST", "/v1/messages", "Native JSON or SSE"),
@@ -151,8 +179,13 @@ fn catalog(config: &Config) -> Value {
                     "Subscription limits and reset times",
                 ),
             ],
-            configured: !relay && config.claude.is_some(),
-            models: Vec::new(),
+            configured: !relay
+                && (config.claude.is_some()
+                    || config
+                        .accounts
+                        .values()
+                        .any(|a| a.implementation() == "claude")),
+            models: claude_models(config),
         },
         Api {
             id: "responses",
@@ -211,8 +244,55 @@ fn catalog(config: &Config) -> Value {
             models: native_models(config),
         },
     ];
+    let claude_default = config
+        .routes
+        .iter()
+        .find(|r| r.model == "*" && r.api_shape == Some(config::ApiShape::Messages))
+        .and_then(|r| r.legs.first())
+        .and_then(|leg| {
+            config
+                .accounts
+                .get(&leg.provider)
+                .map(|a| json!({"name":leg.provider,"auth":a.auth()}))
+        })
+        .or_else(|| {
+            config
+                .claude
+                .as_ref()
+                .map(|p| json!({"name":"Claude","auth":p.auth}))
+        });
+    let account_routing: serde_json::Map<String, Value> = config
+        .accounts
+        .keys()
+        .map(|name| {
+            let mut defaults = Vec::new();
+            let mut models = BTreeSet::new();
+            let mut fallback = false;
+            for route in &config.routes {
+                for (index, _) in route
+                    .legs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, leg)| &leg.provider == name)
+                {
+                    if index > 0 {
+                        fallback = true;
+                    } else if route.model == "*" {
+                        defaults.push(route.api_shape);
+                    } else {
+                        models.insert(route.model.clone());
+                    }
+                }
+            }
+            (
+                name.clone(),
+                json!({"defaults":defaults,"models":models,"fallback":fallback}),
+            )
+        })
+        .collect();
     // Construct fields explicitly: Config contains credential sources and host keys.
-    json!({"mode":config.mode,"relay":relay,"apis":apis})
+    json!({"mode":config.mode,"relay":relay,"apis":apis,
+        "routing": if relay { Value::Null } else { json!({"claude_default":claude_default,"accounts":account_routing}) }})
 }
 
 pub(super) async fn page() -> Response {

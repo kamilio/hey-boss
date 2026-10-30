@@ -265,3 +265,94 @@ async fn overview_host_login_guards_metadata_and_returns_to_landing_page() {
     assert_eq!(login.headers()[header::LOCATION], "/logs");
     task.abort();
 }
+
+#[test]
+fn overview_console_routes_show_account_and_override_without_credentials() {
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"PRIVATE.json"}},
+        "routes":[{"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}],
+        "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test"}}}
+    })).unwrap();
+    let data = catalog(&config);
+    let claude = api(&data, "claude");
+    assert_eq!(claude["configured"], true);
+    let route = &model(claude, "workspace-model").unwrap()["routes"][0];
+    assert_eq!(route["target"], "claude-test");
+    assert_eq!(route["when"], "workspace");
+    assert!(!data.to_string().contains("PRIVATE"));
+    assert!(!data.to_string().contains("wrkspc_example"));
+}
+
+#[test]
+fn wif_account_has_no_oauth_store_and_uses_workspace_api_billing() {
+    let value = json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "accounts":{"workspace":{"implementation":"claude","auth":"wif","workspace_id":"wrkspc_example",
+            "federation":{"organization_id":"org-test","service_account_id":"svac_test","federation_rule_id":"fdrl_test","identity_token":"sh://printf synthetic.jwt.assertion"}}},
+        "routes":[{"model":"workspace","api_shape":"messages","legs":[{"provider":"workspace","model":"claude-test"}]}]
+    });
+    let config: Config = serde_json::from_value(value.clone()).unwrap();
+    config.validate().unwrap();
+    config
+        .validate_account_paths(std::path::Path::new("/tmp/config.json"))
+        .unwrap();
+    assert_eq!(config.accounts["workspace"].auth(), "wif");
+    assert_eq!(
+        config.routes[0]
+            .resolve(&config, 0, "workspace", None)
+            .unwrap()
+            .billing_mode,
+        config::routes::BillingMode::PayPerToken
+    );
+    assert_eq!(api(&catalog(&config), "claude")["configured"], true);
+    for (key, replacement) in [
+        ("credentials_file", json!("wrong.json")),
+        ("workspace_id", Value::Null),
+        ("federation", Value::Null),
+    ] {
+        let mut invalid = value.clone();
+        invalid["accounts"]["workspace"][key] = replacement;
+        assert!(serde_json::from_value::<Config>(invalid).map_or(true, |c| c.validate().is_err()));
+    }
+}
+
+#[test]
+fn overview_distinguishes_subscription_defaults_from_workspace_overrides() {
+    let config: Config = serde_json::from_value(json!({"listen":"127.0.0.1:8080","account_schema_version":1,
+        "providers":{"claude":{}},
+        "accounts":{
+            "personal":{"implementation":"codex","auth":"subscription","credentials_file":"PRIVATE-personal.json"},
+            "workspace":{"implementation":"claude","auth":"console","workspace_id":"wrkspc_example","credentials_file":"PRIVATE-workspace.json"}
+        },
+        "routes":[
+            {"model":"*","api_shape":"responses","legs":[{"provider":"personal"}]},
+            {"model":"workspace-model","api_shape":"messages","legs":[{"provider":"workspace","override":"model"}]}
+        ],
+        "overrides":{"workspace":{"model":{"from":"workspace-model","to":"claude-test"}}}
+    })).unwrap();
+    config.validate().unwrap();
+    let data = catalog(&config);
+    assert_eq!(
+        data["routing"]["claude_default"],
+        json!({"name":"Claude","auth":"subscription"})
+    );
+    assert_eq!(
+        data["routing"]["accounts"]["personal"],
+        json!({"defaults":["responses"],"models":[],"fallback":false})
+    );
+    assert_eq!(
+        data["routing"]["accounts"]["workspace"],
+        json!({"defaults":[],"models":["workspace-model"],"fallback":false})
+    );
+    assert!(!data.to_string().contains("PRIVATE"));
+    assert!(!data.to_string().contains("wrkspc_example"));
+    let mut without_default = config;
+    without_default.claude = None;
+    assert!(catalog(&without_default)["routing"]["claude_default"].is_null());
+    without_default.routes[1].model = "*".into();
+    assert_eq!(
+        catalog(&without_default)["routing"]["claude_default"],
+        json!({"name":"workspace","auth":"console"})
+    );
+    without_default.mode = Mode::Client;
+    assert!(catalog(&without_default)["routing"].is_null());
+}

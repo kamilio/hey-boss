@@ -56,7 +56,7 @@ Hyper+R and Auto Dictation cannot override an app exception.
 When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing
-Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, with reasoning disabled and storage off.
+Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, requesting priority service with reasoning disabled and storage off.
 The proxy's configured routing, model rewrites, and authentication remain authoritative.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. If it fails or exceeds eight seconds, the original
