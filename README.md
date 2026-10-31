@@ -439,6 +439,8 @@ a missing certificate stops installation. Moving from an older ad-hoc CLI signat
 may require one new grant. Plain `cargo build` or `cargo install` does not apply this
 certificate; use the installer or `hey-boss upgrade` for installed copies.
 
+On macOS 26 with Apple Intelligence enabled, choose **Voice conversation…** from the Hey Boss menu bar and click **Start**. Speak, then pause for a reply. The microphone accepts the next turn when the window shows **Listening** again. Recognition, replies, and speech synthesis run on your Mac. **End** releases the microphone and keeps the transcript visible; closing the window clears it.
+
 Notifications, questions, secret requests, and the Inbox are grouped under `hey-boss notif`.
 Run `hey-boss notif --help` to see them. Existing root forms such as `hey-boss alert`
 remain accepted as hidden compatibility aliases.
