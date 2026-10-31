@@ -439,7 +439,7 @@ a missing certificate stops installation. Moving from an older ad-hoc CLI signat
 may require one new grant. Plain `cargo build` or `cargo install` does not apply this
 certificate; use the installer or `hey-boss upgrade` for installed copies.
 
-On macOS 26 with Apple Intelligence enabled, choose **Voice conversation…** from the Hey Boss menu bar and click **Start**. Speak, then pause for a reply. The microphone accepts the next turn when the window shows **Listening** again. Recognition, replies, and speech synthesis run on your Mac. **End** releases the microphone and keeps the transcript visible; closing the window clears it.
+On macOS 26, open **Voice conversation…** in the menu bar. Type a message or choose **Start voice** and speak when the window says **Listening**. **On this Mac** uses Apple Intelligence, local dictation, and local speech synthesis. For tools, choose **Choose folder for Codex…**: your messages go to your configured Codex provider, and Codex can run commands, edit files, and use its configured tools from that folder. Click a tool row for details. Changing folders starts a fresh conversation; **End** stops active work and releases the microphone.
 
 Notifications, questions, secret requests, and the Inbox are grouped under `hey-boss notif`.
 Run `hey-boss notif --help` to see them. Existing root forms such as `hey-boss alert`

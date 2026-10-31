@@ -69,6 +69,7 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
     if let id = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPOKEN_REVIEW"] { auditSpokenReview(id); return }
@@ -4351,20 +4352,83 @@ func auditConversation(_ root: String) {
     wait("listen again") { ui.phase == .listening }
     feed("second")
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
-    precondition(ui.transcript.string.components(separatedBy: "Hey Boss\n").last!.localizedCaseInsensitiveContains("pineapple"), ui.transcript.string)
-    precondition(ui.action.title == "End" && ui.transcript.bounds.width > 320 && ui.status.bounds.width > 60)
+    precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
+    precondition(ui.action.title == "End" && ui.turns.bounds.width > 320 && ui.status.bounds.width > 60)
     // Playback can begin before the fixture finishes writing its trailing silence.
     microphone.sync {}
     ui.window.close()
-    precondition(ui.transcript.string.isEmpty && ui.action.title == "Start")
+    precondition(ui.rows.isEmpty && ui.action.title == "Start voice")
     precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
     let fresh = ReviewAudio()
     ui.connect(fresh)
-    ui.respond("Hello", audio: fresh)
+    ui.respond("Hello")
     precondition(ui.phase == .thinking)
     ui.toggle()
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-    precondition(ui.phase == .idle && fresh.stopped && !ui.transcript.string.contains("Hey Boss\n"))
+    precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1)
     print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
+}
+#endif
+#if canImport(FoundationModels)
+@available(macOS 26, *)
+func auditWorkspaceChat(_ root: String) {
+    let env = ProcessInfo.processInfo.environment
+    let ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!)
+    let folder = URL(fileURLWithPath: root)
+    func snapshot(_ name: String) {
+        ui.window.displayIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
+        let view = ui.window.contentView!
+        let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent(name + ".png"))
+    }
+    func wait() {
+        let deadline = Date().addingTimeInterval(150)
+        while ui.phase != .idle && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.03)) }
+        precondition(ui.phase == .idle && ui.process != nil, ui.status.stringValue)
+    }
+    ui.show(); snapshot("welcome"); ui.selectDirectory(folder)
+    let value = UUID().uuidString
+    try! value.write(to: folder.appendingPathComponent("example.txt"), atomically: true, encoding: .utf8)
+    ui.input.stringValue = "Copy example.txt to answer.txt using a shell command. Reply with its contents."
+    ui.sendTyped(); wait()
+    precondition(try! String(contentsOf: folder.appendingPathComponent("answer.txt"), encoding: .utf8) == value)
+    precondition(ui.rows.last!.stringValue.contains(value) && !ui.tools.isEmpty && ui.audio == nil, ui.rows.map(\.stringValue).description)
+    let tool = ui.tools.values.first!
+    ui.showTool(tool)
+    precondition(ui.window.attachedSheet != nil && !(ui.details[tool] ?? "").isEmpty)
+    ui.window.endSheet(ui.window.attachedSheet!)
+    snapshot("workspace")
+    let original = ui.process!
+    ui.input.stringValue = "Without reading a file, repeat the value from your last reply."
+    ui.sendTyped(); wait(); precondition(ui.process === original && ui.rows.count == 4 && ui.rows.last!.stringValue.contains(value))
+    ui.window.setContentSize(NSSize(width: 415, height: 435)); ui.window.appearance = NSAppearance(named: .darkAqua); snapshot("compact")
+    precondition(ui.input.bounds.width > 150 && ui.rows.allSatisfy { $0.bounds.width > 45 && $0.bounds.width <= ui.scroll.bounds.width })
+    ui.input.stringValue = "Hello"; ui.sendTyped(); ui.toggle()
+    precondition(ui.phase == .idle && ui.process == nil && !ui.rows.isEmpty)
+    ui.selectDirectory(nil)
+    precondition(ui.rows.isEmpty && ui.process == nil && ui.directory == nil && ui.audio == nil)
+    let end = Date().addingTimeInterval(6)
+    while original.isRunning && Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.03)) }
+    precondition(!original.isRunning, "Switching folders must stop the previous Codex process.")
+    let decisions = Pipe(); ui.writer = decisions.fileHandleForWriting
+    func request(_ id: String) {
+        ui.event(["Approval":["id":id,"payload":["params":["command":"pwd","reason":"Inspect the selected folder."]]]])
+        precondition(ui.approvalSheet?.informativeText == "Inspect the selected folder.")
+    }
+    request("expired"); ui.event(["RequestCancelled":["id":"expired"]])
+    precondition(ui.approvalSheet == nil)
+    for (id, response) in [("declined", NSApplication.ModalResponse.alertFirstButtonReturn), ("accepted", .alertSecondButtonReturn)] {
+        request(id); ui.window.endSheet(ui.approvalSheet!.window, returnCode: response)
+        let deadline = Date().addingTimeInterval(2)
+        while ui.approvalSheet != nil && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
+        precondition(ui.approvalSheet == nil)
+    }
+    try! ui.writer!.close(); ui.writer = nil
+    let messages = String(decoding: decisions.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map { try! JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String:Any] }
+    precondition(messages.count == 2 && messages[0]["decision"] as? String == "declined" && messages[0]["allow"] as? Bool == false && messages[1]["decision"] as? String == "accepted" && messages[1]["allow"] as? Bool == true)
+    ui.window.close()
+    print("PASS native workspace chat: real Codex command and file write, tool row, two-turn recall, compact layout and workspace reset")
 }
 #endif
