@@ -7368,7 +7368,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let reviewButton = NSButton(title: "Read Aloud", target: nil, action: nil)
     let commentsButton = NSButton(title: "Comments", target: nil, action: nil)
     let reviewBar = NSStackView()
-    let micLabel = NSTextField(labelWithString: "Mic off until playback")
+    let micLabel = NSTextField(labelWithString: "")
     let micIcon = NSImageView()
     var readerTop: NSLayoutConstraint!
     let commentPopover = NSPopover()
@@ -7527,7 +7527,6 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         micLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         reviewBar.spacing = 8; reviewBar.alignment = .centerY
         for control in [reviewButton, micIcon, micLabel, NSView(), commentsButton] { reviewBar.addArrangedSubview(control) }
-        showMic("Mic off until playback", "mic.slash", .secondaryLabelColor)
         commentPopover.behavior = .transient
         let footer = NSStackView(views: [status, NSView(), reload, recovery]); footer.spacing = 10
         status.font = .systemFont(ofSize: 11); status.textColor = .tertiaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
@@ -7745,7 +7744,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reviewBar.isHidden = !sharedReview
         readerTop?.constant = sharedReview ? 56 : 0
         commentsButton.isHidden = !sharedReview
-        micIcon.isHidden = reviewButton.isHidden; micLabel.isHidden = reviewButton.isHidden
+        micIcon.isHidden = reviewButton.isHidden || review == nil; micLabel.isHidden = micIcon.isHidden
         reviewButton.isEnabled = review != nil || (!postingSpoken && !session.dirty && previewSource == text.string && !reader.string.isEmpty)
         reviewButton.title = review != nil ? "Stop" : pendingSpoken != nil ? "Retry comment" : "Read Aloud"
         reviewButton.image = NSImage(systemSymbolName: review != nil ? "stop.fill" : pendingSpoken != nil ? "arrow.clockwise" : "play.fill", accessibilityDescription: nil)
@@ -7764,7 +7763,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reader.scrollRangeToVisible(range)
     }
     func endReview(_ message: String = "") {
-        review?.stop(); review = nil; showMic("Mic off until playback", "mic.slash", .secondaryLabelColor)
+        review?.stop(); review = nil
         if let old = reviewHighlight, NSMaxRange(old) <= (reader.string as NSString).length {
             reader.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old)
         }

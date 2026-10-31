@@ -4142,9 +4142,10 @@ func auditSpokenReview(_ id: String) {
     wait("load") { editor.session.ready }
     precondition(editor.previewing && editor.reviewButton.title == "Read Aloud")
     wait("render") { !editor.reviewButton.isHidden && editor.reviewButton.isEnabled }
+    precondition(editor.micIcon.isHidden && editor.micLabel.isHidden, "Idle reader has no microphone indicator")
     let range = (editor.reader.string as NSString).range(of: "Second passage")
     editor.reader.setSelectedRange(NSRange(location: range.location, length: 0))
-    let review = SpokenReview(editor); editor.review = review
+    let review = SpokenReview(editor); editor.review = review; editor.updateReviewControls()
     let audio = review.audio
     audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
     audio.engine.mainMixerNode.outputVolume = 0
@@ -4163,7 +4164,7 @@ func auditSpokenReview(_ id: String) {
     precondition(!audio.stopped, "Reading continues after switching apps")
     wait("word progress") { review.word.location > range.location }
     precondition(audio.readerVoice === installedVoice, "An available Hey Talk voice must actually produce the narrated words")
-    precondition(editor.micLabel.stringValue == "Listening")
+    precondition(!editor.micIcon.isHidden && !editor.micLabel.isHidden && editor.micLabel.stringValue == "Listening")
     func dictate(_ name: String) {
         let captured = try! Data(contentsOf: root.appendingPathComponent(name))
         DispatchQueue.global().async {
@@ -4234,7 +4235,7 @@ func auditSpokenReview(_ id: String) {
     silent.position = (reopened.reader.string as NSString).length
     silent.readNext()
     wait("close microphone at silent ending") { reopened.review == nil }
-    precondition(reopened.reviewButton.title == "Read Aloud" && reopened.micLabel.stringValue == "Mic off until playback")
+    precondition(reopened.reviewButton.title == "Read Aloud" && reopened.micIcon.isHidden && reopened.micLabel.isHidden)
     let passage = (reopened.reader.string as NSString).range(of: "First passage.")
     reopened.reader.setSelectedRange(passage)
     reopened.window.orderFront(nil); reopened.window.contentView?.layoutSubtreeIfNeeded()
