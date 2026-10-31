@@ -907,7 +907,17 @@ if (typeof document !== 'undefined') (() => {
       $('machine-editor-context').textContent=name;
       $('machine-editor-title').textContent=({add:'Add a worker',remove:'Remove a worker',project:'Add a project','edit-project':'Edit checkout'})[action];
       $('machine-editor-description').textContent=({add:'Choose its settings. The new worker will start picking up tasks.',remove:'This worker will stop picking up tasks and finish its current work. You can kill it immediately while it is finishing.',project:'Set up a checkout on this machine and choose which worker can use it.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
-      for(const field of ['template','slots','worker','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['template','slots'],remove:['worker'],project:['worker','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
+      for(const field of ['template','slots','project','worker','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['template','slots'],remove:['worker'],project:['project','worker','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
+      const choices=new Map(projects.map(p=>[p.id,{...p}]));
+      for(const configured of [...Object.values(data.document?.machines||{}),machine])for(const [id,checkout] of Object.entries(configured.projects||{})){
+        choices.set(id,{...choices.get(id),id,name:choices.get(id)?.name||projectLabel(id),git:checkout.git});
+      }
+      $('machine-project').replaceChildren(new Option('New Git repository…',''));
+      for(const project of [...choices.values()].filter(p=>!p.hidden_at).sort((a,b)=>a.name.localeCompare(b.name))){
+        const git=project.git||(/^[^/:\s]+(?::\d+)?\/[^\s?#]+$/.test(project.id)?'https://'+project.id+'.git':'');
+        const option=new Option(project.name+(git?'':' · No Git repository'),project.id);
+        option.dataset.git=git;option.disabled=!git;$('machine-project').append(option);
+      }
       $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=false;
       const options=(select,empty)=>{select.replaceChildren();if(empty){const option=element('option','',empty);option.value='';select.append(option);}for(const worker of workers){const option=element('option','',workerLabel(worker)+' · '+worker.id.slice(0,12));option.value=worker.id;select.append(option);}};
       options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Machine only · assign later':null);
@@ -924,7 +934,8 @@ if (typeof document !== 'undefined') (() => {
   }
   $('machine-template').onchange=()=>{$('machine-slots-field').hidden=!!$('machine-template').value;};
   function suggestCheckout(){if(machinePathEdited)return;const git=$('machine-git').value.trim().replace(/\/+$|\.git$/g,'');const name=git.split(/[/:]/).pop();$('machine-path').placeholder=name?'Automatic · '+$('machine-workspace').value.replace(/\/+$/,'')+'/'+name:'Automatic';}
-  $('machine-git').oninput=suggestCheckout;$('machine-workspace').oninput=suggestCheckout;$('machine-path').oninput=()=>{machinePathEdited=!!$('machine-path').value;};
+  $('machine-project').onchange=()=>{$('machine-git').value=$('machine-project').selectedOptions[0]?.dataset.git||'';suggestCheckout();};
+  $('machine-git').oninput=()=>{$('machine-project').value='';suggestCheckout();};$('machine-workspace').oninput=suggestCheckout;$('machine-path').oninput=()=>{machinePathEdited=!!$('machine-path').value;};
   $('machine-editor-cancel').onclick=()=>{if(!machineBusy){$('machine-editor').close();machineEdit=null;}};
   $('machine-editor').addEventListener('cancel',event=>{if(machineBusy)event.preventDefault();else machineEdit=null;});
   $('machine-form').onsubmit=async event=>{
