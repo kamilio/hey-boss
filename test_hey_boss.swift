@@ -4154,16 +4154,19 @@ func auditSpokenReview(_ id: String) {
     let writer = try! audio.listen(cli: editor.backend.cli)
     review.readNext()
     wait("word progress") { review.word.location > range.location }
-    let captured = try! Data(contentsOf: root.appendingPathComponent("voice.pcm"))
-    DispatchQueue.global().async {
-        for part in [Data(count: 9600), captured, Data(count: 38400)] {
-            for start in stride(from: 0, to: part.count, by: 640) {
-                do { try writer.write(contentsOf: part[start..<min(start + 640, part.count)]) }
-                catch { return } // Switching to Edit closes the synthetic input too.
-                Thread.sleep(forTimeInterval: 0.018)
+    func dictate(_ name: String) {
+        let captured = try! Data(contentsOf: root.appendingPathComponent(name))
+        DispatchQueue.global().async {
+            for part in [Data(count: 9600), captured, Data(count: 38400)] {
+                for start in stride(from: 0, to: part.count, by: 640) {
+                    do { try writer.write(contentsOf: part[start..<min(start + 640, part.count)]) }
+                    catch { return } // Switching to Edit closes the synthetic input too.
+                    Thread.sleep(forTimeInterval: 0.018)
+                }
             }
         }
     }
+    dictate("voice.pcm")
     wait("interrupt") { review.holding }
     let frozen = review.word
     precondition(review.line == 4 && !audio.player.isPlaying)
@@ -4172,6 +4175,11 @@ func auditSpokenReview(_ id: String) {
     wait("submit and resume") { !review.holding && audio.player.isPlaying }
     precondition(!FileManager.default.fileExists(atPath: editor.spokenDraft.path))
     wait("highlight resumes") { review.word != frozen }
+    wait("next passage") { review.line == 6 && audio.player.isPlaying }
+    dictate("second.pcm")
+    wait("second interruption") { starts == 2 && review.holding }
+    precondition(review.anchor?.line == 6 && !audio.player.isPlaying)
+    wait("second save and resume") { ends == 2 && !review.holding && audio.player.isPlaying }
     editor.togglePreview()
     precondition(audio.stopped && editor.review == nil && editor.reviewButton.isHidden)
     print("PASS spoken review: detected onset and endpoint, paused highlight, on-device transcription, shared comment save, resumed and stopped")
@@ -4199,7 +4207,7 @@ func auditSpokenReview(_ id: String) {
     for candidateFirst in [true, false] {
         let last = (reopened.reader.string as NSString).range(of: "Final passage.")
         let ending = SpokenReview(reopened); reopened.review = ending
-        ending.phrase = last; ending.word = last; ending.position = NSMaxRange(last)
+        ending.phrase = last; ending.word = last; ending.position = (reopened.reader.string as NSString).length
         if candidateFirst { ending.receive(.candidate) }
         ending.readNext()
         if !candidateFirst { ending.receive(.candidate) }
@@ -4212,7 +4220,7 @@ func auditSpokenReview(_ id: String) {
     }
     let silent = SpokenReview(reopened); reopened.review = silent
     silent.phrase = (reopened.reader.string as NSString).range(of: "Final passage.")
-    silent.position = NSMaxRange(silent.phrase)
+    silent.position = (reopened.reader.string as NSString).length
     silent.readNext()
     wait("close microphone at silent ending") { reopened.review == nil }
     print("PASS final-line interruption and silent completion")
