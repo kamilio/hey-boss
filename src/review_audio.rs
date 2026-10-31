@@ -57,15 +57,46 @@ impl Turn {
 
 // Frames on stdout: little-endian u16 byte count, then that many PCM bytes.
 // 2 bookmarks the first voiced frame before debounce; 0 confirms a turn; 1 ends it.
-pub fn stream(mut input: impl Read, mut output: impl Write) -> io::Result<()> {
+pub fn stream(mut input: impl Read, mut output: impl Write, duplex: bool) -> io::Result<()> {
+    let format = aec3::nodes::audio::AudioFormat::ten_ms(16000, 1);
+    let mut echo = if duplex {
+        Some(
+            aec3::pipelines::linear::builder(format, format)
+                .enable_gain_controller2(false)
+                .build()
+                .map_err(io::Error::other)?,
+        )
+    } else {
+        None
+    };
     let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
     let mut turn = Turn::default();
     let mut history = std::collections::VecDeque::with_capacity(20);
     let mut frame = [0u8; 640];
     loop {
-        match input.read_exact(&mut frame) {
+        let mut stereo = [0u8; 1280];
+        match input.read_exact(if duplex {
+            &mut stereo[..]
+        } else {
+            &mut frame[..]
+        }) {
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             other => other?,
+        }
+        if let Some(echo) = &mut echo {
+            for (pair, mono) in stereo.chunks_exact(640).zip(frame.chunks_exact_mut(320)) {
+                let sample = |i| f32::from(i16::from_le_bytes([pair[i], pair[i + 1]])) / 32768.0;
+                let render: [f32; 160] = std::array::from_fn(|i| sample(i * 4 + 2));
+                let capture: [f32; 160] = std::array::from_fn(|i| sample(i * 4));
+                let mut clean = [0.0; 160];
+                echo.handle_render_frame(&render)
+                    .map_err(io::Error::other)?;
+                echo.process_capture_frame(&capture, &mut clean)
+                    .map_err(io::Error::other)?;
+                for (dst, value) in mono.chunks_exact_mut(2).zip(clean) {
+                    dst.copy_from_slice(&((value * 32768.0).round() as i16).to_le_bytes());
+                }
+            }
         }
         let samples: [i16; 320] =
             std::array::from_fn(|i| i16::from_le_bytes([frame[i * 2], frame[i * 2 + 1]]));

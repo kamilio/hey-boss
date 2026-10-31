@@ -6695,32 +6695,64 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     var failed: (String) -> Void = { _ in }
     private(set) var stopped = false
 
+    func microphoneConverter(from source: AVAudioFormat) -> AVAudioConverter? {
+        let converter = AVAudioConverter(from: source, to: format)
+        // VoiceProcessingIO can expose discrete channels with no mono mix.
+        // Channel zero carries the processed microphone, including on USB inputs.
+        converter?.channelMap = [0]
+        return converter
+    }
+
     func start(cli: String, ready: @escaping () -> Void) throws {
         let lastInput = OSAllocatedUnfairLock(initialState: TimeInterval.zero)
         let mic = engine.inputNode
         try mic.setVoiceProcessingEnabled(true)
         mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
         let source = mic.outputFormat(forBus: 0)
-        guard source.sampleRate > 0, source.channelCount > 0, let converter = AVAudioConverter(from: source, to: format) else {
+        guard source.sampleRate > 0, source.channelCount > 0, let converter = microphoneConverter(from: source) else {
             throw StorageError(description: "No microphone available. Check Sound settings.")
         }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
         // VoiceProcessingIO requires both client buses to agree, including with a USB input and built-in speakers.
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: source)
-        let writer = try listen(cli: cli)
+        let writer = try listen(cli: cli, duplex: true)
         let target = format
-        mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
-            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * target.sampleRate / source.sampleRate)) + 32
-            guard let pcm = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+        let renderFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        guard let renderConverter = microphoneConverter(from: renderFormat) else { throw StorageError(description: "Cannot read playback audio.") }
+        @Sendable func mono(_ buffer: AVAudioPCMBuffer, _ converter: AVAudioConverter) -> AVAudioPCMBuffer? {
+            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate)) + 32
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
             var fed = false, error: NSError?
             converter.convert(to: pcm, error: &error) { _, status in
                 if fed { status.pointee = .noDataNow; return nil }
                 fed = true; status.pointee = .haveData; return buffer
             }
-            let size = Int(pcm.frameLength) * 2
-            if size > 0 { lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime } }
-            if error != nil || (size > 0 && Darwin.write(writer.fileDescriptor, pcm.int16ChannelData![0], size) != size) {
+            return error == nil ? pcm : nil
+        }
+        let reference = OSAllocatedUnfairLock(initialState: [Int16]())
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 960, format: renderFormat) { buffer, _ in
+            guard let pcm = mono(buffer, renderConverter) else { return }
+            reference.withLock { ring in
+                ring.append(contentsOf: UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: Int(pcm.frameLength)))
+                if ring.count > 3200 { ring.removeFirst(ring.count - 3200) }
+            }
+        }
+        mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
+            guard let pcm = mono(buffer, converter) else {
+                onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Could not convert microphone audio.") }; return
+            }
+            let n = Int(pcm.frameLength)
+            guard n > 0 else { return }
+            lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+            var stereo = [Int16](repeating: 0, count: 2*n)
+            for i in 0..<n { stereo[2*i] = pcm.int16ChannelData![0][i] }
+            reference.withLock { ring in
+                let used = min(n, ring.count)
+                for i in 0..<used { stereo[2*i+1] = ring[i] }
+                ring.removeFirst(used)
+            }
+            if stereo.withUnsafeBytes({ Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) != $0.count }) {
                 onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Start again.") }
             }
         }
@@ -6742,8 +6774,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
     }
 
-    func listen(cli: String) throws -> FileHandle {
-        worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = ["review-audio"]
+    func listen(cli: String, duplex: Bool = false) throws -> FileHandle {
+        worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = duplex ? ["review-audio", "--duplex"] : ["review-audio"]
         worker.standardInput = input; worker.standardOutput = output; worker.standardError = FileHandle.nullDevice
         try worker.run()
         let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
@@ -6838,7 +6870,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         micWatch?.invalidate(); timer?.invalidate(); synth.stopSpeaking(at: .immediate)
         if player.engine != nil { player.stop() }
         engine.stop()
-        if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
+        if tapped { engine.inputNode.removeTap(onBus: 0); engine.mainMixerNode.removeTap(onBus: 0); tapped = false }
         try? input.fileHandleForWriting.close()
         if worker.isRunning { worker.terminate() }
     }

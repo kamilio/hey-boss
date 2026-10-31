@@ -4157,7 +4157,7 @@ func auditSpokenReview(_ id: String) {
         if case .ended = frame { ends += 1 }
         review.receive(frame)
     }
-    let writer = try! audio.listen(cli: editor.backend.cli)
+    let writer = try! audio.listen(cli: editor.backend.cli, duplex: true)
     let installedVoice = audio.readerVoice
     review.readNext()
     editor.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: editor.window))
@@ -4166,11 +4166,32 @@ func auditSpokenReview(_ id: String) {
     precondition(audio.readerVoice === installedVoice, "An available Hey Talk voice must actually produce the narrated words")
     precondition(!editor.micIcon.isHidden && !editor.micLabel.isHidden && editor.micLabel.stringValue == "Listening")
     func dictate(_ name: String) {
-        let captured = try! Data(contentsOf: root.appendingPathComponent(name))
+        // VoiceProcessingIO on a Razer Kiyo presents eight discrete copies of
+        // the microphone. Exercise capture conversion before the real detector.
+        let fixture = try! Data(contentsOf: root.appendingPathComponent(name))
+        let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 8)!
+        let source = AVAudioFormat(standardFormatWithSampleRate: 16000, channelLayout: layout)
+        let input = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: AVAudioFrameCount(fixture.count / 2))!
+        input.frameLength = input.frameCapacity
+        fixture.withUnsafeBytes { bytes in
+            for i in 0..<Int(input.frameLength) {
+                let sample = Float(bytes.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)) / 32768
+                for ch in 0..<Int(source.channelCount) { input.floatChannelData![ch][i] = sample }
+            }
+        }
+        let output = AVAudioPCMBuffer(pcmFormat: audio.format, frameCapacity: input.frameLength)!
+        try! audio.microphoneConverter(from: source)!.convert(to: output, from: input)
+        let captured = Data(bytes: output.int16ChannelData![0], count: Int(output.frameLength) * 2)
+        precondition(captured == fixture, "Discrete microphone speech must survive conversion to mono")
         DispatchQueue.global().async {
             for part in [Data(count: 9600), captured, Data(count: 38400)] {
                 for start in stride(from: 0, to: part.count, by: 640) {
-                    do { try writer.write(contentsOf: part[start..<min(start + 640, part.count)]) }
+                    let mic = part[start..<min(start + 640, part.count)]
+                    var stereo = Data(count: mic.count * 2)
+                    for i in stride(from: 0, to: mic.count, by: 2) {
+                        stereo[2*i] = mic[start+i]; stereo[2*i+1] = mic[start+i+1]
+                    }
+                    do { try writer.write(contentsOf: stereo) }
                     catch { return } // Switching to Edit closes the synthetic input too.
                     Thread.sleep(forTimeInterval: 0.018)
                 }
@@ -4268,11 +4289,20 @@ func auditReviewEcho() {
     }
     let audio = ReviewAudio()
     let voice = ReaderVoice(); audio.readerVoice = voice
-    var interruptions = 0, done = false
-    audio.event = { if case .began = $0 { interruptions += 1 } }
+    let stimulus = Process(), fixture = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_INTERRUPT"]
+    var interruptions = 0, done = false, injected = false, paused = false
+    audio.event = {
+        guard case .began = $0 else { return }; interruptions += 1
+        if stimulus.isRunning && audio.player.isPlaying { audio.pause(); paused = !audio.player.isPlaying; done = true }
+    }
     audio.failed = { preconditionFailure($0) }
     try! audio.start(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!) {
-        audio.speak("This is a speaker echo check. The reader should continue when only its own voice is audible.", highlight: { _ in }, finished: { done = true })
+        audio.speak("This is a speaker echo check. The reader should continue when only its own voice is audible.", highlight: { _ in
+            guard let fixture, !injected, audio.player.isPlaying else { return }; injected = true
+            // A separate player is audible at the mic but absent from the narrator's echo reference.
+            stimulus.executableURL = URL(fileURLWithPath: "/usr/bin/afplay"); stimulus.arguments = [fixture]
+            try! stimulus.run()
+        }, finished: { done = true })
     }
     let deadline = Date().addingTimeInterval(20)
     while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
@@ -4280,8 +4310,9 @@ func auditReviewEcho() {
     precondition(audio.readerVoice === voice)
     print("Physical playback voice: " + (voice == nil ? "macOS" : "Supertonic 3"))
     audio.stop()
-    precondition(done && interruptions == 0, "Playback finished: \(done); detected interruptions: \(interruptions)")
-    print("PASS physical playback did not trigger the microphone detector")
+    if stimulus.isRunning { stimulus.terminate() }
+    precondition(done && (fixture == nil ? interruptions == 0 : paused && interruptions == 1), "Playback finished: \(done); detected interruptions: \(interruptions)")
+    print(fixture == nil ? "PASS physical playback did not trigger the microphone detector" : "PASS separate speech through the physical microphone paused active narration")
 }
 
 #if canImport(FoundationModels)

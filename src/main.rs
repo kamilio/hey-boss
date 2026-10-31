@@ -268,7 +268,11 @@ enum Command {
         action: BrowserAction,
     },
     #[command(hide = true)]
-    ReviewAudio,
+    ReviewAudio {
+        /// Input contains interleaved microphone and playback reference samples.
+        #[arg(long)]
+        duplex: bool,
+    },
     #[command(hide = true)]
     RenderMarkdown {
         input: std::path::PathBuf,
@@ -473,10 +477,11 @@ fn run() -> std::io::Result<()> {
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
-        Command::ReviewAudio => {
+        Command::ReviewAudio { duplex } => {
             return review_audio::stream(
                 std::io::stdin().lock(),
                 std::io::BufWriter::new(std::io::stdout().lock()),
+                *duplex,
             );
         }
         Command::Utils(action) => return utils_cli::run(action, &git_args),
