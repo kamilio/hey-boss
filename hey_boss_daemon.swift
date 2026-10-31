@@ -6628,6 +6628,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
+        // VoiceProcessingIO requires both client buses to agree, including with a USB input and built-in speakers.
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: source)
         let writer = try listen(cli: cli)
         let target = format
         mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
@@ -7001,7 +7003,9 @@ final class SpokenReview {
                     self.audio.failed = { [weak self] message in self?.finish(message) }
                     self.audio.event = { [weak self] data in self?.receive(data) }
                     try self.audio.start(cli: self.cli) { [weak self] in self?.readNext() }
-                } catch { self.finish(error.localizedDescription) }
+                } catch {
+                    self.finish((error as NSError).code == -10875 ? "Audio couldn’t start. Choose a working input and output in Sound settings, then try Review again." : error.localizedDescription)
+                }
             }
         }
     }
