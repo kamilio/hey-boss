@@ -3347,6 +3347,8 @@ func auditArtifactEditor() {
         precondition(condition(), "Native operation completed")
     }
     wait { editor.session.ready }
+    precondition(editor.previewing, "Saved Markdown opens in Read")
+    editor.writeMode()
     editor.window.makeFirstResponder(editor.text)
     editor.text.setSelectedRange(NSRange(location: 14, length: 2))
     precondition(editor.command("x", shift: true), "Command-Shift-X strikes the selection")
@@ -3431,6 +3433,7 @@ func auditArtifactEditor() {
                 try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: directory).appendingPathComponent("checklist-\(mode)-\(name).png"))
             }
         }
+        checklist.writeMode()
         snapshot("edit")
         checklist.togglePreview()
         wait { checklist.previewSource != nil }
@@ -4013,7 +4016,7 @@ func auditHTMLReader() {
         wait("JavaScript finished", { done }); return result
     }
     wait("Document opens", { editor.session.ready })
-    editor.window.makeKeyAndOrderFront(nil); editor.togglePreview()
+    editor.window.makeKeyAndOrderFront(nil); precondition(editor.previewing)
     wait("Web reader loads", { editor.htmlReader.loaded && editor.htmlReader.previewFrame != nil })
     var ready = false
     let deadline = Date().addingTimeInterval(20)
@@ -4077,7 +4080,7 @@ func auditHTMLReader() {
         let imported = NativeArtifactEditor(launch: ArtifactLaunch(project: "named:HTML audit", file: path.path), journalRoot: root.appendingPathComponent("import-drafts"), cli: cli, present: false)
         wait("HTML file opens", { imported.session.ready })
         precondition(imported.text.string == wholePage, "HTML file import preserves source")
-        imported.window.makeKeyAndOrderFront(nil); imported.togglePreview()
+        imported.window.makeKeyAndOrderFront(nil); precondition(imported.previewing)
         wait("Imported HTML reader loads", { imported.htmlReader.loaded && imported.htmlReader.previewFrame != nil })
         wait("Imported HTML fills its content height", { (js("document.querySelector('iframe')?.clientHeight", reader: imported.htmlReader) as? Int ?? 0) > 2800 })
         precondition((try! Data(contentsOf: path)) == Data(wholePage.utf8), "Preview never changes the imported file")
@@ -4137,8 +4140,7 @@ func auditSpokenReview(_ id: String) {
         precondition(ready(), "\(label): \(editor.status.stringValue)")
     }
     wait("load") { editor.session.ready }
-    precondition(editor.reviewButton.isHidden)
-    editor.togglePreview()
+    precondition(editor.previewing && editor.reviewButton.title == "Read Aloud")
     wait("render") { !editor.reviewButton.isHidden && editor.reviewButton.isEnabled }
     let range = (editor.reader.string as NSString).range(of: "Second passage")
     editor.reader.setSelectedRange(NSRange(location: range.location, length: 0))
@@ -4155,8 +4157,12 @@ func auditSpokenReview(_ id: String) {
         review.receive(frame)
     }
     let writer = try! audio.listen(cli: editor.backend.cli)
+    let installedVoice = audio.readerVoice
     review.readNext()
+    editor.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: editor.window))
+    precondition(!audio.stopped, "Reading continues after switching apps")
     wait("word progress") { review.word.location > range.location }
+    precondition(audio.readerVoice === installedVoice, "An available Hey Talk voice must actually produce the narrated words")
     precondition(editor.micLabel.stringValue == "Listening")
     func dictate(_ name: String) {
         let captured = try! Data(contentsOf: root.appendingPathComponent(name))
@@ -4200,7 +4206,7 @@ func auditSpokenReview(_ id: String) {
     wait("uncertain submission") { committed }
     let reopened = NativeArtifactEditor(launch: editor.session.launch, journalRoot: root, present: false)
     wait("reopen") { reopened.pendingSpoken != nil }
-    reopened.togglePreview()
+    precondition(reopened.previewing)
     wait("retry available") { reopened.reviewButton.isEnabled && reopened.reviewButton.title == "Retry comment" }
     reopened.playReview()
     wait("retry acknowledged") { reopened.pendingSpoken == nil }
@@ -4228,7 +4234,7 @@ func auditSpokenReview(_ id: String) {
     silent.position = (reopened.reader.string as NSString).length
     silent.readNext()
     wait("close microphone at silent ending") { reopened.review == nil }
-    precondition(reopened.reviewButton.title == "Review" && reopened.micLabel.stringValue == "Mic off")
+    precondition(reopened.reviewButton.title == "Read Aloud" && reopened.micLabel.stringValue == "Mic off until playback")
     let passage = (reopened.reader.string as NSString).range(of: "First passage.")
     reopened.reader.setSelectedRange(passage)
     reopened.window.orderFront(nil); reopened.window.contentView?.layoutSubtreeIfNeeded()
@@ -4260,6 +4266,7 @@ func auditReviewEcho() {
         print("SKIP physical echo test: this app does not have microphone permission."); exit(77)
     }
     let audio = ReviewAudio()
+    let voice = ReaderVoice(); audio.readerVoice = voice
     var interruptions = 0, done = false
     audio.event = { if case .began = $0 { interruptions += 1 } }
     audio.failed = { preconditionFailure($0) }
@@ -4269,6 +4276,8 @@ func auditReviewEcho() {
     let deadline = Date().addingTimeInterval(20)
     while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     RunLoop.current.run(until: Date().addingTimeInterval(1))
+    precondition(audio.readerVoice === voice)
+    print("Physical playback voice: " + (voice == nil ? "macOS" : "Supertonic 3"))
     audio.stop()
     precondition(done && interruptions == 0, "Playback finished: \(done); detected interruptions: \(interruptions)")
     print("PASS physical playback did not trigger the microphone detector")
