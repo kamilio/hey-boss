@@ -4157,6 +4157,7 @@ func auditSpokenReview(_ id: String) {
     let writer = try! audio.listen(cli: editor.backend.cli)
     review.readNext()
     wait("word progress") { review.word.location > range.location }
+    precondition(editor.micLabel.stringValue == "Listening")
     func dictate(_ name: String) {
         let captured = try! Data(contentsOf: root.appendingPathComponent(name))
         DispatchQueue.global().async {
@@ -4171,6 +4172,7 @@ func auditSpokenReview(_ id: String) {
     }
     dictate("voice.pcm")
     wait("interrupt") { review.holding }
+    precondition(editor.micLabel.stringValue == "Recording comment")
     let frozen = review.word
     precondition(review.line == 4 && !audio.player.isPlaying)
     wait("endpoint") { ends == 1 }
@@ -4226,6 +4228,29 @@ func auditSpokenReview(_ id: String) {
     silent.position = (reopened.reader.string as NSString).length
     silent.readNext()
     wait("close microphone at silent ending") { reopened.review == nil }
+    precondition(reopened.reviewButton.title == "Review" && reopened.micLabel.stringValue == "Mic off")
+    let passage = (reopened.reader.string as NSString).range(of: "First passage.")
+    reopened.reader.setSelectedRange(passage)
+    reopened.window.orderFront(nil); reopened.window.contentView?.layoutSubtreeIfNeeded()
+    reopened.commentsButton.performClick(nil)
+    let panel = reopened.discussion!
+    precondition(reopened.commentPopover.isShown && panel.quote == "First passage.")
+    panel.input.string = "Please clarify the opening."; panel.controls()
+    reopened.commentPopover.performClose(nil); reopened.showReviewComments()
+    precondition(panel.input.string == "Please clarify the opening." && panel.quote == "First passage.")
+    panel.send.performClick(nil)
+    wait("typed selection saved") { panel.entries.contains { $0.body == "Please clarify the opening." } }
+    let thread = panel.entries.first { $0.body == "Please clarify the opening." }!
+    precondition(thread.quote == "First passage." && !thread.outdated)
+    _ = panel.textView(panel.list, clickedOnLink: "reply:\(thread.id)", at: 0)
+    panel.input.string = "Added an example."; panel.submit()
+    wait("reply visible") { panel.entries.contains { $0.parent == thread.id && $0.body == "Added an example." } }
+    _ = panel.textView(panel.list, clickedOnLink: "resolve:\(thread.id)", at: 0)
+    wait("resolved") { panel.entries.contains { $0.id == thread.id && $0.resolved } }
+    panel.input.string = "Whole document note."; panel.submit()
+    wait("unanchored note") { panel.entries.contains { $0.quote == nil && $0.parent == nil && $0.body == "Whole document note." } }
+    reopened.commentPopover.performClose(nil); reopened.window.orderOut(nil)
+    print("PASS manual selection, reply, resolve, document comment and microphone states")
     print("PASS final-line interruption and silent completion")
 }
 
