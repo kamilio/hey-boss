@@ -3519,8 +3519,8 @@ final class SecretEntry: NSObject, NSTextFieldDelegate {
     func clear() { masked.stringValue = ""; revealed.clear(); count.stringValue = "0 characters" }
 }
 
-final class SecretFormStack: NSStackView { override var isFlipped: Bool { true } }
-final class SecretFormClip: NSClipView { override var isFlipped: Bool { true } }
+final class FlippedStack: NSStackView { override var isFlipped: Bool { true } }
+final class FlippedClip: NSClipView { override var isFlipped: Bool { true } }
 enum SecretOutcome: Equatable {
     case submitted([String]), replied(String), cancelled, expired
 }
@@ -3558,9 +3558,9 @@ final class SecretPrompt: NSObject, NSWindowDelegate {
         for view in [replyLabel, replyNote, replyInput] { replyContent.addArrangedSubview(view) }
         for section in [credentialContent, replyContent] { section.orientation = .vertical; section.alignment = .leading; section.spacing = 12 }
         replyContent.isHidden = true
-        let stack = SecretFormStack(views: [heading, destination, mode, credentialContent, replyContent, message]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
+        let stack = FlippedStack(views: [heading, destination, mode, credentialContent, replyContent, message]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
         message.textColor = .secondaryLabelColor; message.font = .systemFont(ofSize: 12)
-        let scroll = NSScrollView(); scroll.contentView = SecretFormClip(); scroll.documentView = stack; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
+        let scroll = NSScrollView(); scroll.contentView = FlippedClip(); scroll.documentView = stack; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel)); cancel.keyEquivalent = "\u{1b}"
         submit.target = self; submit.action = #selector(finish); submit.keyEquivalent = "\r"; submit.keyEquivalentModifierMask = .command
         for v in [scroll, submit, cancel] { v.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(v) }
@@ -6935,12 +6935,26 @@ func recognizeTurn(_ samples: Data, format: AVAudioFormat, recognizer: SFSpeechR
 @available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 630, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let status = NSTextField(wrappingLabelWithString: "")
-    let transcript = NSTextView()
     let action = NSButton()
     let symbol = NSImageView()
     let welcome = NSStackView()
+    let headline = NSTextField(labelWithString: "")
+    let hint = NSTextField(wrappingLabelWithString: "")
+    let scope = NSPopUpButton()
+    let input = NSTextField()
+    let send = NSButton()
+    let scroll = NSScrollView()
+    let turns = FlippedStack()
+    var rows: [NSTextField] = []
+    var tools: [String: NSButton] = [:]
+    var details: [NSButton: String] = [:]
+    var directory: URL?
+    var process: Process?
+    var writer: FileHandle?
+    var approvals: [(String, [String: Any])] = []
+    var approvalSheet: NSAlert?
     let cli: String
     let recognizer = SFSpeechRecognizer()
     var phase: Phase = .idle
@@ -6954,72 +6968,120 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     init(cli: String) {
         self.cli = cli
         super.init()
-        window.title = "Voice conversation"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
-        window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 420, height: 390)
-        let body = NSVisualEffectView()
-        body.material = .underWindowBackground; body.blendingMode = .behindWindow; body.state = .active
-        window.contentView = body
-        let kicker = NSTextField(labelWithString: "ON THIS MAC")
-        kicker.font = .systemFont(ofSize: 10, weight: .semibold); kicker.textColor = .secondaryLabelColor
-        let title = NSTextField(labelWithString: "Voice conversation")
-        title.font = .systemFont(ofSize: 30, weight: .semibold)
-        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.hasVerticalScroller = true
-        transcript.isEditable = false; transcript.drawsBackground = false; transcript.isVerticallyResizable = true
-        transcript.autoresizingMask = [.width]; transcript.textContainer?.widthTracksTextView = true
-        transcript.textContainer?.lineFragmentPadding = 0; transcript.textContainerInset = .zero
-        scroll.documentView = transcript
-        let wave = NSImageView(image: NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: nil)!)
-        wave.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 56, weight: .light).applying(.init(paletteColors: [.systemTeal, .systemTeal.withAlphaComponent(0.12)]))
-        let intro = NSTextField(wrappingLabelWithString: "Speak naturally, then pause for a reply.")
-        intro.font = .systemFont(ofSize: 15); intro.textColor = .secondaryLabelColor; intro.alignment = .center
-        welcome.orientation = .vertical; welcome.alignment = .centerX; welcome.spacing = 12
-        welcome.addArrangedSubview(wave); welcome.addArrangedSubview(intro)
-        let dock = nativeBackdrop(), panel = NSView()
-        dock.contentView = panel
-        status.font = .systemFont(ofSize: 13, weight: .medium)
-        symbol.contentTintColor = .systemTeal
+        window.title = "Conversation"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 410, height: 360)
+        let body = NSView(); window.contentView = body
+        let title = NSTextField(labelWithString: "Conversation")
+        title.font = .systemFont(ofSize: 23, weight: .semibold)
+        scope.controlSize = .small; scope.target = self; scope.action = #selector(chooseScope)
+        scope.setAccessibilityLabel("Conversation workspace")
+        let line = NSBox(); line.boxType = .separator
+        scroll.contentView = FlippedClip(); scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        turns.orientation = .vertical; turns.alignment = .leading; turns.spacing = 16
+        turns.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 16, right: 0)
+        turns.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = turns
+        let wave = NSImageView(image: NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)!)
+        wave.symbolConfiguration = .init(pointSize: 29, weight: .medium); wave.contentTintColor = .controlAccentColor
+        headline.font = .systemFont(ofSize: 21, weight: .semibold); headline.alignment = .center
+        hint.font = .systemFont(ofSize: 13); hint.textColor = .secondaryLabelColor; hint.alignment = .center
+        welcome.orientation = .vertical; welcome.alignment = .centerX; welcome.spacing = 8
+        for v in [wave, headline, hint] { welcome.addArrangedSubview(v) }
+        welcome.setCustomSpacing(15, after: wave)
+        let dock = nativeBackdrop(), panel = NSView(); dock.contentView = panel
+        input.isBordered = false; input.drawsBackground = false; input.font = .systemFont(ofSize: 15)
+        input.focusRingType = .none; input.target = self; input.action = #selector(sendTyped)
+        input.setAccessibilityLabel("Message")
+        send.bezelStyle = .accessoryBarAction; send.isBordered = false
+        send.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send message")?.withSymbolConfiguration(.init(pointSize: 23, weight: .medium))
+        send.contentTintColor = .controlAccentColor; send.target = self; send.action = #selector(sendTyped); send.toolTip = "Send message"
+        status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
         action.bezelStyle = .rounded; action.target = self; action.action = #selector(toggle)
-        action.controlSize = .large; action.setContentCompressionResistancePriority(.required, for: .horizontal)
-        for view in [kicker,title,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
-        for view in [symbol,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
+        action.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for view in [title,scope,line,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
+        for view in [input,send,symbol,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
-            kicker.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 28), kicker.topAnchor.constraint(equalTo: body.topAnchor, constant: 49),
-            title.leadingAnchor.constraint(equalTo: kicker.leadingAnchor), title.topAnchor.constraint(equalTo: kicker.bottomAnchor, constant: 3),
-            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 25), scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -28), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -18),
-            welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
-            welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
-            dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
-            dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16), dock.heightAnchor.constraint(greaterThanOrEqualToConstant: 68),
-            symbol.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18), symbol.centerYAnchor.constraint(equalTo: panel.centerYAnchor), symbol.widthAnchor.constraint(equalToConstant: 27),
-            status.leadingAnchor.constraint(equalTo: symbol.trailingAnchor, constant: 10), status.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
-            status.topAnchor.constraint(greaterThanOrEqualTo: panel.topAnchor, constant: 8),
-            action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 12), action.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14), action.centerYAnchor.constraint(equalTo: panel.centerYAnchor)
+            title.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), title.topAnchor.constraint(equalTo: body.topAnchor, constant: 43),
+            scope.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 10), scope.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -20), scope.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            line.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 16), line.leadingAnchor.constraint(equalTo: body.leadingAnchor), line.trailingAnchor.constraint(equalTo: body.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: line.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
+            turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
+            dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
+            input.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16), input.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8),
+            send.centerYAnchor.constraint(equalTo: input.centerYAnchor), send.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
+            symbol.leadingAnchor.constraint(equalTo: input.leadingAnchor), symbol.centerYAnchor.constraint(equalTo: action.centerYAnchor), symbol.widthAnchor.constraint(equalToConstant: 17),
+            status.leadingAnchor.constraint(equalTo: symbol.trailingAnchor, constant: 6), status.centerYAnchor.constraint(equalTo: action.centerYAnchor), status.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
+            action.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 11), action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8), action.trailingAnchor.constraint(equalTo: send.trailingAnchor), action.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
         ])
-        state(.idle, "Ready when you are"); window.center()
+        refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center()
     }
     func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func refreshScope() {
+        scope.removeAllItems()
+        scope.addItems(withTitles: ["On this Mac", "Choose folder for Codex…"])
+        if let directory { scope.addItem(withTitle: String(directory.lastPathComponent.prefix(24))); scope.selectItem(at: 2) }
+        scope.selectedItem?.image = NSImage(systemSymbolName: directory == nil ? "laptopcomputer" : "folder", accessibilityDescription: nil)
+        scope.toolTip = directory?.path ?? "Apple Intelligence on this Mac"
+        headline.stringValue = directory == nil ? "Start a conversation" : "Work with Codex"
+        hint.stringValue = directory == nil ? "Type a message or turn on voice.\nChoose a folder to work with Codex." : "Run commands, edit files, and use tools\nwith your configured Codex account."
+        input.placeholderString = directory == nil ? "Message Hey Boss…" : "Message Codex…"
+    }
+    @objc func chooseScope() {
+        if scope.indexOfSelectedItem == 0 { if directory != nil { selectDirectory(nil) }; return }
+        guard scope.indexOfSelectedItem == 1 else { return }
+        refreshScope()
+        let picker = NSOpenPanel(); picker.canChooseFiles = false; picker.canChooseDirectories = true; picker.prompt = "Use Folder"
+        picker.message = "Codex will receive your messages and can use tools in this folder."
+        picker.beginSheetModal(for: window) { [weak self] result in
+            if result == .OK, let url = picker.url { self?.selectDirectory(url) }
+        }
+    }
+    func selectDirectory(_ url: URL?) {
+        stop("Ready"); directory = url; clearTurns(); input.stringValue = ""; refreshScope()
+        state(.idle, url == nil ? "On-device chat" : "Codex workspace")
+    }
+    func clearTurns() {
+        for row in turns.arrangedSubviews { row.removeFromSuperview() }
+        rows.removeAll(); details.removeAll(); tools.removeAll()
+    }
     func state(_ next: Phase, _ message: String) {
         phase = next; status.stringValue = message
-        action.title = next == .idle ? (transcript.string.isEmpty ? "Start" : "New conversation") : "End"
+        action.title = next == .idle ? "Start voice" : "End"
+        action.image = NSImage(systemSymbolName: next == .idle ? "mic" : "stop.fill", accessibilityDescription: nil)
+        action.imagePosition = .imageLeading
         let glyph: String
         switch next {
         case .recording, .listening: glyph = "mic.fill"
         case .thinking, .decoding: glyph = "ellipsis.bubble"
         case .speaking: glyph = "speaker.wave.2.fill"
-        default: glyph = "waveform"
+        default: glyph = directory == nil ? "laptopcomputer" : "folder"
         }
-        symbol.image = NSImage(systemSymbolName: glyph, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 20, weight: .medium))
-        welcome.isHidden = !transcript.string.isEmpty
+        symbol.contentTintColor = [.recording,.listening].contains(next) ? .systemGreen : .secondaryLabelColor
+        symbol.image = NSImage(systemSymbolName: glyph, accessibilityDescription: nil)
+        scope.isEnabled = next == .idle
+        send.isEnabled = next == .idle || next == .listening
+        welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
+    }
+    func modelReady() -> Bool {
+        if directory != nil || model != nil { return true }
+        switch SystemLanguageModel.default.availability {
+        case .available: return true
+        case .unavailable(.appleIntelligenceNotEnabled): state(.idle, "Turn on Apple Intelligence in System Settings.")
+        case .unavailable(.modelNotReady): state(.idle, "The local model is downloading.")
+        default: state(.idle, "Apple Intelligence is unavailable on this Mac.")
+        }
+        return false
+    }
+    @objc func sendTyped() {
+        guard phase == .idle || phase == .listening else { return }
+        let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, modelReady() else { return }
+        input.stringValue = ""; respond(text)
     }
     @objc func toggle() {
         guard phase == .idle else { stop("Conversation ended"); return }
-        switch SystemLanguageModel.default.availability {
-        case .available: break
-        case .unavailable(.appleIntelligenceNotEnabled): state(.idle, "Turn on Apple Intelligence in System Settings."); return
-        case .unavailable(.modelNotReady): state(.idle, "The local model is downloading. Try again when it’s ready."); return
-        default: state(.idle, "Apple Intelligence is unavailable on this Mac."); return
-        }
+        guard modelReady() else { return }
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
         let audio = ReviewAudio(); self.audio = audio
         state(.starting, "Opening microphone…")
@@ -7033,7 +7095,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         } }
     }
     func connect(_ audio: ReviewAudio) {
-        self.audio = audio; model = LanguageModelSession(); transcript.string = ""
+        self.audio = audio
         audio.event = { [weak self] in self?.receive($0) }
         state(.listening, "Listening")
     }
@@ -7055,7 +7117,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
                     self.timeout?.invalidate(); self.decoding = nil
                     switch result {
                     case .failure(let error): self.stop(error.localizedDescription)
-                    case .success(let text): if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text, audio: audio) }
+                    case .success(let text): if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
                     }
                 }
             } catch { stop(error.localizedDescription) }
@@ -7063,34 +7125,163 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         }
     }
     func append(_ text: String, from speaker: String) {
-        let storage = transcript.textStorage!
-        storage.append(NSAttributedString(string: speaker + "\n", attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor]))
-        storage.append(NSAttributedString(string: text + "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.labelColor]))
-        transcript.scrollToEndOfDocument(nil)
+        let mine = speaker == "You"
+        let row = NSView(), card = NSBox()
+        card.boxType = .custom; card.cornerRadius = 12; card.borderWidth = 0
+        card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
+        let who = NSTextField(labelWithString: speaker)
+        who.font = .systemFont(ofSize: 11, weight: .semibold); who.textColor = mine ? .controlAccentColor : .secondaryLabelColor
+        let label = NSTextField(wrappingLabelWithString: text); label.isSelectable = true
+        label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
+        if !mine { label.attributedStringValue = markdown(text, size: 15, color: .labelColor) }
+        turns.addArrangedSubview(row); rows.append(label)
+        for v in [card,who,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
+        let inset: CGFloat = mine ? 12 : 0
+        NSLayoutConstraint.activate([
+            row.widthAnchor.constraint(equalTo: turns.widthAnchor),
+            card.topAnchor.constraint(equalTo: row.topAnchor), card.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            mine ? card.trailingAnchor.constraint(equalTo: row.trailingAnchor) : card.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            card.widthAnchor.constraint(lessThanOrEqualTo: row.widthAnchor, multiplier: mine ? 0.84 : 1),
+            who.topAnchor.constraint(equalTo: card.topAnchor, constant: mine ? 8 : 0), who.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
+            label.topAnchor.constraint(equalTo: who.bottomAnchor, constant: 3), label.leadingAnchor.constraint(equalTo: who.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset), label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: mine ? -9 : 0)
+        ])
+        reveal(row)
     }
-    func respond(_ text: String, audio: ReviewAudio) {
-        guard let model else { return }
+    func reveal(_ row: NSView) {
+        welcome.isHidden = true; window.contentView?.layoutSubtreeIfNeeded(); row.scrollToVisible(row.bounds)
+    }
+    func respond(_ text: String) {
+        if model == nil && process == nil && !rows.isEmpty { clearTurns() }
         append(text, from: "You"); state(.thinking, "Thinking…")
-        reply = Task { @MainActor [weak self, weak audio] in
+        if let directory {
+            do {
+                if process == nil { try startCodex(directory) }
+                try write(["turn":text])
+            } catch { stop(error.localizedDescription) }
+            return
+        }
+        if model == nil { model = LanguageModelSession() }
+        guard let model else { return }
+        reply = Task { @MainActor [weak self] in
             do {
                 let answer = try await model.respond(to: text).content
-                guard !Task.isCancelled, let self, let audio, self.audio === audio else { return }
-                self.reply = nil; self.append(answer, from: "Hey Boss"); self.state(.speaking, "Speaking")
-                audio.speak(answer, highlight: { _ in }) { [weak self, weak audio] in
-                    if let self, let audio, self.audio === audio { self.state(.listening, "Listening") }
-                }
+                guard !Task.isCancelled, let self else { return }
+                self.reply = nil; self.answer(answer)
             } catch {
-                guard !Task.isCancelled, let self, let audio, self.audio === audio else { return }
-                self.stop(error.localizedDescription)
+                guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
+        }
+    }
+    func answer(_ text: String) {
+        if !text.isEmpty { append(text, from: directory == nil ? "Hey Boss" : "Codex") }
+        guard let audio, !text.isEmpty else { state(audio == nil ? .idle : .listening, audio == nil ? (directory == nil ? "On-device chat" : "Codex workspace") : "Listening"); return }
+        state(.speaking, "Speaking")
+        audio.speak(text, highlight: { _ in }) { [weak self, weak audio] in
+            if let self, let audio, self.audio === audio { self.state(.listening, "Listening") }
+        }
+    }
+    func startCodex(_ folder: URL) throws {
+        let child = Process(), stdin = Pipe(), stdout = Pipe()
+        child.executableURL = URL(fileURLWithPath: cli); child.arguments = ["workspace-chat"]; child.currentDirectoryURL = folder
+        child.standardInput = stdin; child.standardOutput = stdout
+        try child.run(); process = child; writer = stdin.fileHandleForWriting
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let handle = stdout.fileHandleForReading
+            var pending = Data()
+            while true {
+                let data = handle.availableData
+                if data.isEmpty { break }
+                pending.append(data)
+                while let i = pending.firstIndex(of: 10) {
+                    let line = Data(pending[..<i]); pending.removeSubrange(...i)
+                    onMain {
+                        guard let self, self.process === child else { return }
+                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.stop("Unreadable response from Codex."); return }
+                        self.event(event)
+                    }
+                }
+            }
+            onMain { if let self, self.process === child { self.stop("Codex disconnected. Check your Codex sign-in and try again.") } }
+        }
+    }
+    func write(_ command: [String:Any]) throws {
+        guard let writer else { throw CocoaError(.fileWriteUnknown) }
+        var data = try JSONSerialization.data(withJSONObject: command); data.append(10); try writer.write(contentsOf: data)
+    }
+    func event(_ envelope: [String:Any]) {
+        if let error = envelope["error"] as? String { stop(error); return }
+        guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
+        let id = data["id"] as? String ?? ""
+        switch kind {
+        case "ToolStarted", "ToolCompleted":
+            guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
+            let button = tools[id] ?? NSButton()
+            let files = (item["changes"] as? [[String:Any]])?.compactMap { $0["path"] as? String }.joined(separator: ", ")
+            let title = item["command"] as? String ?? files ?? item["tool"] as? String ?? "Tool call"
+            let failed = data["failed"] as? Bool == true, done = kind == "ToolCompleted"
+            let summary = (item["commandActions"] as? [[String:Any]])?.first?["command"] as? String ?? title
+            button.attributedTitle = NSAttributedString(string: " " + String(summary.prefix(180)), attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.secondaryLabelColor]); button.toolTip = "Show tool details"
+            button.image = NSImage(systemSymbolName: done ? (failed ? "exclamationmark.circle" : "checkmark.circle") : "terminal", accessibilityDescription: done ? (failed ? "Failed" : "Completed") : "Running")
+            button.imagePosition = .imageLeading; button.isBordered = false; button.contentTintColor = failed ? .systemOrange : .secondaryLabelColor
+            button.lineBreakMode = .byTruncatingMiddle; button.target = self; button.action = #selector(showTool(_:))
+            if tools[id] == nil { tools[id] = button; turns.addArrangedSubview(button); button.widthAnchor.constraint(lessThanOrEqualTo: turns.widthAnchor).isActive = true }
+            let result = item["aggregatedOutput"] as? String ?? (item["result"] ?? item["changes"]).map { String(describing: $0) } ?? ""
+            details[button] = title + (result.isEmpty ? "" : "\n\n" + String(result.prefix(10000)))
+            reveal(button); state(.thinking, done ? "Thinking…" : "Using tools…")
+        case "Approval":
+            guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { stop("Incomplete approval request."); return }
+            approvals.append((id,params)); presentApproval()
+        case "RequestCancelled":
+            let showing = approvals.first?.0 == id
+            approvals.removeAll { $0.0 == id }
+            if showing, let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window); presentApproval() }
+        case "TurnCompleted":
+            if data["status"] as? String == "Completed" { answer(data["output"] as? String ?? "") }
+            else { stop("Codex did not finish this turn.") }
+        default: break
+        }
+    }
+    func detailView(_ text: String) -> NSScrollView {
+        let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 145))
+        let field = NSTextView(frame: scroller.bounds); field.string = text; field.isEditable = false
+        field.font = .monospacedSystemFont(ofSize: 12, weight: .regular); field.isVerticallyResizable = true
+        field.autoresizingMask = [.width]; field.textContainer?.widthTracksTextView = true
+        scroller.documentView = field; scroller.hasVerticalScroller = true; return scroller
+    }
+    @objc func showTool(_ sender: NSButton) {
+        let alert = NSAlert(); alert.messageText = "Tool details"; alert.accessoryView = detailView(details[sender] ?? sender.title)
+        alert.addButton(withTitle: "Done"); alert.beginSheetModal(for: window)
+    }
+    func presentApproval() {
+        guard approvalSheet == nil, let (id,params) = approvals.first else { return }
+        let alert = NSAlert(); approvalSheet = alert; alert.messageText = "Allow this Codex action?"
+        let fields = params.filter { !["threadId","turnId","itemId"].contains($0.key) }
+        alert.informativeText = fields["reason"] as? String ?? ""
+        var parts: [String] = []
+        if let item = params["itemId"] as? String, let button = tools[item], let detail = details[button] { parts.append(detail) }
+        for key in fields.keys.sorted() where key != "reason" {
+            guard let value = fields[key] else { continue }
+            let text = (value as? String) ?? (try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted,.sortedKeys,.fragmentsAllowed,.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? String(describing: value)
+            parts.append(key + ": " + text)
+        }
+        alert.accessoryView = detailView(parts.joined(separator: "\n\n"))
+        alert.addButton(withTitle: "Decline"); alert.addButton(withTitle: "Allow once")
+        alert.beginSheetModal(for: window) { [weak self] result in
+            guard let self, self.approvalSheet === alert, self.approvals.first?.0 == id else { return }
+            self.approvalSheet = nil; self.approvals.removeFirst()
+            do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.stop(error.localizedDescription) }
         }
     }
     func stop(_ message: String) {
         reply?.cancel(); reply = nil; model = nil; timeout?.invalidate(); timeout = nil
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
+        process = nil; try? writer?.close(); writer = nil
+        approvals.removeAll()
+        if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
         state(.idle, message)
     }
-    func windowWillClose(_ notification: Notification) { transcript.string = ""; stop("Ready when you are") }
+    func windowWillClose(_ notification: Notification) { selectDirectory(nil) }
 }
 #endif
 

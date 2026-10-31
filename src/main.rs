@@ -26,6 +26,7 @@ mod upgrade_cli;
 mod upgrade_provenance;
 mod utils_cli;
 mod worker_cli;
+mod workspace_chat;
 use clap::{Args, Parser, Subcommand};
 use hey_boss::{Client, Request, Severity, resolve_icon_file};
 use std::os::fd::AsRawFd;
@@ -268,6 +269,8 @@ enum Command {
         action: BrowserAction,
     },
     #[command(hide = true)]
+    WorkspaceChat,
+    #[command(hide = true)]
     ReviewAudio {
         /// Input contains interleaved microphone and playback reference samples.
         #[arg(long)]
@@ -477,6 +480,13 @@ fn run() -> std::io::Result<()> {
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
+        Command::WorkspaceChat => {
+            if let Err(error) = workspace_chat::run() {
+                println!("{}", serde_json::json!({"error":error.to_string()}));
+                return Err(error);
+            }
+            return Ok(());
+        }
         Command::ReviewAudio { duplex } => {
             return review_audio::stream(
                 std::io::stdin().lock(),
