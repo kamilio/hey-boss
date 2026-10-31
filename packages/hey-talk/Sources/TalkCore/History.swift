@@ -43,6 +43,7 @@ public struct Dictation: Codable, Equatable, Identifiable {
 /// Use from one serial queue. Each INSERT commits durably before paste is attempted.
 /// SQLite pages older entries without loading or rewriting the full history.
 public final class HistoryStore {
+    public static var cutoff: Date { Date().addingTimeInterval(-14 * 24 * 60 * 60) }
     private var database: OpaquePointer?
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -64,6 +65,7 @@ public final class HistoryStore {
             sqlite3_busy_timeout(database, 2_000)
             try execute("PRAGMA synchronous = FULL")
             try execute("CREATE TABLE IF NOT EXISTS dictations (id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, text TEXT NOT NULL, audio_seconds REAL NOT NULL, source TEXT NOT NULL)")
+            try execute("CREATE INDEX IF NOT EXISTS dictations_created_at ON dictations(created_at)")
             for column in ["original_text", "app_context"] {
                 let columns = try prepare("SELECT name FROM pragma_table_info('dictations') WHERE name = '\(column)'")
                 let result = sqlite3_step(columns)
@@ -77,7 +79,18 @@ public final class HistoryStore {
         }
     }
 
+    private func purgeExpired() throws {
+        let expired = "created_at < \(Self.cutoff.timeIntervalSinceReferenceDate)"
+        // Most reads and saves have nothing to purge; don't start a write transaction.
+        let probe = try prepare("SELECT 1 FROM dictations WHERE \(expired) LIMIT 1")
+        let result = sqlite3_step(probe)
+        sqlite3_finalize(probe)
+        if result == SQLITE_ROW { try execute("DELETE FROM dictations WHERE \(expired)") }
+        else if result != SQLITE_DONE { throw failure() }
+    }
+
     public func append(_ entry: Dictation) throws {
+        try purgeExpired()
         let statement = try prepare("INSERT INTO dictations (id, created_at, text, audio_seconds, source, original_text, app_context) VALUES (?, ?, ?, ?, ?, ?, ?)")
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_text(statement, 1, entry.id.uuidString, -1, transient)
@@ -93,6 +106,7 @@ public final class HistoryStore {
     }
 
     public func recent(limit: Int = 50, before: UUID? = nil) throws -> [Dictation] {
+        try purgeExpired()
         let statement = try prepare("SELECT id, created_at, text, audio_seconds, source, original_text, app_context FROM dictations \(before == nil ? "" : "WHERE rowid < (SELECT rowid FROM dictations WHERE id = ?)") ORDER BY rowid DESC LIMIT ?")
         defer { sqlite3_finalize(statement) }
         if let before { sqlite3_bind_text(statement, 1, before.uuidString, -1, transient) }

@@ -30,7 +30,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var focusGrace: DispatchWorkItem?
     private var autoRestart: DispatchWorkItem?
     private var autoMenuItem: NSMenuItem?
-    private var historyWindow: HistoryWindow?
+    private lazy var historyWindow = HistoryWindow(history: history)
     private var contextWindow: ContextWindow?
     private lazy var accessibilitySetup = AccessibilitySetup()
     private var session = RecordingSession() { didSet { updateSubmitIndicator() } }
@@ -155,6 +155,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
             self.cancel(); self.overlay?.error("Auto paused. Focus the message field again.")
         }
         history.refresh()
+        // Pay the one-time SwiftUI/AppKit layout cost off the user's first click.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.session.phase == .idle, !self.speech.active else { return }
+            _ = self.historyWindow
+        }
         let vocabularyTimer = DispatchSource.makeTimerSource(queue: .main)
         vocabularyTimer.schedule(deadline: .now(), repeating: .seconds(15), leeway: .seconds(3))
         vocabularyTimer.setEventHandler { [weak self] in self?.refreshVocabulary() }
@@ -176,8 +181,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     @objc private func showAccessibilitySetup() { accessibilitySetup.show() }
     @objc private func showHistory() {
-        if historyWindow == nil { historyWindow = HistoryWindow(history: history) }
-        history.refresh(); historyWindow?.show(keepingFocus: session.phase == .recording)
+        historyWindow.show(keepingFocus: session.phase == .recording)
+        history.refresh()
     }
     @objc private func previewContext() {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() {
@@ -468,7 +473,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
         case "cancel": cancelDictation(); reply(status())
         case "last":
-            if let entry = history.entries.first { reply(entry.json.merging(["ok": true]) { _, new in new }) }
+            if let entry = history.entries.first, entry.createdAt >= HistoryStore.cutoff || history.unsaved.contains(entry.id) { reply(entry.json.merging(["ok": true]) { _, new in new }) }
             else {
                 history.read { result in
                     switch result {

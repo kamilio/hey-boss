@@ -27,7 +27,7 @@ final class HistoryTests: XCTestCase {
         XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("history.sqlite3").path, &database), SQLITE_OK)
         let id = UUID()
         XCTAssertEqual(sqlite3_exec(database, "CREATE TABLE dictations (id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, text TEXT NOT NULL, audio_seconds REAL NOT NULL, source TEXT NOT NULL)", nil, nil, nil), SQLITE_OK)
-        XCTAssertEqual(sqlite3_exec(database, "INSERT INTO dictations VALUES ('\(id.uuidString)', 0, 'Old corrected text', 2, 'microphone')", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "INSERT INTO dictations VALUES ('\(id.uuidString)', \(Date().timeIntervalSinceReferenceDate), 'Old corrected text', 2, 'microphone')", nil, nil, nil), SQLITE_OK)
         sqlite3_close(database)
         do {
             let store = try HistoryStore(directory: directory)
@@ -53,11 +53,31 @@ final class HistoryTests: XCTestCase {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("history.sqlite3").path, &database), SQLITE_OK)
         XCTAssertEqual(sqlite3_exec(database, "CREATE TABLE dictations (id TEXT NOT NULL UNIQUE, created_at REAL NOT NULL, text TEXT NOT NULL, audio_seconds REAL NOT NULL, source TEXT NOT NULL, original_text TEXT)", nil, nil, nil), SQLITE_OK)
-        XCTAssertEqual(sqlite3_exec(database, "INSERT INTO dictations VALUES ('\(UUID().uuidString)', 0, 'Corrected', 2, 'microphone', 'um original')", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(database, "INSERT INTO dictations VALUES ('\(UUID().uuidString)', \(Date().timeIntervalSinceReferenceDate), 'Corrected', 2, 'microphone', 'um original')", nil, nil, nil), SQLITE_OK)
         sqlite3_close(database)
         let entry = try XCTUnwrap(HistoryStore(directory: directory).recent().first)
         XCTAssertEqual(entry.originalText, "um original")
         XCTAssertNil(entry.appContext)
+    }
+
+    func testExpiredRowsAreDeletedFromAnAlreadyOpenStore() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try HistoryStore(directory: directory)
+        let old = Dictation(text: "Expired", originalText: "Expired", audioSeconds: 1, source: "file")
+        let keep = Dictation(text: "Keep", originalText: "Keep", audioSeconds: 1, source: "microphone")
+        try store.append(old); try store.append(keep)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("history.sqlite3").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let cutoff = Date().addingTimeInterval(-14 * 86400).timeIntervalSinceReferenceDate
+        XCTAssertEqual(sqlite3_exec(db, "UPDATE dictations SET created_at = CASE WHEN id = '\(old.id.uuidString)' THEN \(cutoff - 60) ELSE \(cutoff + 60) END", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(try store.recent().map(\.id), [keep.id])
+        var count: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT count(*) FROM dictations", -1, &count, nil), SQLITE_OK)
+        defer { sqlite3_finalize(count) }
+        XCTAssertEqual(sqlite3_step(count), SQLITE_ROW)
+        XCTAssertEqual(sqlite3_column_int(count, 0), 1)
     }
 
     func testPagingWhileNewDictationsArriveDoesNotSkipOrDuplicate() throws {

@@ -268,8 +268,7 @@ and undo commands work in native text fields. Select part of any transcript
 and press ⌘C, or use its Copy button for the whole text. The search field filters
 loaded entries. macOS 26 windows use native Liquid Glass. Notices expand inside
 the floating capsule; `status --json` keeps the full error details.
-Older entries load in pages; nothing expires
-automatically. `history` prints the latest 50 entries; `history --before ID`
+Older entries load in pages. Saved dictations older than 14 days are removed when History is read or a dictation is saved. `history` prints the latest 50 entries; `history --before ID`
 reads the next page using the `next_before` cursor from JSON output.
 
 Completed microphone and file transcriptions are saved before any paste attempt
