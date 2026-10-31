@@ -68,6 +68,9 @@ func audit() {
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
+    #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
+    #endif
     if let id = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPOKEN_REVIEW"] { auditSpokenReview(id); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HTML_READER"] == "1" { auditHTMLReader(); return }
@@ -4245,3 +4248,54 @@ func auditReviewEcho() {
     precondition(done && interruptions == 0, "Playback finished: \(done); detected interruptions: \(interruptions)")
     print("PASS physical playback did not trigger the microphone detector")
 }
+
+#if canImport(FoundationModels)
+@available(macOS 26, *)
+func auditConversation(_ root: String) {
+    let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let ui = VoiceConversation(cli: cli)
+    ui.show()
+    let audio = ReviewAudio()
+    audio.engine.attach(audio.player)
+    audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0
+    try! audio.engine.start()
+    let writer = try! audio.listen(cli: cli)
+    ui.connect(audio)
+    func wait(_ step: String, _ check: () -> Bool) {
+        let deadline = Date().addingTimeInterval(70)
+        while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(check(), "\(step): \(ui.status.stringValue)")
+    }
+    func feed(_ name: String) {
+        let pcm = try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent(name + ".pcm"))
+        DispatchQueue.global().async {
+            var frames = Data(count: 12800); frames.append(pcm); frames.append(Data(count: 48000))
+            for index in stride(from: 0, to: frames.count, by: 640) {
+                try! writer.write(contentsOf: frames[index..<min(index + 640, frames.count)])
+                Thread.sleep(forTimeInterval: 0.019)
+            }
+        }
+    }
+    feed("first")
+    wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
+    ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
+    precondition(ui.phase == .speaking && ui.recording == nil)
+    wait("listen again") { ui.phase == .listening }
+    feed("second")
+    wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
+    precondition(ui.transcript.string.components(separatedBy: "Hey Boss\n").last!.localizedCaseInsensitiveContains("pineapple"), ui.transcript.string)
+    precondition(ui.action.title == "End" && ui.transcript.bounds.width > 320 && ui.status.bounds.width > 60)
+    ui.window.close()
+    precondition(ui.transcript.string.isEmpty && ui.action.title == "Start")
+    precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
+    let fresh = ReviewAudio()
+    ui.connect(fresh)
+    ui.respond("Hello", audio: fresh)
+    precondition(ui.phase == .thinking)
+    ui.toggle()
+    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+    precondition(ui.phase == .idle && fresh.stopped && !ui.transcript.string.contains("Hey Boss\n"))
+    print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
+}
+#endif

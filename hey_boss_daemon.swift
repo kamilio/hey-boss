@@ -1,6 +1,9 @@
 import os
 import AVFoundation
 import Speech
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 import AppKit
 import CryptoKit
 import UniformTypeIdentifiers
@@ -5086,6 +5089,13 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         talkItem.target = self
         talkItem.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         menu.addItem(talkItem)
+        #if canImport(FoundationModels)
+        if #available(macOS 26, *) {
+            let voice = NSMenuItem(title: "Voice conversation…", action: #selector(showConversation), keyEquivalent: "")
+            voice.target = self; voice.image = NSImage(systemSymbolName: "bubble.left.and.waveform.bubble.right", accessibilityDescription: nil)
+            menu.addItem(voice)
+        }
+        #endif
         menu.addItem(.separator())
         let syncItem = NSMenuItem()
         syncItem.view = fleetSync.content
@@ -5134,6 +5144,14 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/config.json")
         if !NSWorkspace.shared.open(config) { NSLog("Could not open machine config") }
     }
+    #if canImport(FoundationModels)
+    private var conversationWindow: NSObject?
+    @available(macOS 26, *)
+    @objc func showConversation() {
+        let conversation = conversationWindow as? VoiceConversation ?? VoiceConversation(cli: cli ?? "/opt/homebrew/bin/hey-boss")
+        conversationWindow = conversation; conversation.show()
+    }
+    #endif
     @objc func showHeyTalk() {
         let candidates = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Hey Talk.app"),
                           URL(fileURLWithPath: "/Applications/Hey Talk.app")]
@@ -6623,7 +6641,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             let size = Int(pcm.frameLength) * 2
             if size > 0 { lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime } }
             if error != nil || (size > 0 && Darwin.write(writer.fileDescriptor, pcm.int16ChannelData![0], size) != size) {
-                onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Restart review.") }
+                onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Start again.") }
             }
         }
         tapped = true
@@ -6640,7 +6658,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
         }
         routeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            guard let self, !self.stopped else { return }; self.failed("Sound device changed. Restart review.")
+            guard let self, !self.stopped else { return }; self.failed("Sound device changed. Start again.")
         }
     }
 
@@ -6763,6 +6781,196 @@ struct ReviewTranscript {
     }
 }
 
+func recognizeTurn(_ samples: Data, format: AVAudioFormat, recognizer: SFSpeechRecognizer,
+                   completion: @escaping (Result<String, Error>) -> Void) throws -> SFSpeechRecognitionTask {
+    guard !samples.isEmpty, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count / 2)) else {
+        throw StorageError(description: "Could not read the recorded audio.")
+    }
+    buffer.frameLength = buffer.frameCapacity
+    samples.copyBytes(to: UnsafeMutableRawBufferPointer(start: buffer.int16ChannelData![0], count: samples.count))
+    let request = SFSpeechAudioBufferRecognitionRequest()
+    request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
+    request.append(buffer); request.endAudio()
+    var transcript = ReviewTranscript(), completed = false
+    return recognizer.recognitionTask(with: request) { result, error in onMain {
+        guard !completed else { return }
+        if let result, result.speechRecognitionMetadata != nil || result.isFinal {
+            let transcription = result.bestTranscription
+            if let first = transcription.segments.first, let last = transcription.segments.last {
+                transcript.accept(transcription.formattedString, from: first.timestamp, through: last.timestamp + last.duration)
+            }
+        }
+        guard result?.isFinal == true || error != nil else { return }
+        completed = true
+        if let error, !((error as NSError).domain == "kAFAssistantErrorDomain" && (error as NSError).code == 1110) {
+            completion(.failure(error))
+        } else { completion(.success(transcript.text)) }
+    } }
+}
+
+#if canImport(FoundationModels)
+@available(macOS 26, *)
+final class VoiceConversation: NSObject, NSWindowDelegate {
+    enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 510, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let status = NSTextField(wrappingLabelWithString: "")
+    let transcript = NSTextView()
+    let action = NSButton()
+    let symbol = NSImageView()
+    let welcome = NSStackView()
+    let cli: String
+    let recognizer = SFSpeechRecognizer()
+    var phase: Phase = .idle
+    var audio: ReviewAudio?
+    var model: LanguageModelSession?
+    var recording: Data?
+    var decoding: SFSpeechRecognitionTask?
+    var timeout: Timer?
+    var reply: Task<Void, Never>?
+
+    init(cli: String) {
+        self.cli = cli
+        super.init()
+        window.title = "Voice conversation"; window.titleVisibility = .hidden; window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 420, height: 390)
+        let body = NSVisualEffectView()
+        body.material = .underWindowBackground; body.blendingMode = .behindWindow; body.state = .active
+        window.contentView = body
+        let kicker = NSTextField(labelWithString: "ON THIS MAC")
+        kicker.font = .systemFont(ofSize: 10, weight: .semibold); kicker.textColor = .secondaryLabelColor
+        let title = NSTextField(labelWithString: "Voice conversation")
+        title.font = .systemFont(ofSize: 30, weight: .semibold)
+        let scroll = NSScrollView(); scroll.drawsBackground = false; scroll.hasVerticalScroller = true
+        transcript.isEditable = false; transcript.drawsBackground = false; transcript.isVerticallyResizable = true
+        transcript.autoresizingMask = [.width]; transcript.textContainer?.widthTracksTextView = true
+        transcript.textContainer?.lineFragmentPadding = 0; transcript.textContainerInset = .zero
+        scroll.documentView = transcript
+        let wave = NSImageView(image: NSImage(systemSymbolName: "waveform.circle.fill", accessibilityDescription: nil)!)
+        wave.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 56, weight: .light).applying(.init(paletteColors: [.systemTeal, .systemTeal.withAlphaComponent(0.12)]))
+        let intro = NSTextField(wrappingLabelWithString: "Speak naturally, then pause for a reply.")
+        intro.font = .systemFont(ofSize: 15); intro.textColor = .secondaryLabelColor; intro.alignment = .center
+        welcome.orientation = .vertical; welcome.alignment = .centerX; welcome.spacing = 12
+        welcome.addArrangedSubview(wave); welcome.addArrangedSubview(intro)
+        let dock = nativeBackdrop(), panel = NSView()
+        dock.contentView = panel
+        status.font = .systemFont(ofSize: 13, weight: .medium)
+        symbol.contentTintColor = .systemTeal
+        action.bezelStyle = .rounded; action.target = self; action.action = #selector(toggle)
+        action.controlSize = .large; action.setContentCompressionResistancePriority(.required, for: .horizontal)
+        for view in [kicker,title,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
+        for view in [symbol,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
+        NSLayoutConstraint.activate([
+            kicker.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 28), kicker.topAnchor.constraint(equalTo: body.topAnchor, constant: 49),
+            title.leadingAnchor.constraint(equalTo: kicker.leadingAnchor), title.topAnchor.constraint(equalTo: kicker.bottomAnchor, constant: 3),
+            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 25), scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -28), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -18),
+            welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+            welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
+            dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16), dock.heightAnchor.constraint(greaterThanOrEqualToConstant: 68),
+            symbol.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 18), symbol.centerYAnchor.constraint(equalTo: panel.centerYAnchor), symbol.widthAnchor.constraint(equalToConstant: 27),
+            status.leadingAnchor.constraint(equalTo: symbol.trailingAnchor, constant: 10), status.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
+            status.topAnchor.constraint(greaterThanOrEqualTo: panel.topAnchor, constant: 8),
+            action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 12), action.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14), action.centerYAnchor.constraint(equalTo: panel.centerYAnchor)
+        ])
+        state(.idle, "Ready when you are"); window.center()
+    }
+    func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func state(_ next: Phase, _ message: String) {
+        phase = next; status.stringValue = message
+        action.title = next == .idle ? (transcript.string.isEmpty ? "Start" : "New conversation") : "End"
+        let glyph: String
+        switch next {
+        case .recording, .listening: glyph = "mic.fill"
+        case .thinking, .decoding: glyph = "ellipsis.bubble"
+        case .speaking: glyph = "speaker.wave.2.fill"
+        default: glyph = "waveform"
+        }
+        symbol.image = NSImage(systemSymbolName: glyph, accessibilityDescription: nil)?.withSymbolConfiguration(.init(pointSize: 20, weight: .medium))
+        welcome.isHidden = !transcript.string.isEmpty
+    }
+    @objc func toggle() {
+        guard phase == .idle else { stop("Conversation ended"); return }
+        switch SystemLanguageModel.default.availability {
+        case .available: break
+        case .unavailable(.appleIntelligenceNotEnabled): state(.idle, "Turn on Apple Intelligence in System Settings."); return
+        case .unavailable(.modelNotReady): state(.idle, "The local model is downloading. Try again when it’s ready."); return
+        default: state(.idle, "Apple Intelligence is unavailable on this Mac."); return
+        }
+        guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
+        let audio = ReviewAudio(); self.audio = audio
+        state(.starting, "Opening microphone…")
+        AVCaptureDevice.requestAccess(for: .audio) { [weak self, weak audio] granted in onMain {
+            guard let self, let audio, self.audio === audio else { return }
+            guard granted else { self.stop("Allow Hey Boss in Privacy & Security → Microphone."); return }
+            audio.failed = { [weak self] in self?.stop($0) }
+            do { try audio.start(cli: self.cli) { [weak self, weak audio] in
+                if let self, let audio, self.audio === audio { self.connect(audio) }
+            } } catch { self.stop(error.localizedDescription) }
+        } }
+    }
+    func connect(_ audio: ReviewAudio) {
+        self.audio = audio; model = LanguageModelSession(); transcript.string = ""
+        audio.event = { [weak self] in self?.receive($0) }
+        state(.listening, "Listening")
+    }
+    func receive(_ event: ReviewAudio.Event) {
+        guard let audio else { return }
+        switch event {
+        case .began where phase == .listening:
+            recording = Data(); state(.recording, "Hearing you…")
+        case .pcm(let pcm) where phase == .recording:
+            guard recording!.count + pcm.count <= 32000 * 60 else { stop("Turn exceeded one minute. Start a new conversation."); return }
+            recording!.append(pcm)
+        case .ended where phase == .recording:
+            guard let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
+            recording = nil; state(.decoding, "Transcribing…")
+            do {
+                timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
+                decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self, weak audio] result in
+                    guard let self, let audio, self.audio === audio else { return }
+                    self.timeout?.invalidate(); self.decoding = nil
+                    switch result {
+                    case .failure(let error): self.stop(error.localizedDescription)
+                    case .success(let text): if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text, audio: audio) }
+                    }
+                }
+            } catch { stop(error.localizedDescription) }
+        default: break
+        }
+    }
+    func append(_ text: String, from speaker: String) {
+        let storage = transcript.textStorage!
+        storage.append(NSAttributedString(string: speaker + "\n", attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor]))
+        storage.append(NSAttributedString(string: text + "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.labelColor]))
+        transcript.scrollToEndOfDocument(nil)
+    }
+    func respond(_ text: String, audio: ReviewAudio) {
+        guard let model else { return }
+        append(text, from: "You"); state(.thinking, "Thinking…")
+        reply = Task { @MainActor [weak self, weak audio] in
+            do {
+                let answer = try await model.respond(to: text).content
+                guard !Task.isCancelled, let self, let audio, self.audio === audio else { return }
+                self.reply = nil; self.append(answer, from: "Hey Boss"); self.state(.speaking, "Speaking")
+                audio.speak(answer, highlight: { _ in }) { [weak self, weak audio] in
+                    if let self, let audio, self.audio === audio { self.state(.listening, "Listening") }
+                }
+            } catch {
+                guard !Task.isCancelled, let self, let audio, self.audio === audio else { return }
+                self.stop(error.localizedDescription)
+            }
+        }
+    }
+    func stop(_ message: String) {
+        reply?.cancel(); reply = nil; model = nil; timeout?.invalidate(); timeout = nil
+        decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
+        state(.idle, message)
+    }
+    func windowWillClose(_ notification: Notification) { transcript.string = ""; stop("Ready when you are") }
+}
+#endif
+
 final class SpokenReview {
     let audio = ReviewAudio()
     let recognizer = SFSpeechRecognizer()
@@ -6869,32 +7077,19 @@ final class SpokenReview {
         case .ended: guard recording != nil else { return }
         }
         let samples = recording!; recording = nil
-        guard let recognizer, let buffer = AVAudioPCMBuffer(pcmFormat: audio.format, frameCapacity: AVAudioFrameCount(samples.count / 2)) else { finish("Could not transcribe audio."); return }
-        buffer.frameLength = buffer.frameCapacity
-        samples.copyBytes(to: UnsafeMutableRawBufferPointer(start: buffer.int16ChannelData![0], count: samples.count))
         editor.reviewStatus("Transcribing · line \(anchor!.line)")
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
-        request.append(buffer); request.endAudio()
         watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
-        var transcript = ReviewTranscript()
-        decoding = recognizer.recognitionTask(with: request) { [weak self] result, error in onMain {
-            guard let self, !self.audio.stopped, self.decoding != nil else { return }
-            if let result, result.speechRecognitionMetadata != nil || result.isFinal {
-                let transcription = result.bestTranscription
-                if let first = transcription.segments.first, let last = transcription.segments.last {
-                    transcript.accept(transcription.formattedString, from: first.timestamp, through: last.timestamp + last.duration)
+        do {
+            guard let recognizer else { throw StorageError(description: "On-device dictation is unavailable.") }
+            decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self] result in
+                guard let self, !self.audio.stopped, self.decoding != nil else { return }
+                self.watchdog?.invalidate(); self.decoding = nil
+                switch result {
+                case .success(let text): if text.isEmpty { self.resume() } else { self.submit(text) }
+                case .failure(let error): self.finish(error.localizedDescription)
                 }
             }
-            guard result?.isFinal == true || error != nil else { return }
-            self.watchdog?.invalidate(); self.decoding = nil
-            if let error, !((error as NSError).domain == "kAFAssistantErrorDomain" && (error as NSError).code == 1110) {
-                self.finish(error.localizedDescription); return
-            }
-            let text = transcript.text
-            if text.isEmpty { self.resume(); return }
-            self.submit(text)
-        } }
+        } catch { finish(error.localizedDescription) }
     }
     var line: Int { editor?.reader.textStorage?.attribute(.sourceStart, at: word.location, effectiveRange: nil) as? Int ?? 1 }
     func submit(_ text: String) {
