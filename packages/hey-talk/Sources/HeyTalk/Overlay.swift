@@ -134,6 +134,7 @@ final class Overlay {
     var onToggleAuto: (() -> Void)?
     var onToggleAutoSubmit: (() -> Void)?
     var onToggleCorrection: (() -> Void)?
+    var onShowHistory: (() -> Void)?
     var onPreviewContext: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
@@ -412,6 +413,8 @@ final class Overlay {
     }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
+        let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
+        history.target = self
         for (section, items) in [
             ("Dictation", [
                 ("AI Correction", #selector(toggleCorrection), correctionEnabled, ""),
@@ -420,7 +423,7 @@ final class Overlay {
             ]),
             ("Speech", [("Read Aloud", #selector(toggleSpeechMode), speechEnabled(), "t")])
         ] {
-            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(.separator())
             menu.addItem(.sectionHeader(title: section))
             for (title, action, enabled, key) in items {
                 let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -442,6 +445,7 @@ final class Overlay {
     @objc private func toggleAutoMode() { onToggleAuto?() }
     @objc private func toggleAutoSubmit() { onToggleAutoSubmit?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
+    @objc private func showHistory() { onShowHistory?() }
     @objc private func previewContext() { onPreviewContext?() }
     private func updateModeAppearance() {
         pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
