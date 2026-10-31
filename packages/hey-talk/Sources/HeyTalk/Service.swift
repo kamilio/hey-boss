@@ -82,7 +82,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .previewContext: self.previewContext()
             case .cancel:
                 if self.speech.active { self.speech.stop() }
-                else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil || self.waitingPaste != nil { self.cancel() }
+                else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil || self.waitingPaste != nil { self.cancelDictation() }
             case .none: break
             }
         }
@@ -121,7 +121,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Context Preview · Hyper+M", #selector(previewContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelMenu)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Context Preview · Hyper+M", #selector(previewContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -198,7 +198,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func showOverlay(_ show: Bool) {
         if overlay == nil {
             let view = Overlay()
-            view.onCancelPaste = { [weak self] in self?.cancel() }
+            view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
@@ -318,7 +318,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
             updateSubmitIndicator()
         } catch { overlay?.error(error.localizedDescription) }
     }
-    @objc private func cancelMenu() { cancel() }
+    @objc private func cancelDictation() {
+        if let retry = waitingPaste, retry.isValid,
+           !Paste.copyAndStopWaiting(session.lastText, retry: retry, to: .general) {
+            overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: retry)
+            return
+        }
+        cancel()
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 
     private func status() -> [String: Any] {
@@ -458,7 +465,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 case .busy: reply(failure("Already processing"))
                 }
             }
-        case "cancel": cancel(); reply(status())
+        case "cancel": cancelDictation(); reply(status())
         case "last":
             if let entry = history.entries.first { reply(entry.json.merging(["ok": true]) { _, new in new }) }
             else {

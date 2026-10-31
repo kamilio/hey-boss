@@ -16,13 +16,13 @@ final class PasteWaitView: NSView {
         let spinner = NSProgressIndicator(frame: NSRect(x: 16, y: 19, width: 16, height: 16))
         spinner.style = .spinning; spinner.controlSize = .small
         if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { spinner.startAnimation(nil) }
-        let close = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Cancel paste")!, target: self, action: #selector(cancelPaste))
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Copy and close")!, target: self, action: #selector(cancelPaste))
         close.isBordered = false; close.contentTintColor = .secondaryLabelColor
-        close.toolTip = "Cancel paste (Esc)"; close.setAccessibilityLabel("Cancel paste")
+        close.toolTip = "Copy and close (Esc)"; close.setAccessibilityLabel("Copy and close")
         close.frame = NSRect(x: 249, y: 13, width: 27, height: 28)
         for view in [spinner, title, detail, close] { addSubview(view) }
         setAccessibilityRole(.group)
-        setAccessibilityLabel(title.stringValue + ". " + detail.stringValue + ". Escape to cancel.")
+        setAccessibilityLabel(title.stringValue + ". " + detail.stringValue + ". Escape to copy and close.")
     }
     required init?(coder: NSCoder) { nil }
     @objc private func cancelPaste() { cancel() }

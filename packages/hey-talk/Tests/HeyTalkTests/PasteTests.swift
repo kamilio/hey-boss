@@ -1,7 +1,19 @@
+import AppKit
 import XCTest
 @testable import HeyTalk
 
 final class PasteTests: XCTestCase {
+    func testClosingPendingPasteCopiesExactTranscriptAndStopsRetrying() {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let text = String(repeating: "A long dictation…\n", count: 100)
+        let retry = Timer(timeInterval: 0.35, repeats: true) { _ in XCTFail("Dismissed paste retried") }
+        RunLoop.main.add(retry, forMode: .common)
+        XCTAssertTrue(Paste.copyAndStopWaiting(text, retry: retry, to: board))
+        XCTAssertEqual(board.string(forType: .string), text)
+        XCTAssertFalse(retry.isValid)
+    }
+
     func testRecoveryNoticeNamesOriginalAppAndCorrectAction() {
         XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack"), "Return to Slack. Press ⌘V.")
         XCTAssertEqual(PasteBlockReason.targetClosed.message(targetName: "Notes"), "Reopen Notes. Press ⌘V.")
