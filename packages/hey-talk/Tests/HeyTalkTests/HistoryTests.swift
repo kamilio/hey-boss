@@ -4,6 +4,20 @@ import SQLite3
 @testable import HeyTalk
 
 final class HistoryControllerTests: XCTestCase {
+    @MainActor func testReopeningHistoryReusesTheLoadedPage() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let entry = Dictation(text: "Saved", originalText: "Saved", audioSeconds: 1, source: "file")
+        try HistoryStore(directory: directory).append(entry)
+        let history = DictationHistory(directory: directory)
+        history.refresh()
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !history.loading }, object: nil)
+        wait(for: [loaded], timeout: 5)
+        history.refresh()
+        XCTAssertFalse(history.loading)
+        XCTAssertEqual(history.entries, [entry])
+    }
+
     func testLockedDatabaseKeepsTranscriptWithoutBlockingUI() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

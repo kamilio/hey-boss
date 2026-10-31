@@ -10,6 +10,7 @@ final class DictationHistory: ObservableObject {
     @Published private(set) var loading = false
     private let queue = DispatchQueue(label: "hey-talk.history", qos: .utility)
     private let directory: URL
+    private var loadedFirstPage = false
     private var store: HistoryStore? // Access only on queue.
 
     init(directory: URL = ControlSocket.directory) { self.directory = directory }
@@ -25,6 +26,8 @@ final class DictationHistory: ObservableObject {
         queue.async {
             let result = Result { try self.database().append(entry) }
             DispatchQueue.main.async {
+                let cutoff = HistoryStore.cutoff
+                self.entries.removeAll { $0.createdAt < cutoff && !self.unsaved.contains($0.id) }
                 self.entries.insert(entry, at: 0)
                 switch result {
                 case .success: completion(true)
@@ -44,7 +47,13 @@ final class DictationHistory: ObservableObject {
         }
     }
 
-    func refresh() { load(older: false) }
+    func refresh() {
+        // Saves already update this list. Reuse it unless the first page needs rebuilding.
+        let cutoff = HistoryStore.cutoff
+        if loadedFirstPage, warning == nil, entries.count <= 50,
+           entries.last.map({ $0.createdAt >= cutoff }) ?? true { return }
+        load(older: false)
+    }
     func loadMore() { load(older: true) }
     func finishPendingWrites() { queue.sync {} }
     private func load(older: Bool) {
@@ -55,13 +64,15 @@ final class DictationHistory: ObservableObject {
             self.loading = false
             switch result {
             case .success(let page):
-                // Saves can finish while a read is in flight; retain newer entries.
+                let cutoff = HistoryStore.cutoff
                 if older {
+                    self.entries.removeAll { $0.createdAt < cutoff && !self.unsaved.contains($0.id) }
                     let known = Set(self.entries.map(\.id))
                     self.entries += page.filter { !known.contains($0.id) }
                 } else {
-                    let newest = page.first?.createdAt ?? .distantPast
-                    let retained = self.entries.filter { self.unsaved.contains($0.id) || $0.createdAt > newest }
+                    self.loadedFirstPage = true
+                    let newest = page.first?.createdAt ?? cutoff
+                    let retained = self.entries.filter { self.unsaved.contains($0.id) || ($0.createdAt >= cutoff && $0.createdAt > newest) }
                     let known = Set(retained.map(\.id))
                     self.entries = retained + page.filter { !known.contains($0.id) }
                 }
@@ -84,6 +95,7 @@ final class HistoryWindow {
         window.host(HistoryView(history: history))
         window.setFrameAutosaveName("DictationHistory")
         window.center()
+        window.contentView?.layoutSubtreeIfNeeded()
     }
     func show(keepingFocus: Bool) {
         if keepingFocus { window.orderFrontRegardless(); return }
