@@ -85,7 +85,10 @@ final class HistoryWindow {
         window.setFrameAutosaveName("DictationHistory")
         window.center()
     }
-    func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func show(keepingFocus: Bool) {
+        if keepingFocus { window.orderFrontRegardless(); return }
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 private struct HistoryView: View {

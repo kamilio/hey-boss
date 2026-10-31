@@ -257,7 +257,7 @@ If Hey Boss is unavailable, edits fail visibly and the last good copy stays usab
 Only the word list is shared; recordings, history, Auto mode and login startup stay
 on each Mac. Hints favor terms but do not guarantee spelling or replace text afterward.
 
-Open **Dictation History…** from the waveform menu-bar icon, or run `hey-talk
+Right-click the pill and choose **Dictation History…**, the first item. During recording, the window opens without taking focus from your input. You can also use the waveform menu-bar icon or run `hey-talk
 history show`. Each transcript has a timestamp and Copy button. Expand **Original
 transcript** to inspect and copy the text before AI correction. Search matches
 both versions. `hey-talk last --original` prints the latest original;

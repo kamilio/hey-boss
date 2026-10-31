@@ -117,8 +117,15 @@ final class OverlayTests: XCTestCase {
         overlay.onToggleAuto = { auto.toggle(); overlay.setAutoMode(auto) }
         overlay.onToggleAutoSubmit = { submit.toggle(); overlay.setAutoSubmit(submit) }
         overlay.onToggle = { dictationStarts += 1 }
+        overlay.update(.recording)
+        var historyOpened = false
+        overlay.onShowHistory = { historyOpened = true }
         let menu = overlay.contextMenu()
-        XCTAssertEqual(menu.items.map(\.title), ["Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "", "Speech", "Read Aloud", "", "Setup", "Context Preview", "Paste Permissions…"])
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "", "Speech", "Read Aloud", "", "Setup", "Context Preview", "Paste Permissions…"])
+        let history = try XCTUnwrap(menu.items.first)
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(history.action), to: history.target, from: history))
+        XCTAssertTrue(historyOpened)
+        XCTAssertEqual(dictationStarts, 0, "Opening History must not toggle the recording")
         let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud" })
         let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation" })
         let submission = try XCTUnwrap(menu.items.first { $0.title == "Auto Submit" })

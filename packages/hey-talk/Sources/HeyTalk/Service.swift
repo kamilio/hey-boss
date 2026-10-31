@@ -177,7 +177,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     @objc private func showAccessibilitySetup() { accessibilitySetup.show() }
     @objc private func showHistory() {
         if historyWindow == nil { historyWindow = HistoryWindow(history: history) }
-        history.refresh(); historyWindow?.show()
+        history.refresh(); historyWindow?.show(keepingFocus: session.phase == .recording)
     }
     @objc private func previewContext() {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() {
@@ -204,6 +204,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleAutoSubmit = { [weak self] in self?.toggleAutoSubmit() }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
+            view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onPreviewContext = { [weak self] in self?.previewContext() }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
             view.onOpenAccessibility = { [weak self] in
