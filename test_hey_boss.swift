@@ -4267,9 +4267,10 @@ func auditConversation(_ root: String) {
         while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         precondition(check(), "\(step): \(ui.status.stringValue)")
     }
+    let microphone = DispatchQueue(label: "conversation-audit.microphone")
     func feed(_ name: String) {
         let pcm = try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent(name + ".pcm"))
-        DispatchQueue.global().async {
+        microphone.async {
             var frames = Data(count: 12800); frames.append(pcm); frames.append(Data(count: 48000))
             for index in stride(from: 0, to: frames.count, by: 640) {
                 try! writer.write(contentsOf: frames[index..<min(index + 640, frames.count)])
@@ -4286,6 +4287,8 @@ func auditConversation(_ root: String) {
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.transcript.string.components(separatedBy: "Hey Boss\n").last!.localizedCaseInsensitiveContains("pineapple"), ui.transcript.string)
     precondition(ui.action.title == "End" && ui.transcript.bounds.width > 320 && ui.status.bounds.width > 60)
+    // Playback can begin before the fixture finishes writing its trailing silence.
+    microphone.sync {}
     ui.window.close()
     precondition(ui.transcript.string.isEmpty && ui.action.title == "Start")
     precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
