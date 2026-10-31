@@ -98,6 +98,12 @@ enum PasteBlockReason: String {
 
 enum Paste {
     static let eventTag: Int64 = 0x48544C4B
+    static func copyAndStopWaiting(_ text: String, retry: Timer, to board: NSPasteboard) -> Bool {
+        board.clearContents()
+        guard board.setString(text, forType: .string) else { return false }
+        retry.invalidate()
+        return true
+    }
     static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
