@@ -21,9 +21,9 @@ artifact() { "$cli" artifact --project named:SpokenReview --json "$@"; }
 id=$(artifact create --title "Review fixture" --body $'# First heading\n\nFirst passage.\nSecond passage has several words and continues long enough to interrupt and resume reading.\n\nFinal passage. This section addresses a separate point in the review.' | node -pe 'JSON.parse(require("fs").readFileSync(0)).artifact.id')
 say -v Samantha -o voice.aiff "Please move this paragraph after the introduction."
 ffmpeg -nostdin -loglevel error -i voice.aiff -ar 16000 -ac 1 -f s16le voice.pcm
-node "$scripts/spoken_review_detection.mjs" "$cli" voice.pcm
 say -v Alex -o second.aiff "Please add a date to the last example."
 ffmpeg -nostdin -loglevel error -i second.aiff -ar 16000 -ac 1 -f s16le second.pcm
+node "$scripts/spoken_review_detection.mjs" "$cli" voice.pcm second.pcm
 HEY_BOSS_AUDIT_SPOKEN_REVIEW="$id" "$audit"
 artifact view "$id" | node -e '
 const {comments} = JSON.parse(require("fs").readFileSync(0));
