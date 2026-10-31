@@ -36,6 +36,8 @@ repeated passages.
 Reply drafts survive reloads and resolving a discussion. Interrupted replies keep
 their original content and request identity until delivery can be confirmed.
 
+In the native Markdown reader, choose **Review** to listen and speak a comment. The microphone indicator changes from **Listening** to **Recording comment** when you interrupt. To type instead, select text and choose **Comment on selection**, or open **Comments** (⌘⇧M) for a document note. ⌘Return posts to the same discussion you see on the web.
+
 The editor switches between **Preview** and **Write** without losing draft text.
 Its controls remain reachable while scrolling. Ordinary drafts grow with their
 text; large files use a bounded writing area with a plain editor that renders

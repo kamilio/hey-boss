@@ -7049,6 +7049,7 @@ final class SpokenReview {
         }
         phrase = range; word = NSRange(location: range.location, length: 0)
         position = NSMaxRange(range); phraseFinished = false
+        editor.showMic("Listening", "mic.fill", .systemGreen)
         editor.reviewStatus("Reading · speak to comment")
         editor.highlightReview(range)
         audio.speak((editor.reader.string as NSString).substring(with: range), highlight: { [weak self] relative in
@@ -7072,6 +7073,7 @@ final class SpokenReview {
             guard !holding, let anchor, phrase.length > 0 else { return }
             holding = true; audio.pause(); recording = Data()
             editor.highlightReview(anchor.word)
+            editor.showMic("Recording comment", "waveform", .systemOrange)
             editor.reviewStatus("Listening · line \(anchor.line)")
             return
         case .pcm(let data):
@@ -7081,6 +7083,7 @@ final class SpokenReview {
         case .ended: guard recording != nil else { return }
         }
         let samples = recording!; recording = nil
+        editor.showMic("Transcribing", "ellipsis.bubble", .secondaryLabelColor)
         editor.reviewStatus("Transcribing · line \(anchor!.line)")
         watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
         do {
@@ -7106,12 +7109,161 @@ final class SpokenReview {
         guard !audio.stopped else { return }
         holding = false; anchor = nil
         editor?.highlightReview(word.length > 0 ? word : phrase)
+        editor?.showMic("Listening", "mic.fill", .systemGreen)
         editor?.reviewStatus(message)
         audio.resume()
         if phraseFinished { readNext() }
     }
     func finish(_ message: String) { editor?.endReview(message) }
     func stop() { watchdog?.invalidate(); decoding?.cancel(); decoding = nil; recording = nil; audio.stop() }
+}
+
+final class ArtifactDiscussion: NSViewController, NSTextViewDelegate {
+    struct Entry: Decodable {
+        let id: Int, parent: Int?, author: String, quote: String?, body: String, resolved: Bool, outdated: Bool, created_at: Double
+    }
+    struct Response: Decodable { let comments: [Entry] }
+    let backend: ArtifactBackend, id: String
+    let input = NSTextView(), list = NSTextView()
+    let context = NSTextField(wrappingLabelWithString: ""), feedback = NSTextField(wrappingLabelWithString: "")
+    let clear = NSButton(), send = NSButton(), heading = NSTextField(labelWithString: "Comments")
+    private(set) var entries: [Entry] = []
+    var quote: String?, prefix: String?, suffix: String?, replyTo: Int?
+    var pending: (key: String, body: String, isComment: Bool)?
+    var busy = false, generation = 0
+    init(backend: ArtifactBackend, id: String) {
+        self.backend = backend; self.id = id; super.init(nibName: nil, bundle: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func loadView() {
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 420))
+        heading.font = .systemFont(ofSize: 21, weight: .semibold)
+        context.textColor = .secondaryLabelColor; context.font = .systemFont(ofSize: 12)
+        context.maximumNumberOfLines = 2; context.lineBreakMode = .byTruncatingTail
+        clear.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Clear comment target")
+        clear.isBordered = false; clear.target = self; clear.action = #selector(clearTarget)
+        let target = NSStackView(views: [context, NSView(), clear])
+        func scroll(_ text: NSTextView) -> NSScrollView {
+            let s = NSScrollView(); s.hasVerticalScroller = true; s.autohidesScrollers = true
+            s.drawsBackground = false; text.drawsBackground = false; text.autoresizingMask = [.width]
+            text.isVerticallyResizable = true; text.textContainer?.widthTracksTextView = true
+            text.delegate = self; s.documentView = text; return s
+        }
+        let compose = scroll(input), history = scroll(list)
+        compose.drawsBackground = true; compose.backgroundColor = .textBackgroundColor
+        compose.wantsLayer = true; compose.layer?.cornerRadius = 9; compose.layer?.borderWidth = 1
+        compose.layer?.borderColor = NSColor.separatorColor.cgColor
+        input.textContainerInset = NSSize(width: 8, height: 8)
+        input.font = .systemFont(ofSize: 14); input.isRichText = false; input.allowsUndo = true
+        input.setAccessibilityLabel("Write a comment"); list.setAccessibilityLabel("Comment threads")
+        list.isEditable = false; list.textContainer?.lineFragmentPadding = 0
+        feedback.textColor = .secondaryLabelColor; feedback.font = .systemFont(ofSize: 11)
+        send.bezelColor = .controlAccentColor; send.bezelStyle = .rounded; send.target = self; send.action = #selector(submit)
+        send.keyEquivalent = "\r"; send.keyEquivalentModifierMask = .command; send.toolTip = "Post (⌘Return)"
+        let actions = NSStackView(views: [feedback, NSView(), send])
+        let stack = NSStackView(views: [heading, target, compose, actions, history])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 18), stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            compose.heightAnchor.constraint(equalToConstant: 72)
+        ] + [target, compose, actions, history].map { $0.widthAnchor.constraint(equalTo: stack.widthAnchor) })
+        preferredContentSize = view.frame.size
+        controls()
+    }
+    func controls() {
+        context.stringValue = replyTo != nil ? "Reply to thread" : quote.map { "“" + $0 + "”" } ?? "Document comment · select a passage to quote it."
+        clear.isHidden = replyTo == nil && quote == nil; clear.isEnabled = pending == nil
+        input.isEditable = pending == nil; send.title = busy ? "Saving…" : pending != nil ? "Retry" : replyTo != nil ? "Reply" : "Comment"
+        send.isEnabled = !busy && (pending != nil || !input.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+    func textDidChange(_ notification: Notification) { controls() }
+    @objc func clearTarget() { guard pending == nil else { return }; replyTo = nil; quote = nil; prefix = nil; suffix = nil; controls() }
+    func refresh() {
+        guard !busy else { return }
+        generation += 1; let current = generation
+        backend.request(["view", id]) { [weak self] result in
+            guard let self, self.generation == current else { return }
+            do { try self.render(result.get()) } catch { self.feedback.stringValue = error.localizedDescription }
+        }
+    }
+    func render(_ data: Data) throws {
+        entries = try JSONDecoder().decode(Response.self, from: data).comments
+        let roots = entries.filter { $0.parent == nil }, replies = Dictionary(grouping: entries.filter { $0.parent != nil }, by: { $0.parent! })
+        let text = NSMutableAttributedString()
+        func append(_ value: String, _ font: NSFont, _ color: NSColor, _ link: String? = nil) {
+            var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+            if let link { attributes[.link] = link }
+            text.append(NSAttributedString(string: value, attributes: attributes))
+        }
+        let small = NSFont.systemFont(ofSize: 12, weight: .medium)
+        func message(_ entry: Entry, _ indent: String) {
+            let author = entry.author == "human:boss" ? "Boss" : entry.author.hasPrefix("human:") ? String(entry.author.dropFirst(6)) : entry.author
+            let date = Date(timeIntervalSince1970: entry.created_at / 1000)
+            let when = date.formatted(date: Calendar.current.isDateInToday(date) ? .omitted : .abbreviated, time: .shortened)
+            append(indent + author + " · " + when + (entry.resolved ? " · Resolved" : "") + "\n", small, .secondaryLabelColor)
+            append(indent + entry.body + "\n", .systemFont(ofSize: 14), .labelColor)
+        }
+        heading.stringValue = roots.isEmpty ? "Comments" : "Comments · \(roots.filter { !$0.resolved }.count) open"
+        if roots.isEmpty { append("No comments yet.", small, .secondaryLabelColor) }
+        for entry in roots.reversed() {
+            if let quote = entry.quote { append("“" + quote + "”\n", .systemFont(ofSize: 13, weight: .medium), .secondaryLabelColor) }
+            if entry.outdated { append("Outdated selection\n", small, .secondaryLabelColor) }
+            message(entry, "")
+            for reply in replies[entry.id] ?? [] { message(reply, "    ") }
+            append("Reply", small, .linkColor, "reply:\(entry.id)"); append("    ", small, .secondaryLabelColor)
+            append(entry.resolved ? "Reopen" : "Resolve", small, .linkColor, "resolve:\(entry.id)")
+            append("\n\n", small, .secondaryLabelColor)
+        }
+        list.textStorage?.setAttributedString(text)
+    }
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let parts = String(describing: link).split(separator: ":")
+        guard parts.count == 2, let id = Int(parts[1]), let entry = entries.first(where: { $0.id == id }) else { return true }
+        if parts[0] == "reply" { startReply(id) } else if parts[0] == "resolve" { resolve(entry) }
+        return true
+    }
+    func startReply(_ id: Int) {
+        guard !busy, pending == nil, input.string.isEmpty else { feedback.stringValue = "Finish your current comment first."; return }
+        clearTarget(); replyTo = id; controls(); view.window?.makeFirstResponder(input)
+    }
+    func resolve(_ entry: Entry) {
+        guard !busy, pending == nil else { return }
+        mutate(["command": "resolve", "id": id, "comment_id": entry.id, "resolved": !entry.resolved])
+    }
+    @objc func submit() {
+        guard !busy else { return }
+        guard pending == nil else { transmit(); return }
+        let body = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return }
+        var op: [String: Any] = ["command": "comment", "id": id, "body": body]
+        if let replyTo { op["parent"] = replyTo } else if let quote { op["quote"] = quote; op["prefix"] = prefix; op["suffix"] = suffix }
+        mutate(op)
+    }
+    private func mutate(_ op: [String: Any]) {
+        do {
+            pending = (UUID().uuidString, String(decoding: try JSONSerialization.data(withJSONObject: op), as: UTF8.self), op["command"] as? String == "comment")
+            transmit()
+        } catch { feedback.stringValue = error.localizedDescription }
+    }
+    private func transmit() {
+        guard let pending else { return }
+        busy = true; generation += 1; controls(); feedback.stringValue = ""
+        backend.request(["--request-id", pending.key, "rpc"], body: pending.body) { [weak self] result in
+            guard let self else { return }
+            self.busy = false
+            do {
+                try self.render(result.get()); self.pending = nil
+                if pending.isComment { self.input.string = ""; self.clearTarget() }
+                self.feedback.stringValue = "Saved"
+            } catch {
+                if error is ArtifactWriteFailure { self.pending = nil; self.feedback.stringValue = error.localizedDescription }
+                else { self.feedback.stringValue = "Save unconfirmed. Retry to check."; self.feedback.toolTip = error.localizedDescription }
+            }
+            self.controls()
+        }
+    }
 }
 
 final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
@@ -7123,8 +7275,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let scroll = NSScrollView()
     let readerScroll = NSScrollView()
     let htmlReader = ArtifactHTMLReader()
-    let reviewButton = NSButton(title: "Play review", target: nil, action: nil)
+    let reviewButton = NSButton(title: "Review", target: nil, action: nil)
     let commentsButton = NSButton(title: "Comments", target: nil, action: nil)
+    let reviewBar = NSStackView()
+    let micLabel = NSTextField(labelWithString: "Mic off")
+    let micIcon = NSImageView()
+    var readerTop: NSLayoutConstraint!
+    let commentPopover = NSPopover()
+    var discussion: ArtifactDiscussion?
     var review: SpokenReview?
     var reviewHighlight: NSRange?
     var pendingSpoken: SpokenComment?
@@ -7265,7 +7423,23 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reviewButton.toolTip = "Read aloud. Speak to pause and comment on the highlighted passage."
         commentsButton.target = self; commentsButton.action = #selector(showReviewComments)
         reviewButton.isHidden = true; commentsButton.isHidden = true
-        let footer = NSStackView(views: [reviewButton, status, NSView(), commentsButton, reload, recovery]); footer.spacing = 10
+        reviewButton.bezelStyle = .rounded; reviewButton.controlSize = .large; reviewButton.bezelColor = .controlAccentColor
+        reviewButton.font = .systemFont(ofSize: 14, weight: .semibold)
+        #if compiler(>=6.2)
+        if #available(macOS 26, *) {
+            reviewButton.bezelStyle = .glass; reviewButton.borderShape = .capsule; reviewButton.tintProminence = .primary
+        }
+        #endif
+        commentsButton.bezelStyle = .rounded; commentsButton.imagePosition = .imageLeading
+        commentsButton.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil)
+        commentsButton.toolTip = "Write a document or selection comment (⌘⇧M)"
+        micLabel.font = .systemFont(ofSize: 12, weight: .medium); micLabel.lineBreakMode = .byTruncatingTail
+        micLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        reviewBar.spacing = 8; reviewBar.alignment = .centerY
+        for control in [reviewButton, micIcon, micLabel, NSView(), commentsButton] { reviewBar.addArrangedSubview(control) }
+        showMic("Mic off", "mic.slash", .secondaryLabelColor)
+        commentPopover.behavior = .transient
+        let footer = NSStackView(views: [status, NSView(), reload, recovery]); footer.spacing = 10
         status.font = .systemFont(ofSize: 11); status.textColor = .tertiaryLabelColor; status.lineBreakMode = .byTruncatingMiddle
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
@@ -7281,7 +7455,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         gallery.create.target = self; gallery.create.action = #selector(newDocument)
         gallery.retry.target = self; gallery.retry.action = #selector(retryLibrary)
         gallery.more.target = self; gallery.more.action = #selector(moreDocuments)
-        [scroll, readerScroll, htmlReader.container, footer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
+        [scroll, readerScroll, htmlReader.container, footer, reviewBar].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; page.addSubview($0) }
         htmlReader.container.isHidden = true
         NSLayoutConstraint.activate([
             htmlReader.container.leadingAnchor.constraint(equalTo: readerScroll.leadingAnchor), htmlReader.container.trailingAnchor.constraint(equalTo: readerScroll.trailingAnchor),
@@ -7303,11 +7477,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reader.isEditable = false; reader.usesFindBar = true; reader.delegate = self; reader.setAccessibilityLabel("Markdown preview")
         reader.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .cursor: NSCursor.pointingHand]
         readerScroll.isHidden = true
+        readerTop = readerScroll.topAnchor.constraint(equalTo: page.topAnchor)
+        reviewBar.isHidden = true
         NSLayoutConstraint.activate([
+            reviewBar.topAnchor.constraint(equalTo: page.topAnchor, constant: 10), reviewBar.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 20),
+            reviewBar.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -20),
             scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: page.topAnchor), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
             readerScroll.leadingAnchor.constraint(equalTo: scroll.leadingAnchor), readerScroll.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
-            readerScroll.topAnchor.constraint(equalTo: scroll.topAnchor), readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
+            readerTop, readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
             footer.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 36), footer.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -36), footer.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12)
         ])
         window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(250, ofDividerAt: 0)
@@ -7474,10 +7652,17 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     func updateReviewControls() {
         reviewButton.isHidden = !sharedReview || htmlReader.document != nil
+        reviewBar.isHidden = !sharedReview
+        readerTop?.constant = sharedReview ? 56 : 0
         commentsButton.isHidden = !sharedReview
+        micIcon.isHidden = reviewButton.isHidden; micLabel.isHidden = reviewButton.isHidden
         reviewButton.isEnabled = review != nil || (!postingSpoken && !session.dirty && previewSource == text.string && !reader.string.isEmpty)
-        reviewButton.title = review != nil ? "Stop" : pendingSpoken != nil ? "Retry comment" : "Play review"
+        reviewButton.title = review != nil ? "Stop" : pendingSpoken != nil ? "Retry comment" : "Review"
         reviewButton.image = NSImage(systemSymbolName: review != nil ? "stop.fill" : pendingSpoken != nil ? "arrow.clockwise" : "play.fill", accessibilityDescription: nil)
+    }
+    func showMic(_ text: String, _ symbol: String, _ color: NSColor) {
+        micLabel.stringValue = text; micLabel.textColor = color
+        micIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil); micIcon.contentTintColor = color
     }
     func reviewStatus(_ message: String) {
         status.stringValue = message; status.toolTip = message; status.textColor = .secondaryLabelColor
@@ -7489,7 +7674,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         reader.scrollRangeToVisible(range)
     }
     func endReview(_ message: String = "") {
-        review?.stop(); review = nil
+        review?.stop(); review = nil; showMic("Mic off", "mic.slash", .secondaryLabelColor)
         if let old = reviewHighlight, NSMaxRange(old) <= (reader.string as NSString).length {
             reader.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: old)
         }
@@ -7502,6 +7687,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         if let pendingSpoken { saveSpoken(pendingSpoken); return }
         guard reviewButton.isEnabled else { return }
         let session = SpokenReview(self); review = session
+        showMic("Starting…", "mic", .secondaryLabelColor)
         reviewStatus("Preparing microphone…"); updateReviewControls(); session.start()
     }
     func saveSpoken(_ comment: SpokenComment) {
@@ -7511,6 +7697,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         do {
             try JSONEncoder().encode(comment).write(to: draft, options: .atomic)
             let operation = try comment.operation
+            if review != nil { showMic("Saving", "square.and.arrow.down", .secondaryLabelColor) }
             postingSpoken = true; updateReviewControls(); reviewStatus("Saving comment · line \(comment.line)")
             backend.request(["--request-id", comment.requestID, "rpc"], body: operation) { [weak self] result in
                 if case .success = result { try? FileManager.default.removeItem(at: draft) }
@@ -7519,6 +7706,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 switch result {
                 case .success:
                     self.pendingSpoken = nil; self.reviewStatus("Comment saved · line \(comment.line)")
+                    if self.commentPopover.isShown { self.discussion?.refresh() }
                     self.review?.resume("Saved on line \(comment.line) · reading")
                 case .failure(let error):
                     self.endReview("Comment kept for retry · \(error.localizedDescription)")
@@ -7527,34 +7715,40 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             }
         } catch { endReview("Could not save comment · \(error.localizedDescription)") }
     }
-    @objc func showReviewComments() {
-        guard sharedReview, let id = session.launch.id else { return }
-        let popover = NSPopover(), controller = NSViewController(), scroll = NSScrollView(), list = NSTextView()
-        list.isEditable = false; list.textContainerInset = NSSize(width: 14, height: 12)
-        list.autoresizingMask = [.width]; list.textContainer?.widthTracksTextView = true
-        list.string = "Loading comments…"; scroll.documentView = list; scroll.hasVerticalScroller = true
-        controller.view = scroll; controller.preferredContentSize = NSSize(width: 370, height: 290)
-        popover.behavior = .transient; popover.contentViewController = controller
-        popover.show(relativeTo: commentsButton.bounds, of: commentsButton, preferredEdge: .maxY)
-        backend.request(["view", id]) { result in
-            do {
-                struct Entry: Decodable { let author: String; let quote: String?; let body: String; let resolved: Bool; let outdated: Bool }
-                struct View: Decodable { let comments: [Entry] }
-                let entries = try JSONDecoder().decode(View.self, from: result.get()).comments
-                let content = NSMutableAttributedString()
-                func append(_ text: String, _ font: NSFont, _ color: NSColor) {
-                    content.append(NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color]))
+    func prepareComments() -> ArtifactDiscussion? {
+        guard sharedReview, let id = session.launch.id else { return nil }
+        if discussion?.id != id { discussion = ArtifactDiscussion(backend: backend, id: id) }
+        guard let discussion else { return nil }
+        _ = discussion.view
+        if discussion.input.string.isEmpty, discussion.pending == nil, discussion.replyTo == nil {
+            discussion.clearTarget()
+            let range = reader.selectedRange(), text = reader.string as NSString
+            if htmlReader.document == nil, previewSource != nil, range.length > 0, NSMaxRange(range) <= text.length {
+                let quote = text.substring(with: range)
+                guard quote.utf8.count <= 8192 else { reviewStatus("Select a shorter passage to comment, or clear the selection for a document note."); return nil }
+                if !quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    discussion.quote = quote
+                    // Limit context to this paragraph; other native blocks can contain list markers or attachments.
+                    let start = text.lineRange(for: NSRange(location: range.location, length: 0)).location
+                    let end = NSMaxRange(text.lineRange(for: NSRange(location: NSMaxRange(range) - 1, length: 1)))
+                    let before = text.substring(with: NSRange(location: start, length: range.location - start))
+                    discussion.prefix = String(before.replacingOccurrences(of: #"^(?:[•☑☐]|[0-9]+\.)\t"#, with: "", options: .regularExpression).suffix(80))
+                    discussion.suffix = String(text.substring(with: NSRange(location: NSMaxRange(range), length: end - NSMaxRange(range))).prefix(80))
                 }
-                append("Comments\n\n", .systemFont(ofSize: 17, weight: .semibold), .labelColor)
-                if entries.isEmpty { append("No comments yet. Play the review and speak to leave one.", .systemFont(ofSize: 13), .secondaryLabelColor) }
-                for entry in entries {
-                    append(entry.author + (entry.resolved ? " · Resolved" : "") + (entry.outdated ? " · Outdated selection" : "") + "\n", .systemFont(ofSize: 11, weight: .medium), .secondaryLabelColor)
-                    if let quote = entry.quote { append("“" + quote + "”\n", NSFontManager.shared.convert(.systemFont(ofSize: 13), toHaveTrait: .italicFontMask), .secondaryLabelColor) }
-                    append(entry.body + "\n\n", .systemFont(ofSize: 14), .labelColor)
-                }
-                list.textStorage?.setAttributedString(content)
-            } catch { list.string = error.localizedDescription }
+            }
         }
+        discussion.controls(); discussion.refresh(); return discussion
+    }
+    @objc func showReviewComments() {
+        if commentPopover.isShown { commentPopover.performClose(nil); return }
+        guard let discussion = prepareComments() else { return }
+        commentPopover.contentViewController = discussion
+        commentPopover.show(relativeTo: commentsButton.bounds, of: commentsButton, preferredEdge: .minY)
+        discussion.view.window?.makeFirstResponder(discussion.input)
+    }
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard notification.object as? NSTextView === reader, sharedReview else { return }
+        commentsButton.title = reader.selectedRange().length > 0 && htmlReader.document == nil ? "Comment on selection" : "Comments"
     }
     func updateStatus() {
         updateReviewControls()
@@ -7753,7 +7947,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     @objc func modeChanged() { if (modeControl.selectedSegment == 1) != previewing { togglePreview() } }
     func togglePreview() {
-        guard session.ready && gallery.isHidden else { return }; previewing.toggle()
+        guard session.ready && gallery.isHidden else { return }; commentPopover.performClose(nil); previewing.toggle()
         endReview(); updateStatus()
         modeControl.selectedSegment = previewing ? 1 : 0
         scroll.isHidden = previewing; readerScroll.isHidden = !previewing
@@ -7945,7 +8139,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         window.toolbar?.items.first { $0.itemIdentifier.rawValue == "format" }?.isEnabled = enabled
     }
     @objc func showLibrary() {
-        endReview(); session.flush(); gallery.isHidden = false; page.isHidden = true
+        commentPopover.performClose(nil); endReview(); session.flush(); gallery.isHidden = false; page.isHidden = true
         titleField.stringValue = "Your writing space"; titleField.isEditable = false
         setDocumentControls(false)
         if focusMode { toggleFocus() }
@@ -8078,6 +8272,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case ("o", false): openFile()
         case ("p", false): if focusMode { toggleFocus() }; window.makeFirstResponder(search); search.selectText(nil)
         case ("f", true): toggleFocus()
+        case ("m", true) where sharedReview: showReviewComments()
         case ("e", false): togglePreview()
         case ("s", false): session.flush()
         case ("s", true): if gallery.isHidden && session.ready { exportCopy() }

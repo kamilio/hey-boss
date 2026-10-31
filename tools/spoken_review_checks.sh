@@ -27,8 +27,9 @@ ffmpeg -nostdin -loglevel error -i second.aiff -ar 16000 -ac 1 -f s16le second.p
 HEY_BOSS_AUDIT_SPOKEN_REVIEW="$id" "$audit"
 artifact view "$id" | node -e '
 const {comments} = JSON.parse(require("fs").readFileSync(0));
-require("assert").strictEqual(comments.length, 3);
-const [c, second, recovered] = comments;
+require("assert").strictEqual(comments.length, 6);
+const [c, second, recovered, typed, reply, note] = comments;
+require("assert")(typed.quote === "First passage." && !typed.outdated && typed.resolved && reply.parent === typed.id && note.quote === null && note.parent === null);
 require("assert")(second.quote.startsWith("Final passage.") && !second.outdated && second.body.startsWith("Line 6 · revision 1") && /date to the last example/i.test(second.body), JSON.stringify(second));
 require("assert")(recovered.body.endsWith("Keep this quote.") && !recovered.outdated);
 require("assert")(c.quote.startsWith("Second passage") && !c.outdated && c.body.startsWith("Line 4 · revision 1") && /move this paragraph after the introduction/i.test(c.body), JSON.stringify(c));
