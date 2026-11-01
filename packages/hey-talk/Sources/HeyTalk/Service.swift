@@ -154,12 +154,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard let self, self.autoTarget != nil else { return }
             self.cancel(); self.overlay?.error("Auto paused. Focus the message field again.")
         }
-        history.refresh()
-        // Pay the one-time SwiftUI/AppKit layout cost off the user's first click.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, self.session.phase == .idle, !self.speech.active else { return }
-            _ = self.historyWindow
-        }
         let vocabularyTimer = DispatchSource.makeTimerSource(queue: .main)
         vocabularyTimer.schedule(deadline: .now(), repeating: .seconds(15), leeway: .seconds(3))
         vocabularyTimer.setEventHandler { [weak self] in self?.refreshVocabulary() }
@@ -181,8 +175,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     @objc private func showAccessibilitySetup() { accessibilitySetup.show() }
     @objc private func showHistory() {
-        historyWindow.show(keepingFocus: session.phase == .recording)
         history.refresh()
+        historyWindow.show(keepingFocus: session.phase == .recording)
     }
     @objc private func previewContext() {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid() {

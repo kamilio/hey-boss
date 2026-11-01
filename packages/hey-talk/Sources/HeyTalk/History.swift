@@ -95,7 +95,6 @@ final class HistoryWindow {
         window.host(HistoryView(history: history))
         window.setFrameAutosaveName("DictationHistory")
         window.center()
-        window.contentView?.layoutSubtreeIfNeeded()
     }
     func show(keepingFocus: Bool) {
         if keepingFocus { window.orderFrontRegardless(); return }
@@ -163,7 +162,9 @@ private struct HistoryView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(visible) { entry in
                             DictationRow(entry: entry, saved: !history.unsaved.contains(entry.id))
-                            if entry.id != visible.last?.id { Divider().padding(.horizontal, 18) }
+                                .overlay(alignment: .bottom) {
+                                    if entry.id != visible.last?.id { Divider().padding(.horizontal, 18) }
+                                }
                         }
                         if history.hasMore { loadMore.padding(16) }
                     }
@@ -196,6 +197,7 @@ private struct DictationRow: View {
     @State private var copied = false
     @State private var copiedOriginal = false
     @State private var hovered = false
+    @State private var showFullText = false
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
@@ -221,7 +223,14 @@ private struct DictationRow: View {
                     }
                 }
             }.font(.system(size: 11)).foregroundStyle(.secondary)
-            TranscriptText(text: entry.text).frame(maxWidth: .infinity, alignment: .leading)
+            let preview = entry.text.prefix(600)
+            let truncated = preview.endIndex != entry.text.endIndex
+            TranscriptText(text: truncated && !showFullText ? String(preview) + "…" : entry.text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if truncated {
+                Button(showFullText ? "Show less" : "Show full transcript") { showFullText.toggle() }
+                    .buttonStyle(.link).font(.callout)
+            }
             if let original = entry.originalText {
                 if original != entry.text {
                     DisclosureGroup {
@@ -264,33 +273,19 @@ private struct DictationRow: View {
 /// loop in SelectionOverlay layout on macOS 26 with long, wrapping transcripts.
 private struct TranscriptText: NSViewRepresentable {
     let text: String
-    func makeNSView(context: Context) -> NSTextView {
-        let view = NSTextView()
-        view.isEditable = false
-        view.isSelectable = true
-        view.isRichText = false
-        view.drawsBackground = false
-        view.textContainerInset = .zero
-        view.textContainer?.lineFragmentPadding = 0
-        view.textContainer?.widthTracksTextView = true
-        view.isHorizontallyResizable = false
-        view.isVerticallyResizable = true
-        view.font = .systemFont(ofSize: 14)
-        view.textColor = .labelColor
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 5
-        view.defaultParagraphStyle = paragraph
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return view
+    func makeNSView(context: Context) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.isSelectable = true
+        label.font = .systemFont(ofSize: 14)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
     }
-    func updateNSView(_ view: NSTextView, context: Context) {
-        if view.string != text { view.string = text }
+    func updateNSView(_ label: NSTextField, context: Context) {
+        if label.stringValue != text { label.stringValue = text }
     }
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView view: NSTextView, context: Context) -> CGSize? {
-        guard let width = proposal.width, width > 0, width.isFinite,
-              let container = view.textContainer, let layout = view.layoutManager else { return nil }
-        container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
-        layout.ensureLayout(for: container)
-        return CGSize(width: width, height: ceil(layout.usedRect(for: container).height))
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView label: NSTextField, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0, width.isFinite, let cell = label.cell else { return nil }
+        let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: ceil(size.height))
     }
 }

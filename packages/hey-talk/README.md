@@ -258,7 +258,7 @@ Only the word list is shared; recordings, history, Auto mode and login startup s
 on each Mac. Hints favor terms but do not guarantee spelling or replace text afterward.
 
 Right-click the pill and choose **Dictation History…**, the first item. During recording, the window opens without taking focus from your input. You can also use the waveform menu-bar icon or run `hey-talk
-history show`. Each transcript has a timestamp and Copy button. Expand **Original
+history show`. Long transcripts open as previews; choose **Show full transcript** to expand one. Copy always copies the entire transcript. Expand **Original
 transcript** to inspect and copy the text before AI correction. Search matches
 both versions. `hey-talk last --original` prints the latest original;
 `last --json` and `history --json` include both `text` and `original_text`.
