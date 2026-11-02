@@ -299,7 +299,7 @@ versions deliberately reject the upgraded schema.
 
 ## Automatic Codex workers
 
-Workers start automatically when you add them in **Project workers** or with the CLI:
+Workers start automatically when you add them in **Workers** or with the CLI:
 
 ```sh
 hey-boss workers add --name Tools -C ~/Workspace/atlas -C ~/Workspace/beacon --concurrency 2

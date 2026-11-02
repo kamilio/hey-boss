@@ -298,7 +298,7 @@ fn worker_manager(frame: &mut Frame, app: &Dashboard) {
         if app.selected_tab == Some(DashboardTab::Shared) {
             "Shared workers"
         } else {
-            "Project workers"
+            "Workers"
         },
         true,
     );

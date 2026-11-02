@@ -1919,7 +1919,7 @@ fn agent_conversations_reject_malformed_cursors_and_query_encoding() {
     }
     for path in ["/agents", "/agents/session"] {
         let html = String::from_utf8(web.http("GET", path, &[], b"").body).unwrap();
-        assert!(html.contains("Project workers · Hey Boss"));
+        assert!(html.contains("Workers · Hey Boss"));
         assert!(html.contains("id=\"conversation\""));
         assert!(!html.contains("coordinates workers"));
         assert_eq!(

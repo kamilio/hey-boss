@@ -23,7 +23,7 @@ async page => {
   check(await page.locator('.device-row[data-worker="beacon"]').count()===0,'Unrelated project is excluded');
   check((await page.locator('.device-summary').first().innerText())==='2 running workers · 2 active agents / 4 slots','Live counts exclude history and stopped workers');
   check((await page.locator('.worker-directory code').allTextContents()).includes('/work/atlas-worktrees/a-very-long-checkout-directory-for-the-same-project'),'Full checkout directory is visible');
-  check(await page.locator('[data-worker="atlas-main"] .worker-directory').count()===2,'Multi-project worker shows every explicit checkout');
+  check(await page.locator('[data-worker="atlas-main"] .worker-directory').count()===2,'Multi-worker shows every explicit checkout');
   check((await page.locator('[data-worker="atlas-main"] .worker-directory').allTextContents()).every(text=>text.includes('Working directory ·')),'Each checkout is labelled with its project');
   check((await page.locator('[data-worker="atlas-main"] .worker-directory code').allTextContents()).includes(multi.config.directories['named:Beacon']),'Filtering a worker preserves its other project checkout');
   check((await page.locator('.device-row[data-worker="atlas-main"] .worker-name').innerText())!==(await page.locator('.device-row[data-worker="atlas-worktree"] .worker-name').innerText()),'Default names distinguish workers instead of old process numbers');

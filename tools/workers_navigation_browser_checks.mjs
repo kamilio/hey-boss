@@ -58,7 +58,7 @@ try {
   assert.match(await page.locator('#back').getAttribute('href'),/issue=42/,'Clicking a running task opens its conversation with a task return');
   await visit('/workers');
   assert.equal(await page.locator('.fleet-tabs').count(),0,'No standalone conversation browser');
-  await page.getByRole('heading',{name:'Project workers',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'Workers',exact:true}).waitFor();
   await page.locator('#config-editor').waitFor();
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:Beacon"]').click();
   assert.equal(await page.locator('#config-editor').isVisible(),true,'Project selection preserves global worker settings');

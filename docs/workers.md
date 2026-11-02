@@ -1,6 +1,6 @@
 # Worker fleet
 
-Open **Project workers** (`/workers`). Each machine lists its saved workers. Use **Add project worker** to create one, or **Add project** on an existing worker to share its agent slots across projects.
+Open **Workers** (`/workers`). Each machine lists its saved workers. Use **Add worker** to create one, or **Add project** on an existing worker to share its agent slots across projects.
 Offline machines show last-known activity and contribute no available capacity.
 Organizers have a separate disclosure because they do not consume issue-agent slots.
 
