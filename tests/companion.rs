@@ -540,7 +540,7 @@ fn stalled_replay_does_not_block_queueing_and_racing_hide_is_delivered() {
 fn invalid_autoconnect_config_reports_error_and_recovers_without_relaunch() {
     let root = std::env::temp_dir().join(format!("hb-config-{}", std::process::id()));
     let state = root.join(".local/share/hey-boss");
-    let config = root.join(".hey-boss/config.json");
+    let config = root.join(".hey-boss/config.yaml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, r#"{"ssh_hosts":[}"#).unwrap();
     let mut connector = Broker(

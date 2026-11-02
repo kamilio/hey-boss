@@ -5236,7 +5236,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         refreshNow()
     }
     @objc func openSettings() {
-        let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/config.json")
+        let config = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/config.yaml")
         if !NSWorkspace.shared.open(config) { NSLog("Could not open machine config") }
     }
     #if canImport(FoundationModels)
@@ -5365,8 +5365,19 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         guard !readingHostInventory else { return }
         readingHostInventory = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let inventory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/config.json")
-            let hosts = (try? Data(contentsOf: inventory)).map { overviewSSHHosts($0, excluding: nil) } ?? []
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: self?.cli ?? "/opt/homebrew/bin/hey-boss")
+            process.arguments = ["companion", "inventory"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            var hosts: [String] = []
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 { hosts = overviewSSHHosts(data, excluding: nil) }
+            } catch { NSLog("Could not read machine inventory: %@", error.localizedDescription) }
             onMain {
                 guard let self else { return }; self.readingHostInventory = false
                 guard self.present && self.window.isVisible else { return }

@@ -30,7 +30,7 @@ def setup(host, address):
         env = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(home)}
         if os.environ.get('SSH_AUTH_SOCK'):
             env['SSH_AUTH_SOCK'] = os.environ['SSH_AUTH_SOCK']
-        log = home / '.hey-proxy' / (label + '.log')
+        log = home / '.hey-boss/proxy' / (label + '.log')
         data = plistlib.dumps(dict(Label=label, ProgramArguments=argv, EnvironmentVariables=env,
             RunAtLoad=True, KeepAlive=True, ThrottleInterval=10, StandardOutPath=str(log), StandardErrorPath=str(log)))
         domain = f'gui/{os.getuid()}'

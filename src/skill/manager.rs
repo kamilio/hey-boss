@@ -274,9 +274,14 @@ fn hosts(home: &Path) -> Result<Vec<String>> {
     }
     let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate::fleet::config_directory(home, &state_dir).join("config.json"));
+        .map(Ok)
+        .unwrap_or_else(|| {
+            crate::machine_config::path(&crate::fleet::config_directory(home, &state_dir))
+        })
+        .map_err(|e| Error::invalid(e.to_string()))?;
     if config.exists() {
-        let value: Value = serde_json::from_slice(&fs::read(config)?)?;
+        let value =
+            crate::machine_config::read(&config).map_err(|e| Error::invalid(e.to_string()))?;
         for entry in value["ssh_hosts"].as_array().into_iter().flatten() {
             if let Some(host) = entry.as_str().or_else(|| entry["host"].as_str()) {
                 hosts.insert(host.to_owned());

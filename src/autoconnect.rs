@@ -45,10 +45,10 @@ fn write_json<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
     std::fs::rename(temporary, path).map_err(|e| e.to_string())
 }
 fn machines_path() -> Result<PathBuf, String> {
-    Ok(
-        PathBuf::from(std::env::var_os("HOME").ok_or("HOME is missing")?)
-            .join(".hey-boss/config.json"),
+    hey_boss::machine_config::path(
+        &PathBuf::from(std::env::var_os("HOME").ok_or("HOME is missing")?).join(".hey-boss"),
     )
+    .map_err(|e| e.to_string())
 }
 #[derive(Serialize, Deserialize)]
 struct Machines {
@@ -73,7 +73,7 @@ fn resolve_machines(data: &[u8]) -> Result<Vec<Config>, String> {
     if data.len() > 1024 * 1024 {
         return Err("machine config exceeds 1 MiB".into());
     }
-    let config: Machines = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let config: Machines = serde_yaml_ng::from_slice(data).map_err(|e| e.to_string())?;
     if config.ssh_hosts.len() > 32 {
         return Err("at most 32 machines are supported".into());
     }
@@ -119,8 +119,9 @@ fn save_machines(configs: &[Config]) -> Result<(), String> {
             enabled: c.enabled,
         })
         .collect();
-    let data =
-        serde_json::to_vec_pretty(&Machines { ssh_hosts: entries }).map_err(|e| e.to_string())?;
+    let data = serde_yaml_ng::to_string(&Machines { ssh_hosts: entries })
+        .map_err(|e| e.to_string())?
+        .into_bytes();
     resolve_machines(&data)?;
     let path = machines_path()?;
     std::fs::create_dir_all(path.parent().ok_or("invalid machine config path")?)
@@ -136,9 +137,10 @@ fn migrate_machines() -> Result<(), String> {
     }
     let legacy = config().ok();
     let home = PathBuf::from(std::env::var_os("HOME").ok_or("HOME is missing")?);
-    let inventory: serde_json::Value = std::fs::read(home.join(".hey-proxy/config.json"))
+    let inventory: serde_json::Value = std::fs::read(home.join(".hey-boss/proxy/config.yaml"))
+        .or_else(|_| std::fs::read(home.join(".hey-proxy/config.json")))
         .ok()
-        .and_then(|d| serde_json::from_slice(&d).ok())
+        .and_then(|d| serde_yaml_ng::from_slice(&d).ok())
         .unwrap_or_default();
     let mut hosts = Vec::<String>::new();
     if let Some(entries) = inventory.get("ssh_hosts").and_then(|v| v.as_array()) {
@@ -357,6 +359,12 @@ pub fn status() -> Result<(), String> {
         std::fs::read_to_string(directory()?.join("connections.json"))
             .unwrap_or_else(|_| "No connection status yet.".into())
     );
+    Ok(())
+}
+
+pub fn inventory() -> Result<(), String> {
+    let value = hey_boss::machine_config::read(&machines_path()?).map_err(|e| e.to_string())?;
+    println!("{}", value);
     Ok(())
 }
 struct Worker {

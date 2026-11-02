@@ -289,10 +289,15 @@ impl Context {
     pub fn legacy_inventory(&self) -> Result<Vec<Value>> {
         let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
             .map(PathBuf::from)
+            .map(Ok)
             .unwrap_or_else(|| {
-                crate::fleet::config_directory(&self.home, &self.state).join("config.json")
-            });
-        let value = self.read_json(&config, json!({}))?;
+                crate::machine_config::path(&crate::fleet::config_directory(
+                    &self.home,
+                    &self.state,
+                ))
+            })?;
+        self.protect_file(&config)?;
+        let value = crate::machine_config::read(&config)?;
         let mut hosts = vec![];
         for entry in value["ssh_hosts"].as_array().into_iter().flatten() {
             let entry = if entry.is_string() {

@@ -94,7 +94,7 @@ impl CredentialResolver {
                     let home = std::path::PathBuf::from(home);
                     // Optional service-account adapter obtains its bootstrap token
                     // from the OS credential store, including under supervisors.
-                    paths.insert(0, home.join(".hey-proxy/op-agent"));
+                    paths.insert(0, home.join(".hey-boss/proxy/op-agent"));
                     paths.push(home.join(".local/bin/op"));
                 }
                 paths

@@ -110,7 +110,9 @@ pub(super) fn capture(db: &Connection, fact: &Revision) -> Result<Option<Resourc
                     .as_str()
                     .ok_or_else(|| replica::invalid("Missing job snapshot"))?,
             )?;
-            if snapshot.definition.executable.is_some() { return Ok(None); }
+            if snapshot.definition.executable.is_some() {
+                return Ok(None);
+            }
             let sha = snapshot.instruction_digest;
             let bytes = crate::jobs::files::load(&path.with_extension("jobs"), &sha)?.into_bytes();
             ("job", sha.clone(), sha, bytes)

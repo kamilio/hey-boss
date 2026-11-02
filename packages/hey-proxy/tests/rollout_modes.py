@@ -62,7 +62,7 @@ home.mkdir(exist_ok=True)
 binary = os.environ['ROLE_BINARY']
 with open(root / 'calls', 'a') as log: log.write(host + ' ' + command.split()[0] + '\\n')
 if command.startswith('umask'):
-    base = home / '.hey-proxy/staging'
+    base = home / '.local/share/hey-boss/proxy-staging'
     base.mkdir(parents=True, exist_ok=True)
     print(tempfile.mkdtemp(prefix='hey-proxy-rollout.', dir=base))
 elif command.startswith('tar ') or command.startswith('rm '):
@@ -79,7 +79,7 @@ elif command.startswith('exec '):
     deployment = json.loads((stage / 'deployment.json').read_text())
     if config['mode'] != 'client':
         assert config['providers']['openai']['api_keys']['default'] == 'retained-on-destination'
-        existing_path = home/'.hey-proxy/config.json'
+        existing_path = home/'.hey-boss/proxy/config.yaml'
         if not existing_path.exists():
             existing_path.parent.mkdir(parents=True, exist_ok=True)
             existing = json.loads(json.dumps(config))
@@ -116,7 +116,7 @@ elif command.startswith('exec '):
             argv = shlex.split(next(line.removeprefix('ExecStart=') for line in unit.splitlines() if line.startswith('ExecStart=')))
             setting = shlex.split(next(line.removeprefix('Environment=') for line in unit.splitlines() if line.startswith('Environment=')))[0]
             variables = dict([setting.split('=',1)])
-        assert variables['TMPDIR'] == str(home/'.hey-proxy/tmp')
+        assert variables['TMPDIR'] == str(home/'.hey-boss/proxy/tmp')
         log = open(home/'service.log','ab')
         process = subprocess.Popen(argv, env=dict(os.environ, **variables), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
         log.close()
@@ -134,7 +134,7 @@ elif command.startswith('exec '):
     service.install(binary, str(stage/'remote-config.json'), args[3])
 elif command.startswith('"$HOME/.cargo/bin/hey-proxy" host-keys'):
     args = shlex.split(command)[2:]
-    subprocess.run([binary,'--config',str(home/'.hey-proxy/config.json'),'host-keys',*args], check=True)
+    subprocess.run([binary,'--config',str(home/'.hey-boss/proxy/config.yaml'),'host-keys',*args], check=True)
 else: raise AssertionError(command)
 ''')
     shim.chmod(0o755)
@@ -145,17 +145,17 @@ else: raise AssertionError(command)
         assert result.returncode == 0, result.stdout + result.stderr
         calls = (root/'calls').read_text().splitlines()
         assert calls[0].startswith('fixture-host ')
-        host_keys = json.loads((root/'fixture-host/.hey-proxy/config.access-keys.json').read_text())
-        client_config = json.loads((root/'fixture-client/.hey-proxy/config.json').read_text())
+        host_keys = json.loads((root/'fixture-host/.hey-boss/proxy/config.access-keys.json').read_text())
+        client_config = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-boss/proxy/config.yaml'), 'export-config'], check=True, capture_output=True, text=True).stdout)
         assert isinstance(client_config['connection']['api_key'], dict) and client_config['connection']['api_key'].get('encrypted', '').startswith('v1:')
-        exported = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-proxy/config.json'), 'export-config'], check=True, capture_output=True, text=True).stdout)
+        exported = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-boss/proxy/config.yaml'), 'export-config'], check=True, capture_output=True, text=True).stdout)
         assert exported['connection']['api_key'] == host_keys['clients']['fixture-client']
         response = urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{client_port}/v1/responses', data=b'{"model":"gpt-4.1","input":"fixture"}', headers={'Content-Type':'application/json'}))
         assert json.load(response)['model'] == 'gpt-4.1-mini'
         # Selecting only the client must also update its host and reuse the access key.
         result = subprocess.run(cmd+['--host','fixture-client'], env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert json.loads((root/'fixture-host/.hey-proxy/config.access-keys.json').read_text()) == host_keys
+        assert json.loads((root/'fixture-host/.hey-boss/proxy/config.access-keys.json').read_text()) == host_keys
         assert host_keys['local'] not in result.stdout and host_keys['clients']['fixture-client'] not in result.stdout
         # Verification must fail when the actual upstream connection fails.
         upstream.shutdown()

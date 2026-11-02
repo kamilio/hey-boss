@@ -76,7 +76,7 @@ def restart_macos(data, previous=None):
     # SSH. A fresh private path avoids that cache; the login plist remains the
     # persistent definition. Registration reads the file before returning.
     for attempt in range(5):
-        fd, name = tempfile.mkstemp(prefix='service-registration-', suffix='.plist', dir=home / '.hey-proxy')
+        fd, name = tempfile.mkstemp(prefix='service-registration-', suffix='.plist', dir=home / '.hey-boss/proxy')
         try:
             with os.fdopen(fd, 'wb') as file:
                 file.write(data)
@@ -93,7 +93,8 @@ def restart_macos(data, previous=None):
 
 def install(binary, source_config, base_url, codex_home="", model=""):
     home = Path.home()
-    config_path = home / '.hey-proxy/config.json'
+    run(str(binary), '--init', stdout=subprocess.DEVNULL)
+    config_path = home / '.hey-boss/proxy/config.yaml'
     deployment_path = Path(source_config).with_name('deployment.json')
     deployment = json.loads(deployment_path.read_text()) if deployment_path.exists() else {}
     config = json.loads(Path(source_config).read_bytes())
@@ -129,7 +130,7 @@ def install(binary, source_config, base_url, codex_home="", model=""):
                     raise RuntimeError('Gemini profile endpoint unavailable')
     paths = [home / '.cargo/bin/hey-proxy', config_path, config_path.with_suffix('.credentials.key'),
              home / 'Library/LaunchAgents/com.hey-proxy.plist',
-             home / '.hey-proxy/service-registration.plist',
+             home / '.hey-boss/proxy/service-registration.plist',
              home / '.config/systemd/user/hey-proxy.service']
     snapshots = {p: (p.read_bytes(), p.stat().st_mode & 0o777) if p.exists() else None for p in paths}
     try:
@@ -157,18 +158,19 @@ def install(binary, source_config, base_url, codex_home="", model=""):
 def _install(binary, source_config, base_url, codex_home, model, prepared, profile):
     home = Path.home()
     binary_path = home / '.cargo/bin/hey-proxy'
-    config_path = home / '.hey-proxy/config.json'
-    log_path = home / '.hey-proxy/service.log'
-    temp_path = home / '.hey-proxy/tmp'
+    config_path = home / '.hey-boss/proxy/config.yaml'
+    log_path = home / '.hey-boss/proxy/service.log'
+    temp_path = home / '.hey-boss/proxy/tmp'
     temp_path.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(temp_path, 0o700)
+    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(config_path.parent, 0o700)
     # Check external references on the destination before replacing either its
     # running executable or configuration. Resolved secrets never enter the bundle.
     atomic(binary_path, Path(binary).read_bytes(), 0o755)
     atomic(config_path, prepared, 0o600)
     run(str(binary_path), '--config', str(config_path), 'encrypt-config', stdout=subprocess.DEVNULL)
-    config = json.loads(config_path.read_text())
+    config = json.loads(prepared)
     if config.get('mode', 'standalone') == 'host':
         run(str(binary_path), '--config', str(config_path), 'host-keys', stdout=subprocess.DEVNULL)
     # Codex setup is a separate, explicit CLI command. Rollout never edits its files.

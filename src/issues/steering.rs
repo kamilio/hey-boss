@@ -52,7 +52,9 @@ impl Store {
             )
         })?)?;
         let issue = get_issue(&tx, &job.project.id, job.number(), false)?;
-        if !matches!(issue.state.as_str(), "open" | "ready") || issue.assignee.as_deref() != Some(&job.actor.id) {
+        if !matches!(issue.state.as_str(), "open" | "ready")
+            || issue.assignee.as_deref() != Some(&job.actor.id)
+        {
             return Err(Error::conflict(
                 "The issue owner changed. Refresh before steering.",
             ));

@@ -687,8 +687,56 @@ pub(super) fn native_path(path: &str) -> bool {
         || (path.starts_with("/v1/models/") && path.contains(':'))
 }
 
-/// Native Gemini requests and responses remain byte-for-byte native. This
-/// includes countTokens, cached content, files, media generation and future APIs.
+// Gemini CLI trims tool names for execution but can replay the untrimmed model
+// call. Repair only a mismatch confirmed by the result with the same call ID.
+fn repair_native_tool_names(body: &mut Value) -> bool {
+    let Some(contents) = body.get_mut("contents").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let results: Vec<(String, String)> = contents
+        .iter()
+        .filter_map(|content| content.get("parts").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|part| {
+            let result = part.get("functionResponse")?;
+            Some((
+                result.get("id")?.as_str()?.into(),
+                result.get("name")?.as_str()?.into(),
+            ))
+        })
+        .collect();
+    let mut changed = false;
+    for part in contents
+        .iter_mut()
+        .filter_map(|content| content.get_mut("parts").and_then(Value::as_array_mut))
+        .flatten()
+    {
+        let Some(call) = part.get_mut("functionCall") else {
+            continue;
+        };
+        let (Some(id), Some(name)) = (
+            call.get("id").and_then(Value::as_str),
+            call.get("name").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let trimmed = name.trim();
+        if id.is_empty() || trimmed.is_empty() || name == trimmed {
+            continue;
+        }
+        let mut matching = results
+            .iter()
+            .filter(|(result_id, _)| result_id == id)
+            .peekable();
+        if matching.peek().is_some() && matching.all(|(_, result_name)| result_name == trimmed) {
+            call["name"] = Value::String(trimmed.to_owned());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Native responses and non-generation requests remain byte-for-byte native.
 pub(super) async fn forward_native(
     proxy: Arc<Proxy>,
     parts: axum::http::request::Parts,
@@ -706,6 +754,30 @@ pub(super) async fn forward_native(
     };
     proxy.record_accounting_route("gemini", "default");
     let incoming = parts.uri.path();
+    let body = if parts.method == axum::http::Method::POST
+        && [":generateContent", ":streamGenerateContent"]
+            .iter()
+            .any(|suffix| incoming.ends_with(suffix))
+    {
+        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "Could not read native Gemini request",
+                );
+            }
+        };
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
+            && repair_native_tool_names(&mut value)
+        {
+            Body::from(value.to_string())
+        } else {
+            Body::from(bytes)
+        }
+    } else {
+        body
+    };
     // Config can name either the Developer API version root or a complete
     // Vertex publisher root. Incoming full Vertex resource paths remain valid.
     let root = match reqwest::Url::parse(&config.upstream_url) {
@@ -1076,6 +1148,109 @@ mod tests {
         }
         upstream_task.abort();
         proxy_task.abort();
+    }
+
+    #[tokio::test]
+    async fn native_gemini_repairs_confirmed_tool_name_mismatch_without_changing_history() {
+        let input = json!({
+            "contents": [
+                {"role":"user","parts":[{"text":"Original task"}]},
+                {"role":"model","parts":[
+                    {"functionCall":{"id":"read-1","name":"read_file","args":{"name":" invoke_agent"}},"thoughtSignature":"opaque-first-signature"},
+                    {"functionCall":{"id":"agent-2","name":" invoke_agent","args":{"task":"Investigate"}}}
+                ]},
+                {"role":"user","parts":[
+                    {"functionResponse":{"id":"read-1","name":"read_file","response":{"text":"untouched"}}},
+                    {"functionResponse":{"id":"agent-2","name":"invoke_agent","response":{"name":" result name ","result":"Done"}}}
+                ]}
+            ],
+            "tools":[{"functionDeclarations":[{"name":"invoke_agent","parameters":{"type":"object"}}]}],
+            "generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}
+        });
+        let mut expected = input.clone();
+        expected["contents"][1]["parts"][1]["functionCall"]["name"] = json!("invoke_agent");
+        let original = serde_json::to_vec_pretty(&input).unwrap();
+        async fn upstream(
+            State((expected, original)): State<(Value, Vec<u8>)>,
+            request: Request,
+        ) -> Response {
+            let untouched = request.uri().path().ends_with(":countTokens");
+            let bytes = axum::body::to_bytes(request.into_body(), 10000)
+                .await
+                .unwrap();
+            if untouched {
+                assert_eq!(bytes.as_ref(), original);
+            } else {
+                assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), expected);
+            }
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"thoughtSignature\":\"unchanged-response\"}\n\n",
+            )
+                .into_response()
+        }
+        let (upstream_url, task) = serve(
+            Router::new()
+                .fallback(upstream)
+                .with_state((expected, original.clone())),
+        )
+        .await;
+        let config = Config {
+            gemini: Some(provider(&upstream_url, "api_key")),
+            ..Config::test_fixture()
+        };
+        let (url, proxy) = serve(super::super::router(config).unwrap()).await;
+        for operation in ["generateContent", "streamGenerateContent", "countTokens"] {
+            let response = reqwest::Client::new()
+                .post(format!("{url}/v1beta/models/gemini-test:{operation}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(original.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.text().await.unwrap(),
+                "data: {\"thoughtSignature\":\"unchanged-response\"}\n\n"
+            );
+        }
+        task.abort();
+        proxy.abort();
+    }
+
+    #[test]
+    fn native_gemini_leaves_unconfirmed_or_conflicting_tool_names_unchanged() {
+        for (id, name, result_ids, result_names) in [
+            ("a", "invoke_agent", vec!["a"], vec!["invoke_agent"]),
+            ("", " invoke_agent", vec![""], vec!["invoke_agent"]),
+            ("a", " invoke_agent", vec!["b"], vec!["invoke_agent"]),
+            ("a", " invoke_agent", vec!["a"], vec!["other_tool"]),
+            ("a", "invoke agent", vec!["a"], vec!["invoke_agent"]),
+            (
+                "a",
+                " invoke_agent",
+                vec!["a", "a"],
+                vec!["invoke_agent", "other_tool"],
+            ),
+            ("a", "  ", vec!["a"], vec![""]),
+        ] {
+            let mut body = json!({"contents":[
+                {"parts":[{"functionCall":{"id":id,"name":name,"args":{}}}]},
+                {"parts":result_ids.iter().zip(result_names).map(|(id,name)|json!({"functionResponse":{"id":id,"name":name,"response":{}}})).collect::<Vec<_>>()}
+            ]});
+            let original = body.clone();
+            assert!(!repair_native_tool_names(&mut body));
+            assert_eq!(body, original);
+        }
+        for mut body in [
+            Value::Null,
+            json!({"contents":"invalid"}),
+            json!({"contents":[{"parts":[{"functionCall":{}}, {"functionResponse":{}}]}]}),
+        ] {
+            let original = body.clone();
+            assert!(!repair_native_tool_names(&mut body));
+            assert_eq!(body, original);
+        }
     }
 
     #[tokio::test]

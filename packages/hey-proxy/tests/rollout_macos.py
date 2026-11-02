@@ -14,7 +14,7 @@ previous = plistlib.dumps({'Label': 'com.hey-proxy', 'ProgramArguments': ['/fixt
 
 with tempfile.TemporaryDirectory() as directory:
     home = Path(directory)
-    (home / '.hey-proxy').mkdir()
+    (home / '.hey-boss/proxy').mkdir(parents=True)
     with patch.object(Path, 'home', return_value=home), patch.object(service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
         service.restart_macos(data, data)
         assert [call.args[0][1] for call in run.call_args_list] == ['print', 'kickstart']
@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as directory:
                 return subprocess.CompletedProcess(argv, 0 if loaded else 1)
             if argv[1] == 'bootstrap':
                 path = Path(argv[-1])
-                assert path.parent == home / '.hey-proxy'
+                assert path.parent == home / '.hey-boss/proxy'
                 assert path.read_bytes() == data and path.stat().st_mode & 0o777 == 0o600
                 paths.append(path)
                 return subprocess.CompletedProcess(argv, 5 if len(paths) == 1 else 0)

@@ -479,16 +479,45 @@ fn remote_retry_cooldown_upgrade_preserves_pending_deadlines() {
     db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at,retry_count) VALUES('pending','p',1,'{}','human:test','failed',100,'synthetic','a',1,1,1,9000000000000,7)", []).unwrap();
     db.execute("DELETE FROM distributed_outbox", []).unwrap();
     install(&db, "a").unwrap();
-    let row: Value = serde_json::from_str(&db.query_row("SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'", [], |r|r.get::<_,String>(0)).unwrap()).unwrap();
+    let row: Value = serde_json::from_str(
+        &db.query_row(
+            "SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(row["retry_at"], 9_000_000_000_000_i64);
     assert_eq!(row["retry_count"], 7);
     assert_eq!(row["retry_allowed"], 0);
     db.execute("DELETE FROM distributed_outbox", []).unwrap();
     install(&db, "a").unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM distributed_outbox", [], |r|r.get::<_,i64>(0)).unwrap(), 0, "migration is idempotent");
-    db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE id='pending'", []).unwrap();
-    let row: Value = serde_json::from_str(&db.query_row("SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'", [], |r|r.get::<_,String>(0)).unwrap()).unwrap();
-    assert_eq!(row["retry_allowed"], 1, "retry-only changes must be captured after upgrade");
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM distributed_outbox", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "migration is idempotent"
+    );
+    db.execute(
+        "UPDATE worker_runs SET retry_allowed=1 WHERE id='pending'",
+        [],
+    )
+    .unwrap();
+    let row: Value = serde_json::from_str(
+        &db.query_row(
+            "SELECT after_json FROM distributed_outbox WHERE table_name='worker_runs'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        row["retry_allowed"], 1,
+        "retry-only changes must be captured after upgrade"
+    );
 }
 
 #[test]
@@ -499,17 +528,46 @@ fn remote_retry_cooldown_uses_latest_history_and_legacy_defaults() {
     seed(&db);
     let finished = crate::issues::worker::now();
     db.execute("INSERT INTO distributed_attempts VALUES('remote','b','p',1,'blocked',?1,?1,'Waiting for a prerequisite','{}')", [finished]).unwrap();
-    let ready = || db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id='p' AND number=1)", [], |r|r.get::<_,bool>(0)).unwrap();
-    assert!(!ready(), "old peers still get the existing five-minute fallback");
-    db.execute("UPDATE distributed_attempts SET state='cancelled'", []).unwrap();
-    assert!(ready(), "old-peer cancellations must not acquire a new cooldown");
+    let ready = || {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id='p' AND number=1)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        !ready(),
+        "old peers still get the existing five-minute fallback"
+    );
+    db.execute("UPDATE distributed_attempts SET state='cancelled'", [])
+        .unwrap();
+    assert!(
+        ready(),
+        "old-peer cancellations must not acquire a new cooldown"
+    );
     db.execute("UPDATE distributed_attempts SET state='blocked',finished_at=1,summary='Codex needs input or approval: confirm'", []).unwrap();
     assert!(!ready(), "approval waits are not released by time alone");
     db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at) VALUES('local','p',1,'{}','human:test','failed',100,'synthetic','a',?1,?1,?1,0)", [finished+1]).unwrap();
-    assert!(ready(), "newer local history supersedes an older remote hold");
-    db.execute("INSERT INTO distributed_attempts VALUES('local','a','p',1,'failed',?1,?1,'','{}')", [finished+1]).unwrap();
+    assert!(
+        ready(),
+        "newer local history supersedes an older remote hold"
+    );
+    db.execute(
+        "INSERT INTO distributed_attempts VALUES('local','a','p',1,'failed',?1,?1,'','{}')",
+        [finished + 1],
+    )
+    .unwrap();
     assert!(ready(), "a local row wins over its stale replicated copy");
-    assert_eq!(db.query_row("SELECT count(*) FROM worker_retry_history WHERE id='local'", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM worker_retry_history WHERE id='local'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
 }
 
 fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
@@ -575,7 +633,6 @@ fn reused_logical_revision_converges_and_does_not_block_the_journal() {
         );
     }
 }
-
 
 #[test]
 fn distributed_reservations_precede_agent_claims() {
@@ -1118,7 +1175,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
 fn script_job_logs_remain_readable_on_other_peers() {
     check_job_history_replication(true);
 }
-fn check_job_history_replication(script:bool) {
+fn check_job_history_replication(script: bool) {
     use crate::jobs::{Definition, Operation as Job};
     use serde_json::json;
     let fa = Fixture::new();
@@ -1144,15 +1201,20 @@ fn check_job_history_replication(script:bool) {
             name: "Schedule fixture".into(),
             cron: "0 * * * *".into(),
             timezone: "UTC".into(),
-            executable: script.then(||"maintenance".into()),
-            harness: if script {""} else {"codex"}.into(),
-            model: if script {""} else {"gpt-6-astra"}.into(),
+            executable: script.then(|| "maintenance".into()),
+            harness: if script { "" } else { "codex" }.into(),
+            model: if script { "" } else { "gpt-6-astra" }.into(),
             machines: Vec::new(),
             all_machines: false,
             each_machine: false,
             thread_mode: Default::default(),
         },
-        markdown: if script {""} else {include_str!("../../../jobs/fixtures/original.md")}.into(),
+        markdown: if script {
+            ""
+        } else {
+            include_str!("../../../jobs/fixtures/original.md")
+        }
+        .into(),
         enabled: true,
     }))
     .unwrap();
@@ -1187,7 +1249,13 @@ fn check_job_history_replication(script:bool) {
             .len(),
         1
     );
-    if script {b.execute("INSERT INTO scheduled_job_logs VALUES(?1,0,\'output from b\',NULL)",[rb["id"].as_str()]).unwrap();}
+    if script {
+        b.execute(
+            "INSERT INTO scheduled_job_logs VALUES(?1,0,\'output from b\',NULL)",
+            [rb["id"].as_str()],
+        )
+        .unwrap();
+    }
     for (db, id) in [(&a, &ra["id"]), (&b, &rb["id"])] {
         db.execute(
             "UPDATE scheduled_job_runs SET state='succeeded',finished_at=created_at+1 WHERE id=?1",
@@ -1230,7 +1298,18 @@ fn check_job_history_replication(script:bool) {
             }))
             .unwrap();
         assert_eq!(remote["run"]["id"], rb["id"]);
-        if script {assert_eq!(store.execute(&request(Job::Log{id:"test-job".into(),run_id:rb["id"].as_str().unwrap().into(),offset:0})).unwrap()["log"],"output from b");}
+        if script {
+            assert_eq!(
+                store
+                    .execute(&request(Job::Log {
+                        id: "test-job".into(),
+                        run_id: rb["id"].as_str().unwrap().into(),
+                        offset: 0
+                    }))
+                    .unwrap()["log"],
+                "output from b"
+            );
+        }
     }
 }
 
@@ -3080,7 +3159,13 @@ fn conflicting_archive_does_not_block_other_tasks_and_retries_after_repair() {
 
 #[test]
 fn secret_revisions_are_not_issue_revisions() {
-    assert!(archives::revision(r#"{"protocol":2,"kind":"secret_revision_v1","revision":{"encrypted":"synthetic"}}"#).unwrap().is_none());
+    assert!(
+        archives::revision(
+            r#"{"protocol":2,"kind":"secret_revision_v1","revision":{"encrypted":"synthetic"}}"#
+        )
+        .unwrap()
+        .is_none()
+    );
 }
 
 #[test]
