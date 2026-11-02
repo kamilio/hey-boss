@@ -6659,8 +6659,8 @@ final class ReaderVoice {
                 while first < count && abs(samples[first]) < 0.002 { first += 1 }
                 if first < count {
                     while end > first && abs(samples[end - 1]) < 0.002 { end -= 1 }
-                    first = max(0, first - 4410)       // 100 ms of lead-in
-                    end = min(count, end + 6615)       // 150 ms of release
+                    first = max(0, first - 1103)       // 25 ms before the first audible sample
+                    end = min(count, end + 2205)       // 50 ms after the last audible sample
                     if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
                     buffer.frameLength = AVAudioFrameCount(end - first)
                     words = words.map { (min(end - first - 1, max(0, $0.0 - first)), $0.1) }
@@ -7383,6 +7383,13 @@ final class SpokenReview {
             if end < NSMaxRange(line) {
                 let gap = string.rangeOfCharacter(from: .whitespaces, options: .backwards, range: range)
                 if gap.location > pos, gap.location != NSNotFound { range.length = gap.location - pos }
+            }
+            // A short title can finish before a whole paragraph has rendered.
+            // Produce its opening sentence first so it can play while the rest renders.
+            if range.length > 100 {
+                string.enumerateSubstrings(in: range, options: [.bySentences, .substringNotRequired]) { _, sentence, _, stop in
+                    range.length = NSMaxRange(sentence) - pos; stop.pointee = true
+                }
             }
             let text = string.substring(with: range)
             if let marker = text.range(of: #"^(?:[•☑☐]|[0-9]+\.)\t"#, options: .regularExpression) {
