@@ -47,12 +47,13 @@ pub(super) fn mac_definition(ctx: &Context, role: &str) -> String {
     };
     let label = format!("local.hey-boss-fleet-{role}");
     let association = crate::desktop_identity::association(&ctx.home);
+    let home = xml(&ctx.home.to_string_lossy());
     let log = xml(&ctx
         .state
         .join(format!("fleet-{role}.log"))
         .to_string_lossy());
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string>{association}<key>ProgramArguments</key><array><string>{}</string><string>fleet</string><string>{name}</string></array><key>EnvironmentVariables</key><dict><key>HEY_BOSS_FLEET_SUPERVISED</key><string>1</string></dict><key>ProcessType</key><string>Interactive</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>AbandonProcessGroup</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>{label}</string>{association}<key>ProgramArguments</key><array><string>{}</string><string>fleet</string><string>{name}</string></array><key>EnvironmentVariables</key><dict><key>PATH</key><string>{home}/.local/bin:{home}/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>HEY_BOSS_FLEET_SUPERVISED</key><string>1</string></dict><key>ProcessType</key><string>Interactive</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>AbandonProcessGroup</key><true/><key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>\n",
         xml(&ctx.binary.to_string_lossy())
     )
 }
@@ -230,6 +231,10 @@ mod tests {
             assert!(mac.contains("<key>AbandonProcessGroup</key><true/>"));
             assert!(mac.contains(&format!("local.hey-boss-fleet-{role}")));
             assert!(mac.contains("&amp;"));
+            assert!(mac.contains(&format!(
+                "<key>PATH</key><string>{}/.local/bin:",
+                xml(&ctx.home.to_string_lossy())
+            )));
             let linux = linux_definition(&ctx, role);
             assert!(linux.contains("KillMode=process\n"));
             assert!(linux.contains("Restart=always\n"));
