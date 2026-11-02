@@ -67,8 +67,9 @@ Audio stays local. Correction applies before History, copy, paste, or submission
 including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one
-snapshot when microphone recording starts and uses it for correction even if
-you change tabs before stopping. Capture uses macOS Accessibility with a
+background snapshot after the microphone is ready and uses it for correction even
+if you change tabs before stopping. Recording never waits for context capture.
+Capture uses macOS Accessibility with a
 200 ms budget and an 8,000-character cap. It skips password fields, unrelated editors, controls, navigation trees, and
 clipped or off-screen text; cmux's rendered terminal viewport is included.
 Named regions and message headings separate the captured text into sections.
