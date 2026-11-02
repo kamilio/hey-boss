@@ -441,7 +441,7 @@ mod tests {
             stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         ctx.atomic_json(
-            &ctx.home.join(".hey-boss/config.json"),
+            &ctx.state.join("config.json"),
             &json!({"ssh_hosts":["old-mac", "ready"]}),
         )
         .unwrap();

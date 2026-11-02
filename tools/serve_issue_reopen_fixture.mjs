@@ -8,6 +8,7 @@ import {createHash} from 'node:crypto';
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'hey-boss-issue361-')));
 const database = join(root, 'issues.db');
 const env = {...process.env, HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:root,
+  HEY_BOSS_FLEET_CONFIG:join(root, 'config.json'), HEY_BOSS_FLEET_DESIRED:join(root, 'fleet.yaml'),
   HEY_BOSS_INBOX_SOCKET:join(root, 'inbox.sock'), HEY_BOSS_AGENT_ID:'human:boss'};
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','CODEX_THREAD_ID']) delete env[key];
 // Keep concurrent checkout builds from restarting the fixture midway through a check.

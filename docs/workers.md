@@ -28,6 +28,10 @@ The supervisor owns `~/.hey-boss/fleet.yaml`. Machine keys are SSH host names;
 Registered companions in `~/.hey-boss/config.json` also stay connected for sync,
 even with no saved workers. Removing a worker drains it without disconnecting the machine.
 
+With a custom `HEY_BOSS_FLEET_STATE`, `fleet.yaml` and `config.json` default to
+that directory, keeping private fleets separate from the home inventory.
+`HEY_BOSS_FLEET_DESIRED` and `HEY_BOSS_FLEET_CONFIG` can explicitly select other files.
+
 ```yaml
 machines:
   local:
