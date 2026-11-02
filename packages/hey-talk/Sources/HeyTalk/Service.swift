@@ -552,19 +552,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if paste || correctionSettings.enabled, let target, target.bundleIdentifier == "com.t3tools.t3code" {
             startingT3Input = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
         } else { startingT3Input = nil }
-        if correctionSettings.enabled, let target {
-            let pid = target.processIdentifier
-            let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
-            recordingContext = Task.detached(priority: .userInitiated) { [startingT3Input] in
-                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                      !isT3 || startingT3Input?.isFocused() == true else { return (nil, 0) }
-                let started = ProcessInfo.processInfo.systemUptime
-                let text = AppContext.capture(pid: pid)
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                guard !isT3 || startingT3Input?.isFocused() == true else { return (nil, elapsed) }
-                return (text, elapsed)
-            }
-        }
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
@@ -579,6 +566,19 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.captureMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 self.captureReady = true
                 self.updateRecordingOverlay(); self.hotkey?.captureEscape(true)
+                if self.correctionSettings.enabled, let target = self.target {
+                    let pid = target.processIdentifier
+                    let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
+                    self.recordingContext = Task.detached(priority: .userInitiated) { [startingT3Input = self.startingT3Input] in
+                        guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                              !isT3 || startingT3Input?.isFocused() == true else { return (nil, 0) }
+                        let started = ProcessInfo.processInfo.systemUptime
+                        let text = AppContext.capture(pid: pid)
+                        let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                        guard !isT3 || startingT3Input?.isFocused() == true else { return (nil, elapsed) }
+                        return (text, elapsed)
+                    }
+                }
                 let limit = DispatchWorkItem { [weak self] in
                     guard let self, self.session.generation == id, self.session.phase == .recording else { return }
                     if self.autoTarget != nil {
