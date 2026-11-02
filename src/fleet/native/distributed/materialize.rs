@@ -22,9 +22,19 @@ fn issue_overlay(db: &Connection, row: &mut Value) -> Result<()> {
         &[row["project_id"].clone(),row["number"].clone()])?.into_iter().next();
     if let Some(ref current) = current {
         let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL)",params![row["project_id"].as_str(),row["number"].as_i64()],|r|r.get(0))?;
-        if active && row["state"] == "open" && row["deleted_at"].is_null() {
+        if active
+            && (row["state"] == "open"
+                || (row["state"] == "ready"
+                    && current["state"] == "ready"
+                    && !row["assignee"]
+                        .as_str()
+                        .is_some_and(|owner| owner.starts_with("human:"))))
+            && row["deleted_at"].is_null()
+        {
             row["assignee"] = current["assignee"].clone();
-        } else if row["state"] == "open" && foreign_assignment(db, row)? {
+        } else if matches!(row["state"].as_str(), Some("open" | "ready"))
+            && foreign_assignment(db, row)?
+        {
             row["assignee"] = Value::Null;
         }
         row["version"] = current["version"].clone();
@@ -37,7 +47,9 @@ fn issue_overlay(db: &Connection, row: &mut Value) -> Result<()> {
                 json!("")
             };
         }
-    } else if row["state"] == "open" && foreign_assignment(db, row)? {
+    } else if matches!(row["state"].as_str(), Some("open" | "ready"))
+        && foreign_assignment(db, row)?
+    {
         row["assignee"] = Value::Null;
     }
     if current.is_none() && !row["archive_key"].is_null() {

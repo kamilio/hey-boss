@@ -86,6 +86,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn ready_without_prs_preserves_settings_and_assignment_does_not_reopen() {
+    let mut f = Fixture::new();
+    f.run(json!({"action":"remove_pull_request","number":1,"url":"https://github.com/example/repo/pull/1"}));
+    f.run(json!({"action":"configure_project","prs_enabled":false}));
+    let request = f.handoff();
+    f.store.execute(&request).unwrap();
+    let ready = f.view();
+    assert_eq!(ready["issue"]["state"], "ready");
+    assert_eq!(ready["issue"]["assignee"], "human:boss");
+    assert_eq!(ready["prs_enabled"], false);
+    f.run(json!({"action":"unassign","number":1,"force":false}));
+    assert_eq!(f.view()["issue"]["state"], "ready");
+    assert!(f.view()["issue"]["assignee"].is_null());
+    f.run(json!({"action":"claim","number":1,"force":false}));
+    assert_eq!(f.view()["issue"]["state"], "ready");
+    assert_eq!(f.view()["issue"]["assignee"], "codex:owner");
+}
+
+#[test]
 fn supervisor_close_completes_unclaimed_ready_without_taking_work() {
     let mut f = Fixture::new();
     let handoff = f.handoff();
@@ -349,6 +368,12 @@ fn ready_github_handoff_requires_the_original_owner_and_latest_handoff() {
         );
         if mode == "foreign" {
             assign.actor.as_mut().unwrap().id = "codex:other".into();
+        }
+        if mode == "other-target" {
+            let result = f.store.execute(&assign).unwrap();
+            assert_eq!(result["issue"]["state"], "ready");
+            assert!(result["issue"]["assignee"].is_null());
+            continue;
         }
         f.reject(
             &assign,
@@ -626,18 +651,11 @@ fn draft_handoff_rejects_stale_version_claim_and_reservation_atomically() {
 }
 
 #[test]
-fn draft_handoff_preserves_pr_and_dependency_requirements() {
-    for (change, message) in [
-        ("DELETE FROM issue_pull_requests", "Attach the task's PR"),
-        (
-            "UPDATE project_settings SET prs_enabled=0",
-            "pull requests enabled",
-        ),
-        (
-            "UPDATE issues SET manual_blocked=1,state='blocked' WHERE number=1",
-            "manual hold",
-        ),
-    ] {
+fn draft_handoff_preserves_hold_and_dependency_requirements() {
+    for (change, message) in [(
+        "UPDATE issues SET manual_blocked=1,state='blocked' WHERE number=1",
+        "manual hold",
+    )] {
         let mut f = Fixture::new();
         f.draft();
         f.sql(change);

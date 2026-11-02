@@ -183,9 +183,6 @@ pub(super) fn assign(
         "boss" => Some("human:boss".into()),
         _ => None,
     };
-    if target != "github" {
-        issue.state = "open".into();
-    }
     db.execute(
         "UPDATE issues SET assignment_target=?3 WHERE project_id=?1 AND number=?2",
         params![

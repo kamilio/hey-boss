@@ -107,9 +107,9 @@ pub(super) fn execute(
                 BatchAssignment::Keep => {}
                 BatchAssignment::Unassign => after.assignee = None,
                 BatchAssignment::Boss => {
-                    if before.state != "open" || before.draft {
+                    if !matches!(before.state.as_str(), "open" | "ready") || before.draft {
                         return Err(Error::conflict(
-                            "Boss assignment requires an open, undrafted issue",
+                            "Boss assignment requires an open or ready, undrafted issue",
                         ));
                     }
                     after.assignee = Some("human:boss".into());

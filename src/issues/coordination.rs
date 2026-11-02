@@ -173,7 +173,7 @@ fn message(
 ) -> Result<String> {
     let issue = get_issue(db, &project.id, number, false)?;
     let is_linked = linked(db, &actor.machine, session)? == Some((project.id.clone(), number));
-    if issue.state != "open"
+    if !matches!(issue.state.as_str(), "open" | "ready")
         || (issue.assignee.as_deref() != Some(&format!("codex:{session}"))
             && !(is_linked && issue.draft && issue.assignee.is_none()))
     {

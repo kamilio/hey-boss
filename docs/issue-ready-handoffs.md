@@ -1,7 +1,8 @@
 # Guarded Ready handoffs
 
-Ready means the caller considers the attached PR usable by dependent work. It
-assigns the issue to Boss and unblocks eligible dependents. It does not assert
+Ready is a task status independent of pull requests. It assigns the issue to
+Boss and unblocks eligible dependents. Unassigning preserves Ready; workers
+can pick up unassigned Open and Ready tasks with their status intact. It does not assert
 passing CI, completion, merge, or deployment, and performs no GitHub or Git action.
 
 Run `hey-boss issue ready NUMBER`. The CLI reads the authoritative revision,
@@ -17,8 +18,7 @@ Reusing that ID for a different operation fails.
 For a reconciled manual hold, add `--clear-manual-hold` to the guarded Ready
 command. The hold clears only if the entire handoff succeeds. Dependency links
 remain and unfinished dependencies still prevent Ready. Closed issues require an
-explicit reopen. An attached fix or unspecified PR and
-project PR support remain required.
+explicit reopen. No attached PR or commit is required, and Ready never enables project PR support.
 
 For a useful draft source, add `--keep-draft` to the guarded Ready command. This
 records a development handoff, assigns Boss, and unblocks eligible dependents

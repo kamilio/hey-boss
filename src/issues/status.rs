@@ -50,9 +50,9 @@ pub(super) fn update(
     now: i64,
 ) -> Result<Value> {
     let issue = get_issue(db, &project.id, number, false)?;
-    if issue.state != "open" || issue.draft {
+    if !matches!(issue.state.as_str(), "open" | "ready") || issue.draft {
         return Err(Error::conflict(
-            "Only open, non-draft issues can receive status updates.",
+            "Only Open or Ready, non-draft issues can receive status updates.",
         ));
     }
     // Progress is append-only collaboration, not worker pickup. Allocation and

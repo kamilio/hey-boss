@@ -800,7 +800,7 @@ fn apply_change(writer: &mut RowWriter<'_>, node: &str, change: &Value) -> Resul
         if old.is_null() && change["bootstrap"] != true {
             let eligible = rows(
                 db,
-                "SELECT 1 FROM issues WHERE project_id=? AND number=? AND state='open' AND draft=0 AND deleted_at IS NULL",
+                "SELECT 1 FROM issues WHERE project_id=? AND number=? AND state IN ('open','ready') AND draft=0 AND deleted_at IS NULL",
                 &[after["project_id"].clone(), after["issue_number"].clone()],
             )?;
             if eligible.is_empty() {
@@ -2407,7 +2407,7 @@ fn plan_allocations(db: &Connection, node: &str, workers: &[Value]) -> Result<Al
             CROSS JOIN fleet_allocations a CROSS JOIN issues i
             WHERE a.project_id=selected.value AND a.node=?2
               AND i.project_id=a.project_id AND i.number=a.issue_number
-              AND i.state='open' AND i.deleted_at IS NULL AND {ALLOCATED}"
+              AND i.state IN ('open','ready') AND i.deleted_at IS NULL AND {ALLOCATED}"
         ),
         &[json!(serde_json::to_string(&keys)?), json!(node)],
     )? {
@@ -2466,7 +2466,7 @@ fn plan_allocations(db: &Connection, node: &str, workers: &[Value]) -> Result<Al
         db,
         &format!(
             "SELECT i.project_id,i.number,i.labels FROM json_each(?1) selected CROSS JOIN issues i
-             WHERE i.project_id=selected.value AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL
+             WHERE i.project_id=selected.value AND i.state IN ('open','ready') AND i.deleted_at IS NULL AND i.assignee IS NULL
                AND (assignment_target IS NULL OR assignment_target NOT LIKE 'machine:%' OR assignment_target='machine:'||?2)
                AND {READY} AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number)
                AND NOT EXISTS(SELECT 1 FROM worker_runs r WHERE r.project_id=i.project_id AND r.issue_number=i.number AND r.finished_at IS NULL)

@@ -1297,7 +1297,7 @@ impl Store {
             .is_none_or(|sql| !sql.contains("ready_dependencies"));
         let needs_readiness_refresh = prior_readiness
             .as_ref()
-            .is_none_or(|sql| !sql.contains("explicit_dependencies_only"));
+            .is_none_or(|sql| !sql.contains("ready_task_pickup"));
         let archive_guard: Option<String> = db
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE name='issue_archive_mutation_guard'",
@@ -1500,6 +1500,8 @@ impl Store {
         super::dependency_notices::migrate(&db)?;
         if needs_readiness_refresh {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch("DROP INDEX IF EXISTS worker_project_queue; DROP INDEX IF EXISTS worker_sort_order; CREATE INDEX worker_sort_order ON issues(sort_order,created_at,project_id,number) WHERE deleted_at IS NULL AND state IN ('open','ready') AND assignee IS NULL;")?;
+            tx.execute_batch(registry::PROJECT_QUEUE_INDEX)?;
             tx.execute("UPDATE project_settings SET subtask_scheduling='explicit',version=version+1 WHERE subtask_scheduling<>'explicit'", [])?;
             super::blockers::reconcile_upgrade(&tx)?;
             super::worker_retry::install_readiness(&tx)?;
@@ -2174,7 +2176,7 @@ impl Store {
                     coalesce(sum(i.state='open' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.state='closed' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.deleted_at IS NOT NULL),0),
-                    coalesce(sum(i.state='open' AND i.assignee IS NULL AND i.assignment_target IS NULL AND i.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number)),0),
+                    coalesce(sum(i.state IN ('open','ready') AND i.assignee IS NULL AND i.assignment_target IS NULL AND i.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM fleet_allocations a WHERE a.project_id=i.project_id AND a.issue_number=i.number)),0),
                     p.activity_at,p.hidden_at,p.created_at,
                     coalesce(sum(i.state='blocked' AND i.deleted_at IS NULL),0),
                     coalesce(sum(i.state='ready' AND i.deleted_at IS NULL),0),
@@ -3213,7 +3215,7 @@ fn mutate(
                 return Err(Error::conflict("Undraft the issue before claiming it"));
             }
             registry::claim_lock(db, project, number, actor, *force)?;
-            if issue.state != "open" {
+            if !matches!(issue.state.as_str(), "open" | "ready") {
                 return Err(Error::conflict("Reopen the issue before claiming it"));
             }
             if issue.assignee.is_none()
