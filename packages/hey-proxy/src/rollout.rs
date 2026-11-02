@@ -19,6 +19,40 @@ fn table<'a>(doc: &'a mut Item, key: &str) -> Result<&'a mut Item> {
     }
     Ok(&mut doc[key])
 }
+enum Setting {
+    Str(&'static str),
+    Bool(bool),
+}
+const CODEX_SETTINGS: &[(&str, Setting, bool)] = &[
+    ("model_provider", Setting::Str("hey-proxy"), true),
+    ("approval_policy", Setting::Str("on-request"), true),
+    ("approvals_reviewer", Setting::Str("auto_review"), true),
+    (
+        "features.enable_request_compression",
+        Setting::Bool(false),
+        true,
+    ),
+    ("analytics.enabled", Setting::Bool(false), true),
+    ("otel.metrics_exporter", Setting::Str("none"), false),
+];
+fn apply_codex_settings(item: &mut Item, profile: bool) -> Result<()> {
+    for (key, setting, in_profile) in CODEX_SETTINGS {
+        if profile && !in_profile {
+            continue;
+        }
+        let mut parts: Vec<&str> = key.split('.').collect();
+        let last = parts.pop().unwrap();
+        let mut target = &mut *item;
+        for part in parts {
+            target = table(target, part)?;
+        }
+        target[last] = match setting {
+            Setting::Str(text) => value(*text),
+            Setting::Bool(flag) => value(*flag),
+        };
+    }
+    Ok(())
+}
 #[cfg(test)]
 fn edit_codex(content: &str, base_url: &str, model: Option<&str>) -> Result<String> {
     edit_codex_token(content, base_url, model, None)
@@ -32,19 +66,15 @@ fn edit_codex_token(
     let mut doc = content
         .parse::<DocumentMut>()
         .context("Invalid Codex config TOML; left unchanged")?;
-    doc["model_provider"] = value("hey-proxy");
-    doc["approval_policy"] = value("on-request");
-    doc["approvals_reviewer"] = value("auto_review");
+    apply_codex_settings(doc.as_item_mut(), false)?;
     if let Some(model) = model {
         doc["model"] = value(model);
     }
     let providers = table(doc.as_item_mut(), "model_providers")?;
-    // Recovery settings must survive rerunning configure-codex/rollout.
     let timeout = providers
         .get("hey-proxy")
-        .and_then(|p| p.get("stream_idle_timeout_ms"))
+        .and_then(|provider_item| provider_item.get("stream_idle_timeout_ms"))
         .cloned();
-    // Replace only our own provider to remove stale env-key/auth overrides.
     providers["hey-proxy"] = Item::Table(Table::new());
     let provider = &mut providers["hey-proxy"];
     provider["name"] = value("hey-proxy");
@@ -55,8 +85,6 @@ fn edit_codex_token(
     if let Some(token) = token {
         provider["experimental_bearer_token"] = value(token);
     }
-    // The proxy routes on uncompressed JSON model envelopes.
-    table(doc.as_item_mut(), "features")?["enable_request_compression"] = value(false);
     if let Some(profile) = doc.get("profile").and_then(Item::as_str).map(str::to_owned)
         && let Some(profiles) = doc.get_mut("profiles")
         && let Some(active) = profiles.get_mut(&profile)
@@ -64,10 +92,7 @@ fn edit_codex_token(
         if !active.is_table() {
             bail!("Active Codex profile must be a table");
         }
-        active["model_provider"] = value("hey-proxy");
-        active["approval_policy"] = value("on-request");
-        active["approvals_reviewer"] = value("auto_review");
-        table(active, "features")?["enable_request_compression"] = value(false);
+        apply_codex_settings(active, true)?;
         if let Some(model) = model {
             active["model"] = value(model);
         }
@@ -1412,7 +1437,7 @@ mod tests {
     use super::*;
     #[test]
     fn codex_changes_are_idempotent_and_preserve_unrelated_settings() {
-        let content = "# my configuration\nmodel = 'existing-model'\napproval_policy = 'on-request'\nprofile = 'work'\n[projects.'/project']\ntrust_level = 'trusted'\n[model_providers.other]\nname = 'Other'\n[profiles.work]\nmodel_provider = 'other'\n";
+        let content = "# my configuration\nmodel = 'existing-model'\napproval_policy = 'on-request'\nprofile = 'work'\n[projects.'/project']\ntrust_level = 'trusted'\n[model_providers.other]\nname = 'Other'\n[otel]\nexporter = 'none'\nmetrics_exporter = { otlp-http = { endpoint = 'https://telemetry.example/metrics' } }\n[analytics]\nenabled = true\n[profiles.work]\nmodel_provider = 'other'\n[profiles.work.analytics]\nenabled = true\n";
         let edited = edit_codex(content, "http://127.0.0.1:8080/v1", None).unwrap();
         let doc = edited.parse::<DocumentMut>().unwrap();
         assert_eq!(doc["model"].as_str(), Some("existing-model"));
@@ -1433,6 +1458,13 @@ mod tests {
             doc["features"]["enable_request_compression"].as_bool(),
             Some(false)
         );
+        assert_eq!(doc["analytics"]["enabled"].as_bool(), Some(false));
+        assert_eq!(
+            doc["profiles"]["work"]["analytics"]["enabled"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(doc["otel"]["exporter"].as_str(), Some("none"));
+        assert_eq!(doc["otel"]["metrics_exporter"].as_str(), Some("none"));
         assert!(edited.contains("# my configuration"));
         assert_eq!(
             doc["model_providers"]["hey-proxy"]["stream_idle_timeout_ms"].as_integer(),
@@ -1540,14 +1572,26 @@ mod tests {
     #[test]
     fn remote_sync_omits_host_inventory_and_preserves_routes() {
         let mut config = Config {
-            ssh_hosts: vec![SshHost::Name("builder".into())],
+            auto_approve: true,
+            ssh_hosts: serde_json::from_value(json!([
+                {"host": "gateway", "mode": "host", "listen": "0.0.0.0:8080", "url": "http://gateway:8080"},
+                {"host": "laptop", "mode": "client", "via": "gateway"},
+                "builder"
+            ]))
+            .unwrap(),
             proxy_url: Some("socks5h://127.0.0.1:18083".into()),
             ..Config::test_fixture()
         };
         config.fallbacks =
             serde_json::from_value(serde_json::json!({"model-primary":["model-secondary"]}))
                 .unwrap();
-        let remote = remote_config(&config, &config.ssh_hosts[0]).unwrap();
+        let host_remote = remote_config(&config, &config.ssh_hosts[0]).unwrap();
+        assert!(host_remote.auto_approve);
+        let client_remote =
+            remote_config_with_key(&config, &config.ssh_hosts[1], Some("client-key")).unwrap();
+        assert!(client_remote.auto_approve);
+        let remote = remote_config(&config, &config.ssh_hosts[2]).unwrap();
+        assert!(remote.auto_approve);
         assert!(remote.ssh_hosts.is_empty());
         assert!(remote.proxy_url.is_none());
         assert_eq!(remote.aliases[1].to, config.aliases[1].to);

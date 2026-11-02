@@ -50,11 +50,11 @@ machines:
         config:
           concurrency: 1
           projects:
-            - github.com/kamilio/hey-proxy
-            - github.com/kamilio/hey-gh
+            - github.com/me/service-a
+            - github.com/me/service-b
           directories:
-            github.com/kamilio/hey-proxy: /work/hey-proxy
-            github.com/kamilio/hey-gh: /work/hey-gh
+            github.com/me/service-a: /work/service-a
+            github.com/me/service-b: /work/service-b
 ```
 
 A shared worker divides its slots across the selected projects. Separate
