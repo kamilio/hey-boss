@@ -409,8 +409,16 @@ final class AudioCapture {
 
     static func readFile(_ path: String) throws -> [Float] {
         let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+        guard Double(file.length) / file.processingFormat.sampleRate <= 300 else { throw TalkError("Audio file exceeds five minutes") }
+        var result: [Float] = []
+        try readFileChunks(file) { result += $0 }
+        guard result.count <= PCMFrame.maxSamples else { throw TalkError("Audio file exceeds five minutes") }
+        return result
+    }
+
+    static func readFileChunks(_ file: AVAudioFile, consume: ([Float]) throws -> Void) throws {
+        guard file.length > 0 else { throw TalkError("Audio file is empty") }
         let format = file.processingFormat
-        guard Double(file.length) / format.sampleRate <= 300 else { throw TalkError("Audio file exceeds five minutes") }
         let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
         guard let converter = AVAudioConverter(from: format, to: target) else { throw TalkError("Unsupported audio format") }
         let input = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)!
@@ -422,7 +430,7 @@ final class AudioCapture {
             let status = converter.convert(to: output, error: &error) { requested, state in
                 let remaining = file.length - file.framePosition
                 guard remaining > 0 else { state.pointee = .endOfStream; return nil }
-                let count = min(input.frameCapacity, requested, AVAudioFrameCount(remaining))
+                let count = min(input.frameCapacity, requested, AVAudioFrameCount(clamping: remaining))
                 do { try file.read(into: input, frameCount: count) } catch { readError = error; state.pointee = .endOfStream; return nil }
                 state.pointee = input.frameLength == 0 ? .endOfStream : .haveData
                 return input.frameLength == 0 ? nil : input
@@ -431,11 +439,17 @@ final class AudioCapture {
             if let channel = output.floatChannelData?[0] {
                 result.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
             }
-            guard result.count <= PCMFrame.maxSamples else { throw TalkError("Audio file exceeds five minutes") }
+            if result.count >= 30 * PCMFrame.rate {
+                let cut = stride(from: result.count - PCMFrame.rate, to: result.count - 160, by: 160)
+                    .min { a, b in
+                        result[a..<a+160].reduce(0) { $0 + abs($1) } < result[b..<b+160].reduce(0) { $0 + abs($1) }
+                    }! + 80
+                try consume(Array(result[..<cut]))
+                result.removeFirst(cut)
+            }
             if status == .endOfStream { break }
             if status == .error { throw TalkError("Cannot decode audio file") }
         }
-        guard !result.isEmpty else { throw TalkError("Audio file is empty") }
-        return result
+        if !result.isEmpty { try consume(result) }
     }
 }

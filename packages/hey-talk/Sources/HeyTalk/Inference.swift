@@ -2,8 +2,17 @@ import Foundation
 import CSherpa
 import TalkCore
 import Darwin
+import MachO
 
 enum ModelPaths {
+    static let contents: URL = {
+        var size: UInt32 = 0
+        _NSGetExecutablePath(nil, &size)
+        var path = [CChar](repeating: 0, count: Int(size))
+        _NSGetExecutablePath(&path, &size)
+        return URL(fileURLWithPath: String(cString: path)).resolvingSymlinksInPath()
+            .deletingLastPathComponent().deletingLastPathComponent()
+    }()
     static var directory: URL {
         let installed = ControlSocket.directory.appendingPathComponent("models/orukeet-v0.1.0")
         if FileManager.default.fileExists(atPath: installed.appendingPathComponent("encoder.int8.onnx").path) { return installed }
@@ -11,8 +20,8 @@ enum ModelPaths {
         // makes an independent copy so removing OpenWhispr cannot break Hey Talk.
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache/openwhispr/parakeet-models/orukeet-v0.1.0")
     }
-    static var library: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib") }
-    static var vocabulary: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/vocabulary.md") }
+    static var library: URL { ModelPaths.contents.appendingPathComponent("Frameworks/libsherpa-onnx-c-api.dylib") }
+    static var vocabulary: URL { ModelPaths.contents.appendingPathComponent("Resources/vocabulary.md") }
     static var available: Bool {
         ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt", "bpe.vocab"].allSatisfy {
             FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path)
@@ -78,7 +87,7 @@ final class Inference {
         if process?.isRunning == true { return }
         guard ModelPaths.available else { throw TalkError("Orukeet is missing. Run the hey-talk installer to prepare its model and runtime.") }
         let child = Process(), stdin = Pipe(), stdout = Pipe()
-        child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/hey-talk-inference")
+        child.executableURL = ModelPaths.contents.appendingPathComponent("Helpers/hey-talk-inference")
         child.arguments = ["--worker", ModelPaths.directory.path, ModelPaths.library.path, try Vocabulary().prepare().path]
         child.standardInput = stdin; child.standardOutput = stdout
         child.standardError = FileHandle.standardError

@@ -191,6 +191,10 @@ Hey Talk installs and updates, including the project's usual all-machines rollou
 
 ## Daily use
 
+Use `hey-talk transcribe-file recording.m4a` for a local transcript of any length.
+Add `--json` for `{"ok":true,"text":"…"}`. It runs independently of dictation
+and does not use AI correction, copy to the clipboard, or write history.
+
 ```sh
 hey-talk devices
 hey-talk input default

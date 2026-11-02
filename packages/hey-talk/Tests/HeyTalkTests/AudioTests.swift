@@ -445,6 +445,13 @@ final class AudioTests: XCTestCase {
                 }
             }
             XCTAssertThrowsError(try AudioCapture.readFile(url.path))
+            if seconds > 0 {
+                var counts: [Int] = []
+                try AudioCapture.readFileChunks(AVAudioFile(forReading: url)) { counts.append($0.count) }
+                XCTAssertGreaterThan(counts.count, 1)
+                XCTAssertEqual(counts.reduce(0, +), seconds * 16_000)
+                XCTAssertLessThanOrEqual(counts.max()!, PCMFrame.maxSamples)
+            }
         }
     }
 }
