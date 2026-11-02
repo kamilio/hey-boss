@@ -23,7 +23,7 @@ host, command = sys.argv[-2:]
 with open(os.environ['FIXTURE_LOG'], 'a') as log:
     log.write(host + ' ' + command.split()[0] + '\\n')
 if command.startswith('umask'):
-    base = pathlib.Path(os.environ['FIXTURE_LOG']).parent / '.hey-proxy/staging'
+    base = pathlib.Path(os.environ['FIXTURE_LOG']).parent / '.local/share/hey-boss/proxy-staging'
     base.mkdir(parents=True, exist_ok=True)
     print(tempfile.mkdtemp(prefix='hey-proxy-rollout.', dir=base))
 elif command.startswith('tar '):

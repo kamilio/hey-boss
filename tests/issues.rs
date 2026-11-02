@@ -1981,13 +1981,29 @@ fn issue_search_preserves_literal_matching_filters_and_pagination() {
     );
     let first = f.run(
         "a",
-        &["search", "--literal", "100%_done 🦀", "--label", "cli", "--limit", "1"],
+        &[
+            "search",
+            "--literal",
+            "100%_done 🦀",
+            "--label",
+            "cli",
+            "--limit",
+            "1",
+        ],
     );
     assert_eq!(first["issues"][0]["number"], 1);
     assert_eq!(first["next_offset"], 1);
     let next = f.run(
         "a",
-        &["search", "--literal", "100%_done 🦀", "--limit", "1", "--offset", "1"],
+        &[
+            "search",
+            "--literal",
+            "100%_done 🦀",
+            "--limit",
+            "1",
+            "--offset",
+            "1",
+        ],
     );
     assert_eq!(next["issues"][0]["number"], 2);
     assert!(next["next_offset"].is_null());
@@ -1999,7 +2015,10 @@ fn issue_search_preserves_literal_matching_filters_and_pagination() {
         2
     );
     assert!(
-        f.run("a", &["search", "--literal", "100%_done 🦀", "--label", "missing"])["issues"]
+        f.run(
+            "a",
+            &["search", "--literal", "100%_done 🦀", "--label", "missing"]
+        )["issues"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -2012,7 +2031,10 @@ fn issue_search_preserves_literal_matching_filters_and_pagination() {
         assert_eq!(found["issues"].as_array().unwrap().len(), 1);
         assert_eq!(found["issues"][0]["number"], 1);
     }
-    let unassigned = f.run("a", &["search", "--literal", "100%_done 🦀", "--unassigned"]);
+    let unassigned = f.run(
+        "a",
+        &["search", "--literal", "100%_done 🦀", "--unassigned"],
+    );
     assert_eq!(unassigned["issues"].as_array().unwrap().len(), 1);
     assert_eq!(unassigned["issues"][0]["number"], 2);
     f.fail("a", &["search", "--literal", " "], 2);
@@ -4592,15 +4614,33 @@ fn markdown_file_import_remains_a_one_time_body_import() {
 
 #[test]
 fn ranked_search_is_opt_in_and_exact_issue_numbers_win() {
-    let f=Fixture::new();
-    let _owner=hey_boss::database::Owner::host(&f.db).unwrap();
-    f.run("a", &["create","--title","Reconnect after sleep","--body","Network failure"]);
-    assert_eq!(f.run("a", &["search-index"])["search_index"]["enabled"],false);
-    assert_eq!(f.run("a", &["search","Network"])["issues"][0]["number"],1);
-    assert_eq!(f.run("a", &["search-index","--enable"])["search_index"]["enabled"],true);
-    let ranked=f.run("a", &["search","#1"]);
-    assert_eq!(ranked["issues"][0]["number"],1);
-    assert_eq!(ranked["issues"][0]["match"]["field"],"title");
-    f.run("a", &["search-index","--disable"]);
-    assert_eq!(f.run("a", &["search","Network"])["search"]["enabled"],false);
+    let f = Fixture::new();
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    f.run(
+        "a",
+        &[
+            "create",
+            "--title",
+            "Reconnect after sleep",
+            "--body",
+            "Network failure",
+        ],
+    );
+    assert_eq!(
+        f.run("a", &["search-index"])["search_index"]["enabled"],
+        false
+    );
+    assert_eq!(f.run("a", &["search", "Network"])["issues"][0]["number"], 1);
+    assert_eq!(
+        f.run("a", &["search-index", "--enable"])["search_index"]["enabled"],
+        true
+    );
+    let ranked = f.run("a", &["search", "#1"]);
+    assert_eq!(ranked["issues"][0]["number"], 1);
+    assert_eq!(ranked["issues"][0]["match"]["field"], "title");
+    f.run("a", &["search-index", "--disable"]);
+    assert_eq!(
+        f.run("a", &["search", "Network"])["search"]["enabled"],
+        false
+    );
 }

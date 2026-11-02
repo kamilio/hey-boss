@@ -12,30 +12,32 @@ mod chief_ownership;
 pub(crate) mod codex_permissions;
 #[doc(hidden)]
 pub mod database;
-pub mod document;
 #[doc(hidden)]
 pub mod desktop_identity;
+pub mod document;
 pub mod environment;
 pub mod error_inbox;
 pub mod fleet;
-pub mod utilities;
 pub mod health;
 /// SQLite-backed project issues and durable agent ownership.
 pub mod issues;
 pub mod jobs;
+#[doc(hidden)]
+pub mod machine_config;
 pub mod markdown;
 pub mod notices;
 pub mod quiet_hours;
 #[doc(hidden)]
 pub mod readiness;
 pub mod routes;
-pub mod skill;
 pub mod secrets;
+pub mod skill;
 #[doc(hidden)]
 pub mod ssh;
 pub mod syntax;
 #[cfg(test)]
 mod test_allocations;
+pub mod utilities;
 /// Shared worker terminal library, also available as the standalone worker-tui crate.
 pub mod worker_tui;
 use serde::{Deserialize, Serialize};

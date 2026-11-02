@@ -65,7 +65,7 @@ fn absent_vpn_and_saved_cooldown_send_no_ssh_requests() {
         };
         std::fs::create_dir_all(home.join(".hey-boss")).unwrap();
         std::fs::write(
-            home.join(".hey-boss/config.json"),
+            home.join(".hey-boss/config.yaml"),
             serde_json::json!({"ssh_hosts":[{"host":host,"vpn_domain":domain,"enabled":true}]})
                 .to_string(),
         )

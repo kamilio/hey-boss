@@ -80,7 +80,7 @@ pub(crate) struct SpendArgs {
     /// Compatibility flag; CLI history is no longer imported
     #[arg(long, hide = true)]
     pub no_sync: bool,
-    /// Custom path to the spend SQLite database (default: ~/.hey-proxy/spend.sqlite3)
+    /// Custom path to the spend SQLite database (default: ~/.hey-boss/proxy/spend.sqlite3)
     #[arg(long)]
     pub db: Option<PathBuf>,
     /// Print provider/account/model breakdowns and daily history as JSON

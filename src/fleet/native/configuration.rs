@@ -366,9 +366,6 @@ pub(super) fn write(ctx: &Context, value: &Value) -> Result<()> {
     validate_transition(&previous["runtime"], &document)?;
     let old = fs::read(&ctx.desired)?;
     if parse(std::str::from_utf8(&old)?)? != parse(&text)? {
-        let backup = ctx.desired.with_extension("yaml.previous");
-        ctx.protect_file(&backup)?;
-        context::atomic_bytes(&backup, &old)?;
         context::atomic_bytes(&ctx.desired, text.as_bytes())?;
     }
     load_locked(ctx)?;
@@ -387,9 +384,6 @@ pub(super) fn edit(ctx: &Context, edit: impl FnOnce(&mut Value) -> Result<()>) -
     let previous = ctx.read_json(&ctx.state.join("fleet-config-cache.json"), json!({}))?;
     validate_transition(&previous["runtime"], &doc)?;
     if parse(&current)? != parse(&text)? {
-        let backup = ctx.desired.with_extension("yaml.previous");
-        ctx.protect_file(&backup)?;
-        context::atomic_bytes(&backup, current.as_bytes())?;
         context::atomic_bytes(&ctx.desired, text.as_bytes())?;
     }
     load_locked(ctx)?;
@@ -481,9 +475,6 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
             ));
         }
         if request["save"] == true && text != current {
-            let backup = ctx.desired.with_extension("yaml.previous");
-            ctx.protect_file(&backup)?;
-            context::atomic_bytes(&backup, current.as_bytes())?;
             context::atomic_bytes(&ctx.desired, text.as_bytes())?;
         }
         if request["save"] != true {
@@ -1054,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_saves_exact_text_rejects_stale_edits_and_retains_previous_file() {
+    fn editor_saves_exact_text_rejects_stale_edits_without_backup_copies() {
         let fixture = Fixture::new();
         let ctx = &fixture.ctx;
         let original = "# My machines\nmachines:\n  local:\n    workers: []\n";
@@ -1074,10 +1065,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved["text"], text);
-        assert_eq!(
-            fs::read_to_string(ctx.desired.with_extension("yaml.previous")).unwrap(),
-            original
-        );
+        assert!(!ctx.desired.with_extension("yaml.previous").exists());
         assert!(
             request(
                 ctx,

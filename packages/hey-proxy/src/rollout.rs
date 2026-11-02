@@ -829,7 +829,7 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
     .await?;
     let output = ssh(
         host.host(),
-        "umask 077; mkdir -p \"$HOME/.hey-proxy/staging\" && mktemp -d \"$HOME/.hey-proxy/staging/hey-proxy-rollout.XXXXXXXX\"",
+        "umask 077; mkdir -p \"$HOME/.local/share/hey-boss/proxy-staging\" && mktemp -d \"$HOME/.local/share/hey-boss/proxy-staging/hey-proxy-rollout.XXXXXXXX\"",
     )
     .output()
     .await?;
@@ -839,7 +839,7 @@ async fn deploy(config: &Config, host: &SshHost, access_key: Option<&str>) -> Re
     }
     let stage = String::from_utf8(output.stdout)?.trim().to_owned();
     if !stage.starts_with('/')
-        || !stage.contains("/.hey-proxy/staging/hey-proxy-rollout.")
+        || !stage.contains("/.local/share/hey-boss/proxy-staging/hey-proxy-rollout.")
         || !stage
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"/-._".contains(&b))
@@ -1529,7 +1529,9 @@ mod tests {
                     .get("credentials_file")
                     .is_none()
             );
-            let leg = remote.routes[0].resolve(&remote, 0, "workspace", None).unwrap();
+            let leg = remote.routes[0]
+                .resolve(&remote, 0, "workspace", None)
+                .unwrap();
             assert_eq!(leg.provider, "workspace");
             assert_eq!(leg.upstream_model, "claude-test");
         }

@@ -15,8 +15,8 @@ service = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(service)
 with tempfile.TemporaryDirectory() as directory:
     home = Path(directory)
-    config = home / '.hey-proxy/config.json'
-    config.parent.mkdir()
+    config = home / '.hey-boss/proxy/config.yaml'
+    config.parent.mkdir(parents=True)
     binary = home / '.cargo/bin/hey-proxy'
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b'previous executable')
@@ -71,7 +71,7 @@ print('Rollout retention/preflight/rollback checks passed')
 # Actual service installation must not read, create, or rewrite Codex configuration.
 with tempfile.TemporaryDirectory() as directory:
     home = Path(directory)
-    (home / '.hey-proxy').mkdir()
+    (home / '.hey-boss/proxy').mkdir(parents=True)
     codex = home / '.codex'
     codex.mkdir()
     sentinel = b'not even TOML: preserved without parsing\n'

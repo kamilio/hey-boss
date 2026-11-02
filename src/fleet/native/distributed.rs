@@ -257,7 +257,11 @@ pub(super) fn baseline(
             controller
                 || matches!(
                     **table,
-                    "worker_runs" | "scheduled_job_runs" | "scheduled_job_logs" | "worker_allocations" | "dictation_vocabulary"
+                    "worker_runs"
+                        | "scheduled_job_runs"
+                        | "scheduled_job_logs"
+                        | "worker_allocations"
+                        | "dictation_vocabulary"
                 )
         })
         .copied()

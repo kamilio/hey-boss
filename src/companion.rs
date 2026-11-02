@@ -15,6 +15,8 @@ pub enum Action {
     },
     /// Import the hey-proxy machine inventory and enable config-driven connections.
     Setup,
+    #[command(hide = true)]
+    Inventory,
     /// Save automatic connection settings and enable login startup on macOS.
     Configure {
         #[arg(default_value = "devbox")]
@@ -139,6 +141,7 @@ pub fn run(action: &Action) -> Result<(), String> {
             remote_port,
         } => return cancel_forward(host, *local_port, *remote_port),
         Action::Setup => return super::autoconnect::setup_machines(),
+        Action::Inventory => return super::autoconnect::inventory(),
         Action::Configure {
             host,
             vpn_domain,

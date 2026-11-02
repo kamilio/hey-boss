@@ -39,7 +39,7 @@ pub fn default_db_path(config: Option<&Path>) -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".hey-proxy")
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".hey-boss/proxy")
         })
         .join("spend.sqlite3")
 }

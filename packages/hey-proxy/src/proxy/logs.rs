@@ -221,9 +221,9 @@ pub(super) struct Query {
 }
 
 // Credentials are read and used on the remote machine, never returned over SSH.
-const REMOTE_READ: &str = r#"import json, pathlib, urllib.request, sys
-p = pathlib.Path.home() / '.hey-proxy/config.json'
-c = json.loads(p.read_text())
+const REMOTE_READ: &str = r#"import json, pathlib, urllib.request, sys, subprocess
+p = pathlib.Path.home() / '.hey-boss/proxy/config.yaml'
+c = json.loads(subprocess.run([str(pathlib.Path.home() / '.cargo/bin/hey-proxy'), 'export-config'], check=True, capture_output=True).stdout)
 address = c.get('listen', '127.0.0.1:8080')
 if address.startswith('0.0.0.0:'): address = address.replace('0.0.0.0:', '127.0.0.1:', 1)
 if address.startswith('[::]:'): address = address.replace('[::]:', '[::1]:', 1)

@@ -99,7 +99,9 @@ impl Provider {
         })
     }
 }
-pub(crate) fn find_executable(paths: impl IntoIterator<Item = PathBuf>) -> io::Result<Option<PathBuf>> {
+pub(crate) fn find_executable(
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> io::Result<Option<PathBuf>> {
     paths
         .into_iter()
         .find(|path| executable(path))
@@ -272,7 +274,10 @@ impl AgentSession {
                 .as_ref()
                 .map(|m| m.id.clone())
                 .unwrap_or_default();
-            launch.codex_execution.validate().map_err(io::Error::other)?;
+            launch
+                .codex_execution
+                .validate()
+                .map_err(io::Error::other)?;
         }
         if launch.output_schema.is_some() && !launch.provider.capabilities().structured_output {
             return Err(io::Error::other("Provider has no native output schema"));

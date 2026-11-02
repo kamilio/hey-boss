@@ -923,15 +923,15 @@ hey-boss companion setup
 hey-boss companion status
 ```
 
-Discovery and automatic notification delivery both use `~/.hey-boss/config.json`:
+Discovery and automatic notification delivery both use `~/.hey-boss/config.yaml`:
 
-```json
-{
-  "ssh_hosts": [
-    { "host": "devbox", "vpn_domain": "quora.net", "enabled": true },
-    { "host": "kamils-macbook-pro.local", "enabled": true }
-  ]
-}
+```yaml
+ssh_hosts:
+  - host: devbox
+    vpn_domain: quora.net
+    enabled: true
+  - host: kamils-macbook-pro.local
+    enabled: true
 ```
 
 Strings are also accepted as host entries. `.local` hosts use the LAN; other hosts
@@ -1006,7 +1006,7 @@ Reading `agent overview --json` returns the cached view without launching scanne
 Last-known snapshots are retained and marked stale when the view is rebuilt.
 
 Additional machines are read from the shared `ssh_hosts` inventory in
-`~/.hey-boss/config.json`. Disabled entries are omitted. Discovery still runs only
+`~/.hey-boss/config.yaml`. Disabled entries are omitted. Discovery still runs only
 on open or manual refresh; the connection manager does not scan agents.
 Install a compatible CLI on additional machines at `~/.local/bin/hey-boss-scanner`,
 `~/.local/bin/hey-boss`, or a standard Homebrew location. Opening or manually
@@ -1238,7 +1238,7 @@ install it alone, run `cargo install --path packages/hey-gh --locked`.
 `hey-proxy` is built and installed alongside `hey-boss`. `hey-boss proxy …`
 passes every argument to that executable; existing standalone installations on
 `PATH` also work during upgrades. The proxy remains a separately supervised
-service with its existing `~/.hey-proxy` configuration, credentials and data.
+service with its configuration, credentials and data in `~/.hey-boss/proxy/`.\nThe editable config is `config.yaml`; `#` comments can disable individual settings.
 See [proxy setup and usage SDK](packages/hey-proxy/README.md).
 
 Build and test with `cargo build --locked -p hey-proxy` and

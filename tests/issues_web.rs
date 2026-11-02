@@ -1065,8 +1065,13 @@ fn opening_web_does_not_start_standalone_workers() {
         ..Default::default()
     };
     let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
-    let count: i64 = db.query_row("SELECT count(*) FROM issue_workers", [], |row| row.get(0)).unwrap();
-    assert_eq!(count, 0, "Opening the app and setting up a project must leave workers empty");
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM issue_workers", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "Opening the app and setting up a project must leave workers empty"
+    );
     db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('must-not-launch','managed',?1,1,0)",[serde_json::to_string(&config).unwrap()]).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     let count: i64 = db
@@ -2008,19 +2013,46 @@ fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
     let w = Web::start();
     let call = |mut action: Value| {
         action["project"] = json!(w.project);
-        w.http("POST", "/api/errors", &[("Content-Type", "application/json"), ("X-Hey-Boss-CSRF", &w.token)], &serde_json::to_vec(&action).unwrap())
+        w.http(
+            "POST",
+            "/api/errors",
+            &[
+                ("Content-Type", "application/json"),
+                ("X-Hey-Boss-CSRF", &w.token),
+            ],
+            &serde_json::to_vec(&action).unwrap(),
+        )
     };
     let shell = w.http("GET", "/errors", &[], &[]);
     assert_eq!(shell.status, 200);
-    assert!(String::from_utf8(shell.body).unwrap().contains("id=\"nav-errors\""));
+    assert!(
+        String::from_utf8(shell.body)
+            .unwrap()
+            .contains("id=\"nav-errors\"")
+    );
     assert_eq!(call(json!({"action":"list"})).json()["enabled"], false);
     let event = json!({"source":"synthetic","event_id":"one","timestamp":hey_boss::error_inbox::now(),"message":"Synthetic upload failure","count":7,"request_ref":"trace-qa"});
-    assert_ne!(call(json!({"action":"ingest","events":[event.clone()]})).status, 200);
-    let denied = w.http("POST", "/api/errors", &[("Content-Type", "application/json")], &serde_json::to_vec(&json!({"action":"enable","project":w.project,"enabled":true})).unwrap());
+    assert_ne!(
+        call(json!({"action":"ingest","events":[event.clone()]})).status,
+        200
+    );
+    let denied = w.http(
+        "POST",
+        "/api/errors",
+        &[("Content-Type", "application/json")],
+        &serde_json::to_vec(&json!({"action":"enable","project":w.project,"enabled":true}))
+            .unwrap(),
+    );
     assert_eq!(denied.status, 403);
     assert_eq!(call(json!({"action":"enable","enabled":true})).status, 200);
-    assert_eq!(call(json!({"action":"ingest","events":[event.clone()]})).json()["accepted"], 1);
-    assert_eq!(call(json!({"action":"ingest","events":[event]})).json()["accepted"], 0);
+    assert_eq!(
+        call(json!({"action":"ingest","events":[event.clone()]})).json()["accepted"],
+        1
+    );
+    assert_eq!(
+        call(json!({"action":"ingest","events":[event]})).json()["accepted"],
+        0
+    );
     let list = call(json!({"action":"list"})).json();
     assert_eq!(list["groups"][0]["count_24h"], 7);
     let id = &list["groups"][0]["id"];
@@ -2029,7 +2061,12 @@ fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
     assert!(prompt.starts_with("Fix this error: `hey-boss errors --project "));
     assert!(prompt.contains(&format!("show '{}' # get error`", id.as_str().unwrap())));
     let first = call(json!({"action":"promote","id":id}));
-    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.body));
+    assert_eq!(
+        first.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
     assert_eq!(first.json()["issue"], 1);
     assert_eq!(call(json!({"action":"promote","id":id})).json()["issue"], 1);
     let issue = w.ok(json!({"action":"view","number":1}));
@@ -2042,15 +2079,42 @@ fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
     let event = json!({"source":"synthetic","event_id":"two","timestamp":hey_boss::error_inbox::now(),"message":"Different failure"});
     call(json!({"action":"ingest","events":[event]}));
     let groups = call(json!({"action":"list"})).json();
-    let id = &groups["groups"].as_array().unwrap().iter().find(|g| g["title"] == "Different failure").unwrap()["id"];
-    assert!(call(json!({"action":"detail","id":id})).json()["task_prompt"].as_str().unwrap().starts_with("Custom hey-boss errors"));
-    assert_ne!(call(json!({"action":"promote","id":id,"prompt":" "})).status, 200);
-    assert_eq!(call(json!({"action":"promote","id":id,"prompt":"Edited task prompt"})).json()["issue"], 2);
+    let id = &groups["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["title"] == "Different failure")
+        .unwrap()["id"];
+    assert!(
+        call(json!({"action":"detail","id":id})).json()["task_prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("Custom hey-boss errors")
+    );
+    assert_ne!(
+        call(json!({"action":"promote","id":id,"prompt":" "})).status,
+        200
+    );
+    assert_eq!(
+        call(json!({"action":"promote","id":id,"prompt":"Edited task prompt"})).json()["issue"],
+        2
+    );
     // A lost link acknowledgement must recover the same task and frozen prompt.
-    rusqlite::Connection::open(w.root.join("issues.errors.db")).unwrap()
-        .execute("UPDATE error_groups SET issue=NULL WHERE id=?1", [id.as_str().unwrap()]).unwrap();
-    assert_eq!(call(json!({"action":"promote","id":id,"prompt":"Changed retry"})).json()["issue"], 2);
-    assert_eq!(w.ok(json!({"action":"view","number":2}))["issue"]["body"], "Edited task prompt");
+    rusqlite::Connection::open(w.root.join("issues.errors.db"))
+        .unwrap()
+        .execute(
+            "UPDATE error_groups SET issue=NULL WHERE id=?1",
+            [id.as_str().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        call(json!({"action":"promote","id":id,"prompt":"Changed retry"})).json()["issue"],
+        2
+    );
+    assert_eq!(
+        w.ok(json!({"action":"view","number":2}))["issue"]["body"],
+        "Edited task prompt"
+    );
 }
 
 #[test]
