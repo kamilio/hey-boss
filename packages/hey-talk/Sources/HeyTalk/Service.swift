@@ -41,6 +41,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication? { didSet { updateSubmitIndicator() } }
     private var targetName: String?
+    private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
+    private var recordingContext: ContextSnapshot?
     private var startingT3Input: FocusedInput?
     private var waitingPaste: Timer? { didSet { oldValue?.invalidate() } }
     private var paste = true
@@ -547,9 +549,22 @@ final class TalkService: NSObject, NSApplicationDelegate {
         automatic = focusedInput.map { AutoRecording(target: $0, followsFocus: $0.app.bundleIdentifier != "com.t3tools.t3code") }
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
         targetName = target?.localizedName
-        if paste, let target, target.bundleIdentifier == "com.t3tools.t3code" {
+        if paste || correctionSettings.enabled, let target, target.bundleIdentifier == "com.t3tools.t3code" {
             startingT3Input = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
         } else { startingT3Input = nil }
+        if correctionSettings.enabled, let target {
+            let pid = target.processIdentifier
+            let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
+            recordingContext = Task.detached(priority: .userInitiated) { [startingT3Input] in
+                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      !isT3 || startingT3Input?.isFocused() == true else { return (nil, 0) }
+                let started = ProcessInfo.processInfo.systemUptime
+                let text = AppContext.capture(pid: pid)
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                guard !isT3 || startingT3Input?.isFocused() == true else { return (nil, elapsed) }
+                return (text, elapsed)
+            }
+        }
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
@@ -608,6 +623,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         captureReady = false
         do { try session.processing(id) } catch { reply(failure(error.localizedDescription)); return }
         overlay?.update(.processing); pendingReply = reply
+        let snapshot = recordingContext
+        recordingContext = nil
         capture.stop { result in
             guard self.session.generation == id else { return }
             switch result {
@@ -617,34 +634,19 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     if self.autoTarget != nil { self.noSpeechDetected(id: id) } else { self.cancel() }
                     return
                 }
-                self.decode(samples, id: id)
+                self.decode(samples, id: id, snapshot: snapshot)
             }
         }
     }
-    private func decode(_ samples: [Float], id: UInt64) {
+    private func decode(_ samples: [Float], id: UInt64, snapshot: ContextSnapshot? = nil) {
         let audioSeconds = Double(samples.count) / 16_000
         let useCorrection = correctionSettings.enabled
         overlay?.processing(audioSeconds: audioSeconds, correction: useCorrection)
         hotkey?.captureEscape(true)
-        let contextReady = DispatchGroup()
-        var appContext: String?
-        var contextMS = 0.0
-        if useCorrection, transcriptionSource == "microphone", let pid = target?.processIdentifier,
-           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-           target?.bundleIdentifier != "com.t3tools.t3code" || startingT3Input?.isFocused() == true {
-            contextReady.enter()
-            contextQueue.async {
-                let started = ProcessInfo.processInfo.systemUptime
-                let text = AppContext.capture(pid: pid)
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                DispatchQueue.main.async {
-                    appContext = text; contextMS = elapsed
-                    contextReady.leave()
-                }
-            }
-        }
-        inference.transcribe(samples) { result in contextReady.notify(queue: .main) {
+        inference.transcribe(samples) { result in Task { @MainActor in
+            let context = useCorrection ? await snapshot?.value : nil
             guard self.session.generation == id else { return }
+            let appContext = context?.text
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
@@ -657,7 +659,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext) { result in
                     guard self.session.generation == id, self.session.phase == .processing else { return }
                     var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
-                                             "context_ms": contextMS, "context_characters": appContext?.count ?? 0]
+                                             "context_ms": context?.milliseconds ?? 0, "context_characters": appContext?.count ?? 0]
                     let corrected: String
                     switch result {
                     case .success(let value): corrected = value; info["status"] = "applied"
@@ -740,6 +742,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func cancel(keepMicrophoneWarm: Bool = true) {
         captureReady = false
+        recordingContext?.cancel(); recordingContext = nil
         clearAutomatic()
         session.cancel(); maximumDuration?.cancel(); maximumDuration = nil
         capture.cancel(keepWarm: keepMicrophoneWarm); inference.cancel(); correction.cancel(); hotkey?.reset(); overlay?.update(.idle)
@@ -748,6 +751,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func fail(_ message: String, keepMicrophoneWarm: Bool = false) {
         captureReady = false
+        recordingContext?.cancel(); recordingContext = nil
         clearAutomatic()
         capture.cancel(keepWarm: keepMicrophoneWarm); session.fail(session.generation); hotkey?.reset()
         correction.cancel()

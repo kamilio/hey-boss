@@ -1,7 +1,6 @@
 import AppKit
 
 enum AppContext {
-    // Called once per dictation on a background queue, alongside transcription.
     static func capture(pid: pid_t) -> String? {
         guard AXIsProcessTrusted() else { return nil }
         let deadline = ProcessInfo.processInfo.systemUptime + 0.2
