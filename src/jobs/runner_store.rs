@@ -206,7 +206,8 @@ impl Store {
         };
         if (report.state == "running" || report.state == "succeeded")
             && (report.started_at.is_none()
-                || report.session_id.as_deref().is_none_or(str::is_empty))
+                || (run.snapshot.definition.executable.is_none()
+                    && report.session_id.as_deref().is_none_or(str::is_empty)))
         {
             return Err(Error::invalid(
                 "Running job requires its exact session and start timestamp",
@@ -248,6 +249,16 @@ impl Store {
                 } else {
                     report.state.as_str()
                 };
+                if let Some(log) = &report.log {
+                    if run.snapshot.definition.executable.is_none() {
+                        return Err(Error::invalid("Unexpected script log"));
+                    }
+                    tx.execute("INSERT INTO scheduled_job_logs(run_id,offset,output,next_offset) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![run.id,log.offset,log.output,log.next])?;
+                    if log.next.is_some() {
+                        tx.commit()?;
+                        return Ok(true);
+                    }
+                }
                 complete(
                     &tx,
                     &run,

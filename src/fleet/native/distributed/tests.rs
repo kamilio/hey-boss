@@ -1112,6 +1112,13 @@ fn cutover_requires_caught_up_membership_and_keeps_offline_number_namespaces() {
 
 #[test]
 fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
+    check_job_history_replication(false);
+}
+#[test]
+fn script_job_logs_remain_readable_on_other_peers() {
+    check_job_history_replication(true);
+}
+fn check_job_history_replication(script:bool) {
     use crate::jobs::{Definition, Operation as Job};
     use serde_json::json;
     let fa = Fixture::new();
@@ -1137,14 +1144,15 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             name: "Schedule fixture".into(),
             cron: "0 * * * *".into(),
             timezone: "UTC".into(),
-            harness: "codex".into(),
-            model: "gpt-6-astra".into(),
+            executable: script.then(||"maintenance".into()),
+            harness: if script {""} else {"codex"}.into(),
+            model: if script {""} else {"gpt-6-astra"}.into(),
             machines: Vec::new(),
             all_machines: false,
             each_machine: false,
             thread_mode: Default::default(),
         },
-        markdown: include_str!("../../../jobs/fixtures/original.md").into(),
+        markdown: if script {""} else {include_str!("../../../jobs/fixtures/original.md")}.into(),
         enabled: true,
     }))
     .unwrap();
@@ -1179,6 +1187,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             .len(),
         1
     );
+    if script {b.execute("INSERT INTO scheduled_job_logs VALUES(?1,0,\'output from b\',NULL)",[rb["id"].as_str()]).unwrap();}
     for (db, id) in [(&a, &ra["id"]), (&b, &rb["id"])] {
         db.execute(
             "UPDATE scheduled_job_runs SET state='succeeded',finished_at=created_at+1 WHERE id=?1",
@@ -1221,6 +1230,7 @@ fn job_history_keeps_overlapping_runs_without_importing_executable_ownership() {
             }))
             .unwrap();
         assert_eq!(remote["run"]["id"], rb["id"]);
+        if script {assert_eq!(store.execute(&request(Job::Log{id:"test-job".into(),run_id:rb["id"].as_str().unwrap().into(),offset:0})).unwrap()["log"],"output from b");}
     }
 }
 

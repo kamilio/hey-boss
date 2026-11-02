@@ -4,7 +4,7 @@
 
 Placement is automatic by default. In the editor, choose **Specific machines** and add machines in priority order; move a fallback up to change the order. The CLI accepts repeated `--machine NODE_ID` on create/edit, and the definition API accepts `"machines":["primary-node-id","fallback-node-id"]`. IDs are the stable fleet node IDs, not hostnames. The first connected, fresh machine with an eligible project worker and harness wins. If none qualify, the run waits; unlisted machines are never used. One entry pins a job to one machine. Omit the list (or use an empty list) to restore automatic placement. Edits replace the list along with the other definition fields. Each run keeps its revision’s list; changing it affects future runs. Fallback applies before assignment; a disconnected owner retains custody until the existing fenced handoff protocol permits release.
 
-Create requires a stable ID, project, name, cron, explicit IANA timezone, harness, logical model and user-written `.md` instructions. Edit replaces definition fields with an `--if-revision` guard; omitted instructions retain the prior file. Pause, resume and delete also require that guard. Delete retains revisions and history, and does not stop active work.
+Create requires a stable ID, project, name, cron, and explicit IANA timezone. Agent jobs also take a harness, model selection and user-written `.md` instructions. Edit replaces definition fields with an `--if-revision` guard; omitted instructions retain the prior file. Pause, resume and delete also require that guard. Delete retains revisions and history, and does not stop active work.
 
 For fleet maintenance, choose **All machines · One execution each**, use `--all-machines` on create/edit, or set `"all_machines":true` in the definition. This is mutually exclusive with an ordered machine list. Each occurrence freezes the known fleet node IDs when first dispatched, creates one execution per machine, and retains separate status/session history. Offline machines and machines without an eligible project worker/harness wait for readiness; their executions never move to another machine. New machines join subsequent occurrences. The occurrence stays active until every machine finishes, preventing overlapping maintenance. Stop on the occurrence cancels every remaining execution. An individual machine execution can also be stopped by its run ID. A failure on one machine does not stop the others; the overall outcome reports failure if any machine failed.
 
@@ -24,9 +24,21 @@ The existing resource API accepts `{"action":"job","operation":...}`; `hey-boss 
 
 Markdown bytes are never normalized or stored as database prompt text. References point to SHA-256-named `.md` files beside the database in its `.jobs` directory. Files are published and fsynced before references commit. Revisions are immutable and retained after edits/deletion. A revision/run read transfers and verifies its exact bytes, then fsyncs the companion copy before acknowledging. The runner must fetch a run on its destination before launch; cached instructions can subsequently be loaded offline. Failed/crashed saves can leave unreferenced content-addressed files, which must not be removed while an in-flight save could reference them.
 
+## Script jobs
+
+Select **Script** in the editor, or pass `--executable` instead of agent settings and instructions:
+
+```sh
+hey-boss job create --id refresh-index --name "Refresh index" --cron "0 9 * * *" --timezone America/Chicago --executable refresh-index
+```
+
+The assigned worker runs the executable in the project checkout itself. A bare name uses the worker’s PATH; absolute paths and paths like `./scripts/refresh-index` also work. Install the executable on each intended machine. The field names one program; put arguments or shell commands inside the script. All placement modes, Run Now, overlap protection, and Stop work as for agent jobs. No agent runtime or worktree is needed.
+
+After execution, open **View log** in run history or use `hey-boss job logs JOB_ID RUN_ID`. Standard output and errors are saved together and transferred in pages. Transfer resumes on reconnect. A nonzero exit or missing executable marks only that execution failed; no failure notification is sent.
+
 ## Execution
 
-Every run starts a **New thread** by default, including existing jobs. Choose **Resume previous thread** in the editor or pass `--thread-mode resume` to create/edit to continue the most recent thread for this job on the assigned machine. The definition API uses `"thread_mode":"resume"`; omitted or `"new"` starts fresh. Changing this setting affects future runs only and does not change the instructions.
+Every agent run starts a **New thread** by default, including existing jobs. Choose **Resume previous thread** in the editor or pass `--thread-mode resume` to create/edit to continue the most recent thread for this job on the assigned machine. The definition API uses `"thread_mode":"resume"`; omitted or `"new"` starts fresh. Changing this setting affects future runs only and does not change the instructions.
 
 Resume starts fresh when that machine has no saved thread for the job or its latest thread used a different harness. Saved references survive worker restarts and include Pi’s exact session file. Threads are never transferred between machines or resumed while their previous execution is active. A missing or rejected saved thread fails visibly rather than silently creating a replacement. Worktree creation still follows the assigned worker’s policy; resuming a thread does not restore a deleted worktree. The `job resume` command separately re-enables a paused schedule.
 

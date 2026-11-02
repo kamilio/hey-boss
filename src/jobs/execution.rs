@@ -10,6 +10,13 @@ pub(crate) struct Dispatch {
     pub revoke: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LogChunk {
+    pub offset: u64,
+    pub output: String,
+    pub next: Option<u64>,
+}
+
 /// A terminal report is published only after the owned process group stops.
 /// Disconnect is deliberately not a terminal observation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -22,6 +29,8 @@ pub(crate) struct Report {
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<LogChunk>,
 }
 
 impl Report {
@@ -35,6 +44,7 @@ impl Report {
             started_at: None,
             finished_at: None,
             reason: None,
+            log: None,
         }
     }
 }

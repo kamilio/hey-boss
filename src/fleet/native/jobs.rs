@@ -16,7 +16,7 @@ fn now() -> i64 {
 }
 
 fn advertise_worker(ctx: &Context, worker: &str) -> Result<()> {
-    ctx.db()?.execute("INSERT OR REPLACE INTO local_job_workers(worker_id,owner_pid,owner_start) SELECT id,owner_pid,owner_start FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![worker,std::process::id()])?;
+    ctx.db()?.execute("INSERT OR REPLACE INTO local_job_workers(worker_id,owner_pid,owner_start,scripts) SELECT id,owner_pid,owner_start,1 FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![worker,std::process::id()])?;
     Ok(())
 }
 
@@ -24,14 +24,16 @@ fn advertise_worker(ctx: &Context, worker: &str) -> Result<()> {
 pub(super) fn capability(ctx: &Context) -> Result<Value> {
     let db = ctx.db()?;
     let ids = db.query_collect(
-        "SELECT w.id FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start WHERE w.machine=?1 ORDER BY w.id",
-        [&ctx.node], |r| r.get::<_,String>(0))?;
+        "SELECT w.id,b.scripts FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start WHERE w.machine=?1 ORDER BY w.id",
+        [&ctx.node], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?, r.get::<_,bool>(1)?)))?;
     let store = Store::open(&ctx.path)?;
     let mut workers = Vec::new();
-    for id in ids {
+    for (id, scripts) in ids {
         let projects = store.job_worker_projects(&id)?;
         if !projects.is_empty() {
-            workers.push(json!({"id":id,"projects":projects.keys().collect::<Vec<_>>()}));
+            workers.push(
+                json!({"id":id,"scripts":scripts,"projects":projects.keys().collect::<Vec<_>>()}),
+            );
         }
     }
     let runtimes: BTreeMap<_, _> = [Provider::Codex, Provider::Claude, Provider::Pi]
@@ -53,7 +55,7 @@ pub(super) fn reports(ctx: &Context) -> Result<Vec<Report>> {
     Ok(ctx
         .db()?
         .query_collect(
-            "SELECT report FROM local_job_executions WHERE acknowledged=0 ORDER BY rowid",
+            "SELECT report FROM local_job_executions WHERE acknowledged=0 AND (json_type(report,'$.log') IS NULL OR rowid IN (SELECT rowid FROM local_job_executions WHERE acknowledged=0 AND json_type(report,'$.log') IS NOT NULL ORDER BY rowid LIMIT 8)) ORDER BY rowid",
             [],
             |r| r.get::<_, String>(0),
         )?
@@ -156,9 +158,18 @@ fn revoked(ctx: &Context, d: &Dispatch) -> Result<bool> {
         _ => true,
     })
 }
-fn finish(ctx: &Context, report: &mut Report, state: &str, reason: Option<String>) -> Result<()> {
+fn finish(
+    ctx: &Context,
+    d: &Dispatch,
+    report: &mut Report,
+    state: &str,
+    reason: Option<String>,
+) -> Result<()> {
     report.state = state.into();
     report.reason = reason.map(|r| r.chars().take(4096).collect());
+    if d.run.snapshot.definition.executable.is_some() {
+        report.log = script::read_log(ctx, report, 0)?;
+    }
     report.finished_at = Some(now().max(report.started_at.unwrap_or(0)));
     save(ctx, report)
 }
@@ -321,11 +332,12 @@ fn execute(ctx: &Context, d: &Dispatch) -> Result<()> {
             report.reason=Some("Execution owner exited; waiting for surviving job processes to stop before reconciliation".into());
             return save(ctx, &report);
         }
-        return finish(ctx,&mut report,if revoked(ctx,d)?{"cancelled"}else{"failed"},Some("Execution service restarted; interrupted attempt was stopped and will not be replayed".into()));
+        return finish(ctx,d,&mut report,if revoked(ctx,d)?{"cancelled"}else{"failed"},Some("Execution service restarted; interrupted attempt was stopped and will not be replayed".into()));
     }
     if revoked(ctx, d)? {
         return finish(
             ctx,
+            d,
             &mut report,
             "released",
             Some("Revoked before launch".into()),
@@ -337,7 +349,7 @@ fn execute(ctx: &Context, d: &Dispatch) -> Result<()> {
     db.execute("UPDATE local_job_executions SET owner_pid=?3,owner_start=?4 WHERE run_id=?1 AND generation=?2",params![d.run.id,d.generation,owner,start])?;
     let result = run_session(ctx, d, &mut report);
     match result {
-        Ok((state, reason)) => finish(ctx, &mut report, &state, reason),
+        Ok((state, reason)) => finish(ctx, d, &mut report, &state, reason),
         Err(error) => {
             // AgentSession drops its owned group on all normal errors. Recovery
             // still verifies no live descendants before the terminal report.
@@ -349,6 +361,7 @@ fn execute(ctx: &Context, d: &Dispatch) -> Result<()> {
             }
             finish(
                 ctx,
+                d,
                 &mut report,
                 if revoked(ctx, d)? {
                     "cancelled"
@@ -416,6 +429,10 @@ fn run_session(
                 "Assigned worker is paused, stopped, or no longer has this project checkout",
             )
         })?;
+    if let Some(executable) = &d.run.snapshot.definition.executable {
+        report.cwd = Some(config.cwd.clone());
+        return script::run(ctx, d, report, &config.cwd, executable);
+    }
     let cwd = job_workspace(&config, &d.run.id)?;
     report.cwd = Some(cwd.to_string_lossy().into_owned());
     let provider: Provider = serde_json::from_value(json!(d.run.snapshot.definition.harness))?;
@@ -543,7 +560,20 @@ fn run_session(
 }
 
 pub(super) fn acknowledge(ctx: &Context, report: &Report) -> Result<()> {
-    ctx.db()?.execute("UPDATE local_job_executions SET acknowledged=1 WHERE run_id=?1 AND generation=?2 AND report=?3 AND json_extract(report,'$.state') NOT IN ('pending','running')",params![report.run_id,report.generation,serde_json::to_string(report)?])?;
+    if let Some(next) = report.log.as_ref().and_then(|c| c.next) {
+        if !ctx.db()?.query_row("SELECT EXISTS(SELECT 1 FROM local_job_executions WHERE run_id=?1 AND generation=?2 AND report=?3 AND acknowledged=0)",params![report.run_id,report.generation,serde_json::to_string(report)?],|r|r.get::<_,bool>(0))? {return Ok(());}
+        let mut following = report.clone();
+        following.log = Some(
+            script::read_log(ctx, report, next)?
+                .ok_or_else(|| replica::invalid("Missing script log during transfer"))?,
+        );
+        ctx.db()?.execute("UPDATE local_job_executions SET report=?4 WHERE run_id=?1 AND generation=?2 AND report=?3 AND acknowledged=0",params![report.run_id,report.generation,serde_json::to_string(report)?,serde_json::to_string(&following)?])?;
+        return Ok(());
+    }
+    let changed=ctx.db()?.execute("UPDATE local_job_executions SET acknowledged=1 WHERE run_id=?1 AND generation=?2 AND report=?3 AND json_extract(report,'$.state') NOT IN ('pending','running')",params![report.run_id,report.generation,serde_json::to_string(report)?])?;
+    if changed > 0 && report.log.is_some() {
+        let _ = std::fs::remove_file(script::log_path(ctx, report));
+    }
     Ok(())
 }
 
@@ -615,6 +645,8 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 format!(
                     "Waiting for an eligible worker on machine {node}. This execution cannot move to another machine."
                 )
+            } else if targets.is_empty() && run.snapshot.definition.executable.is_some() {
+                "Waiting for a running script worker with this project checkout.".to_owned()
             } else if targets.is_empty() {
                 "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.".to_owned()
             } else {
@@ -648,10 +680,13 @@ fn eligible_workers<'a>(
         .into_iter()
         .flatten()
         .filter(move |w| {
-            machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"] == true
-                && w["projects"]
-                    .as_array()
-                    .is_some_and(|p| p.iter().any(|p| p == &run.snapshot.project_id))
+            (if run.snapshot.definition.executable.is_some() {
+                w["scripts"] == true
+            } else {
+                machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"] == true
+            }) && w["projects"]
+                .as_array()
+                .is_some_and(|p| p.iter().any(|p| p == &run.snapshot.project_id))
         })
         .filter_map(|w| w["id"].as_str())
 }
@@ -680,6 +715,9 @@ fn job_workspace(config: &crate::issues::worker::ProjectConfig, run: &str) -> Re
     }
     Ok(path)
 }
+
+#[path = "job_script.rs"]
+mod script;
 
 #[cfg(test)]
 #[path = "jobs_tests.rs"]

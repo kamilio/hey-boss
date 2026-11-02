@@ -35,8 +35,11 @@ struct Fields {
     /// Explicit IANA timezone, e.g. America/Chicago.
     #[arg(long)]
     timezone: String,
-    #[arg(long, value_enum)]
-    harness: hey_boss::agent_runtime::Provider,
+    #[arg(long, value_enum, required_unless_present = "executable")]
+    harness: Option<hey_boss::agent_runtime::Provider>,
+    /// Run this executable in the project checkout (absolute path, relative path, or name on PATH).
+    #[arg(long, conflicts_with_all = ["harness", "model", "thread_mode", "instructions"])]
+    executable: Option<String>,
     /// Exact model override; omit for Codex to follow the project setting.
     #[arg(long, default_value = "")]
     model: String,
@@ -59,7 +62,8 @@ impl Fields {
             name: self.name.clone(),
             cron: self.cron.clone(),
             timezone: self.timezone.clone(),
-            harness: self.harness.name().into(),
+            executable: self.executable.clone(),
+            harness: self.harness.map(|p| p.name()).unwrap_or_default().into(),
             model: self.model.clone(),
             thread_mode: self.thread_mode,
             machines: self.machines.clone(),
@@ -110,8 +114,8 @@ enum Action {
         #[command(flatten)]
         fields: Fields,
         /// User-written UTF-8 Markdown file; copied exactly into managed storage.
-        #[arg(long)]
-        instructions: PathBuf,
+        #[arg(long, required_unless_present = "executable")]
+        instructions: Option<PathBuf>,
         #[arg(long)]
         paused: bool,
     },
@@ -181,6 +185,8 @@ enum Action {
     Revision { id: String, revision: i64 },
     /// Read an execution snapshot and durably cache its required Markdown.
     Run { id: String, run_id: String },
+    /// Print the combined stdout and stderr for a script run.
+    Logs { id: String, run_id: String },
     /// Queue one execution, including when the schedule is paused.
     RunNow { id: String },
     /// Stop this exact owned execution; leaves the schedule unchanged.
@@ -205,7 +211,11 @@ pub fn run(options: &Options) -> Result<()> {
         } => Operation::Create {
             id: id.clone(),
             definition: fields.definition(),
-            markdown: markdown(instructions)?,
+            markdown: instructions
+                .as_deref()
+                .map(markdown)
+                .transpose()?
+                .unwrap_or_default(),
             enabled: !*paused,
         },
         Action::Edit {
@@ -283,6 +293,11 @@ pub fn run(options: &Options) -> Result<()> {
             id: id.clone(),
             run_id: run_id.clone(),
         },
+        Action::Logs { id, run_id } => Operation::Log {
+            id: id.clone(),
+            run_id: run_id.clone(),
+            offset: 0,
+        },
         Action::Rpc => {
             let mut bytes = Vec::new();
             std::io::stdin()
@@ -327,7 +342,7 @@ pub fn run(options: &Options) -> Result<()> {
             )
         })
     });
-    let request = issues::Request {
+    let mut request = issues::Request {
         version: 1,
         project: issues::identity::project(&cwd, &machine)?,
         project_override: options
@@ -347,6 +362,34 @@ pub fn run(options: &Options) -> Result<()> {
         }
         error
     })?;
+    if let Action::Logs { id, run_id } = &options.action {
+        let mut page = value;
+        let mut combined = String::new();
+        loop {
+            let Some(output) = page["log"].as_str() else {
+                return Err(Error::invalid("No script log available for this run yet"));
+            };
+            if options.json {
+                combined.push_str(output);
+            } else {
+                print!("{output}");
+            }
+            let Some(offset) = page["next_log_offset"].as_u64() else {
+                if options.json {
+                    println!("{}", json!({"log":combined}));
+                }
+                return Ok(());
+            };
+            request.operation = issues::Operation::Job {
+                operation: Operation::Log {
+                    id: id.clone(),
+                    run_id: run_id.clone(),
+                    offset,
+                },
+            };
+            page = crate::cli_request::execute(&request, None, false)?;
+        }
+    }
     print(
         &value,
         options.json || matches!(options.action, Action::Rpc),
@@ -418,21 +461,29 @@ fn print_job(job: &Value) {
             "paused"
         }
     );
-    println!(
-        "  {} · {} · {} / {}",
-        d["cron"].as_str().unwrap_or(""),
-        d["timezone"].as_str().unwrap_or(""),
-        d["harness"].as_str().unwrap_or(""),
-        d["model"].as_str().unwrap_or("")
-    );
-    println!(
-        "  Thread: {}",
-        if d["thread_mode"] == "resume" {
-            "resume previous"
-        } else {
-            "new for every run"
-        }
-    );
+    if let Some(executable) = d["executable"].as_str() {
+        println!(
+            "  {} · {} · Script: {executable}",
+            d["cron"].as_str().unwrap_or(""),
+            d["timezone"].as_str().unwrap_or("")
+        );
+    } else {
+        println!(
+            "  {} · {} · {} / {}",
+            d["cron"].as_str().unwrap_or(""),
+            d["timezone"].as_str().unwrap_or(""),
+            d["harness"].as_str().unwrap_or(""),
+            d["model"].as_str().unwrap_or("")
+        );
+        println!(
+            "  Thread: {}",
+            if d["thread_mode"] == "resume" {
+                "resume previous"
+            } else {
+                "new for every run"
+            }
+        );
+    }
     if d["all_machines"] == true {
         println!("  Machines: all fleet machines (one execution each)");
     }

@@ -99,7 +99,7 @@ impl Provider {
         })
     }
 }
-fn find_executable(paths: impl IntoIterator<Item = PathBuf>) -> io::Result<Option<PathBuf>> {
+pub(crate) fn find_executable(paths: impl IntoIterator<Item = PathBuf>) -> io::Result<Option<PathBuf>> {
     paths
         .into_iter()
         .find(|path| executable(path))

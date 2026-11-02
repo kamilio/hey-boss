@@ -165,7 +165,7 @@ pub(super) fn write(
                 .ok_or_else(|| replica::invalid("Missing database path"))?,
         )
         .with_extension("jobs");
-        crate::jobs::files::load(&root, &snapshot.instruction_digest)?;
+        if snapshot.definition.executable.is_none() { crate::jobs::files::load(&root, &snapshot.instruction_digest)?; }
         let previous: Option<(i64, Option<i64>)> = db
             .query_row(
                 "SELECT revision,next_at FROM scheduled_jobs WHERE id=?1",

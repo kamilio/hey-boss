@@ -63,6 +63,18 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS local_jobs_worker_active ON local_job_executions(json_extract(dispatch,'$.run.worker_id')) WHERE json_extract(report,'$.state') IN ('pending','running');")?;
         tx.commit()?;
     }
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_job_logs')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_job_workers') WHERE name='scripts')",[],|r|r.get::<_,bool>(0))? {
+            tx.execute_batch("ALTER TABLE local_job_workers ADD COLUMN scripts INTEGER NOT NULL DEFAULT 0;")?;
+        }
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS scheduled_job_logs(run_id TEXT NOT NULL,offset INTEGER NOT NULL,output TEXT NOT NULL,next_offset INTEGER,PRIMARY KEY(run_id,offset));")?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -324,6 +336,9 @@ fn receipt(
     }
 }
 fn bundle(root: &Path, snapshot: &Snapshot) -> Result<Value> {
+    if snapshot.definition.executable.is_some() {
+        return Ok(Value::Null);
+    }
     Ok(
         json!({"digest":snapshot.instruction_digest,"markdown":files::load(root,&snapshot.instruction_digest)?}),
     )
@@ -339,12 +354,14 @@ impl Store {
                 .unwrap_or(&response["run"]["snapshot"])
                 .clone(),
         )?;
-        if response["instructions"]["digest"] != snapshot.instruction_digest {
-            return Err(Error::invalid(
-                "Instruction transfer does not match its revision",
-            ));
+        if snapshot.definition.executable.is_none() {
+            if response["instructions"]["digest"] != snapshot.instruction_digest {
+                return Err(Error::invalid(
+                    "Instruction transfer does not match its revision",
+                ));
+            }
+            files::cache_response(&self.job_root()?, response)?;
         }
-        files::cache_response(&self.job_root()?, response)?;
         let encoded = serde_json::to_string(&snapshot)?;
         let tx =
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -486,13 +503,24 @@ impl Store {
                     let snapshot: Snapshot = serde_json::from_str(&raw)?;
                     json!({"snapshot":snapshot,"instructions":bundle(&root,&snapshot)?})
                 }
-                JobOperation::Run { id, run_id } => {
+                JobOperation::Run { id, run_id } | JobOperation::Log { id, run_id, .. } => {
                     get_job(&tx, &project.id, id)?;
                     let run = observed_run(&tx, run_id)?;
                     if run.snapshot.job_id != *id {
                         return Err(Error::new("not_found", "Run does not belong to this job"));
                     }
-                    json!({"instructions":bundle(&root,&run.snapshot)?,"run":run})
+                    if let JobOperation::Log { offset, .. } = operation {
+                        let page = tx.query_row(
+                            "SELECT output,next_offset FROM scheduled_job_logs WHERE run_id=?1 AND offset=?2",
+                            params![run_id,offset], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<i64>>(1)?))
+                        ).optional()?;
+                        match page {
+                            Some((output, next)) => json!({"log":output,"next_log_offset":next}),
+                            None => json!({"log":null,"reason":run.reason}),
+                        }
+                    } else {
+                        json!({"instructions":bundle(&root,&run.snapshot)?,"run":run})
+                    }
                 }
                 _ => unreachable!(),
             };
@@ -563,12 +591,21 @@ impl Store {
         } else {
             None
         };
-        let instruction_digest = match markdown {
-            Some(markdown) => files::persist(&root, markdown)?,
-            None => {
-                let sha = &old.as_ref().unwrap().snapshot.instruction_digest;
-                files::load(&root, sha)?;
-                sha.clone()
+        let instruction_digest = if definition.executable.is_some() {
+            String::new()
+        } else {
+            match markdown {
+                Some(markdown) => files::persist(&root, markdown)?,
+                None => {
+                    let sha = &old.as_ref().unwrap().snapshot.instruction_digest;
+                    if sha.is_empty() {
+                        return Err(Error::invalid(
+                            "Switching to an agent requires instructions",
+                        ));
+                    }
+                    files::load(&root, sha)?;
+                    sha.clone()
+                }
             }
         };
         let revision = if self.db.query_row(
@@ -799,6 +836,9 @@ impl Store {
     }
     /// Works offline for revisions already durably synchronized to this machine.
     pub fn job_instructions(&self, snapshot: &Snapshot) -> Result<String> {
+        if snapshot.definition.executable.is_some() {
+            return Ok(String::new());
+        }
         files::load(&self.job_root()?, &snapshot.instruction_digest)
     }
 }
