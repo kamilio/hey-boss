@@ -1658,6 +1658,7 @@ impl Store {
                 draft: Some(true),
                 ..
             } | Operation::Assign { .. }
+                | Operation::Rework { .. }
                 | Operation::Move { .. }
                 | Operation::Batch {
                     matching: Some(_),
@@ -1683,7 +1684,7 @@ impl Store {
                         request.operation
                     ]))?;
                     let prefix = match request.operation {
-                        Operation::Assign { .. } => "assign",
+                        Operation::Assign { .. } | Operation::Rework { .. } => "assign",
                         Operation::Move { .. }
                         | Operation::Batch {
                             matching: Some(_), ..
@@ -1708,8 +1709,13 @@ impl Store {
         }
         if matches!(
             r.operation,
-            Operation::Artifact { .. } | Operation::Attachment { .. } | Operation::Job { .. }
-        ) || matches!(&r.operation, Operation::Create { attachments, .. } if !attachments.is_empty())
+            Operation::Artifact { .. }
+                | Operation::Attachment { .. }
+                | Operation::Job { .. }
+                | Operation::AddCommit { .. }
+                | Operation::RemoveCommit { .. }
+        ) || matches!(&r.operation, Operation::CommitReview { operation, .. } if operation.writes())
+            || matches!(&r.operation, Operation::Create { attachments, .. } if !attachments.is_empty())
         {
             validate(r)?;
             let companion: bool = self.db.query_row(
@@ -2128,6 +2134,45 @@ impl Store {
                 *if_order_version,
                 now,
             )?,
+            Operation::CommitReview {
+                number,
+                commit,
+                operation,
+            } => {
+                get_issue(&tx, &project.id, *number, false)?;
+                super::commit_reviews::execute(
+                    &tx, &project, *number, commit, operation, actor, now,
+                )?
+            }
+            Operation::Rework { number, if_version } => {
+                let issue = get_issue(&tx, &project.id, *number, false)?;
+                if issue.version != *if_version {
+                    return Err(Error::conflict(
+                        "Issue changed; reload before sending it back",
+                    ));
+                }
+                mutate(
+                    &tx,
+                    &project,
+                    actor.unwrap(),
+                    &Operation::Reopen {
+                        number: *number,
+                        if_version: Some(*if_version),
+                        clear_manual_hold: false,
+                    },
+                    now,
+                )?;
+                mutate(
+                    &tx,
+                    &project,
+                    actor.unwrap(),
+                    &Operation::AssignBoss {
+                        number: *number,
+                        force: false,
+                    },
+                    now,
+                )?
+            }
             Operation::Batch { edits, .. } => batch::execute(&tx, &project, actor, edits, now)?,
             Operation::Artifact { operation } => artifacts::execute_import(
                 &tx,
@@ -2597,6 +2642,7 @@ impl Store {
                 | Operation::ConfigureProject { .. }
                 | Operation::Close { .. }
                 | Operation::Reopen { .. }
+                | Operation::Rework { .. }
                 | Operation::Delete { .. }
                 | Operation::Restore { .. }
                 | Operation::Transfer { .. }
@@ -2613,7 +2659,9 @@ impl Store {
                 super::blockers::reconcile_subtasks
             } else if matches!(
                 r.operation,
-                Operation::Reopen { .. } | Operation::ConfigureProject { .. }
+                Operation::Reopen { .. }
+                    | Operation::Rework { .. }
+                    | Operation::ConfigureProject { .. }
             ) && result["changed"] != false
             {
                 super::blockers::reconcile_rework
@@ -2687,6 +2735,7 @@ impl Store {
         if !matches!(
             r.operation,
             Operation::Attachment { .. }
+                | Operation::CommitReview { .. }
                 | Operation::Artifact { .. }
                 | Operation::Batch { .. }
                 | Operation::Comments { .. }

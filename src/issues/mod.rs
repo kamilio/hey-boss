@@ -6,6 +6,7 @@ mod discovery;
 pub(crate) use store::chief;
 pub(crate) mod blockers;
 mod comment_limits;
+pub mod commit_reviews;
 pub mod commits;
 mod dependency_notices;
 mod fleet;
@@ -430,10 +431,21 @@ pub enum Operation {
         number: i64,
     },
     AddCommit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<commit_reviews::Snapshot>,
         number: i64,
         commit: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+    CommitReview {
+        number: i64,
+        commit: String,
+        operation: commit_reviews::Operation,
+    },
+    Rework {
+        number: i64,
+        if_version: i64,
     },
     RemoveCommit {
         number: i64,
@@ -738,6 +750,9 @@ impl Operation {
         if let Self::ProjectInit { settings } = self {
             return settings.is_some();
         }
+        if let Self::CommitReview { operation, .. } = self {
+            return operation.writes();
+        }
         if let Self::Attachment { operation } = self {
             return operation.writes();
         }
@@ -825,6 +840,8 @@ impl Operation {
             | Self::RemovePullRequest { number, .. }
             | Self::Commits { number }
             | Self::AddCommit { number, .. }
+            | Self::CommitReview { number, .. }
+            | Self::Rework { number, .. }
             | Self::RemoveCommit { number, .. }
             | Self::Move { number, .. }
             | Self::Transfer { number, .. }

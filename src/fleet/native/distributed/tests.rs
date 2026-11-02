@@ -3117,3 +3117,61 @@ fn upgrade_retires_map_capture_and_accepts_legacy_project_settings() {
             .any(|c| c == "mindmaps_enabled")
     );
 }
+
+#[test]
+fn commit_review_snapshots_and_laptop_feedback_sync_without_a_checkout() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    a.execute_batch(
+        "UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer',node='a';",
+    )
+    .unwrap();
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
+    a.execute_batch("INSERT INTO commit_reviews VALUES('p',1,'abcdef0123456789','{\"patch\":\"whole patch\\n\"}','Original message');
+        INSERT INTO commit_review_comments VALUES('comment-a','p',1,'abcdef0123456789','{\"file\":\"x.rs\",\"side\":\"new\",\"line\":1}','exact source','Please fix','human:boss',1,1);").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row(
+            "SELECT json_extract(snapshot,'$.patch') FROM commit_reviews",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "whole patch\n"
+    );
+    b.execute_batch("UPDATE commit_reviews SET message='Edited on laptop'; UPDATE commit_review_comments SET body='Changed on laptop',updated_at=2;").unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row("SELECT message FROM commit_reviews", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Edited on laptop"
+    );
+    assert_eq!(
+        a.query_row("SELECT body FROM commit_review_comments", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "Changed on laptop"
+    );
+    b.execute("DELETE FROM commit_review_comments", []).unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row("SELECT count(*) FROM commit_review_comments", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}

@@ -717,6 +717,12 @@ enum CommitAction {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Show a stored review, including its complete patch and comments.
+    Show { number: i64, commit: String },
+    /// Export the stored commit as a git-am mail patch (with the edited message).
+    Patch { number: i64, commit: String },
+    /// Read review comments with file, line range and exact source context.
+    Comments { number: i64, commit: String },
     /// Remove an attached commit by SHA, prefix, or URL.
     Remove { number: i64, commit: String },
     /// List commits attached to an issue.
@@ -959,6 +965,7 @@ impl Options {
                     commit,
                     title,
                 } => Operation::AddCommit {
+                    review: None,
                     number: *number,
                     commit: commit.clone(),
                     title: title.clone(),
@@ -968,6 +975,17 @@ impl Options {
                     commit: commit.clone(),
                 },
                 CommitAction::List { number } => Operation::Commits { number: *number },
+                CommitAction::Show { number, commit }
+                | CommitAction::Patch { number, commit }
+                | CommitAction::Comments { number, commit } => Operation::CommitReview {
+                    number: *number,
+                    commit: commit.clone(),
+                    operation: match command {
+                        CommitAction::Show { .. } => issues::commit_reviews::Operation::View,
+                        CommitAction::Patch { .. } => issues::commit_reviews::Operation::Patch,
+                        _ => issues::commit_reviews::Operation::Comments,
+                    },
+                },
             },
             Action::GlobalSettings { operation } => operation.as_ref().clone(),
             Action::Settings { command } => match command {
@@ -1645,20 +1663,26 @@ pub fn run(options: &Options) -> Result<()> {
         {
             issues::identity::model_context(actor);
         }
-        if let Operation::AddCommit { commit, title, .. } = &mut operation {
+        if let Operation::AddCommit {
+            commit,
+            title,
+            review,
+            ..
+        } = &mut operation
+        {
             let target_project = project_override
                 .clone()
                 .unwrap_or_else(|| project.id.clone());
-            if let Ok(resolved) = issues::commits::resolve_commit_input(
+            let resolved = issues::commits::resolve_commit_input(
                 commit,
                 &target_project,
                 Some(&cwd),
                 title.as_deref(),
-            ) {
-                *commit = resolved.url;
-                if title.is_none() && !resolved.title.is_empty() {
-                    *title = Some(resolved.title);
-                }
+            )?;
+            *review = issues::commit_reviews::capture(&cwd, &resolved.sha, &target_project)?;
+            *commit = resolved.url;
+            if title.is_none() && !resolved.title.is_empty() {
+                *title = Some(resolved.title);
             }
         }
         let request = Request {
@@ -1772,6 +1796,31 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if let Some(patch) = value["patch"].as_str() {
+        print!("{patch}");
+        return;
+    }
+    if value["sha"].is_string() && (value["review"].is_object() || value["comments"].is_array()) {
+        if let Some(review) = value.get("review") {
+            println!("{}\n{}", text(&review["message"]), text(&review["patch"]));
+        }
+        if let Some(comments) = value["comments"].as_array() {
+            for comment in comments {
+                let at = &comment["location"];
+                println!(
+                    "{}:{}–{} ({}) · {}\n{}\n\n{}\n",
+                    text(&at["file"]),
+                    at["line"],
+                    at.get("endLine").unwrap_or(&at["line"]),
+                    text(&at["side"]),
+                    text(&comment["id"]),
+                    text(&comment["source"]),
+                    text(&comment["body"])
+                );
+            }
+        }
+        return;
+    }
     if let Some(count) = value["matched_count"].as_u64() {
         println!(
             "{count} matched · {} changed · {} skipped",

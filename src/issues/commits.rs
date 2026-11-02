@@ -76,6 +76,7 @@ END;
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits' AND type='table')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='commit_reviews')
          AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits_event_sync_insert' AND type='trigger' AND instr(sql,'syncing')>0)",
         [],
         |r| r.get(0),
@@ -92,6 +93,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         )?;
         db.execute_batch("DROP TRIGGER IF EXISTS issue_commits_event_sync_insert; DROP TRIGGER IF EXISTS issue_commits_event_sync_delete;")?;
         db.execute_batch(SCHEMA)?;
+        db.execute_batch(super::commit_reviews::SCHEMA)?;
         if !already {
             // Replay any replicated commit events if bootstrapping an existing store.
             let has_events: bool = db.query_row(
@@ -526,16 +528,6 @@ pub(crate) fn add(
     actor: &Actor,
     now: i64,
 ) -> Result<(bool, Vec<Value>)> {
-    migrate(db)?;
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM project_settings WHERE project_id=?1 AND prs_enabled=1)",
-        [&project.id],
-        |row| row.get::<_, bool>(0),
-    )? {
-        return Err(Error::invalid(
-            "This project uses pull requests. Attach a PR instead of a commit.",
-        ));
-    }
     let resolved = resolve_commit_input(raw_commit, &project.id, Some(&actor.cwd), title_override)?;
     let origin = super::provenance::capture(db, actor, now)?;
     let (changed, final_sha, final_url, final_title, final_created_at, final_origin) = upsert_row(
@@ -585,7 +577,6 @@ pub(crate) fn remove(
     actor: &Actor,
     now: i64,
 ) -> Result<(bool, Vec<Value>)> {
-    migrate(db)?;
     let target_sha = parse_url_commit(raw_commit)
         .map(|(_, sha)| sha)
         .unwrap_or_else(|| raw_commit.trim().to_ascii_lowercase());
@@ -643,10 +634,9 @@ pub(crate) fn list_for_issues(
     if numbers.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-    migrate(db)?;
     let mut map: std::collections::HashMap<i64, Vec<Value>> = std::collections::HashMap::new();
     let rows = db.query_collect::<_, _, rusqlite::Error>(
-        "SELECT issue_number, sha, url, title, added_by, created_at, origin FROM json_each(?2) requested CROSS JOIN issue_commits WHERE project_id=?1 AND issue_number=requested.value ORDER BY issue_number, created_at, sha",
+        "SELECT c.issue_number, c.sha, c.url, coalesce(substr(r.message,1,instr(r.message||char(10),char(10))-1),c.title), c.added_by, c.created_at, c.origin, r.sha IS NOT NULL, (SELECT count(*) FROM commit_review_comments n WHERE n.project_id=c.project_id AND n.issue_number=c.issue_number AND n.sha=c.sha) FROM json_each(?2) requested CROSS JOIN issue_commits c LEFT JOIN commit_reviews r ON r.project_id=c.project_id AND r.issue_number=c.issue_number AND r.sha=c.sha WHERE c.project_id=?1 AND c.issue_number=requested.value ORDER BY c.issue_number, c.created_at, c.sha",
         params![project_id, serde_json::to_string(numbers)?], |r| {
         let num: i64 = r.get(0)?;
         let sha: String = r.get(1)?;
@@ -666,6 +656,8 @@ pub(crate) fn list_for_issues(
                 "added_by": r.get::<_, String>(4)?,
                 "created_at": r.get::<_, i64>(5)?,
                 "origin": origin,
+                "review_available": r.get::<_, bool>(7)?,
+                "comment_count": r.get::<_, i64>(8)?,
             }),
         ))
     })?;
@@ -693,53 +685,9 @@ pub(crate) fn list_for_issues(
 }
 
 pub(crate) fn list(db: &Connection, project_id: &str, number: i64) -> Result<Vec<Value>> {
-    migrate(db)?;
-    let mut stmt = db.prepare(
-        "SELECT sha, url, title, added_by, created_at, origin FROM issue_commits WHERE project_id=?1 AND issue_number=?2 ORDER BY created_at, sha",
-    )?;
-    let rows = stmt
-        .query_map(params![project_id, number], |r| {
-            let sha: String = r.get(0)?;
-            let short_sha: String = sha.chars().take(7).collect();
-            let origin_raw: Option<String> = r.get(5)?;
-            let origin = origin_raw
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .unwrap_or(Value::Null);
-            Ok(json!({
-                "sha": sha,
-                "short_sha": short_sha,
-                "url": r.get::<_, String>(1)?,
-                "title": r.get::<_, String>(2)?,
-                "added_by": r.get::<_, String>(3)?,
-                "created_at": r.get::<_, i64>(4)?,
-                "origin": origin,
-            }))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    // Defensive read-time prefix deduplication.
-    let mut deduped: Vec<Value> = Vec::with_capacity(rows.len());
-    for item in rows {
-        let sha = item["sha"].as_str().unwrap_or("");
-        if let Some(existing) = deduped
-            .iter_mut()
-            .find(|e| sha_matches(e["sha"].as_str().unwrap_or(""), sha))
-        {
-            if sha.len() > existing["sha"].as_str().unwrap_or("").len() {
-                let created_at = existing["created_at"].clone();
-                let prev_origin = existing["origin"].clone();
-                *existing = item;
-                existing["created_at"] = created_at;
-                if existing["origin"].is_null() && !prev_origin.is_null() {
-                    existing["origin"] = prev_origin;
-                }
-            }
-        } else {
-            deduped.push(item);
-        }
-    }
-    Ok(deduped)
+    Ok(list_for_issues(db, project_id, &[number])?
+        .remove(&number)
+        .unwrap_or_default())
 }
 
 const MANAGED_HOOKS: &[&str] = &[

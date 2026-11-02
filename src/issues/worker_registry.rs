@@ -940,9 +940,10 @@ pub(super) fn execute(
             number,
             commit,
             title,
+            review,
         } => {
             get_issue(db, &p.id, *number, true)?;
-            let (changed, commits) = crate::issues::commits::add(
+            let (mut changed, mut commits) = crate::issues::commits::add(
                 db,
                 p,
                 *number,
@@ -951,6 +952,24 @@ pub(super) fn execute(
                 actor.unwrap(),
                 now(),
             )?;
+            if let Some(snapshot) = review {
+                if crate::issues::commit_reviews::attach(db, &p.id, *number, commit, snapshot)? {
+                    if !changed {
+                        db.execute("UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",params![p.id,number,now()])?;
+                    }
+                    event(
+                        db,
+                        &p.id,
+                        *number,
+                        &actor.unwrap().id,
+                        "commit_review_attached",
+                        now(),
+                        &json!({"commit":commit}),
+                    )?;
+                    changed = true;
+                }
+                commits = crate::issues::commits::list(db, &p.id, *number)?;
+            }
             Ok(json!({"ok":true,"project":p,"number":number,"commits":commits,"changed":changed}))
         }
         Operation::RemoveCommit { number, commit } => {
