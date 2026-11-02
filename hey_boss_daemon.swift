@@ -3831,9 +3831,9 @@ enum QuickIssueText {
     static func suggestions(_ projects: [QuickIssueProject], query: String) -> [QuickIssueProject] {
         let q = fold(query)
         func rank(_ p: QuickIssueProject) -> Int { fold(p.name) == q ? 0 : fold(p.name).hasPrefix(q) ? 1 : fold(p.id).hasPrefix(q) ? 2 : 3 }
-        return Array(projects.filter { fold($0.name).contains(q) || fold($0.id).contains(q) }.sorted {
-            rank($0) != rank($1) ? rank($0) < rank($1) : $0.name == $1.name ? $0.id < $1.id : $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }.prefix(8))
+        return Array(projects.enumerated().filter { fold($0.element.name).contains(q) || fold($0.element.id).contains(q) }.sorted {
+            rank($0.element) != rank($1.element) ? rank($0.element) < rank($1.element) : $0.offset < $1.offset
+        }.prefix(8).map(\.element))
     }
     static func completion(_ project: QuickIssueProject, projects: [QuickIssueProject]) -> String {
         let matches = projects.filter { fold($0.name) == fold(project.name) || fold($0.id) == fold(project.name) }
@@ -3850,6 +3850,7 @@ struct QuickIssueImage {
 }
 
 final class QuickIssuePanel: NSPanel {
+    var cycleProject: ((Int) -> Void)?
     var commandChanged: ((Bool) -> Void)?
     var toggleBottom: (() -> Void)?
     var submitIssue: (() -> Void)?
@@ -3859,6 +3860,17 @@ final class QuickIssuePanel: NSPanel {
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { cancel?() }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        if modifiers == [.command, .option], event.keyCode == 126 || event.keyCode == 125 {
+            if (firstResponder as? NSTextView)?.hasMarkedText() != true { cycleProject?(event.keyCode == 126 ? -1 : 1) }
+            return true
+        }
+        // Hey Talk tags its paste/submit events. Physical Return still edits a new line.
+        if modifiers.isEmpty, event.keyCode == 36,
+           event.cgEvent?.getIntegerValueField(.eventSourceUserData) == 0x48544C4B {
+            if (firstResponder as? NSTextView)?.hasMarkedText() != true, !event.isARepeat { submitIssue?() }
+            return true
+        }
         if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
            event.keyCode == 36 || event.keyCode == 76 {
             if (firstResponder as? NSTextView)?.hasMarkedText() != true, !event.isARepeat { submitIssue?() }
@@ -3987,6 +3999,9 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     let preferences: UserDefaults
     var cli: String?
     var runner: (([String], @escaping (Result<Data, Error>) -> Void) -> Void)?
+    var voiceRunner: ((String, @escaping (Result<Data, Error>) -> Void) -> Void)?
+    var voiceBusy = false
+    var voiceOnOpen = false
     private var selectionObserver: NSObjectProtocol?
     init(present: Bool = true, preferences: UserDefaults = .standard) {
         self.present = present; self.preferences = preferences
@@ -4044,6 +4059,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         for view in [progress, context, bottom, submit] { footer.addSubview(view) }
         window.commandChanged = { [weak self] held in self?.showShortcuts(held) }
         window.submitIssue = { [weak self] in self?.create() }
+        window.cycleProject = { [weak self] in self?.cycleProject($0) }
         window.pasteImage = { [weak self] in self?.pasteImages(.general) ?? false }
         window.cancel = { [weak self] in self?.dismiss() }
         window.toggleBottom = { [weak self] in guard let self, !self.saving, self.mediaSubmission == nil else { return }; self.bottom.state = self.bottom.state == .on ? .off : .on }
@@ -4112,12 +4128,18 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     func showShortcuts(_ held: Bool) {
         bottom.showsShortcut = held; submit.showsShortcut = held
     }
-    func open(cli: String?) {
+    func open(cli: String?, voice: Bool = false) {
         self.cli = cli
+        if voice { voiceOnOpen = true }
         showShortcuts(NSEvent.modifierFlags.contains(.command))
         if window.isVisible {
             if succeeded { generation += 1; succeeded = false; changed() }
-            window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }; return
+            window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }
+            if voice, ready {
+                voiceOnOpen = false
+                if current == nil, let first = projects.first { selectProject(first); changed() }
+                toggleVoice()
+            }; return
         }
         generation += 1; let sequence = generation
         ready = false; succeeded = false; error.stringValue = ""; overflowNote.stringValue = ""; context.stringValue = "Loading projects…"; matches = []; mention = nil; updateEnabled(); layout()
@@ -4133,11 +4155,78 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
                 let data = try result.get()
                 struct Bootstrap: Decodable { let projects: [QuickIssueProject] }
                 self.projects = try JSONDecoder().decode(Bootstrap.self, from: data).projects
+                let uses = self.preferences.dictionary(forKey: "quickIssueProjectUses") as? [String: Int] ?? [:]
+                self.projects.sort {
+                    let a = uses[$0.id, default: 0], b = uses[$1.id, default: 0]
+                    return a != b ? a > b : $0.name == $1.name ? $0.id < $1.id : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                }
                 self.current = self.projects.first { $0.name == self.preferences.string(forKey: "quickIssueProject") || $0.id == self.preferences.string(forKey: "quickIssueProject") }
-                // No implicit project from the daemon's working directory: the
-                // first native issue requires an explicit @project destination.
+                // Never derive the destination from the daemon's working directory.
                 self.ready = true; self.changed()
+                if self.voiceOnOpen {
+                    self.voiceOnOpen = false
+                    if self.current == nil, let first = self.projects.first { self.selectProject(first); self.changed() }
+                    self.toggleVoice("start")
+                }
             } catch { self.context.stringValue = "Unable to load projects · close and retry"; self.fail(error.localizedDescription) }
+        }
+    }
+    func selectProject(_ project: QuickIssueProject) {
+        current = project; preferences.set(project.id, forKey: "quickIssueProject")
+    }
+    func cycleProject(_ delta: Int) {
+        guard ready, !saving, !succeeded, mediaSubmission == nil, !projects.isEmpty, !input.hasMarkedText() else { return }
+        let parsed = try? QuickIssueText.parse(input.string, projects: projects, current: current)
+        let index = projects.firstIndex { $0.id == (parsed?.project ?? current)?.id }
+        let next = index.map { ($0 + delta + projects.count) % projects.count } ?? 0
+        let project = projects[next]
+        // Keep typed destinations consistent with the controller without rewriting the draft.
+        if parsed != nil {
+            var chars = Array(input.string)
+            for mention in QuickIssueText.mentions(input.string).reversed() {
+                chars.replaceSubrange(mention.start..<mention.end, with: QuickIssueText.completion(project, projects: projects))
+            }
+            if input.string != String(chars) { input.string = String(chars) }
+        }
+        selectProject(project); changed()
+        NSAccessibility.post(element: context, notification: .announcementRequested, userInfo: [.announcement: context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+    func toggleVoice(_ command: String = "toggle") {
+        guard ready, current != nil, !saving, !succeeded, mediaSubmission == nil, !voiceBusy,
+              !present || window.isKeyWindow else { return }
+        voiceBusy = true
+        let sequence = generation
+        let reply: (Result<Data, Error>) -> Void = { [weak self] result in
+            guard let self else { return }
+            self.voiceBusy = false
+            guard sequence == self.generation, !self.succeeded else { return }
+            do {
+                let data = try result.get()
+                let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard value?["ok"] as? Bool == true else {
+                    throw StorageError(description: value?["error"] as? String ?? "Could not control dictation. Check Hey Talk; your draft is kept.")
+                }
+            } catch { self.fail(error.localizedDescription) }
+        }
+        if let voiceRunner { voiceRunner(command, reply); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let paths = [FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-talk").path,
+                         "/Applications/Hey Talk.app/Contents/MacOS/hey-talk"]
+            guard let path = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+                onMain { reply(.failure(StorageError(description: "Install Hey Talk to record. You can still type your issue."))) }; return
+            }
+            let process = Process(); process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = [command, "--submit", "--json"]
+            let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+            defer { try? pipe.fileHandleForReading.close() }
+            do {
+                try process.run()
+                let data = try readScannerOutput(pipe.fileHandleForReading); process.waitUntilExit()
+                if process.terminationStatus != 0 {
+                    throw StorageError(description: String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Could not control dictation. Check Hey Talk.")
+                }
+                onMain { reply(.success(data)) }
+            } catch { onMain { reply(.failure(error)) } }
         }
     }
     func updateEnabled() {
@@ -4176,7 +4265,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         let value = NSMutableAttributedString(string: "Create in ", attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
         value.append(NSAttributedString(string: project.name, attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: NSColor.labelColor]))
         context.attributedStringValue = value
-        context.toolTip = "Create in \(project.name) · @project to switch"
+        context.toolTip = "Create in \(project.name) · @project or ⌘⌥↑↓ to switch · Most-used projects first"
     }
     func textDidChange(_ obj: Notification) { changed(); input.scrollRangeToVisible(input.selectedRange()) }
     func updatePicker() {
@@ -4215,6 +4304,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     @objc func chooseProject() {
         guard let mention, matches.indices.contains(table.selectedRow), !saving else { return }
         let project = matches[table.selectedRow]; let chars = Array(input.string)
+        selectProject(project)
         let suffix = String(chars[mention.end...]); let completion = QuickIssueText.completion(project, projects: projects)
         let space = suffix.isEmpty || suffix.first.map(QuickIssueText.token) == true ? " " : ""
         let prefix = String(chars[..<mention.start]) + completion + space
@@ -4278,6 +4368,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     }
     @objc func dismiss() {
         guard !saving else { return }
+        voiceOnOpen = false
         showShortcuts(false)
         updateEnabled()
         generation += 1; window.orderOut(nil)
@@ -4293,7 +4384,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
             let parsed = try QuickIssueText.parse(input.string, projects: projects, current: current)
             var args = ["create", "--json", "--agent", "human:boss", "--project", parsed.project.name, "--title", parsed.title]
             if !parsed.body.isEmpty { args += ["--body", parsed.body] }
-            if bottom.state != .on { args.append("--at-top") }
+            args.append(bottom.state == .on ? "--at-bottom" : "--at-top")
             if !images.isEmpty {
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hb-quick-images-" + UUID().uuidString)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -4353,7 +4444,9 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         }
     }
     func complete(number: Int, project: QuickIssueProject) {
-        current = project; preferences.set(project.name, forKey: "quickIssueProject")
+        selectProject(project)
+        var uses = preferences.dictionary(forKey: "quickIssueProjectUses") as? [String: Int] ?? [:]
+        uses[project.id, default: 0] += 1; preferences.set(uses, forKey: "quickIssueProjectUses")
         pending = nil; input.string = ""; input.undoManager?.removeAllActions(); bottom.state = .off; succeeded = true
         context.stringValue = "Created #\(number) in \(project.name)"; updateEnabled(); layout(); window.makeFirstResponder(nil)
         NSAccessibility.post(element: confirmation, notification: .announcementRequested, userInfo: [.announcement: context.stringValue, .priority: NSAccessibilityPriorityLevel.high.rawValue])
@@ -4881,7 +4974,9 @@ final class FleetSyncController {
 
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate, NSMenuDelegate {
     lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
-    lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in self?.showQuickIssue() }
+    lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in
+        guard let self else { return }; self.quickIssue.open(cli: self.cli, voice: true)
+    }
     lazy var quickIssue = NativeQuickIssue(present: present)
     @objc func showQuickIssue() { quickIssue.open(cli: cli) }
     var openInbox: (() -> Void)?

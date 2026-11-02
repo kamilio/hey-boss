@@ -318,6 +318,7 @@ func auditQuickIssue() {
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
     auditQuickIssueMedia()
     auditNativeQuickIssue()
+    auditQuickIssueController()
     if ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_INTEGRATION"] == "1" { auditQuickIssueMediaIntegration() }
     var calls = 0
     let shortcut = QuickIssueShortcut { calls += 1 }
@@ -473,7 +474,7 @@ func auditNativeQuickIssue() {
     reply?(.success(Data("{\"issue\":{\"number\":7}}".utf8)))
     precondition(ui.input.string.isEmpty && ui.pending == nil && ui.current == projects[1] && ui.bottom.state == .off)
     precondition(firstRequest[firstRequest.firstIndex(of: "--project")! + 1] == projects[1].name)
-    precondition(prefs.string(forKey: "quickIssueProject") == projects[1].name && ui.context.stringValue.contains("#7"))
+    precondition(prefs.string(forKey: "quickIssueProject") == projects[1].id && ui.context.stringValue.contains("#7"))
     precondition(ui.succeeded && ui.input.isHidden && !ui.confirmation.isHidden && ui.submit.isHidden && ui.bottom.isHidden)
     precondition(ui.window.performKeyEquivalent(with: commandReturn) && requests.count == 3, "Success cannot resubmit")
     ui.input.string = "Preserved draft"; ui.bottom.state = .on; ui.dismiss(); ui.open(cli: nil)
@@ -679,7 +680,8 @@ func auditQuickIssueMedia() {
 }
 
 func auditQuickIssueMediaIntegration() {
-    precondition(ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"]?.hasPrefix("/tmp/") == true, "Use an isolated temporary issue store")
+    let database = ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"]!
+    precondition(URL(fileURLWithPath: database).deletingLastPathComponent().standardizedFileURL.path == URL(fileURLWithPath: ProcessInfo.processInfo.environment["TMPDIR"]!).standardizedFileURL.path, "Use an isolated issue store directly inside TMPDIR")
     let initialize = Process()
     initialize.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!)
     initialize.arguments = ["project", "init", "--project", "Native media test", "--prs", "false", "--worktree", "false", "--drafts", "false", "--yes", "--json"]
@@ -700,10 +702,6 @@ func auditQuickIssueMediaIntegration() {
         while !condition() && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
         precondition(condition(), "Native CLI operation timed out")
     }
-    var configured: Result<Data, Error>?
-    ui.request(["settings", "set", "--project", "Native media test", "--no-drafts", "--json"]) { configured = $0 }
-    wait { configured != nil }
-    _ = try! configured!.get()
     ui.create()
     wait { !ui.saving }
     precondition(ui.succeeded, ui.error.stringValue)
@@ -718,8 +716,19 @@ func auditQuickIssueMediaIntegration() {
     let listed = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]
     let attachments = listed["attachments"] as! [[String: Any]]
     precondition(attachments.count == 2 && attachments.allSatisfy { ($0["name"] as? String)?.hasSuffix(".png") == true })
+    ui.succeeded = false; ui.input.string = "Controller bottom"; ui.bottom.state = .on; ui.changed()
+    let enter = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true)!
+    enter.flags = []; enter.setIntegerValueField(.eventSourceUserData, value: 0x48544C4B)
+    precondition(ui.window.performKeyEquivalent(with: NSEvent(cgEvent: enter)!))
+    wait { !ui.saving }; precondition(ui.succeeded, ui.error.stringValue)
+    ui.succeeded = false; ui.input.string = "Controller top"; ui.changed(); ui.create()
+    wait { !ui.saving }; precondition(ui.succeeded, ui.error.stringValue)
+    result = nil
+    ui.request(["list", "--project", "Native media test", "--json"]) { result = $0 }; wait { result != nil }
+    let queue = try! JSONSerialization.jsonObject(with: result!.get()) as! [String: Any]
+    precondition((queue["issues"] as! [[String: Any]]).map { $0["number"] as! Int } == [3, 1, 2], "Voice submission honors bottom placement in the real queue")
     ui.window.close()
-    print("Passed: real CLI atomically saves a regular task and two images with drafts disabled")
+    print("Passed: real CLI atomically saves images, and voice submission honors top/bottom queue placement")
 }
 
 func auditInbox(root: URL, sample: Record) {
@@ -4511,3 +4520,58 @@ func auditWorkspaceChat(_ root: String) {
     print("PASS native workspace chat: real Codex command and file write, tool row, two-turn recall, compact layout and workspace reset")
 }
 #endif
+
+func auditQuickIssueController() {
+    let suite = "hey-boss-controller-" + UUID().uuidString
+    let prefs = UserDefaults(suiteName: suite)!
+    defer { prefs.removePersistentDomain(forName: suite) }
+    prefs.set(["named:Beta": 4, "named:Gamma": 1], forKey: "quickIssueProjectUses")
+    prefs.set("Gamma", forKey: "quickIssueProject")
+    let ui = NativeQuickIssue(present: false, preferences: prefs)
+    var requests: [[String]] = []
+    var loaded: ((Result<Data, Error>) -> Void)?
+    var saved: ((Result<Data, Error>) -> Void)?
+    ui.runner = { args, reply in
+        if args.first == "projects" { loaded = reply } else { requests.append(args); saved = reply }
+    }
+    var voice: [String] = []
+    var voiceReply: ((Result<Data, Error>) -> Void)?
+    ui.voiceRunner = { command, reply in voice.append(command); voiceReply = reply }
+    let bootstrap = Data(#"{"projects":[{"id":"named:Alpha","name":"Alpha"},{"id":"named:Gamma","name":"Gamma"},{"id":"named:Beta","name":"Beta"}]}"#.utf8)
+    ui.open(cli: nil, voice: true)
+    precondition(voice.isEmpty, "Wait for projects before starting the microphone")
+    loaded?(.success(bootstrap))
+    precondition(ui.projects.map(\.name) == ["Beta", "Gamma", "Alpha"])
+    precondition(ui.current?.name == "Gamma" && voice == ["start"])
+    ui.input.string = "Preserve this draft"; ui.changed()
+    func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags, repeat held: Bool = false) {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: held, keyCode: code)!
+        precondition(ui.window.performKeyEquivalent(with: event))
+    }
+    key(126, [.command, .option])
+    precondition(ui.current?.name == "Beta" && ui.input.string == "Preserve this draft")
+    key(126, [.command, .option]); precondition(ui.current?.name == "Alpha", "Project navigation wraps")
+    key(125, [.command, .option]); precondition(ui.current?.name == "Beta")
+    precondition(prefs.string(forKey: "quickIssueProject") == "named:Beta", "Remember selection before submitting")
+    ui.toggleVoice(); precondition(voice.count == 1, "Do not overlap microphone requests")
+    voiceReply?(.success(Data(#"{"ok":true}"#.utf8)))
+    ui.toggleVoice(); precondition(voice == ["start", "toggle"])
+    ui.bottom.state = .on
+    let enter = CGEvent(keyboardEventSource: nil, virtualKey: 36, keyDown: true)!
+    enter.flags = []; enter.setIntegerValueField(.eventSourceUserData, value: 0x48544C4B)
+    precondition(ui.window.performKeyEquivalent(with: NSEvent(cgEvent: enter)!))
+    precondition(requests.count == 1 && requests[0].contains("Beta") && requests[0].contains("--at-bottom"), "Dictation submits to the selected project and queue position")
+    key(125, [.command, .option]); precondition(ui.current?.name == "Beta", "Saving locks the destination")
+    saved?(.success(Data(#"{"issue":{"number":1}}"#.utf8)))
+    precondition((prefs.dictionary(forKey: "quickIssueProjectUses")?["named:Beta"] as? Int) == 5)
+    voiceReply?(.success(Data(#"{"ok":true}"#.utf8)))
+    ui.dismiss(); ui.open(cli: nil); loaded?(.success(bootstrap))
+    precondition(ui.current?.name == "Beta" && voice.count == 2, "Normal opening does not start dictation")
+    ui.input.string = "Draft @Gamma"; ui.changed(); ui.cycleProject(1)
+    precondition(ui.current?.name == "Alpha" && ui.input.string == "Draft @Alpha", "Controller changes the effective destination, including typed mentions")
+    ui.toggleVoice(); voiceReply?(.failure(StorageError(description: "Microphone unavailable")))
+    precondition(ui.error.stringValue == "Microphone unavailable" && ui.input.string == "Draft @Alpha")
+    ui.dismiss(); ui.open(cli: nil, voice: true); ui.dismiss(); loaded?(.success(bootstrap))
+    precondition(voice.count == 3, "Dismissed loading panels cannot start recording")
+    print("Passed: controller project frequency, wraparound, remembered selection, voice start/stop, tagged submission, queue placement and errors")
+}
