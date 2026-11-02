@@ -7,7 +7,7 @@ const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const source = resolve('src/issues/web');
 const projects = [{id:'named:Atlas',name:'Atlas'},{id:'named:Beacon',name:'Beacon'}];
 const run = {id:'run-1',project_id:projects[0].id,project_name:'Atlas',number:42,title:'Keep task conversations connected',state:'completed',started_at:Date.now()-60000,finished_at:Date.now()-1000};
-const fleet = () => ({ok:true,machines:[{host:'devbox',hostname:'Devbox',state:'connected',heartbeat:Date.now()/1000,workers:[{id:'worker-1',pid:123,intent:'running',managed:true,config:{name:'Atlas worker',projects:[projects[0].id],concurrency:3,enabled:true},runs:[run,{...run,id:'live-run',state:'running',finished_at:null}]}]}],signals:[],conflicts:[]});
+const fleet = () => ({ok:true,configuration:{source:'/Users/kjopek/.hey-boss/fleet.yaml'},machines:[{host:'devbox',hostname:'Devbox',state:'connected',heartbeat:Date.now()/1000,workers:[{id:'worker-1',pid:123,intent:'running',managed:true,config:{name:'Atlas worker',projects:[projects[0].id],concurrency:3,enabled:true},runs:[run,{...run,id:'live-run',state:'running',finished_at:null}]}]}],signals:[],conflicts:[]});
 const server = createServer((req,res) => {
   const path = new URL(req.url,'http://fixture').pathname;
   res.setHeader('Content-Type','application/json');
@@ -59,9 +59,11 @@ try {
   await visit('/workers');
   assert.equal(await page.locator('.fleet-tabs').count(),0,'No standalone conversation browser');
   await page.getByRole('heading',{name:'Workers',exact:true}).waitFor();
-  await page.locator('#config-editor').waitFor();
+  assert.equal(await page.locator('#config-editor, #config-text').count(),0,'Raw YAML editing is absent');
+  await page.locator('#config-source').waitFor();
+  assert.equal(await page.locator('#config-source').innerText(),'/Users/kjopek/.hey-boss/fleet.yaml','Configuration path remains visible');
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:Beacon"]').click();
-  assert.equal(await page.locator('#config-editor').isVisible(),true,'Project selection preserves global worker settings');
+  assert.equal(await page.locator('#config-source').isVisible(),true,'Project selection preserves global worker settings');
   assert.equal(await workers.getAttribute('href'),'/workers');
   await visit('/agents#project=named%3AAtlas&view=conversations');
   await page.locator('#worker-board .project-worker-machine').waitFor();

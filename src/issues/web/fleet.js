@@ -200,7 +200,6 @@ if (typeof document !== 'undefined') (() => {
   const base = '/agents';
   const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(!detail)query.set('workers','');return query;};
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
-  let configRevision, configOriginal='', configPreview, configBusy=false;
   let workerSearch=route().get('find')||'', workerEdit, workerEditRevision, workerEditPreview, workerEditBusy=false;
   let activityFilter='all';
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
@@ -239,8 +238,8 @@ if (typeof document !== 'undefined') (() => {
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
   function renderOverview(data) {
     $('worker-config').hidden=false;
-    if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
-    else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
+    $('config-source').textContent=data.configuration?.source||'';
+    $('config-source').hidden=!data.configuration?.source;
     renderWorkerBoard(data);
   }
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
@@ -640,7 +639,6 @@ if (typeof document !== 'undefined') (() => {
     const response=await fetch('/api/fleet/configuration',{cache:'no-store',...(body?{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify(body)}:{})});
     const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not load configuration.');return data;
   }
-  function configButtons(){const loaded=configRevision!==undefined;$('config-text').disabled=configBusy||!loaded;$('config-reload').disabled=configBusy;$('config-validate').disabled=configBusy||!loaded;$('config-save').disabled=configBusy||configPreview!==$('config-text').value||configOriginal===$('config-text').value;}
   function confirmFleet(title,message,submitLabel='Continue',danger=false){
     return new Promise(resolve=>{
       let dialog=$('fleet-confirm-dialog');
@@ -664,12 +662,6 @@ if (typeof document !== 'undefined') (() => {
       cancelBtn.focus();
     });
   }
-  async function loadConfig(){
-    if(configBusy)return;
-    if(configRevision&&$('config-text').value!==configOriginal&&!(await confirmFleet('Discard unsaved YAML edits?','Reloading will replace your unsaved YAML edits with the saved file from the supervisor.','Discard and reload',true)))return;
-    configBusy=true;configButtons();$('config-status').textContent='Loading configuration…';
-    try{const data=await configRequest();configRevision=data.revision;configOriginal=data.text;$('config-text').value=data.text;configPreview=undefined;$('config-source').textContent=data.source;$('config-changes').replaceChildren();$('config-status').textContent=data.error?'File error: '+data.error:'Loaded from the supervisor. Changes are applied after saving.';}catch(error){$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
-  }
   $('worker-filters').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.activityFilter)activityFilter=b.dataset.activityFilter;if(last)renderWorkerBoard(last);};
   $('worker-search').value=workerSearch;
   $('worker-search').oninput=event=>{workerSearch=event.target.value;if(last)renderWorkerBoard(last);};
@@ -680,7 +672,6 @@ if (typeof document !== 'undefined') (() => {
   const editFingerprint=()=>JSON.stringify(editFields.map(field=>$('worker-'+field).value));
   async function openWorkerEditor(host,id){
     if(workerEditBusy)return;
-    if(configRevision&&$('config-text').value!==configOriginal){fail(Error('Save or reload your unsaved YAML changes before editing a worker.'));return;}
     workerEditBusy=true;
     try{
       const data=await configRequest();
@@ -713,8 +704,7 @@ if (typeof document !== 'undefined') (() => {
   };
   $('worker-editor-save').onclick=async()=>{
     if(workerEditBusy||!workerEditPreview)return;workerEditBusy=true;workerEditButtons();
-    try{const saved=await configRequest({worker_update:workerEditPreview,revision:workerEditRevision,save:true});workerEditOriginal=editFingerprint();workerEditPreview=undefined;
-      if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
+    try{await configRequest({worker_update:workerEditPreview,revision:workerEditRevision,save:true});workerEditOriginal=editFingerprint();workerEditPreview=undefined;
       $('worker-save-note').textContent='Worker saved. Check its machine below for application status.';$('worker-save-note').hidden=false;await refresh();$('worker-editor').close();workerEdit=null;
     }catch(error){workerEditPreview=undefined;$('worker-editor-status').textContent=error.message;}finally{workerEditBusy=false;workerEditButtons();}
   };
@@ -722,7 +712,6 @@ if (typeof document !== 'undefined') (() => {
   function machineButtons(){for(const input of $('machine-form').elements)input.disabled=machineBusy;}
   async function openMachineEditor(host,action,workerId,projectId){
     if(machineBusy)return;
-    if(configRevision&&$('config-text').value!==configOriginal){fail(Error('Save or reload your unsaved YAML changes first.'));return;}
     machineBusy=true;
     try{
       const data=await configRequest(),machine=data.document?.machines?.[host]||(last?.machines?.some(m=>m.host===host)?{workers:[]}:null);
@@ -763,8 +752,7 @@ if (typeof document !== 'undefined') (() => {
       if(action==='add')Object.assign(update,{id,concurrency:Number($('machine-slots').value)});
       if(action==='remove')update.id=workerId;
       if(['add','project','edit-project'].includes(action))Object.assign(update,{git:$('machine-git').value.trim(),workspace:$('machine-workspace').value.trim(),path:$('machine-path').value.trim(),...(action==='edit-project'?{project:projectId}:action==='project'?{worker:workerId}:{})});
-      const saved=await configRequest({machine_update:update,revision,save:true});
-      if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
+      await configRequest({machine_update:update,revision,save:true});
       $('worker-save-note').textContent=action==='remove'?'Worker removed. Any current agents will finish; project files are kept.':action==='project'?'Project added. It shares this worker’s agent limit.':action==='edit-project'?'Checkout saved. Retrying setup.':'Worker created. Its machine will prepare the checkout and start picking up tasks.';$('worker-save-note').hidden=false;
       if(action==='edit-project')await configRequest({retry_project:{host,project:projectId}});
       $('machine-editor').close();machineEdit=null;render(await read('/api/fleet/status'));
@@ -782,15 +770,13 @@ if (typeof document !== 'undefined') (() => {
     const capacity=event.target.closest('[data-capacity-delta]');
     if(capacity){
       event.preventDefault();if(capacityBusy)return;
-      if(configRevision&&$('config-text').value!==configOriginal){fail(Error('Save or reload your unsaved YAML changes first.'));return;}
       capacityBusy=true;for(const b of $('worker-board').querySelectorAll('[data-capacity-delta]'))b.disabled=true;
       try{
         const data=await configRequest(),{host,worker,capacityDelta}=capacity.dataset;
         const update=workerCapacityUpdate(data.document,host,worker,Number(capacityDelta));
         const key=host+':'+worker;capacityRequests.set(key,{limit:update.config.concurrency,saved:false});if(last)render(last);
-        const saved=await configRequest({worker_update:update,revision:data.revision,save:true});
+        await configRequest({worker_update:update,revision:data.revision,save:true});
         capacityRequests.set(key,{limit:update.config.concurrency,saved:true});
-        if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
         $('worker-save-note').hidden=true;
         await refresh();
       }catch(error){capacityRequests.delete(capacity.dataset.host+':'+capacity.dataset.worker);fail(error);}finally{capacityBusy=false;if(last)render(last);}return;
@@ -802,19 +788,7 @@ if (typeof document !== 'undefined') (() => {
     const signalKey=b.dataset.host+':'+b.dataset.worker;if(signalRequests.has(signalKey))return;signalRequests.add(signalKey);b.disabled=true;try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');render(await read('/api/fleet/status'));}catch(error){fail(error);}finally{signalRequests.delete(signalKey);if(last)render(last);}
   };
 
-  $('config-editor').addEventListener('toggle',()=>{if($('config-editor').open&&configRevision===undefined)loadConfig();});
-  $('config-reload').onclick=loadConfig;
-  $('config-text').oninput=()=>{configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent=$('config-text').value===configOriginal?'No unsaved changes.':'Unsaved changes. Preview before saving.';configButtons();};
-  async function submitConfig(save){
-    if(configBusy||!configRevision)return;const text=$('config-text').value;
-    configBusy=true;configButtons();$('config-status').textContent=save?'Saving configuration…':'Checking configuration…';
-    try{const data=await configRequest({text,revision:configRevision,save});
-      if(save){configRevision=data.revision;configOriginal=data.text;configPreview=undefined;$('config-changes').replaceChildren();$('config-status').textContent='Saved. Machines will apply this configuration automatically.';await refresh();}
-      else{configPreview=text;$('config-changes').replaceChildren(...(data.changes||[]).map(change=>element('li','',({add:'Add',update:'Update',drain:'Drain and remove',remove:'Remove'})[change.action]+' '+(change.utility?'utility '+change.utility:change.worker)+(change.host?' on '+change.host:''))));$('config-status').textContent=data.changes?.length?'Valid YAML. Review the changes below.':'Valid YAML. No worker or utility changes.';}
-    }catch(error){configPreview=undefined;$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
-  }
-  $('config-validate').onclick=()=>submitConfig(false);$('config-save').onclick=()=>submitConfig(true);
-  addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal||workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
+  addEventListener('beforeunload',event=>{if(workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
   addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;}if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});

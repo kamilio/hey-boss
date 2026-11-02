@@ -51,14 +51,8 @@ async page => {
   check(await page.locator('#worker-name').inputValue()==='Unsaved draft'&&await page.locator('#worker-editor-save').isDisabled(),'Stale form retains its draft and blocks saving');
   await page.locator('#worker-name').fill('Review worker');
   await page.locator('#worker-editor-cancel').click();
-  await page.locator('#config-editor>summary').click();
-  await page.waitForFunction(()=>!document.getElementById('config-text').disabled);
-  const original=await page.locator('#config-text').inputValue();
-  await page.locator('#config-text').fill('machines: [');
-  await page.locator('#config-validate').click();
-  await page.waitForFunction(()=>!document.getElementById('config-validate').disabled);
-  check(await page.locator('#config-save').isDisabled(),'Advanced YAML still validates before saving');
-  await page.locator('#config-text').fill(original);
+  check(await page.locator('#config-editor, #config-text').count()===0,'No raw YAML editor');
+  check((await page.locator('#config-source').innerText())===saved.source,'Configuration path remains visible');
   check(errors.length===0,'No browser JavaScript errors');
   return {passed:checks.length,checks};
 }
