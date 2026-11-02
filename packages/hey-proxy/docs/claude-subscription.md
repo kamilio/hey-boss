@@ -6,7 +6,7 @@ hey-proxy owns an independent Claude OAuth login, encrypted token storage, and a
 
 ## Setup
 
-Add `claude` to `providers` in `~/.hey-proxy/config.json` (keep any existing providers):
+Add `claude` to `providers` in `~/.hey-boss/proxy/config.yaml` (keep any existing providers):
 
 ```json
 "providers": {
@@ -105,7 +105,7 @@ The public Rust library exposes the same types used by the server and CLI:
 
 ```toml
 [dependencies]
-hey-proxy = { git = "https://github.com/kamilio/hey-proxy" }
+hey-proxy = { path = "packages/hey-proxy" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

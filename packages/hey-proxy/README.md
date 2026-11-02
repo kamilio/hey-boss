@@ -4,12 +4,10 @@ Use one local endpoint for OpenAI, Gemini, and your Claude subscription. hey-pro
 
 ## Install and start
 
-Install a current stable [Rust toolchain](https://rustup.rs/), then:
+Build or install from the `hey-boss` workspace (or via `hey-boss upgrade`):
 
 ```sh
-git clone https://github.com/kamilio/hey-proxy.git
-cd hey-proxy
-cargo install --path . --locked
+cargo install --path packages/hey-proxy --locked
 hey-proxy --init
 ```
 
@@ -262,7 +260,7 @@ hey-proxy configure-codex --base-url http://127.0.0.1:8080/v1
 codex
 ```
 
-This command updates Codex's user configuration to select hey-proxy and use automatic approval review (`approval_policy = "on-request"`, `approvals_reviewer = "auto_review"`). It applies these settings to the selected profile too, so new sessions use automatic review. It backs up changed existing files and preserves sandbox permissions and unrelated settings. Use `--model coding` to select an overwrite, or `--codex-home /path/to/codex-home` to choose which installation to configure.
+This command updates Codex's user configuration to select hey-proxy and use automatic approval review (`approval_policy = "on-request"`, `approvals_reviewer = "auto_review"`). It also turns off Codex's direct usage reporting (`analytics.enabled = false`, `otel.metrics_exporter = "none"`). It applies these settings to the selected profile too, so new sessions use automatic review. It backs up changed existing files and preserves sandbox permissions and unrelated settings. Use `--model coding` to select an overwrite, or `--codex-home /path/to/codex-home` to choose which installation to configure.
 
 To create a separate Gemini profile while keeping Codex's default provider:
 
@@ -275,7 +273,7 @@ codex --profile gemini
 
 This writes `gemini.config.toml` in Codex's configuration directory. It uses Responses over HTTP, disables request compression, and enables client retries. Re-running it updates that profile. See the [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Normal startup, `--init`, credential checks, and remote rollout do not create or modify Codex files.
+Normal startup, `--init`, and credential checks do not create or modify Codex files. Remote rollout applies these same Codex settings after verifying the proxy.
 
 ## Configure Gemini CLI — optional
 

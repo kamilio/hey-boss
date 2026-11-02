@@ -39,8 +39,10 @@ threading.Thread(target=upstream.serve_forever, daemon=True).start()
 with tempfile.TemporaryDirectory(prefix='hey-proxy-role-test-') as folder:
     root = Path(folder)
     config_path = root / 'controller.json'
-    subprocess.run([BINARY, '--config', str(config_path), '--init'], check=True, capture_output=True)
-    data = json.loads(config_path.read_text())
+    controller_home = root / 'controller-home'
+    subprocess.run([BINARY, '--init'], env=dict(os.environ, HOME=str(controller_home)), check=True, capture_output=True)
+    data = json.loads(subprocess.run([BINARY, 'export-config'], env=dict(os.environ, HOME=str(controller_home)), check=True, capture_output=True, text=True).stdout)
+    data['auto_approve'] = True
     data['providers']['openai']['api_keys'] = {'default':'something'}
     data['aliases'] = [{'from':'gpt-4.1','to':'gpt-4.1-mini','reasoning':'low'}]
     host_port, client_port, solo_port = port(), port(), port()
@@ -146,8 +148,19 @@ else: raise AssertionError(command)
         calls = (root/'calls').read_text().splitlines()
         assert calls[0].startswith('fixture-host ')
         host_keys = json.loads((root/'fixture-host/.hey-boss/proxy/config.access-keys.json').read_text())
-        client_config = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-boss/proxy/config.yaml'), 'export-config'], check=True, capture_output=True, text=True).stdout)
-        assert isinstance(client_config['connection']['api_key'], dict) and client_config['connection']['api_key'].get('encrypted', '').startswith('v1:')
+        import tomllib
+        for name, local_port in [('fixture-host', host_port), ('fixture-client', client_port), ('fixture-solo', solo_port)]:
+            codex = tomllib.loads((root/name/'.codex/config.toml').read_text())
+            provider = codex['model_providers']['hey-proxy']
+            assert provider['base_url'] == f'http://127.0.0.1:{local_port}/v1', name
+            assert provider.get('experimental_bearer_token') == (host_keys['local'] if name == 'fixture-host' else None), name
+            assert codex['model_provider'] == 'hey-proxy' and codex['analytics'] == {'enabled': False}, name
+            assert codex['otel'] == {'metrics_exporter': 'none'}, name
+            exported_host = json.loads(subprocess.run([BINARY, '--config', str(root/name/'.hey-boss/proxy/config.yaml'), 'export-config'], check=True, capture_output=True, text=True).stdout)
+            assert exported_host['auto_approve'] is True, name
+        raw_client = (root/'fixture-client/.hey-boss/proxy/config.yaml').read_text()
+        assert 'encrypted: v1:' in raw_client or 'encrypted: "v1:' in raw_client
+        assert host_keys['clients']['fixture-client'] not in raw_client
         exported = json.loads(subprocess.run([BINARY, '--config', str(root/'fixture-client/.hey-boss/proxy/config.yaml'), 'export-config'], check=True, capture_output=True, text=True).stdout)
         assert exported['connection']['api_key'] == host_keys['clients']['fixture-client']
         response = urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{client_port}/v1/responses', data=b'{"model":"gpt-4.1","input":"fixture"}', headers={'Content-Type':'application/json'}))

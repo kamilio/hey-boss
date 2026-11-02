@@ -9,8 +9,9 @@ binary = os.environ.get('HEY_PROXY_TEST_BINARY', str(Path.home() / '.cargo/bin/h
 with tempfile.TemporaryDirectory(prefix='hey-proxy-test-') as folder:
     root = Path(folder)
     config = root / 'config.json'
-    subprocess.run([binary, '--config', str(config), '--init'], check=True, capture_output=True)
-    data = json.loads(config.read_text())
+    controller_home = root / 'controller-home'
+    subprocess.run([binary, '--init'], env=dict(os.environ, HOME=str(controller_home)), check=True, capture_output=True)
+    data = json.loads(subprocess.run([binary, 'export-config'], env=dict(os.environ, HOME=str(controller_home)), check=True, capture_output=True, text=True).stdout)
     data['aliases'] = [{'from':'coding','to':'gpt-4.1-mini'}]
     data['fallbacks'] = {'gpt-4.1':['gpt-4.1-mini']}
     data['ssh_hosts'] = ['fixture-ok', 'fixture-fail']
