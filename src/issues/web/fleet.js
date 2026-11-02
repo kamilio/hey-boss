@@ -118,26 +118,10 @@ function slotUsage(worker,machine,now=Date.now()) {
   const pickup=worker.config?.enabled&&(!worker.intent||worker.intent==='running');
   return {capacity,occupied,available:pickup?Math.max(0,capacity-occupied):0,paused:pickup?0:Math.max(0,capacity-occupied),online,running};
 }
-function workerScopeGroups(entries) {
-  const groups=new Map();
-  for(const entry of entries){
-    const projects=[...new Set(entry.worker.config?.projects||[])].sort(),key=JSON.stringify(projects);
-    if(!groups.has(key))groups.set(key,{key,projects,entries:[]});
-    groups.get(key).entries.push(entry);
-  }
-  for(const group of groups.values()){
-    const names=new Map(),shortIds=new Map();group.labels=new Map();
-    for(const {worker:w} of group.entries){
-      const name=w.config?.name||'Worker';
-      names.set(name,(names.get(name)||0)+1);
-      shortIds.set(w.id.slice(0,8),(shortIds.get(w.id.slice(0,8))||0)+1);
-    }
-    for(const {worker:w} of group.entries){
-      const name=w.config?.name||'Worker',id=shortIds.get(w.id.slice(0,8))>1?w.id:w.id.slice(0,8);
-      group.labels.set(w.id,names.get(name)>1||!w.config?.name?name+' · '+id:name);
-    }
-  }
-  return [...groups.values()];
+function projectWorkers(machine) {
+  return (machine.workers||[]).filter(w=>w.managed!==false &&
+    ((w.active||w.job_active||(w.runs||[]).some(r=>r.finished_at==null)) ||
+      !w.retiring && w.intent!=='stop' && w.intent!=='drain' && (w.pid>0||w.intent==='running'||w.intent==='pause')));
 }
 function workerCapacityUpdate(document, host, id, delta) {
   const worker=document.machines?.[host]?.workers?.find(w=>w.id===id&&!w.retiring);
@@ -207,7 +191,7 @@ function fleetAttention(data,now=Date.now()) {
   }
   return notices;
 }
-if (typeof module !== 'undefined') module.exports = {syncProblem, fleetAttention, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, workerScopeGroups, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
+if (typeof module !== 'undefined') module.exports = {syncProblem, fleetAttention, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, projectWorkers, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
@@ -217,7 +201,7 @@ if (typeof document !== 'undefined') (() => {
   const route = () => {const query=new URLSearchParams(location.hash.slice(1));if(!detail)query.set('workers','');return query;};
   let projects=[], defaultProject, csrf, last, refreshing=false, disposed=false;
   let configRevision, configOriginal='', configPreview, configBusy=false;
-  let workerFilter='current', workerSearch=route().get('find')||'', workerEdit, workerEditRevision, workerEditPreview, workerEditBusy=false;
+  let workerSearch=route().get('find')||'', workerEdit, workerEditRevision, workerEditPreview, workerEditBusy=false;
   let activityFilter='all';
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
   const seen = new Set();
@@ -254,110 +238,25 @@ if (typeof document !== 'undefined') (() => {
   const runLabel = run => HeyBossUI.actorLabel(run.actor_id || (run.session_id ? 'codex:'+run.session_id : 'agent:unknown'), run.model);
   const stateBadge = entry => element('span','agent-state '+(entry.online&&entry.run.finished_at==null?'is-live':entry.run.state==='completed'?'is-done':'is-quiet'),agentState(entry));
   function renderOverview(data) {
-    $('worker-status-view').href='/workers';
-    $('worker-config-view').href='/workers#view=configuration';
     $('worker-config').hidden=false;
     if(data.configuration?.error){$('config-status').textContent='File error: '+data.configuration.error+' The last valid configuration is still active.';}
     else if(configRevision&&data.configuration?.revision&&configRevision!==data.configuration.revision&&!configBusy){$('config-status').textContent='The file changed elsewhere. Reload before saving; your edits are still here.';configPreview=undefined;$('config-save').disabled=true;}
-    renderWorkerBoard(data);$('device-settings').hidden=true;
+    renderWorkerBoard(data);
   }
   const projectLabel=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'').split('/').pop();
-  const workerLabel=w=>w.config?.name&&!/^Worker(?: \d+)?$/.test(w.config.name)?w.config.name:(w.config?.projects||[]).map(projectLabel).join(' + ')||'Worker '+w.id.slice(0,8);
-  const scopeLabel=group=>group.projects.map(projectLabel).join(' + ')||'All projects';
-  const projectHasWorker=(machine,id)=>(machine.workers||[]).some(w=>!w.retiring&&(!(w.config?.projects||[]).length||w.config.projects.includes(id)));
+  const workerLabel=w=>(w.config?.projects||[]).map(projectLabel).join(' + ')||'All projects';
   function runtime(run){
     const time=element('time','agent-runtime',elapsed(run));time.hidden=!time.textContent;time.title='Agent runtime';
     if(!time.hidden&&run.finished_at==null)time.dataset.startedAt=run.started_at;
     return time;
   }
-  function renderFleetActivity(data) {
-    const board=$('worker-board'),focus=document.activeElement?.dataset.focus;
-    const known=new Set([...board.querySelectorAll('details')].map(d=>d.dataset.key));
-    const expanded=new Set([...board.querySelectorAll('details[open]')].map(d=>d.dataset.key));
-    const devices=deviceView(managedFleet(data));
-    const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,usage:slotUsage(worker,device.machine),phase:workerPhase(worker,device.machine)})));
-    renderFleetAttention(data);
-    const relevant=entries.filter(e=>e.worker.pid>0||e.worker.intent==='running'||e.worker.intent==='drain');
-    const filters=[['all','All'],['busy','Working'],['available','Available'],['attention','Needs attention']];
-    $('worker-filters').replaceChildren(...filters.map(([value,label])=>{const b=element('button','worker-filter',label);b.type='button';b.dataset.activityFilter=value;b.setAttribute('aria-pressed',String(activityFilter===value));return b;}));
-    const search=workerSearch.trim().toLowerCase();
-    const matches=e=>(activityFilter==='all'||activityFilter==='busy'&&(e.usage.occupied>0||e.worker.job_active>0)||activityFilter==='available'&&e.usage.available>0||activityFilter==='attention'&&e.phase.group==='attention')&&(!search||[workerLabel(e.worker),e.worker.id,e.device.machine.host,e.device.machine.hostname,...(e.worker.config?.projects||[]),...(e.worker.runs||[]).filter(r=>r.finished_at==null).flatMap(r=>[r.title,r.summary,r.last_event])].join(' ').toLowerCase().includes(search));
-    const activity=run=>{
-      const last=(run.last_event||'').replace(/\s+/g,' ').trim();
-      if(!last||/^(reasoning|tool|message|assistant|thinking)$/i.test(last))return run.summary||'Working on this task';
-      if(/^(\/bin\/|.* -lc )/.test(last))return 'Running a command';
-      if(/^(Goal:|Codex session|\/goal)/.test(last))return run.summary||'Working on this task';
-      return last;
-    };
-    function task(run,entry){
-      const a=element('a','activity-task');a.href=link({machine:entry.device.machine,run});a.dataset.focus=entry.device.machine.host+':task:'+run.id;
-      const meta=element('span','activity-task-meta');meta.append(element('span','',run.project_name||projectLabel(run.project_id||'')),element('span','',run.number?'#'+run.number:'Organizer'),element('span','agent-model',runLabel(run)));
-      const text=element('span','activity-task-copy');text.append(element('strong','',run.title||'Organizing project'),element('span','',activity(run)));
-      const state=element('span','activity-task-state',agentState({run,worker:entry.worker,machine:entry.device.machine,online:entry.device.online}));
-      a.append(meta,text,state,runtime(run),element('span','activity-task-arrow','↗'));return a;
-    }
-    function worker(entry,label,showLimit){
-      const {worker:w,device:d,usage:u,phase}=entry;
-      const runs=(w.runs||[]).filter(r=>r.finished_at==null);
-      const row=element('details','activity-worker');row.dataset.worker=w.id;row.dataset.key=d.machine.host+':worker:'+w.id;row.open=expanded.has(row.dataset.key);
-      const summary=element('summary','activity-worker-summary');summary.dataset.focus=row.dataset.key;
-      const identity=element('span','activity-worker-name');identity.append(element('strong','',label));
-      const slots=showLimit?capacityControls(d.machine,w):element('span','activity-worker-slots',d.online?u.occupied+' running':'Last known');
-      const current=element('span','activity-worker-current');
-      if(runs.length){const line=element('span','activity-current-line');line.append(element('span','activity-current-title',(runs[0].number?'#'+runs[0].number+' · ':'')+(runs[0].title||'Working')+(runs.length>1?' · +'+(runs.length-1)+' more':'')),runtime(runs[0]));current.append(line,element('span','activity-current-note',activity(runs[0])));}
-      else current.append(element('span','activity-current-note',u.occupied?'Working · task details unavailable':w.job_active?phase.note:u.available?'Waiting for a task':phase.note));
-      if(w.job_active&&(runs.length||u.occupied))current.append(element('span','activity-job-note',jobActivity(w.job_active)));
-      summary.append(identity,element('span','worker-state is-'+phase.group,phase.label),slots,current);row.append(summary);
-      const detail=element('div','activity-worker-detail');
-      if(runs.length){const tasks=element('div','activity-tasks');for(const run of runs)tasks.append(task(run,entry));detail.append(tasks);}
-      if(u.occupied>runs.length)detail.append(element('p','activity-note',(u.occupied-runs.length)+' more running agents; task details are unavailable.'));
-      if(phase.group==='attention')detail.append(element('p','activity-note activity-problem',phase.note));
-      const footer=element('div','activity-worker-footer');
-      footer.append(element('span','',u.running?[u.available?u.available+' available':null,u.paused?u.paused+' paused':null].filter(Boolean).join(' · '):(w.config?.projects||[]).map(projectLabel).join(', ')));
-      const edit=element('a','','Worker settings →');edit.href='/workers#view=configuration&find='+encodeURIComponent(w.id);edit.dataset.focus=row.dataset.key+':settings';footer.append(edit);detail.append(footer,removalActions(d.machine,w));row.append(detail);return row;
-    }
-    const sections=[];
-    for(const d of devices.sort((a,b)=>b.active-a.active||Number(b.online)-Number(a.online))){
-      const own=entries.filter(e=>e.device===d),shown=relevant.filter(e=>e.device===d&&matches(e));
-      const pendingProjects=Object.fromEntries(Object.entries(d.machine.projects||{}).filter(([id])=>!projectHasWorker(d.machine,id)&&(activityFilter==='all'||activityFilter==='attention'&&d.machine.configuration_error)&&(!search||[id,projectLabel(id),d.machine.host,d.machine.hostname].join(' ').toLowerCase().includes(search))));
-      if(!shown.length&&!Object.keys(pendingProjects).length&&(search||activityFilter!=='all'))continue;
-      const total=own.reduce((n,e)=>{for(const k of ['capacity','occupied','available','paused'])n[k]+=e.usage[k];return n;},{capacity:0,occupied:0,available:0,paused:0});
-      const section=element('details','activity-machine');section.dataset.host=d.machine.host;section.dataset.key='machine:'+d.machine.host;section.open=known.has(section.dataset.key)?expanded.has(section.dataset.key):true;
-      const heading=element('summary','activity-machine-heading');heading.dataset.focus=section.dataset.key;
-      const name=element('h2','',d.machine.host==='local'?'This machine':d.machine.hostname||d.machine.host);
-      heading.append(name,element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','activity-machine-usage',d.online?total.occupied+' agents running · '+total.available+' available'+(total.paused?' · '+total.paused+' paused':''):'Last known activity'));section.append(heading);section.append(machineControls(d.machine));
-      if(d.machine.configuration_error)section.append(configurationRecovery(d.machine,expanded));
-      section.append(machineProjects({...d.machine,projects:pendingProjects}));
-      shown.sort((a,b)=>b.usage.occupied-a.usage.occupied||Number(b.phase.group==='attention')-Number(a.phase.group==='attention')||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
-      for(const group of workerScopeGroups(shown)){
-        const scope=element('details','worker-scope-group');scope.dataset.key=section.dataset.key+':scope:'+group.key;scope.open=expanded.has(scope.dataset.key);
-        const summary=element('summary','worker-scope-heading');summary.dataset.focus=scope.dataset.key;
-        const usage=group.entries.reduce((n,e)=>{n.occupied+=e.usage.occupied;n.capacity+=e.usage.capacity;return n;},{occupied:0,capacity:0});
-        const current=group.entries.flatMap(e=>(e.worker.runs||[]).filter(r=>r.finished_at==null));
-        summary.append(element('h3','',scopeLabel(group)),group.entries.length===1?capacityControls(d.machine,group.entries[0].worker):element('span','scope-worker-count','Agent limit: '+group.entries.reduce((n,e)=>n+workerLimitState(e.worker,d.machine).limit,0)),element('span','scope-usage',d.online?usage.occupied+' '+(usage.occupied===1?'agent':'agents')+' running':'Last known'));
-        const jobCount=group.entries.reduce((n,e)=>n+(e.worker.job_active||0),0);
-        const preview=current.length?(current[0].number?'#'+current[0].number+' · ':'')+(current[0].title||'Working')+(current.length>1?' · +'+(current.length-1)+' more tasks':''):usage.occupied?'Working · task details unavailable':jobCount?jobActivity(jobCount):group.entries.some(e=>e.phase.group==='attention')?'Needs attention':group.entries.some(e=>e.usage.available)?'Waiting for a task':'Pickup paused';
-        const taskPreview=element('span','scope-current-task');taskPreview.append(element('span','scope-current-title',preview));if(current.length)taskPreview.append(runtime(current[0]));summary.append(taskPreview);scope.append(summary);
-        const labels=element('div','activity-columns');labels.append(element('span','','Worker'),element('span','','Status'),element('span','',group.entries.length===1?'Agents':'Agent limit'),element('span','','Current task · latest activity'));scope.append(labels);
-        for(const entry of group.entries)scope.append(worker(entry,group.labels.get(entry.worker.id),group.entries.length>1));section.append(scope);
-      }
-      if(!shown.length&&!Object.keys(pendingProjects).length)section.append(element('p','activity-note','No running workers.'));
-      const inactive=own.filter(e=>!relevant.includes(e)).length;
-      if(inactive){const a=element('a','activity-inactive',inactive+' paused or stopped workers →');a.href='/workers#view=configuration&find='+encodeURIComponent(d.machine.host);section.append(a);}sections.push(section);
-    }
-    board.replaceChildren(...(sections.length?sections:[element('p','activity-note','No workers match this filter.')]));
-    if(focus)[...board.querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
-  }
-
   function machineControls(machine) {
     const bar=element('div','machine-controls');
-    const add=element('button','button small','+ Add project');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,focus:machine.host+':project'});
+    const add=element('button','button small','Add project worker');add.type='button';Object.assign(add.dataset,{machineAction:'add',host:machine.host,focus:machine.host+':add'});
     bar.append(add);
-    const retiring=(machine.workers||[]).filter(w=>w.retiring&&w.pid>0);
-    if(retiring.length)bar.append(element('span','machine-draining',retiring.length+' finishing'));
     return bar;
   }
-  const capacityRequests=new Map(),retryRequests=new Map();
+  const capacityRequests=new Map(),retryRequests=new Map(),signalRequests=new Set();
   function configurationRecovery(machine,expanded){
     const panel=element('div','setup-recovery');
     for(const problem of configurationProblems(machine)){
@@ -387,32 +286,21 @@ if (typeof document !== 'undefined') (() => {
     if(request?.saved&&state.limit===request.limit)capacityRequests.delete(key);
     const pending=capacityRequests.get(key),limit=pending?.limit??state.limit;
     const controls=element('span','capacity-controls'),count=element('span','worker-stepper');count.setAttribute('role','group');
-    const name=workerLabel(worker),duplicate=(machine.workers||[]).filter(w=>workerLabel(w)===name).length>1;
-    const label=name+(duplicate?' · '+worker.id.slice(0,8):'')+' on '+(machine.hostname||machine.host);count.setAttribute('aria-label','Agent limit for '+label);
+    const label=workerLabel(worker)+' on '+(machine.hostname||machine.host);count.setAttribute('aria-label','Agent limit for '+label);
     for(const [delta,text] of [[-1,'−'],[0,String(limit)],[1,'+']]){
       const item=element(delta?'button':'span',delta?'worker-step':'worker-count',text);
       if(delta){item.type='button';Object.assign(item.dataset,{capacityDelta:delta,worker:worker.id,host:machine.host,focus:machine.host+':'+worker.id+':capacity:'+delta});item.setAttribute('aria-label',(delta>0?'Increase':'Decrease')+' agent limit for '+label);item.disabled=capacityBusy||worker.retiring||delta<0&&limit<=1||delta>0&&limit>=1024;}
       count.append(item);
     }
-    controls.append(count,element('span','capacity-caption','limit'));
+    controls.append(count,element('span','capacity-caption','agents'));
     const status=pending?(pending.saved?'Pending':'Saving…'):state.status;
     if(status){const note=element('span','capacity-status',status);note.setAttribute('role','status');note.title=pending?'Saving the requested agent limit.':state.note;controls.append(note);}
     return controls;
   }
-  function machineProjects(machine){
-    const panel=element('div','machine-projects');
-    for(const [id,project] of Object.entries(machine.projects||{})){
-      const row=element('div','machine-project');const copy=element('div');copy.append(element('strong','',projectLabel(id)),element('code','',project.resolved_path||project.path),element('small','',project.git));
-      row.append(copy);panel.append(row);
-      if((machine.workers||[]).some(w=>!w.retiring)){const add=element('button','button small','Assign');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,project:id});add.setAttribute('aria-label','Assign '+projectLabel(id)+' to a worker');row.append(add);}
-      const worker=element('button','button small','Add worker');worker.type='button';Object.assign(worker.dataset,{machineAction:'add',host:machine.host,project:id});worker.setAttribute('aria-label','Add worker for '+projectLabel(id));row.append(worker);
-    }
-    return panel;
-  }
   function removalActions(machine,worker){
     const actions=element('div','device-actions');
-    if(!worker.retiring){const remove=element('button','button small','Remove worker');remove.type='button';Object.assign(remove.dataset,{machineAction:'remove',host:machine.host,removeWorker:worker.id});actions.append(remove);}
-    else if(worker.pid>0){actions.append(element('span','device-note','Finishing current work before removal.'));const kill=element('button','button small danger','Kill now');kill.type='button';Object.assign(kill.dataset,{signal:'stop',worker:worker.id,host:machine.host});actions.append(kill);}
+    if(!worker.retiring){const remove=element('button','button small','Remove');remove.type='button';Object.assign(remove.dataset,{machineAction:'remove',host:machine.host,removeWorker:worker.id,focus:machine.host+':'+worker.id+':remove'});actions.append(remove);}
+    else if(worker.pid>0){actions.append(element('span','device-note','Finishing current work before removal.'));const kill=element('button','button small danger','Stop now');kill.type='button';Object.assign(kill.dataset,{signal:'stop',worker:worker.id,host:machine.host});actions.append(kill);}
     return actions;
   }
   function renderFleetAttention(data){
@@ -428,150 +316,91 @@ if (typeof document !== 'undefined') (() => {
     }
   }
 
+  // Keep keyed cards and controls in place while polling updates their content.
+  function updateWorkerNodes(parent, children) {
+    const key=node=>node.nodeType===1?(node.dataset.key||node.dataset.focus||node.id):null;
+    const keyed=new Map([...parent.childNodes].filter(key).map(node=>[key(node),node]));
+    let cursor=parent.firstChild;
+    for(const next of children){
+      const id=key(next);
+      let node=id?keyed.get(id):cursor&&!key(cursor)?cursor:null;
+      if(!node||node.nodeName!==next.nodeName){node=next;parent.insertBefore(node,cursor);}
+      else {
+        if(node!==cursor)parent.insertBefore(node,cursor);
+        if(node.nodeType===3){if(node.textContent!==next.textContent)node.textContent=next.textContent;}
+        else {
+          for(const attr of [...node.attributes])if(!next.hasAttribute(attr.name))node.removeAttribute(attr.name);
+          for(const attr of next.attributes)if(node.getAttribute(attr.name)!==attr.value)node.setAttribute(attr.name,attr.value);
+          updateWorkerNodes(node,[...next.childNodes]);
+        }
+      }
+      cursor=node.nextSibling;
+    }
+    while(cursor){const next=cursor.nextSibling;cursor.remove();cursor=next;}
+  }
   function renderWorkerBoard(data) {
-    const configuring=route().get('view')==='configuration';
-    document.querySelector('.page-heading h1').textContent=configuring?'Workers & settings':'Worker activity';
-    document.title=(configuring?'Worker settings':'Worker activity')+' · Hey Boss';
-    $('overview-note').textContent=configuring?'Manage saved workers across your machines.':'Running agents and agent limits across all projects.';
+    document.querySelector('.page-heading h1').textContent='Project workers';
+    document.title='Project workers · Hey Boss';
+    $('overview-note').textContent='Choose the projects. Set how many agents can work on them.';
     $('worker-view-help').hidden=true;
     document.body.classList.add('workers-page');
-    $('worker-status-view').setAttribute('aria-current',configuring?'false':'page');
-    $('worker-config-view').setAttribute('aria-current',configuring?'page':'false');
-    $('config-editor').hidden=!configuring;
-    if(!configuring){renderFleetActivity(data);return;}
-    const devices=deviceView(managedFleet(data));
-    const entries=devices.flatMap(device=>[...device.live,...device.saved].map(worker=>({device,worker,phase:workerPhase(worker,device.machine)})));
-    const count=group=>entries.filter(e=>e.phase.group===group).length;
-    renderFleetAttention(data);
-    $('worker-view-help').textContent=configuring?'Edit a worker’s settings below. Changes save to the supervisor’s fleet.yaml and apply automatically.':'Workers are grouped by machine. Expand a row for its tasks and controls. Stopped workers are kept out of the way.';
-    const filters=[['current','Current',entries.length-count('stopped')],['attention','Needs attention',count('attention')],['paused','Paused',count('paused')],['stopped','Stopped',count('stopped')],['all','All',entries.length]];
-    $('worker-filters').replaceChildren(...filters.map(([value,label,total])=>{const b=element('button','worker-filter',label+' '+total);b.type='button';b.dataset.filter=value;b.setAttribute('aria-pressed',String(workerFilter===value));return b;}));
-    const board=$('worker-board'),focus=document.activeElement?.dataset.focus;
+    const board=$('worker-board');
+    const focusedMachine=document.activeElement?.closest('.project-worker-machine')?.dataset.host;
     const expanded=new Set([...board.querySelectorAll('details[open]')].map(d=>d.dataset.key));
-    const search=workerSearch.trim().toLowerCase();
-    const matches=e=>(workerFilter==='all'||workerFilter==='current'&&e.phase.group!=='stopped'||e.phase.group===workerFilter)&&(!search||[workerLabel(e.worker),e.worker.id,e.device.machine.host,e.device.machine.hostname,...(e.worker.config?.projects||[])].join(' ').toLowerCase().includes(search));
-    function row(entry,label) {
-      const {worker:w,device:d,phase}=entry,m=d.machine;
-      const r=element('details','worker-record');r.dataset.key=m.host+':'+w.id;r.dataset.worker=w.id;r.open=expanded.has(r.dataset.key);
-      const summary=element('summary','worker-record-summary');
-      const identity=element('div','worker-record-identity');identity.append(element('strong','',label));
-      const state=element('span','worker-state is-'+phase.group,phase.label);
-      const slots=capacityControls(m,w);
-      summary.append(identity,state,slots);
-      if(configuring&&!w.retiring){const b=element('button','button small','Edit');b.type='button';Object.assign(b.dataset,{editWorker:w.id,host:m.host,focus:m.host+':'+w.id+':edit'});b.setAttribute('aria-label','Edit '+workerLabel(w)+' on '+(m.hostname||m.host));summary.append(b);}
-      else summary.append(element('span','worker-expand','Details'));
-      r.append(summary);
-      const body=element('div','worker-record-body');body.append(element('p',phase.group==='attention'?'worker-problem':'device-note',phase.note));
-      const facts=element('dl','worker-facts');
-      for(const [key,value] of [['Desired state',({running:'Pick up tasks',pause:'Paused',stop:'Stopped',drain:'Drain and stop'})[w.intent]||'Unknown'],['Worker ID',w.id],['Workspace',workspaceLabel(w.config?.worktree_enabled)],['Working directory',w.config?.directory||'Discovered per project'],...Object.entries(w.config?.directories||{}).map(([p,v])=>[projectLabel(p),v])]){facts.append(element('dt','',key),element('dd','',value));}body.append(facts);
-      const tasks=element('div','worker-tasks');
-      for(const run of (w.runs||[]).filter(r=>r.kind!=='chief'&&r.finished_at==null)){const a=element('a','worker-task');a.href=link({machine:m,run});a.append(element('strong','',run.title||run.project_name||'Agent'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(a);}
-      if(tasks.childNodes.length)body.append(element('h4','','Current tasks'),tasks);
-      const actions=element('div','device-actions');
-      for(const [signal,label] of w.retiring?[]:w.pid>0?[[w.config?.enabled?'pause':'resume',w.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']]){const b=element('button','button small',label);b.type='button';Object.assign(b.dataset,{signal,worker:w.id,host:m.host,focus:m.host+':'+w.id+':'+signal});actions.append(b);}
-      if(!w.retiring&&!configuring){const b=element('button','button small','Edit settings');b.type='button';Object.assign(b.dataset,{editWorker:w.id,host:m.host});actions.append(b);}body.append(actions,removalActions(m,w));
-      for(const signal of (data.signals||[]).filter(s=>s.host===m.host&&s.worker===w.id&&!['acknowledged','superseded'].includes(s.state)))body.append(element('p','device-note',signal.signal+': '+signal.state));
-      r.append(body);return r;
-    }
-    const sections=[];
-    for(const d of devices.sort((a,b)=>Number(!b.online||!!b.machine.configuration_error)-Number(!a.online||!!a.machine.configuration_error))){
-      const own=entries.filter(e=>e.device===d),shown=own.filter(matches);
-      const stopped=workerFilter==='current'&&!search?own.filter(e=>e.phase.group==='stopped'):[];
-      if(!shown.length&&!stopped.length&&(search||workerFilter!=='current'))continue;
-      const m=d.machine,section=element('section','worker-machine');section.dataset.host=m.host;
-      const heading=element('div','worker-machine-heading');const title=element('div');title.append(element('h2','',m.hostname||m.host),element('p','',m.host==='local'?'Supervisor · owns fleet.yaml':m.host));
-      const status=element('div','machine-status');status.append(element('span','machine-connection '+(d.online?'is-online':'is-offline'),d.online?'Connected':'Offline'),element('span','',!d.online?'Changes waiting for connection':m.configuration_error?'Configuration needs fixing':m.desired_revision===m.applied_revision?'Configuration applied':'Applying configuration'));heading.append(title,status);section.append(heading);
-      const metrics=element('p','machine-metrics',d.online?d.live.length+' running workers · '+d.active+' active agents · '+own.filter(e=>!e.worker.retiring).length+' configured workers':own.length+' configured workers · last seen '+(m.heartbeat?new Date(m.heartbeat*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'unknown'));section.append(metrics,machineControls(m),machineProjects(m));
-      if(m.configuration_error)section.append(configurationRecovery(m,expanded));
-      const rank={attention:0,working:1,ready:2,paused:3,stopped:4};shown.sort((a,b)=>rank[a.phase.group]-rank[b.phase.group]||workerLabel(a.worker).localeCompare(workerLabel(b.worker)));
-      for(const group of workerScopeGroups([...shown,...stopped])){
-        const scope=element('details','worker-scope-group settings-scope');scope.dataset.key=m.host+':settings-scope:'+group.key;scope.open=expanded.has(scope.dataset.key)||!!search;
-        const summary=element('summary','worker-scope-heading');summary.dataset.focus=scope.dataset.key;summary.append(element('h3','',scopeLabel(group)));
-        const template=group.entries.find(e=>!e.worker.retiring)?.worker;
-        if(template){const add=element('button','button small','Add worker configuration');add.type='button';Object.assign(add.dataset,{machineAction:'add',host:m.host,templateWorker:template.id,focus:m.host+':add:'+group.key});summary.append(add);}scope.append(summary);
-        const current=group.entries.filter(e=>!stopped.includes(e)),archived=group.entries.filter(e=>stopped.includes(e));
-        if(current.length){const labels=element('div','worker-column-labels');labels.append(element('span','','Worker'),element('span','','Status'),element('span','','Agent limit'),element('span','',''));scope.append(labels);for(const entry of current)scope.append(row(entry,group.labels.get(entry.worker.id)));}
-        if(archived.length){const archive=element('details','stopped-workers');archive.dataset.key=scope.dataset.key+':stopped';archive.open=expanded.has(archive.dataset.key);archive.append(element('summary','',archived.length+' stopped '+(archived.length===1?'worker':'workers')));for(const entry of archived)archive.append(row(entry,group.labels.get(entry.worker.id)));scope.append(archive);}section.append(scope);
+    renderFleetAttention(data);
+    const filters=[['all','All'],['busy','Working'],['paused','Paused'],['attention','Needs attention']];
+    updateWorkerNodes($('worker-filters'),filters.map(([value,label])=>{const b=element('button','worker-filter',label);b.type='button';b.dataset.activityFilter=value;b.dataset.key=value;b.setAttribute('aria-pressed',String(activityFilter===value));return b;}));
+    const search=workerSearch.trim().toLowerCase(),sections=[];
+    for(const machine of [...(data.machines||[])].sort((a,b)=>Number(b.host==='local')-Number(a.host==='local')||(a.hostname||a.host).localeCompare(b.hostname||b.host))){
+      const online=machine.state==='connected'&&Date.now()/1000-(machine.heartbeat||0)<=15;
+      const workers=projectWorkers(machine);
+      const shown=workers.filter(w=>{
+        const phase=workerPhase(w,machine);
+        return (activityFilter==='all'||activityFilter==='busy'&&phase.group==='working'||activityFilter==='paused'&&(w.intent==='pause'||w.config?.enabled===false&&!w.retiring)||activityFilter==='attention'&&phase.group==='attention')&&(!search||[workerLabel(w),w.id,machine.host,machine.hostname,...(w.runs||[]).flatMap(r=>[r.title,r.summary,r.last_event])].join(' ').toLowerCase().includes(search));
+      });
+      if(!shown.length&&(search||activityFilter!=='all'))continue;
+      const section=element('section','project-worker-machine');section.dataset.host=machine.host;section.dataset.key='machine:'+machine.host;
+      const heading=element('div','project-worker-machine-heading');
+      const title=element('div'),name=element('h2','',machine.host==='local'?'This machine · '+(machine.hostname||'Local'):machine.hostname||machine.host);name.tabIndex=-1;title.append(name,element('span','machine-connection '+(online?'is-online':'is-offline'),online?'Connected':'Offline · changes apply after reconnecting'));
+      heading.append(title,machineControls(machine));section.append(heading);
+      if(machine.configuration_error)section.append(configurationRecovery(machine,expanded));
+      const cards=element('div','project-worker-list');
+      for(const w of shown){
+        const phase=workerPhase(w,machine),usage=slotUsage(w,machine),key=machine.host+':'+w.id;
+        const card=element('article','project-worker');card.dataset.key=key;card.dataset.worker=w.id;
+        const header=element('div','project-worker-header'),identity=element('div','project-worker-identity');
+        identity.append(element('span','project-worker-label','Project worker'),element('h3','',workerLabel(w)));
+        header.append(identity,capacityControls(machine,w));card.append(header);
+        const status=element('div','project-worker-status');
+        status.append(element('span','worker-state is-'+phase.group,w.retiring?'Removing · finishing agents':phase.label),element('span','',online?usage.occupied+' '+(usage.occupied===1?'agent':'agents')+' running':'Last known activity'));
+        card.append(status);
+        if(phase.group==='attention')card.append(element('p','activity-problem',phase.note));
+        const actions=element('div','project-worker-actions');actions.dataset.key=key+':actions';
+        if(!w.retiring){
+          const add=element('button','button small','Add project');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,projectWorker:w.id,focus:key+':project'});add.disabled=!(w.config?.projects||[]).length;add.title=add.disabled?'This project worker already includes all projects.':'';actions.append(add);
+          const paused=w.intent==='pause'||w.intent==='drain'||w.intent==='stop'||w.config?.enabled===false;
+          const pickup=element('button','button small',paused?'Resume':'Pause');pickup.type='button';Object.assign(pickup.dataset,{signal:paused?'resume':'pause',worker:w.id,host:machine.host,focus:key+':pickup'});pickup.disabled=signalRequests.has(key);pickup.title=paused?'Start picking up tasks.':'Let current agents finish and pause new tasks.';actions.append(pickup);
+          const edit=element('button','button small','Settings');edit.type='button';Object.assign(edit.dataset,{editWorker:w.id,host:machine.host,focus:key+':settings'});actions.append(edit);
+        }
+        actions.append(...removalActions(machine,w).childNodes);card.append(actions);
+        const runs=(w.runs||[]).filter(r=>r.finished_at==null);
+        if(runs.length){
+          const tasks=element('div','project-worker-tasks');tasks.dataset.key=key+':tasks';
+          for(const run of runs){
+            const task=element('a','project-worker-task');task.href=link({machine,run});task.dataset.key=key+':run:'+run.id;
+            const text=element('span');text.append(element('strong','',run.title||'Working'),element('small','',[(run.project_name||projectLabel(run.project_id||'')),run.number?'#'+run.number:'',runLabel(run)].filter(Boolean).join(' · ')));if(run.summary||run.last_event)text.append(element('span','project-worker-task-note',run.summary||run.last_event));const state=element('span','project-worker-task-state');state.append(element('span','',agentState({run,online})),runtime(run));task.append(text,state);tasks.append(task);
+          }
+          card.append(tasks);
+        }else if(usage.occupied||w.job_active)card.append(element('p','activity-note',w.job_active?jobActivity(w.job_active):'Agents are working. Task details are not available yet.'));
+        cards.append(card);
       }
-      if(!shown.length&&!stopped.length)section.append(element('p','worker-empty','No workers configured.'));
-      sections.push(section);
+      if(!shown.length)cards.append(element('p','project-worker-empty','Add a project worker to start running agents on this machine.'));
+      section.append(cards);sections.push(section);
     }
-    board.replaceChildren(...(sections.length?sections:[element('p','worker-empty','No workers match this filter.')]));
-    if(focus)[...board.querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
+    updateWorkerNodes(board,sections.length?sections:[element('p','worker-empty','No project workers match this filter.')]);
+    if(focusedMachine&&document.activeElement===document.body)[...board.querySelectorAll('.project-worker-machine')].find(section=>section.dataset.host===focusedMachine)?.querySelector('h2')?.focus({preventScroll:true});
   }
 
-  function renderDevices(data) {
-    const workersPage=route().has('workers');
-    const open=workersPage||$('device-settings').open;
-    const savedOpen=new Set([...$('device-list').querySelectorAll('details[open]')].map(d=>d.dataset.host));
-    const project=workersPage||route().get('scope')==='all'?null:route().get('project');
-    const devices=deviceView(workersPage?managedFleet(data):data,project);
-    const projectName=id=>projects.find(p=>p.id===id)?.name||id.replace(/^named:/,'');
-    $('device-help').textContent=(project?'Workers that can pick up tasks for '+projectName(project)+'.':'Workers across all projects.')+' Each worker manages its own agent slots. Controls below affect that worker, including all its projects.';
-    const controls=[];
-    function workerRow(worker,device) {
-      const {machine,online}=device, running=worker.pid>0;
-      const active=worker.active??(worker.runs||[]).filter(r=>r.finished_at==null).length;
-      const name=worker.config?.name;
-      const label=name&&!/^Worker \d+$/.test(name)?name:'Worker '+worker.id.slice(0,8);
-      const row=element('div','device-row');row.dataset.worker=worker.id;
-      const info=element('div','worker-info');
-      const heading=element('div','worker-heading');heading.append(element('strong','worker-name',label));
-      if(name&&!/^Worker \d+$/.test(name))heading.append(element('span','worker-id',worker.id.slice(0,8)));
-      const state=!online?(running?'Last seen running':'Offline'):!running&&worker.retry_at>Date.now()/1000?'Retrying':worker.intent==='drain'?'Draining':worker.intent==='pause'?'Paused':!running?(worker.intent==='running'?'Starting':'Stopped'):!worker.config?.enabled?(active||worker.job_active?'Draining':'Paused'):(active||worker.job_active?'Working':'Idle');
-      heading.append(element('span','worker-state',state));info.append(heading);
-      const ids=worker.config?.projects||[];
-      info.append(element('p','worker-projects',ids.length?ids.map(projectName).join(', '):'All projects'));
-      const directories=Object.entries(worker.config?.directories||{});
-      if(directories.length){
-        for(const [project,path] of directories){
-          const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory · '+projectName(project)),element('code','',path));info.append(cwd);
-        }
-      }else{
-        const cwd=element('p','worker-directory');cwd.append(element('span','','Working directory'),element('code','',worker.config?.directory||'Discovered per project'));info.append(cwd);
-      }
-      info.append(element('p','worker-capacity',running?(online?'':'Last known: ')+active+' active '+(active===1?'agent':'agents')+' · '+(worker.config?.concurrency||1)+' '+((worker.config?.concurrency||1)===1?'slot':'slots'):'No running agents'));
-      if(worker.job_active)info.append(element('p','worker-capacity',worker.job_active+' running '+(worker.job_active===1?'job':'jobs')+' · no task slots used'));
-      row.append(info);
-      const buttons=element('div','device-actions');
-      const actions=worker.retiring?[]:running?[[worker.config?.enabled?'pause':'resume',worker.config?.enabled?'Pause pickup':'Resume pickup'],['restart','Restart worker'],['stop','Stop worker']]:[['resume','Start worker']];
-      const hints={pause:'Finish current agents, then pause new task pickup.',resume:'Enable task pickup and start this worker if needed.',restart:'Stop this worker’s current agents and restart the worker.',stop:'Stop this worker and its current agents. It stays stopped until started again.'};
-      for(const [action,text] of actions){
-        const b=element('button','button small',text);b.type='button';b.title=hints[action];Object.assign(b.dataset,{signal:action,host:machine.host,worker:worker.id,focus:machine.host+':'+worker.id+':'+action});b.setAttribute('aria-label',text+' · '+label+' on '+(machine.hostname||machine.host));buttons.append(b);
-      }
-      row.append(buttons);
-      if(workersPage){
-        if(worker.error)row.append(element('p','device-note',worker.error));
-        if(online&&running&&!active&&worker.config?.enabled&&worker.eligible===0)row.append(element('p','device-note','Waiting for eligible issues.'));
-        const tasks=element('div','worker-tasks');
-        for(const run of (worker.runs||[]).filter(r=>r.kind!=='chief'&&r.finished_at==null)){
-          const task=element('a','worker-task');task.href=link({machine,run});
-          task.append(element('strong','',run.title||run.project_name||'Agent'),element('span','',run.summary||run.last_event||'Working'),element('small','',elapsed(run)));tasks.append(task);
-        }
-        if(tasks.childNodes.length)row.append(tasks);
-      }
-      if(!online)row.append(element('p','device-note','Device disconnected. Actions will wait for it to reconnect.'));
-      for(const signal of (data.signals||[]).filter(s=>s.host===machine.host&&s.worker===worker.id&&s.state!=='acknowledged'))row.append(element('p','device-note',`${signal.signal}: ${signal.state}${machine.state==='connected'?'':' · waiting for connection'}`));
-      return row;
-    }
-    for(const device of devices){
-      const {machine,online,live,saved,active,capacity}=device;
-      const section=element('section','device-group');section.dataset.host=machine.host;
-      const heading=element('div','device-heading');heading.append(element('h3','',machine.hostname||machine.host),element('span','device-connection',online?'Connected':'Disconnected'));section.append(heading);
-      section.append(element('p','device-summary',online?live.length+' running '+(live.length===1?'worker':'workers')+' · '+active+' active '+(active===1?'agent':'agents')+' / '+capacity+' slots':'Showing last known worker state'));
-      if(machine.configuration_error)section.append(element('p','error','Configuration: '+machine.configuration_error));
-      else if(machine.desired_revision)section.append(element('p','device-summary',machine.desired_revision===machine.applied_revision?'Configuration applied':online?'Applying saved configuration…':'Saved · waiting for connection'));
-      for(const worker of live)section.append(workerRow(worker,device));
-      if(workersPage){for(const worker of saved)section.append(workerRow(worker,device));}
-      else if(saved.length){const past=element('details','saved-workers');past.dataset.host=machine.host;past.open=savedOpen.has(machine.host);past.append(element('summary','',saved.length+' '+(online?'stopped':'last seen stopped')+' '+(saved.length===1?'worker':'workers')));for(const worker of saved)past.append(workerRow(worker,device));section.append(past);}
-      if(!live.length&&!saved.length)section.append(element('p','device-note','No workers configured.'));
-      controls.push(section);
-    }
-    const focus=document.activeElement?.dataset.focus;
-    $('device-list').replaceChildren(...controls);$('device-settings').open=open;
-    if(focus)[...$('device-list').querySelectorAll('[data-focus]')].find(e=>e.dataset.focus===focus)?.focus({preventScroll:true});
-    $('device-settings').hidden=!workersPage&&(mobile||!controls.length);
-  }
   function taskNavigation(run={}) {
     const project=run.project_id||route().get('project');
     const number=Number(run.number||route().get('issue'));
@@ -681,7 +510,7 @@ if (typeof document !== 'undefined') (() => {
     const wait=Math.max(0,400-(Date.now()-lastRefreshAt));
     if(wait>0){if(refreshQueued)return;refreshQueued=true;setTimeout(()=>{refreshQueued=false;refresh();},wait);return;}
     refreshing=true;
-    try{render(await read('/api/fleet/status'));$('error').hidden=true;}catch(e){fail(e);if(last)render(last);}finally{lastRefreshAt=Date.now();refreshing=false;if(refreshQueued){refreshQueued=false;setTimeout(()=>refresh(),400);}}
+    try{render(await read('/api/fleet/status'));}catch(e){fail(e);if(last)render(last);}finally{lastRefreshAt=Date.now();refreshing=false;if(refreshQueued){refreshQueued=false;setTimeout(()=>refresh(),400);}}
   }
   function message(item) {
     const row=element(item.role==='tool'||item.role==='activity'?'details':'article','chat-message '+item.role);row.dataset.message=item.id;
@@ -806,7 +635,7 @@ if (typeof document !== 'undefined') (() => {
     finally{clearTimeout(timeout);steerBusy=false;for(const control of $('steer-form').elements)control.disabled=false;if(selected&&!disposed)renderTakeover();}
   };
   $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
-  $('refresh').onclick=async()=>{await refresh();if(detail)await loadConversation();};
+  $('refresh').onclick=async()=>{$('error').hidden=true;await refresh();if(detail)await loadConversation();};
   async function configRequest(body) {
     const response=await fetch('/api/fleet/configuration',{cache:'no-store',...(body?{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify(body)}:{})});
     const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not load configuration.');return data;
@@ -841,8 +670,8 @@ if (typeof document !== 'undefined') (() => {
     configBusy=true;configButtons();$('config-status').textContent='Loading configuration…';
     try{const data=await configRequest();configRevision=data.revision;configOriginal=data.text;$('config-text').value=data.text;configPreview=undefined;$('config-source').textContent=data.source;$('config-changes').replaceChildren();$('config-status').textContent=data.error?'File error: '+data.error:'Loaded from the supervisor. Changes are applied after saving.';}catch(error){$('config-status').textContent=error.message;}finally{configBusy=false;configButtons();}
   }
-  $('worker-filters').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.activityFilter)activityFilter=b.dataset.activityFilter;else if(b.dataset.filter)workerFilter=b.dataset.filter;if(last)renderWorkerBoard(last);};
-  $('worker-search').value=workerSearch;if(workerSearch)workerFilter='all';
+  $('worker-filters').onclick=event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.activityFilter)activityFilter=b.dataset.activityFilter;if(last)renderWorkerBoard(last);};
+  $('worker-search').value=workerSearch;
   $('worker-search').oninput=event=>{workerSearch=event.target.value;if(last)renderWorkerBoard(last);};
   function workerEditButtons(){for(const input of $('worker-form').querySelectorAll('input,textarea,select'))input.disabled=workerEditBusy;$('worker-editor-preview').disabled=workerEditBusy;$('worker-editor-save').disabled=workerEditBusy||!workerEditPreview;$('worker-editor-cancel').disabled=workerEditBusy;}
   const editFields=['name','provider','slots','intent','workspace','projects','directory','directories'];
@@ -858,8 +687,8 @@ if (typeof document !== 'undefined') (() => {
       const worker=data.document?.machines?.[host]?.workers?.find(w=>w.id===id);
       if(!worker)throw Error(data.error||'This worker is no longer configured. Reload the page.');
       workerEdit={host,id,worker};$('worker-scope').open=!!last?.machines?.find(m=>m.host===host)?.configuration_error?.includes(id);workerEditRevision=data.revision;workerEditPreview=undefined;
-      $('worker-editor-title').textContent='Edit '+workerLabel(worker);
-      $('worker-editor-context').textContent=host+' · '+id;
+      $('worker-editor-title').textContent='Project worker settings';
+      $('worker-editor-context').textContent=workerLabel(worker)+' · '+host;
       $('worker-name').value=worker.config?.name||'Worker';$('worker-provider').value=worker.config?.provider||'codex';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
       $('worker-workspace').value=String(worker.config?.worktree_enabled===true);
       $('worker-projects').value=(worker.config?.projects||[]).join('\n');$('worker-directory').value=worker.config?.directory||'';$('worker-directories').value=Object.entries(worker.config?.directories||{}).map(([p,d])=>p+' = '+d).join('\n');
@@ -891,48 +720,37 @@ if (typeof document !== 'undefined') (() => {
   };
   let machineEdit=null,machineBusy=false,machinePathEdited=false;
   function machineButtons(){for(const input of $('machine-form').elements)input.disabled=machineBusy;}
-  async function openMachineEditor(host,action,workerId,projectId,templateId){
+  async function openMachineEditor(host,action,workerId,projectId){
     if(machineBusy)return;
     if(configRevision&&$('config-text').value!==configOriginal){fail(Error('Save or reload your unsaved YAML changes first.'));return;}
     machineBusy=true;
     try{
       const data=await configRequest(),machine=data.document?.machines?.[host]||(last?.machines?.some(m=>m.host===host)?{workers:[]}:null);
       if(!machine)throw Error('Machine is no longer configured. Reload the page.');
-      const template=machine.workers?.find(w=>w.id===templateId&&!w.retiring);
-      const scope=template?JSON.stringify([...(template.config?.projects||[])].sort()):null;
-      const workers=(machine.workers||[]).filter(w=>!w.retiring&&(!scope||JSON.stringify([...(w.config?.projects||[])].sort())===scope));
+      const worker=machine.workers?.find(w=>w.id===workerId&&!w.retiring);
+      if(['remove','project'].includes(action)&&!worker)throw Error('This project worker is no longer configured. Reload the page.');
       if(action==='edit-project'&&!machine.projects?.[projectId])throw Error('Project is no longer configured. Reload the page.');
-      machineEdit={host,action,projectId,revision:data.revision,id:HeyBossUI.requestId()};machinePathEdited=false;
+      machineEdit={host,action,workerId,projectId,revision:data.revision,id:HeyBossUI.requestId()};machinePathEdited=false;
       const name=last?.machines?.find(m=>m.host===host)?.hostname||host;
-      $('machine-editor-context').textContent=name;
-      $('machine-editor-title').textContent=({add:'Add a worker',remove:'Remove a worker',project:'Add a project','edit-project':'Edit checkout'})[action];
-      $('machine-editor-description').textContent=({add:'Choose its settings. The new worker will start picking up tasks.',remove:'This worker will stop picking up tasks and finish its current work. You can kill it immediately while it is finishing.',project:'Set up a checkout on this machine. Choose a worker to let it pick up tasks for this project, or prepare the checkout only and keep worker assignments unchanged.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
-      for(const field of ['template','slots','project','worker','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['template','slots'],remove:['worker'],project:['project','worker','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
+      $('machine-editor-context').textContent=(worker?workerLabel(worker)+' · ':'')+name;
+      $('machine-editor-title').textContent=({add:'Add project worker',remove:'Remove project worker',project:'Add project','edit-project':'Edit checkout'})[action];
+      $('machine-editor-description').textContent=({add:'Choose its first project and agent limit. You can add more projects to it later.',remove:'Stop picking up tasks and let current agents finish. The project worker will disappear when its work is done. Project files are kept.',project:'Add a project to this project worker. Its projects share the same agent limit.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
+      for(const field of ['slots','project','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['slots','project','git','workspace','path'],remove:[],project:['project','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
       const choices=new Map(projects.map(p=>[p.id,{...p}]));
-      for(const configured of [...Object.values(data.document?.machines||{}),machine])for(const [id,checkout] of Object.entries(configured.projects||{})){
-        choices.set(id,{...choices.get(id),id,name:choices.get(id)?.name||projectLabel(id),git:checkout.git});
-      }
-      $('machine-project').replaceChildren(new Option('New Git repository…',''));
-      for(const project of [...choices.values()].filter(p=>!p.hidden_at).sort((a,b)=>a.name.localeCompare(b.name))){
+      for(const configured of Object.values(data.document?.machines||{}))for(const [id,checkout] of Object.entries(configured.projects||{}))choices.set(id,{...choices.get(id),id,name:choices.get(id)?.name||projectLabel(id),git:checkout.git});
+      $('machine-project').replaceChildren(new Option('Choose a project or enter a Git URL…',''));
+      for(const project of [...choices.values()].filter(p=>!p.hidden_at&&!worker?.config?.projects?.includes(p.id)).sort((a,b)=>a.name.localeCompare(b.name))){
         const git=project.git||(/^[^/:\s]+(?::\d+)?\/[^\s?#]+$/.test(project.id)?'https://'+project.id+'.git':'');
-        const option=new Option(project.name+(git?'':' · No Git repository'),project.id);
-        option.dataset.git=git;option.disabled=!git;$('machine-project').append(option);
+        const option=new Option(project.name+(git?'':' · No Git repository'),project.id);option.dataset.git=git;option.disabled=!git;$('machine-project').append(option);
       }
-      $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=false;
-      const options=(select,empty)=>{select.replaceChildren();if(empty){const option=element('option','',empty);option.value='';select.append(option);}for(const worker of workers){const option=element('option','',workerLabel(worker)+' · '+worker.id.slice(0,12));option.value=worker.id;select.append(option);}};
-      options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Prepare checkout only':null);
-      if(action==='project'&&!workers.length){$('machine-worker-field').hidden=true;$('machine-editor-description').textContent='Set up the checkout, then add a worker and choose its agent limit.';}
-      if(template){$('machine-template').value=template.id;$('machine-slots-field').hidden=true;$('machine-editor-context').textContent=scopeLabel({projects:template.config?.projects||[]})+' · '+name;}
-      if(action==='add'&&projectId){$('machine-template-field').hidden=true;$('machine-template').value='';$('machine-editor-context').textContent=projectLabel(projectId)+' · '+name;}
-      if(workerId)$('machine-worker').value=workerId;
+      $('machine-git').required=action!=='remove';$('machine-workspace').required=action!=='remove';$('machine-path').required=false;
       $('machine-slots').value='1';$('machine-workspace').value=machine.workspace||'~/Workspace';$('machine-git').value='';$('machine-path').value='';
-      if(projectId&&machine.projects?.[projectId]){const project=machine.projects[projectId];$('machine-git').value=project.git;$('machine-path').value=project.reuse_existing?'':project.path;machinePathEdited=!project.reuse_existing;}
+      if(projectId&&machine.projects?.[projectId]){const project=machine.projects[projectId];$('machine-git').value=project.git;$('machine-path').value=project.reuse_existing?'':project.path;machinePathEdited=!project.reuse_existing;$('machine-project').value=projectId;}
       $('machine-editor-status').textContent=last?.machines?.find(m=>m.host===host)?.state==='disconnected'?'This machine is offline. Changes apply when it reconnects.':'';
-      $('machine-editor-save').textContent=({add:'Add worker',remove:'Finish & remove',project:'Save project','edit-project':'Save & retry'})[action];
+      $('machine-editor-save').textContent=({add:'Create project worker',remove:'Remove project worker',project:'Add project','edit-project':'Save & retry'})[action];
       suggestCheckout();$('machine-editor').showModal();
     }catch(error){fail(error);}finally{machineBusy=false;machineButtons();}
   }
-  $('machine-template').onchange=()=>{$('machine-slots-field').hidden=!!$('machine-template').value;};
   function suggestCheckout(){if(machinePathEdited)return;const git=$('machine-git').value.trim().replace(/\/+$|\.git$/g,'');const name=git.split(/[/:]/).pop();$('machine-path').placeholder=name?'Automatic · '+$('machine-workspace').value.replace(/\/+$/,'')+'/'+name:'Automatic';}
   $('machine-project').onchange=()=>{$('machine-git').value=$('machine-project').selectedOptions[0]?.dataset.git||'';suggestCheckout();};
   $('machine-git').oninput=()=>{$('machine-project').value='';suggestCheckout();};$('machine-workspace').oninput=suggestCheckout;$('machine-path').oninput=()=>{machinePathEdited=!!$('machine-path').value;};
@@ -941,25 +759,19 @@ if (typeof document !== 'undefined') (() => {
   $('machine-form').onsubmit=async event=>{
     event.preventDefault();if(machineBusy||!machineEdit)return;machineBusy=true;machineButtons();$('machine-editor-status').textContent='Saving…';
     try{
-      const {host,action,id,revision,projectId}=machineEdit;let update={host,action};
-      if(action==='add')Object.assign(update,{id,concurrency:Number($('machine-slots').value),...(projectId?{project:projectId}:$('machine-template').value?{template:$('machine-template').value}:{})});
-      if(action==='remove')update.id=$('machine-worker').value;
-      if(['project','edit-project'].includes(action))Object.assign(update,{git:$('machine-git').value.trim(),workspace:$('machine-workspace').value.trim(),path:$('machine-path').value.trim(),...(action==='edit-project'?{project:projectId}:{worker:$('machine-worker').value})});
+      const {host,action,id,revision,projectId,workerId}=machineEdit;let update={host,action};
+      if(action==='add')Object.assign(update,{id,concurrency:Number($('machine-slots').value)});
+      if(action==='remove')update.id=workerId;
+      if(['add','project','edit-project'].includes(action))Object.assign(update,{git:$('machine-git').value.trim(),workspace:$('machine-workspace').value.trim(),path:$('machine-path').value.trim(),...(action==='edit-project'?{project:projectId}:action==='project'?{worker:workerId}:{})});
       const saved=await configRequest({machine_update:update,revision,save:true});
       if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
-      $('worker-save-note').textContent=action==='remove'?'Worker is finishing its current work. Expand it to kill it now.':['project','edit-project'].includes(action)?'Project saved. Its machine will prepare the checkout and apply worker settings.':'Worker added. Its machine will start it automatically.';$('worker-save-note').hidden=false;
-      if(action==='project'){
-        const machine=saved.document?.machines?.[host],project=Object.entries(machine?.projects||{}).find(([,p])=>p.git===update.git)?.[0];
-        if(project&&!projectHasWorker(machine,project)){
-          $('worker-save-note').textContent='Project saved. Add a worker to start agents. ';
-          const next=element('button','button small','Add worker');next.type='button';next.onclick=()=>openMachineEditor(host,'add',null,project);$('worker-save-note').append(next);
-        }
-      }
+      $('worker-save-note').textContent=action==='remove'?'Project worker removed. Any current agents will finish; project files are kept.':action==='project'?'Project added. It shares this project worker’s agent limit.':action==='edit-project'?'Checkout saved. Retrying setup.':'Project worker created. Its machine will prepare the checkout and start picking up tasks.';$('worker-save-note').hidden=false;
       if(action==='edit-project')await configRequest({retry_project:{host,project:projectId}});
-      $('machine-editor').close();machineEdit=null;await refresh();
+      $('machine-editor').close();machineEdit=null;render(await read('/api/fleet/status'));
     }catch(error){$('machine-editor-status').textContent=error.message;}finally{machineBusy=false;machineButtons();}
   };
   $('worker-board').onclick=async event=>{
+    $('error').hidden=true;
     const retry=event.target.closest('[data-retry-project]');
     if(retry){event.preventDefault();const {host,retryProject:project}=retry.dataset,key=host+':'+project;if(retryRequests.has(key))return;
       retryRequests.set(key,'Requesting retry…');if(last)render(last);
@@ -983,11 +795,11 @@ if (typeof document !== 'undefined') (() => {
         await refresh();
       }catch(error){capacityRequests.delete(capacity.dataset.host+':'+capacity.dataset.worker);fail(error);}finally{capacityBusy=false;if(last)render(last);}return;
     }
-    const machine=event.target.closest('[data-machine-action]');if(machine){event.preventDefault();await openMachineEditor(machine.dataset.host,machine.dataset.machineAction,machine.dataset.removeWorker,machine.dataset.project,machine.dataset.templateWorker);return;}
+    const machine=event.target.closest('[data-machine-action]');if(machine){event.preventDefault();await openMachineEditor(machine.dataset.host,machine.dataset.machineAction,machine.dataset.removeWorker||machine.dataset.projectWorker,machine.dataset.project);return;}
     const edit=event.target.closest('[data-edit-worker]');if(edit){event.preventDefault();await openWorkerEditor(edit.dataset.host,edit.dataset.editWorker);return;}
     const b=event.target.closest('button[data-signal]');if(!b)return;
     if(['stop','restart'].includes(b.dataset.signal)&&!(await confirmFleet((b.dataset.signal==='stop'?'Stop':'Restart')+' this worker?','This will '+(b.dataset.signal==='stop'?'stop':'restart')+' the worker and its currently running agents.',b.dataset.signal==='stop'?'Stop worker':'Restart worker',b.dataset.signal==='stop')))return;
-    b.disabled=true;try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(error){fail(error);}finally{b.disabled=false;}
+    const signalKey=b.dataset.host+':'+b.dataset.worker;if(signalRequests.has(signalKey))return;signalRequests.add(signalKey);b.disabled=true;try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');render(await read('/api/fleet/status'));}catch(error){fail(error);}finally{signalRequests.delete(signalKey);if(last)render(last);}
   };
 
   $('config-editor').addEventListener('toggle',()=>{if($('config-editor').open&&configRevision===undefined)loadConfig();});
@@ -1003,13 +815,7 @@ if (typeof document !== 'undefined') (() => {
   }
   $('config-validate').onclick=()=>submitConfig(false);$('config-save').onclick=()=>submitConfig(true);
   addEventListener('beforeunload',event=>{if(configRevision&&$('config-text').value!==configOriginal||workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
-  $('device-list').onclick=async event=>{
-    const b=event.target.closest('button[data-signal]');if(!b)return;
-    if(b.dataset.signal==='stop'&&!(await confirmFleet('Stop agents on this device?','Currently running agents on this device will stop. Their saved conversations will remain available.','Stop agents',true)))return;
-    b.disabled=true;
-    try{const response=await fetch('/api/fleet',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({kind:'signal',host:b.dataset.host,worker:b.dataset.worker,signal:b.dataset.signal,id:HeyBossUI.requestId()})});const data=await response.json();if(!response.ok||data.ok===false)throw Error(data.error?.message||data.error||'Could not apply this change.');await refresh();}catch(e){fail(e);}finally{b.disabled=false;}
-  };
-  addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;workerFilter='all';}if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;}if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{

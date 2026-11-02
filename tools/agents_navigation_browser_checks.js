@@ -7,7 +7,6 @@ async page => {
   await visit('/workers#project=named%3AAtlas');
   check(await page.locator('.fleet-tabs').count()===0,'No standalone conversation navigation');
   check(await page.locator('#worker-config').isVisible(),'Workers opens by default');
-  await page.locator('#worker-config-view').click();
   await page.locator('#config-editor').waitFor({state:'visible'});
   await page.locator('#project-trigger').click();
   await page.locator('button[data-project="named:Beacon"]').click();

@@ -500,6 +500,12 @@ pub(super) fn request(ctx: &Context, request: &Value) -> Result<Value> {
 }
 
 fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
+    // Create the checkout and its project worker in the same configuration save.
+    if update["action"] == "add" && update.get("git").is_some() {
+        let mut checkout = update.clone();
+        checkout["action"] = json!("project");
+        machine_update(doc, &checkout)?;
+    }
     let host = update["host"]
         .as_str()
         .filter(|h| context::valid_host(h))
@@ -513,7 +519,9 @@ fn machine_update(doc: &mut Value, update: &Value) -> Result<()> {
             let id = update["id"]
                 .as_str()
                 .ok_or_else(|| invalid("Missing worker ID"))?;
-            let project_ids: Vec<_> = if let Some(project) = update.get("project") {
+            let project_ids: Vec<_> = if let Some(git) = update["git"].as_str() {
+                vec![super::projects::identity(git.trim())?]
+            } else if let Some(project) = update.get("project") {
                 let project = project
                     .as_str()
                     .filter(|id| machine["projects"].get(*id).is_some())
@@ -808,6 +816,65 @@ mod tests {
         assert_eq!(
             reloaded["document"]["machines"]["local"]["workspace"],
             "~/Work"
+        );
+    }
+
+    #[test]
+    fn adding_project_to_worker_preserves_capacity_and_existing_checkout() {
+        let mut doc = parse("machines: {local: {workers: [{id: tools, intent: pause, config: {projects: [github.com/acme/tools], concurrency: 4, provider: claude, tags: [ready], directory: /work/tools}}]}}\n").unwrap();
+        machine_update(&mut doc, &json!({"host":"local","action":"project","worker":"tools","git":"https://github.com/acme/atlas.git","workspace":"~"})).unwrap();
+        let worker = &doc["machines"]["local"]["workers"][0];
+        assert_eq!(worker["intent"], "pause");
+        assert_eq!(
+            worker["config"]["projects"],
+            json!(["github.com/acme/tools", "github.com/acme/atlas"])
+        );
+        assert_eq!(
+            worker["config"]["directories"]["github.com/acme/tools"],
+            "/work/tools"
+        );
+        assert_eq!(worker["config"]["directory"], "");
+        assert_eq!(worker["config"]["concurrency"], 4);
+        assert_eq!(worker["config"]["provider"], "claude");
+        assert_eq!(worker["config"]["tags"], json!(["ready"]));
+        assert!(parse(&serde_yaml_ng::to_string(&compact(&doc)).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn project_worker_creation_saves_checkout_and_capacity_atomically() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::write(&ctx.desired, "machines: {local: {workers: []}}\n").unwrap();
+        let current = request(ctx, &json!({})).unwrap();
+        let mut update = json!({"host":"local","action":"add","id":"atlas-worker","git":"https://github.com/acme/atlas.git","workspace":"~","path":"","concurrency":3});
+        let saved = request(
+            ctx,
+            &json!({"machine_update":update,"revision":current["revision"],"save":true}),
+        )
+        .unwrap();
+        let machine = &saved["document"]["machines"]["local"];
+        assert_eq!(
+            machine["projects"]["github.com/acme/atlas"]["path"],
+            "~/atlas"
+        );
+        assert_eq!(
+            machine["workers"][0]["config"]["projects"],
+            json!(["github.com/acme/atlas"])
+        );
+        assert_eq!(machine["workers"][0]["config"]["concurrency"], 3);
+        update["id"] = json!("bad-worker");
+        update["git"] = json!("https://github.com/acme/other.git");
+        update["concurrency"] = json!(0);
+        assert!(
+            request(
+                ctx,
+                &json!({"machine_update":update,"revision":saved["revision"],"save":true})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            request(ctx, &json!({})).unwrap()["document"],
+            saved["document"]
         );
     }
 
