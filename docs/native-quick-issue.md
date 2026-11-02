@@ -5,6 +5,12 @@ Press **Command+Control+Option+Shift+I** anywhere on macOS, or choose
 active display, including over full-screen applications. No web page or embedded
 browser is involved, and the registered shortcut needs no Accessibility access.
 
+The global shortcut (also the 8BitDo Micro Home button) starts Hey Talk recording
+after the panel is ready. Press it again, or press Star, to finish and submit the
+transcript. Star remains a global dictation shortcut in other apps. Hey Talk needs
+its usual microphone and Accessibility permissions. The menu opens Quick Add
+without starting recording. Ordinary Return still adds a line.
+
 Type an issue title and **@project** to choose its destination. Suggestions match
 project names and full IDs, including hidden projects. Use **↑/↓** to browse and
 **Enter** or **Tab** to choose, or click a suggestion. Mentions can appear anywhere
@@ -12,8 +18,15 @@ in the title. Names containing spaces are quoted automatically; ambiguous names
 use the full project ID. Email addresses remain ordinary title text; `\@` inserts
 a literal `@`. Unknown projects and conflicting destinations show an inline error.
 
-The first issue needs an explicit project. Later issues default to the last
-successfully used project on that Mac. The footer previews the destination with
+With the controller held horizontally, Up/Down immediately select projects; Left
+toggles **Add to bottom**. The keyboard equivalents are **⌘⌥↑/↓** and **⌘⇧B**.
+Projects are ordered by successful Quick Add submissions on this Mac, most-used
+first, with alphabetical ties. Selection wraps and is remembered immediately,
+even if the draft is dismissed. Typed project mentions follow controller selection.
+
+The first typed issue needs an explicit project. Voice Quick Add starts with the
+most-used project when no selection has been saved. Later issues default to the last
+selected project on that Mac. The footer previews the destination with
 the project name in bold. Hold **Command** to reveal shortcuts inside the
 **Create** and **Add to bottom** buttons; releasing it hides them without moving
 the controls.
@@ -69,7 +82,7 @@ ordinary audits do not capture the screen. For interactive
 testing set `HEY_BOSS_NATIVE_QUICK_ISSUE_PREVIEW=1` and point
 `HEY_BOSS_CLI_PATH` and `HEY_BOSS_ISSUE_DB` at an updated CLI and isolated test store.
 `HEY_BOSS_QUICK_ISSUE_INTEGRATION=1` adds real CLI/attachment-store checks (requires
-an isolated `HEY_BOSS_ISSUE_DB` under `/tmp/`). For visual inspection without Screen
+an isolated `HEY_BOSS_ISSUE_DB` directly inside a dedicated `TMPDIR`). For visual inspection without Screen
 Recording access, launch the audit app with `HEY_BOSS_QUICK_ISSUE_VISUAL` set to a
 fixture such as `light-images`, `dark-saving`, `light-error`,
 `dark-empty`, `light-success`, or `light-images-compact`.
