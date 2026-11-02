@@ -135,7 +135,7 @@ pub(super) fn decrypt(value: &mut Value, path: &Path) -> Result<()> {
 pub(super) fn protect(path: &Path) -> Result<super::Config> {
     let path = fs::canonicalize(path).context("Cannot locate config")?;
     let config = super::load(&path)?;
-    let mut value: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let mut value = super::read_value(&fs::read(&path)?, &path)?;
     let mut needs_encryption = false;
     visit(&mut value, |v| {
         needs_encryption |= v.as_str().is_some_and(|s| {
@@ -143,7 +143,15 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         });
         Ok(())
     })?;
-    if !needs_encryption {
+    let convert_yaml = matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("yaml" | "yml")
+    ) && fs::read(&path)?
+        .iter()
+        .copied()
+        .find(|c| !c.is_ascii_whitespace())
+        == Some(b'{');
+    if !needs_encryption && !convert_yaml {
         return Ok(config);
     }
     let mut options = fs::OpenOptions::new();
@@ -158,7 +166,7 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         .context("Credential migration is busy; retry shortly")?;
     let original = fs::read(&path)?;
     let config = super::parse(&original, &path)?;
-    let mut value: Value = serde_json::from_slice(&original)?;
+    let mut value = super::read_value(&original, &path)?;
     let cipher = Aes256GcmSiv::new((&key(&path, true)?).into());
     visit(&mut value, |value| {
         let Some(secret) = value.as_str().filter(|s| {
@@ -182,8 +190,7 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         Ok(())
     })?;
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    file.write_all(&serde_json::to_vec_pretty(&value)?)?;
-    file.write_all(b"\n")?;
+    file.write_all(&super::encode(&value, &path)?)?;
     file.as_file().sync_all()?;
     // Do not overwrite an editor's changes made while encryption was running.
     if fs::read(&path)? != original {

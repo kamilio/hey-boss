@@ -19,7 +19,7 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    /// Config file (default: ~/.hey-proxy/config.json)
+    /// Config file (default: ~/.hey-boss/proxy/config.yaml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     /// Override the configured listening address
@@ -145,10 +145,9 @@ enum Command {
 fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
     match config {
         Some(path) => Ok(path),
-        None => Ok(PathBuf::from(
+        None => config::default_path(&PathBuf::from(
             std::env::var_os("HOME").context("HOME is not set; use --config")?,
-        )
-        .join(".hey-proxy/config.json")),
+        )),
     }
 }
 
@@ -238,13 +237,16 @@ async fn main() -> Result<()> {
         };
         return rollout::configure_pi(&config, &api_key, None);
     }
+    // Only the default config is created; a missing explicit path would start without credentials.
+    let explicit = args.config.is_some();
     let path = config_path(args.config)?;
     // Fingerprint before loading so an edit racing startup is picked up by the first request.
     let fingerprint = config::fingerprint(&path);
-    let config = if matches!(
-        args.command,
-        Some(Command::Rollout { .. } | Command::ResolveRoute { .. })
-    ) {
+    let config = if explicit
+        || matches!(
+            args.command,
+            Some(Command::Rollout { .. } | Command::ResolveRoute { .. })
+        ) {
         config::load(&path)?
     } else {
         config::load_or_create(&path)?
