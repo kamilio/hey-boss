@@ -54,11 +54,63 @@ let available = String(decoding: identityOutput.fileHandleForReading.readDataToE
 identities.waitUntilExit()
 require(identities.terminationStatus == 0 && available.contains(identity),
     "Restore the persistent signing identity with packages/hey-talk/setup-signing.sh before packaging Hey Boss")
+func signInDesktopSession(_ arguments: [String], beside path: URL) throws -> Int32 {
+    // An SSH audit session cannot use the desktop's unlocked login keychain.
+    // A one-shot GUI job uses the existing codesign ACL without unlocking keys.
+    let label = "local.hey-boss.signing.\(UUID().uuidString)"
+    let directory = path.deletingLastPathComponent().appendingPathComponent(".signing-\(UUID().uuidString)")
+    try files.createDirectory(at: directory, withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700])
+    let domain = "gui/\(getuid())"
+    let log = directory.appendingPathComponent("stderr")
+    defer {
+        let stop = Process(); stop.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        stop.arguments = ["bootout", "\(domain)/\(label)"]
+        stop.standardOutput = FileHandle.nullDevice; stop.standardError = FileHandle.nullDevice
+        if (try? stop.run()) != nil { stop.waitUntilExit() }
+        if let data = try? Data(contentsOf: log) { FileHandle.standardError.write(data) }
+        try? files.removeItem(at: directory)
+    }
+    let plist = directory.appendingPathComponent("job.plist")
+    let job: [String: Any] = ["Label": label, "ProgramArguments": ["/usr/bin/codesign"] + arguments,
+        "RunAtLoad": true, "StandardErrorPath": log.path]
+    try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist)
+    let start = Process(); start.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+    start.arguments = ["bootstrap", domain, plist.path]
+    try start.run(); start.waitUntilExit()
+    guard start.terminationStatus == 0 else { return start.terminationStatus }
+    let deadline = Date().addingTimeInterval(30)
+    while Date() < deadline {
+        let status = Process(); status.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        status.arguments = ["print", "\(domain)/\(label)"]
+        let output = Pipe(); status.standardOutput = output; status.standardError = FileHandle.nullDevice
+        try status.run()
+        let state = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        status.waitUntilExit()
+        guard status.terminationStatus == 0 else { return status.terminationStatus }
+        for line in state.components(separatedBy: .newlines) {
+            let line = line.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("last exit code = "), let code = Int32(line.dropFirst("last exit code = ".count)) {
+                return code
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    FileHandle.standardError.write(Data("Desktop signing timed out; check the Mac for a keychain access prompt.\n".utf8))
+    return 1
+}
 func sign(_ path: URL, identifier: String) throws {
-    let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-    sign.arguments = ["--force", "--sign", identity, "--identifier", identifier, "--timestamp=none", path.path]
-    try sign.run(); sign.waitUntilExit()
-    require(sign.terminationStatus == 0, "Could not sign \(path.path) with the pinned identity")
+    let arguments = ["--force", "--sign", identity, "--identifier", identifier, "--timestamp=none", path.path]
+    let status: Int32
+    if ProcessInfo.processInfo.environment["SSH_CONNECTION"] != nil {
+        status = try signInDesktopSession(arguments, beside: path)
+    } else {
+        let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        sign.arguments = arguments
+        try sign.run(); sign.waitUntilExit()
+        status = sign.terminationStatus
+    }
+    require(status == 0, "Could not sign \(path.path) with the pinned identity")
     require(try verify(path, identifier: identifier), "Signing verification failed for \(path.path)")
 }
 // The installed CLI and temporary upgrade guard perform App Management work.
