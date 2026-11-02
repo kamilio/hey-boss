@@ -45,7 +45,7 @@ SWIFT
 fixture_pid=$!
 for attempt in {1..100}; do [[ -e ready ]] && break; sleep 0.05; done
 test -e ready
-"$cli" start --no-paste --no-overlay --json | jq -e '.state == "recording"' >/dev/null
+"$cli" start --no-paste --json | jq -e '.state == "recording"' >/dev/null
 recording=true
 say 'Checking the dictation context snapshot.'
 kill -USR1 "$fixture_pid"
