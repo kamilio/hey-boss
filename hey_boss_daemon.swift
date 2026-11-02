@@ -6627,7 +6627,7 @@ final class ReaderVoice {
                     guard try message()["ready"] as? Bool == true else { throw CocoaError(.fileReadCorruptFile) }
                     ready = true
                 }
-                var request = try JSONEncoder().encode(["text": text]); request.append(10)
+                var request = try JSONSerialization.data(withJSONObject: ["text": text, "speaker": 7]); request.append(10)
                 try input.fileHandleForWriting.write(contentsOf: request)
                 let header = try message()
                 guard header["rate"] as? Int == 44100, let count = header["count"] as? Int, (1...44100*120).contains(count),
@@ -6879,13 +6879,14 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
 struct SpokenComment: Codable {
     let requestID: String
     let id: String
-    let line: Int
+    let line: Int?
     let version: Int
-    let quote: String
+    let quote: String?
     let text: String
     var operation: String {
         get throws {
-            let payload = ["command": "comment", "id": id, "quote": quote, "body": "Line \(line) · revision \(version)\n\n\(text)"]
+            var payload = ["command": "comment", "id": id, "body": line.map { "Line \($0) · revision \(version)\n\n\(text)" } ?? text]
+            payload["quote"] = quote
             return String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
         }
     }
@@ -7293,7 +7294,7 @@ final class SpokenReview {
     var position: Int
     var phrase = NSRange()
     var word = NSRange()
-    var anchor: (line: Int, passage: NSRange, word: NSRange, version: Int)?
+    var anchor: (line: Int?, passage: NSRange, word: NSRange, version: Int)?
     var recording: Data?
     var decoding: SFSpeechRecognitionTask?
     var watchdog: Timer?
@@ -7387,7 +7388,7 @@ final class SpokenReview {
             holding = true; audio.pause(); recording = Data()
             editor.highlightReview(anchor.word)
             editor.showMic("Recording comment", "waveform", .systemOrange)
-            editor.reviewStatus("Listening · line \(anchor.line)")
+            editor.reviewStatus(anchor.line.map { "Listening · line \($0)" } ?? "Listening · document title")
             return
         case .pcm(let data):
             guard recording != nil else { return }
@@ -7397,7 +7398,7 @@ final class SpokenReview {
         }
         let samples = recording!; recording = nil
         editor.showMic("Transcribing", "ellipsis.bubble", .secondaryLabelColor)
-        editor.reviewStatus("Transcribing · line \(anchor!.line)")
+        editor.reviewStatus(anchor?.line.map { "Transcribing · line \($0)" } ?? "Transcribing · document title")
         watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
         do {
             guard let recognizer else { throw StorageError(description: "On-device dictation is unavailable.") }
@@ -7411,11 +7412,11 @@ final class SpokenReview {
             }
         } catch { finish(error.localizedDescription) }
     }
-    var line: Int { editor?.reader.textStorage?.attribute(.sourceStart, at: word.location, effectiveRange: nil) as? Int ?? 1 }
+    var line: Int? { editor?.reader.textStorage?.attribute(.sourceStart, at: word.location, effectiveRange: nil) as? Int }
     func submit(_ text: String) {
         guard let editor, let id = editor.session.launch.id, let anchor else { return }
         let comment = SpokenComment(requestID: UUID().uuidString, id: id, line: anchor.line, version: anchor.version,
-                                    quote: (editor.reader.string as NSString).substring(with: anchor.passage), text: text)
+                                    quote: anchor.line == nil ? nil : (editor.reader.string as NSString).substring(with: anchor.passage), text: text)
         editor.saveSpoken(comment)
     }
     func resume(_ message: String = "Reading · speak to comment") {
@@ -7642,6 +7643,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     var importingImage = false
     var imageFailure: String?
     var previewImages: [URL: NSImage] = [:]
+    var previewTitleLength = 0
     var previewSource: String?
     var onClose: () -> Void = {}
     var onOpen: (ArtifactLaunch) -> Void = { _ in }
@@ -8010,16 +8012,16 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             try JSONEncoder().encode(comment).write(to: draft, options: .atomic)
             let operation = try comment.operation
             if review != nil { showMic("Saving", "square.and.arrow.down", .secondaryLabelColor) }
-            postingSpoken = true; updateReviewControls(); reviewStatus("Saving comment · line \(comment.line)")
+            postingSpoken = true; updateReviewControls(); reviewStatus(comment.line.map { "Saving comment · line \($0)" } ?? "Saving comment")
             backend.request(["--request-id", comment.requestID, "rpc"], body: operation) { [weak self] result in
                 if case .success = result { try? FileManager.default.removeItem(at: draft) }
                 guard let self else { return }
                 self.postingSpoken = false
                 switch result {
                 case .success:
-                    self.pendingSpoken = nil; self.reviewStatus("Comment saved · line \(comment.line)")
+                    self.pendingSpoken = nil; self.reviewStatus(comment.line.map { "Comment saved · line \($0)" } ?? "Comment saved")
                     if self.commentPopover.isShown { self.discussion?.refresh() }
-                    self.review?.resume("Saved on line \(comment.line) · reading")
+                    self.review?.resume(comment.line.map { "Saved on line \($0) · reading" } ?? "Comment saved · reading")
                 case .failure(let error):
                     self.endReview("Comment kept for retry · \(error.localizedDescription)")
                 }
@@ -8034,7 +8036,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         _ = discussion.view
         if discussion.input.string.isEmpty, discussion.pending == nil, discussion.replyTo == nil {
             discussion.clearTarget()
-            let range = reader.selectedRange(), text = reader.string as NSString
+            let range = selectedBodyRange, text = reader.string as NSString
             if htmlReader.document == nil, previewSource != nil, range.length > 0, NSMaxRange(range) <= text.length {
                 let quote = text.substring(with: range)
                 guard quote.utf8.count <= 8192 else { reviewStatus("Select a shorter passage to comment, or clear the selection for a document note."); return nil }
@@ -8058,9 +8060,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         commentPopover.show(relativeTo: commentsButton.bounds, of: commentsButton, preferredEdge: .minY)
         discussion.view.window?.makeFirstResponder(discussion.input)
     }
+    var selectedBodyRange: NSRange {
+        let length = (reader.string as NSString).length, start = min(previewTitleLength, length)
+        return NSIntersectionRange(reader.selectedRange(), NSRange(location: start, length: length - start))
+    }
     func textViewDidChangeSelection(_ notification: Notification) {
         guard notification.object as? NSTextView === reader, sharedReview else { return }
-        commentsButton.title = reader.selectedRange().length > 0 && htmlReader.document == nil ? "Comment on selection" : "Comments"
+        commentsButton.title = selectedBodyRange.length > 0 && htmlReader.document == nil ? "Comment on selection" : "Comments"
     }
     func updateStatus() {
         updateReviewControls()
@@ -8153,7 +8159,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
         if notification.object as? NSSearchField === search {
             searchTimer?.invalidate(); searchTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in self?.refreshLibrary() }
-        } else if notification.object as? NSTextField === titleField { session.change(title: titleField.stringValue, body: text.string) }
+        } else if notification.object as? NSTextField === titleField {
+            session.change(title: titleField.stringValue, body: text.string)
+            if previewing, previewSource != nil, htmlReader.document == nil, let storage = reader.textStorage {
+                if review != nil { endReview() }
+                storage.deleteCharacters(in: NSRange(location: 0, length: previewTitleLength))
+                updateReadTitle(in: storage)
+            }
+        }
     }
     func highlightVisible() {
         guard !loading, !highlighting, let manager = text.layoutManager, let container = text.textContainer, let storage = text.textStorage else { return }
@@ -8308,7 +8321,18 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             guard let line = value as? Int else { return }
             rendered.addAttributes([.link: "hey-boss-checklist:\(line)", .toolTip: "Check or uncheck (⌘Return)"], range: range)
         }
+        updateReadTitle(in: rendered)
         reader.textStorage?.setAttributedString(rendered); previewSource = source
+    }
+    private func updateReadTitle(in rendered: NSMutableAttributedString) {
+        let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let first = rendered.mutableString.substring(with: rendered.mutableString.lineRange(for: NSRange(location: 0, length: 0))).trimmingCharacters(in: .whitespacesAndNewlines)
+        previewTitleLength = 0
+        if !title.isEmpty && first.caseInsensitiveCompare(title) != .orderedSame {
+            let paragraph = NSMutableParagraphStyle(); paragraph.paragraphSpacing = 10
+            let heading = NSAttributedString(string: title + "\n", attributes: [.font: NSFont.systemFont(ofSize: 30, weight: .semibold), .foregroundColor: NSColor.textColor, .paragraphStyle: paragraph])
+            rendered.insert(heading, at: 0); previewTitleLength = heading.length
+        }
     }
     @discardableResult func togglePreviewTask(at index: Int) -> Bool {
         guard previewSource == text.string, let storage = reader.textStorage, index >= 0, index < storage.length,

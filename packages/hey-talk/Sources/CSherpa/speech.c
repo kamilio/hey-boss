@@ -43,9 +43,9 @@ failed:
     return NULL;
 }
 
-float *ht_speech_generate(HTSpeech *s, const char *text, int32_t *count, int32_t *rate) {
+float *ht_speech_generate(HTSpeech *s, const char *text, int32_t speaker, int32_t *count, int32_t *rate) {
     SherpaOnnxGenerationConfig config = {0};
-    config.speed = 1; config.sid = 6; config.num_steps = 5;
+    config.speed = 1; config.sid = speaker; config.num_steps = 5;
     config.extra = "{\"lang\":\"en\"}";
     const SherpaOnnxGeneratedAudio *audio = s->generate(s->tts, text, &config, NULL, NULL);
     if (!audio) return NULL;
