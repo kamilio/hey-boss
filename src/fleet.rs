@@ -264,21 +264,12 @@ pub fn record_local_worker(
         return Ok(());
     };
     let base = value["revision"].clone();
-    let declarative = value["declarative"] == true;
-    let Some(workers) = value["workers"].as_array_mut() else {
+    let Some(worker) = value["workers"]
+        .as_array_mut()
+        .and_then(|rows| rows.iter_mut().find(|w| w["id"] == id))
+    else {
         return Ok(());
     };
-    if !workers.iter().any(|w| w["id"] == id) {
-        if declarative {
-            return Ok(());
-        }
-        if let Some(config) = config {
-            workers.push(serde_json::json!({"id":id,"config":config}));
-        } else {
-            return Ok(());
-        }
-    }
-    let worker = workers.iter_mut().find(|w| w["id"] == id).unwrap();
     if let Some(config) = config {
         worker["config"] = serde_json::to_value(config)?;
     }

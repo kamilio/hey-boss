@@ -77,7 +77,7 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
     };
     if config.is_null() {
         return Err(replica::invalid(&format!(
-            "No saved worker configuration. Add machines.local.workers to {}, or run hey-boss fleet setup to adopt existing workers.",
+            "No saved worker configuration. Use auto-workers add or add a worker to {}.",
             ctx.desired.display()
         )));
     }
@@ -102,6 +102,9 @@ fn owned_ids(ctx: &Context) -> Result<HashSet<String>> {
             .filter_map(|w| w["id"].as_str().map(str::to_owned))
             .collect());
     }
+    legacy_owned_ids(ctx)
+}
+pub(super) fn legacy_owned_ids(ctx: &Context) -> Result<HashSet<String>> {
     let saved = ctx.read_json(
         &ctx.state.join("auto-workers.json"),
         json!({"worker_ids":[]}),
@@ -261,7 +264,9 @@ pub(super) fn add(settings: &Settings, requested_id: Option<&str>) -> Result<Val
         })?;
     }
     if is_new {
-        workers.push(worker.clone());
+        let mut added = worker.clone();
+        added["local_add"] = json!(true);
+        workers.push(added);
         ids.insert(id.clone());
         save_owned_ids(&ctx, &ids)?;
         save_changes(&ctx, role, workers, std::slice::from_ref(&id))?;

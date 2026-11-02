@@ -47,6 +47,13 @@ fn pending(worker: &Value) -> bool {
 }
 
 fn classification(worker: &Value, build: &str) -> &'static str {
+    if worker["intent"].is_null()
+        && worker["pid"].is_null()
+        && worker["active"].as_u64().unwrap_or(0) == 0
+        && worker["job_active"].as_u64().unwrap_or(0) == 0
+    {
+        return "inactive";
+    }
     if pending(worker) {
         return "restarting";
     }
@@ -141,6 +148,17 @@ pub(super) fn run(build: &str, apply: bool) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_leaves_an_exited_independent_worker_stopped() {
+        let mut standalone =
+            json!({"id":"one-off","config":{"enabled":true},"active":0,"pid":null});
+        assert_eq!(classification(&standalone, "new"), "inactive");
+        standalone["rollout_signal"] = json!({"state":"pending"});
+        assert_eq!(classification(&standalone, "new"), "inactive");
+        standalone["intent"] = json!("running");
+        assert_eq!(classification(&standalone, "new"), "restarting");
+    }
 
     #[test]
     fn upgrade_identity_survives_raw_receipt_recovery() {

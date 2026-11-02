@@ -159,12 +159,13 @@ impl Context {
         )?;
         enrich_worker_retries(&db, &mut workers)?;
         for w in &mut workers {
-            if let Some(definition) = saved["workers"]
+            let definition = saved["workers"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .find(|definition| definition["id"] == w["id"])
-            {
+                .find(|definition| definition["id"] == w["id"]);
+            w["managed"] = json!(definition.is_some());
+            if let Some(definition) = definition {
                 w["intent"] = definition["intent"].clone();
             }
             if let Some(pid) = w["pid"].as_u64()
@@ -1530,6 +1531,7 @@ pub(super) mod tests {
                 .unwrap();
             let mut workers = status["workers"].as_array().unwrap().clone();
             for worker in &mut workers {
+                worker["managed"] = json!(false);
                 let detail = ctx
                     .rpc_store(
                         &mut store,

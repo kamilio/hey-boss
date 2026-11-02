@@ -81,6 +81,10 @@ on its worker's machine.
 
 Run `hey-boss auto-workers run` to start or resume saved workers, then
 `hey-boss auto-workers watch` to open their dashboard.
+Create a saved project worker with **Project workers → Add project worker** or
+`hey-boss auto-workers add --name Tools -C /path/to/project`. Project onboarding and fleet
+discovery leave worker creation to you.
+
 Tab / Shift+Tab switches project tabs; `a` adds a worker, and `w` then `d` removes
 one after its current agents finish. Reopening the dashboard reuses the
 same workers. Separate checkouts and shared multi-project pools retain their own

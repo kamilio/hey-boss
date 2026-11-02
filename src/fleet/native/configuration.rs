@@ -254,6 +254,27 @@ fn compact(value: &Value) -> Value {
     value
 }
 
+// Applied snapshots can contain old, independent processes. Only saved definitions
+// and explicitly owned CLI workers may become project workers.
+pub(super) fn legacy_local_workers(ctx: &Context, doc: &Value) -> Result<Value> {
+    let mut workers = doc["machines"]["local"]["workers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let owned = super::auto_workers::legacy_owned_ids(ctx)?;
+    let main = ctx.read_json(&ctx.state.join("fleet-main.json"), json!({}))?;
+    for row in main["workers"].as_array().into_iter().flatten() {
+        if let Some(saved) = workers.iter_mut().find(|w| w["id"] == row["id"]) {
+            if row.get("local_revision").is_some() {
+                *saved = json!({"id":row["id"],"config":row["config"],"intent":row["intent"]});
+            }
+        } else if row["id"].as_str().is_some_and(|id| owned.contains(id)) {
+            workers.push(json!({"id":row["id"],"config":row["config"],"intent":row["intent"]}));
+        }
+    }
+    Ok(json!(workers))
+}
+
 fn initialize(ctx: &Context) -> Result<()> {
     if ctx.desired.exists() {
         return Ok(());
@@ -269,31 +290,11 @@ fn initialize(ctx: &Context) -> Result<()> {
     let legacy = ctx.desired.with_extension("json");
     ctx.protect_file(&legacy)?;
     let mut doc = context::read_json(&legacy, json!({"machines":{}}))?;
-    let main = ctx.read_json(&ctx.state.join("fleet-main.json"), json!({}))?;
-    if !doc["machines"]["local"]["workers"].is_array() {
-        doc["machines"]["local"]["workers"] = main.get("workers").cloned().unwrap_or(json!([]));
-    }
-    for pending in main["workers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|w| w.get("local_revision").is_some())
-    {
-        let workers = doc["machines"]["local"]["workers"].as_array_mut().unwrap();
-        if let Some(old) = workers.iter_mut().find(|w| w["id"] == pending["id"]) {
-            *old = pending.clone();
-        } else {
-            workers.push(pending.clone());
-        }
-    }
-    let known = super::replica::state_get(&ctx.db()?, "machines", json!({}))?;
+    doc["machines"]["local"]["workers"] = legacy_local_workers(ctx, &doc)?;
     for entry in ctx.legacy_inventory()? {
         let host = entry["host"].as_str().unwrap();
         if !doc["machines"][host]["workers"].is_array() {
-            doc["machines"][host]["workers"] = known[host]
-                .get("desired_workers")
-                .cloned()
-                .unwrap_or(json!([]));
+            doc["machines"][host]["workers"] = entry.get("workers").cloned().unwrap_or(json!([]));
         }
     }
     // Inventory is now defined by machine keys; old connection metadata is not a second config.
@@ -752,6 +753,26 @@ mod tests {
         assert_eq!(config["projects"], json!(["github.com/acme/atlas"]));
         assert_eq!(config["concurrency"], 5);
         assert!(request(ctx, &json!({"machine_update":{"host":"local","action":"add","id":"missing","project":"github.com/acme/missing"},"revision":saved["revision"],"save":true})).is_err());
+    }
+
+    #[test]
+    fn migration_preserves_explicit_ownership_without_enrolling_observations() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        let snapshot = json!({"workers":[{"id":"old-process","config":{},"local_revision":5},{"id":"saved","config":{},"intent":"pause"}]});
+        ctx.atomic_json(&ctx.state.join("fleet-main.json"), &snapshot)
+            .unwrap();
+        ctx.atomic_json(
+            &ctx.state.join("auto-workers.json"),
+            &json!({"worker_ids":["saved"]}),
+        )
+        .unwrap();
+        let doc = load(ctx).unwrap();
+        let workers = doc["document"]["machines"]["local"]["workers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0]["id"], "saved");
     }
 
     #[test]

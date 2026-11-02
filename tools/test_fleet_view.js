@@ -99,6 +99,7 @@ const {projectWorkers}=require('../src/issues/web/fleet.js');
 const visibleWorkers=projectWorkers({workers:[
  {id:'running',managed:true,intent:'running',pid:12},
  {id:'paused',managed:true,intent:'pause',pid:null},
+ {id:'observed-only',pid:123,active:1},
  {id:'history',managed:false,intent:'pause',pid:null},
  {id:'stopped',managed:true,intent:'stop',pid:null},
  {id:'removed',managed:true,retiring:true,intent:'drain',pid:12},
