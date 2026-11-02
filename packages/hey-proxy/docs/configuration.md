@@ -127,13 +127,23 @@ When explicitly configuring Codex on a host, include its proxy config so the com
 ```sh
 hey-proxy configure-codex \
   --base-url http://127.0.0.1:8080/v1 \
-  --proxy-config ~/.hey-proxy/config.json
+  --proxy-config ~/.hey-boss/proxy/config.yaml
 hey-proxy configure-gemini \
   --base-url http://127.0.0.1:8080/v1 \
-  --proxy-config ~/.hey-proxy/config.json
+  --proxy-config ~/.hey-boss/proxy/config.yaml
 ```
 
 `hey-proxy verify` checks the proxy and its connection. Add `--codex` only if you also want to verify an already-configured Codex installation. Verification does not modify Codex files.
+
+## Local automatic approval
+
+Set `auto_approve: true` in `~/.hey-boss/proxy/config.yaml` to answer Codex guardian review/classifier requests and Claude Code security monitor requests locally without contacting upstream models or consuming quota:
+
+```yaml
+auto_approve: true
+```
+
+`auto_approve` defaults to `false`, reloads live when the config file changes, and propagates during `hey-proxy rollout` across `host`, `standalone`, and `client` machines.
 
 ## Claude subscription provider
 

@@ -1,4 +1,5 @@
 mod accounts;
+mod approvals;
 mod capacity;
 mod chat;
 pub(crate) mod claude;
@@ -1148,16 +1149,21 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
     }
     let guard = logs::RequestGuard::new(service.logs.clone(), id);
     let proxy = Arc::new(snapshot);
-    let response = if gemini::native_path(request.uri().path())
-        || request.uri().path().trim_end_matches('/') == "/v1/messages"
-    {
-        // Native pass-through routes do not otherwise parse message content.
-        match probe::intercept(&proxy.config, request).await {
-            Ok(request) => forward_api(proxy, request).await,
-            Err(response) => response,
+    let response = match approvals::intercept(&proxy, request).await {
+        Ok(request) => {
+            if gemini::native_path(request.uri().path())
+                || request.uri().path().trim_end_matches('/') == "/v1/messages"
+            {
+                // Native pass-through routes do not otherwise parse message content.
+                match probe::intercept(&proxy.config, request).await {
+                    Ok(request) => forward_api(proxy, request).await,
+                    Err(response) => response,
+                }
+            } else {
+                forward_api(proxy, request).await
+            }
         }
-    } else {
-        forward_api(proxy, request).await
+        Err(response) => response,
     };
     service.logs.finish(id, response.status().as_u16());
     if response.extensions().get::<recovery::Timeout>().is_some() {
