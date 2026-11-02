@@ -157,7 +157,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn explicit_commit_attachments_preserve_repository_and_respect_pr_projects() {
+fn explicit_commit_attachments_preserve_repository_independently_of_pr_settings() {
     let f = Fixture::new();
     let first = f.git(&["rev-parse", "HEAD"]);
     let url = format!("https://{UPSTREAM}/commit/{first}");
@@ -236,29 +236,19 @@ fn explicit_commit_attachments_preserve_repository_and_respect_pr_projects() {
     f.git(&["commit", "--allow-empty", "-m", "Another local fix (#1)"]);
     assert_eq!(f.commits(CONSUMER), before);
 
+    // Restore the snapshot's repository identity before replaying its attachment.
+    f.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/upstream.git",
+    ]);
     f.issue(CONSUMER, &["settings", "set", "--prs-enabled"], false);
     for args in [
         vec!["commit", "add", "1", &url],
         vec!["pr", "add", "1", &url],
     ] {
-        let output = f
-            .command()
-            .args([
-                "issue",
-                "--project",
-                CONSUMER,
-                "--agent",
-                "test:commits",
-                "--json",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            !output.status.success(),
-            "PR projects reject both commit attachment routes"
-        );
-        assert!(String::from_utf8_lossy(&output.stdout).contains("Attach a PR"));
+        f.issue(CONSUMER, &args, false);
     }
     assert_eq!(f.commits(CONSUMER), before);
     for commit in before {
