@@ -867,6 +867,71 @@ pub fn validate_root_url(value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn default_path(home: &Path) -> Result<std::path::PathBuf> {
+    let directory = home.join(".hey-boss/proxy");
+    let legacy = home.join(".hey-proxy");
+    if legacy.exists() && !directory.exists() {
+        fs::create_dir_all(directory.parent().unwrap())?;
+        fs::rename(&legacy, &directory)
+            .context("Cannot move proxy directory to ~/.hey-boss/proxy")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&directory, &legacy)?;
+    }
+    let path = directory.join("config.yaml");
+    let old = directory.join("config.json");
+    if !path.exists() && old.exists() {
+        // Convert the encrypted document, not the decrypted runtime configuration.
+        // Sibling OAuth stores and encryption keys retain their names.
+        load(&old)?;
+        let value = read_value(&fs::read(&old)?, &old)?;
+        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+        file.write_all(&encode(&value, &path)?)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(&path)?;
+        load(&path)?;
+        fs::remove_file(old)?;
+    }
+    Ok(path)
+}
+
+pub(super) fn read_value(content: &[u8], path: &Path) -> Result<serde_json::Value> {
+    let value = if matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        serde_yaml_ng::from_slice::<json::UniqueValue>(content).map_err(|e| {
+            let location = e.location();
+            anyhow::anyhow!(
+                "Invalid config YAML at line {}, column {}",
+                location.as_ref().map_or(0, |l| l.line()),
+                location.as_ref().map_or(0, |l| l.column())
+            )
+        })?
+    } else {
+        serde_json::from_slice::<json::UniqueValue>(content).map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid config JSON at line {}, column {}",
+                e.line(),
+                e.column()
+            )
+        })?
+    };
+    Ok(value.0)
+}
+
+pub(super) fn encode(value: &serde_json::Value, path: &Path) -> Result<Vec<u8>> {
+    if matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        Ok(serde_yaml_ng::to_string(value)?.into_bytes())
+    } else {
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
 pub fn load_or_create(path: &Path) -> Result<Config> {
     if !path.exists() {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -890,12 +955,14 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
         }
         match options.open(path) {
             Ok(mut file) => {
-                let mut content = serde_json::to_vec_pretty(&serde_json::json!({
-                    "listen":"127.0.0.1:8080",
-                    "providers":{"openai":{"api_keys":{}}},
-                    "aliases":[], "fallbacks":{}
-                }))?;
-                content.push(b'\n');
+                let content = encode(
+                    &serde_json::json!({
+                        "listen":"127.0.0.1:8080",
+                        "providers":{"openai":{"api_keys":{}}},
+                        "aliases":[], "fallbacks":{}
+                    }),
+                    path,
+                )?;
                 file.write_all(&content).context("Cannot write config")?;
                 file.sync_all()?;
             }
@@ -919,13 +986,7 @@ pub fn protect(path: &Path) -> Result<Config> {
 }
 
 fn parse(content: &[u8], path: &Path) -> Result<Config> {
-    let json::UniqueValue(mut value) = serde_json::from_slice(content).map_err(|e| {
-        anyhow::anyhow!(
-            "Invalid config JSON at line {}, column {}",
-            e.line(),
-            e.column()
-        )
-    })?;
+    let mut value = read_value(content, path)?;
     secrets::decrypt(&mut value, path)?;
     let config: Config =
         serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid config fields"))?;

@@ -13,7 +13,12 @@ cargo install --path . --locked
 hey-proxy --init
 ```
 
-This creates `~/.hey-proxy/config.json` if it is missing:
+Configuration, credentials and state live in `~/.hey-boss/proxy/`. Existing
+`~/.hey-proxy/` installations move there on first use. JSON configs passed with
+`--config` remain supported. YAML supports commented settings, for example
+`# proxy_url: socks5h://127.0.0.1:18083`.
+
+This creates `~/.hey-boss/proxy/config.yaml` if it is missing:
 
 ```json
 {
@@ -442,7 +447,7 @@ For SSH deployment, add hosts to `ssh_hosts` and run `hey-proxy rollout`. This i
 - **Address already in use:** stop the other listener or run `hey-proxy --listen 127.0.0.1:9090`.
 - **Gemini rejects a request:** check [API compatibility](docs/compatibility.md), your model's capabilities, and Google project access.
 
-Run `hey-proxy --help` for commands. Use `--config /path/to/config.json` to keep multiple proxy configurations separate.
+Run `hey-proxy --help` for commands. Use `--config /path/to/config.yaml` to keep multiple proxy configurations separate.
 
 ## Workspace provenance
 

@@ -53,8 +53,8 @@ fn init_is_minimal_private_and_preserves_existing_proxy_and_codex_files() {
     assert!(cli(home).arg("--help").output().unwrap().status.success());
     assert!(!home.join(".hey-proxy").exists());
     assert!(cli(home).arg("--init").output().unwrap().status.success());
-    let path = home.join(".hey-proxy/config.json");
-    let generated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let path = home.join(".hey-boss/proxy/config.yaml");
+    let generated: Value = serde_yaml_ng::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let expected: Value =
         serde_json::from_str(include_str!("../examples/minimal.config.json")).unwrap();
     assert_eq!(generated, expected);
@@ -116,7 +116,100 @@ async fn first_start_creates_only_proxy_config_and_missing_credentials_return_a_
     );
     assert!(!dir.path().join("codex").exists());
     assert!(!dir.path().join(".codex").exists());
-    assert!(dir.path().join(".hey-proxy/config.json").exists());
+    assert!(dir.path().join(".hey-boss/proxy/config.yaml").exists());
+}
+
+#[test]
+fn yaml_comments_can_disable_the_egress_proxy_without_rewriting_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.yaml");
+    let content = "listen: 127.0.0.1:8080\n# proxy_url: socks5h://127.0.0.1:18083\nproviders:\n  openai:\n    api_keys: {}\n";
+    std::fs::write(&path, content).unwrap();
+    let output = cli(dir.path())
+        .arg("--config")
+        .arg(&path)
+        .arg("--init")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    std::fs::write(&path, "listen: 127.0.0.1:8080\nlisten: 127.0.0.1:9090\n").unwrap();
+    assert!(
+        !cli(dir.path())
+            .arg("--config")
+            .arg(&path)
+            .arg("--init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn legacy_proxy_directory_moves_with_credentials_and_no_config_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join(".hey-proxy");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("config.json"), r#"{"listen":"127.0.0.1:8080","providers":{"openai":{"api_keys":{"default":"synthetic-migration-secret"}}}}"#).unwrap();
+    assert!(
+        cli(dir.path())
+            .args(["--config"])
+            .arg(old.join("config.json"))
+            .arg("encrypt-config")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let key = std::fs::read(old.join("config.credentials.key")).unwrap();
+    std::fs::write(old.join("config.codex.json"), "credential-sentinel").unwrap();
+    let output = cli(dir.path()).arg("--init").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let new = dir.path().join(".hey-boss/proxy");
+    // Launch agents and helpers keep absolute ~/.hey-proxy paths.
+    assert_eq!(std::fs::read_link(&old).unwrap(), new);
+    assert!(!new.join("config.json").exists());
+    let yaml = std::fs::read_to_string(new.join("config.yaml")).unwrap();
+    assert!(!yaml.contains("synthetic-migration-secret"));
+    assert_eq!(
+        std::fs::read(new.join("config.credentials.key")).unwrap(),
+        key
+    );
+    assert_eq!(
+        std::fs::read_to_string(new.join("config.codex.json")).unwrap(),
+        "credential-sentinel"
+    );
+}
+
+#[test]
+fn explicit_missing_config_fails_instead_of_creating_one_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("moved/config.json");
+    let output = cli(dir.path())
+        .arg("--config")
+        .arg(&path)
+        .arg("export-config")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!path.exists());
+    let output = cli(dir.path())
+        .arg("--config")
+        .arg(&path)
+        .arg("--init")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(!path.exists());
 }
 
 #[test]
