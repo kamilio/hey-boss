@@ -43,7 +43,8 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             force: false,
             ..
         } => {}
-        Operation::Assign { if_version, .. } if *if_version > 0 => {}
+        Operation::Assign { if_version, .. } | Operation::Rework { if_version, .. }
+            if *if_version > 0 => {}
         Operation::Batch {
             matching: Some(_),
             change: Some(_),

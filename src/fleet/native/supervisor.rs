@@ -1828,10 +1828,13 @@ impl Supervisor {
                     crate::issues::Operation::Job { .. }
                         | crate::issues::Operation::Artifact { .. }
                         | crate::issues::Operation::Attachment { .. }
+                        | crate::issues::Operation::AddCommit { .. }
+                        | crate::issues::Operation::RemoveCommit { .. }
+                        | crate::issues::Operation::CommitReview { .. }
                 ) && !matches!(&request.operation, crate::issues::Operation::Create { attachments, .. } if !attachments.is_empty())
                 {
                     return Err(crate::issues::Error::invalid(
-                        "Only jobs, artifacts and attachments use the authority relay",
+                        "Only jobs, artifacts, attachments and commit reviews use the authority relay",
                     ));
                 }
                 crate::issues::Store::open(&self.ctx.path)?.execute(&request)

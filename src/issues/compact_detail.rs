@@ -60,6 +60,7 @@ pub(super) fn read(
         }
     });
     result["issue"]["pull_requests"] = json!(prs);
+    result["issue"]["commit_reviews"] = json!(db.query_collect("SELECT r.sha,(SELECT count(*) FROM commit_review_comments c WHERE c.project_id=r.project_id AND c.issue_number=r.issue_number AND c.sha=r.sha) FROM commit_reviews r JOIN issue_commits a USING(project_id,issue_number,sha) WHERE r.project_id=?1 AND r.issue_number=?2 ORDER BY r.sha",params![project.id,number],|r| Ok::<_,rusqlite::Error>(json!({"sha":r.get::<_,String>(0)?,"comment_count":r.get::<_,i64>(1)?})))?);
     if issue.deleted_at.is_some()
         && let Some(destination) = transfer::destination(db, &project.id, number)?
     {
