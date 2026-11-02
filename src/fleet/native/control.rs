@@ -476,6 +476,23 @@ pub(super) fn apply_signal(ctx: &Context, message: &Value) -> Result<Value> {
             )?;
             return Ok(result);
         }
+        // A failed replacement leaves its registration disabled. Keeping the signal
+        // in "starting" also prevents the supervisor from applying saved intent.
+        if old.first().is_some_and(|v| v["state"] == "starting")
+            && progress["error"].is_string()
+            && worker["pid"].is_null()
+            && worker["active"] == 0
+            && worker["job_active"] == 0
+            && worker["config"]["enabled"] == false
+        {
+            let result = json!({"id":message["id"],"state":"failed","worker":message["worker"],"signal":message["signal"],"error":progress["error"]});
+            replica::execute(
+                &db,
+                "UPDATE fleet_signals SET state='failed',result=? WHERE id=?",
+                &[json!(result.to_string()), message["id"].clone()],
+            )?;
+            return Ok(result);
+        }
         if !acknowledging_start && upgrade_restart_deferred(&worker, build) {
             return Ok(json!({"id":message["id"],"state":"deferred","worker":message["worker"]}));
         }
@@ -846,6 +863,41 @@ mod tests {
             worker[key] = value;
             assert!(super::upgrade_restart_deferred(&worker, "new"), "{worker}");
         }
+    }
+    #[test]
+    fn failed_upgrade_releases_an_offline_worker_for_reconciliation() {
+        let (root, ctx, store) = test_context();
+        let db = ctx.db().unwrap();
+        replica::ensure_metadata(&db).unwrap();
+        super::ensure_worker(&ctx, &json!({"id":"offline","config":{"enabled":false}})).unwrap();
+        let id = format!("upgrade-old-{}", hash(&json!("offline")));
+        db.execute(
+            "INSERT INTO fleet_signals VALUES(?1,'local','offline','restart','starting',?2,0)",
+            rusqlite::params![
+                id,
+                json!({"failures":1,"error":"failed startup"}).to_string()
+            ],
+        )
+        .unwrap();
+        let message = replica::rows(&db, "SELECT * FROM fleet_signals WHERE id=?", &[json!(id)])
+            .unwrap()
+            .remove(0);
+        assert_eq!(apply_signal(&ctx, &message).unwrap()["state"], "failed");
+        assert_eq!(
+            apply_signal(&ctx, &message).unwrap()["error"],
+            "failed startup"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM issue_workers WHERE owner_pid IS NOT NULL",
+                [],
+                |r| r.get::<_, usize>(0)
+            )
+            .unwrap(),
+            0
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn upgrade_recovers_a_lost_start_ack_without_stopping_the_replacement() {
