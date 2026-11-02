@@ -6652,13 +6652,26 @@ final class ReaderVoice {
                     guard let index = spoken[cursor...].firstIndex(where: { $0.0 == word?.lowercased() }) else { return }
                     words.append((spoken[index].1, NSRange(range, in: text))); cursor = index + 1
                 }
+                // Supertonic includes silence on both edges of each clip. Keep
+                // a short breath and protect quiet consonants near the boundary.
+                let samples = buffer.floatChannelData![0]
+                var first = 0, end = count
+                while first < count && abs(samples[first]) < 0.002 { first += 1 }
+                if first < count {
+                    while end > first && abs(samples[end - 1]) < 0.002 { end -= 1 }
+                    first = max(0, first - 4410)       // 100 ms of lead-in
+                    end = min(count, end + 6615)       // 150 ms of release
+                    if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
+                    buffer.frameLength = AVAudioFrameCount(end - first)
+                    words = words.map { (min(end - first - 1, max(0, $0.0 - first)), $0.1) }
+                }
                 // Alignment warms independently. Pace the highlight across the first
                 // passage until the helper can supply measured timestamps.
                 if words.isEmpty {
                     let length = max(1, text.utf16.count)
                     text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { _, range, _, _ in
                         let span = NSRange(range, in: text)
-                        words.append((count * span.location / length, span))
+                        words.append((Int(buffer.frameLength) * span.location / length, span))
                     }
                 }
                 onMain { timeout.cancel(); completion(buffer, words) }
@@ -6678,14 +6691,27 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     private var tapped = false
     private var micWatch: Timer?
     private var routeObserver: NSObjectProtocol?
-    private var utterance = 0
-    private var phrase: AVSpeechUtterance?
-    private var generatedFrames = 0
-    private var words: [(Int, NSRange)] = []
+    // Audio can be rendered before its turn, but only the playing passage
+    // publishes word offsets or advances the document.
+    private final class Passage {
+        let utterance: AVSpeechUtterance
+        var buffers: [AVAudioPCMBuffer] = []
+        var words: [(Int, NSRange)] = []
+        var frames = 0
+        var complete = false
+        var deliver: ((AVAudioPCMBuffer?) -> Void)?
+        init(_ text: String) { utterance = AVSpeechUtterance(string: text) }
+        func append(_ buffer: AVAudioPCMBuffer) {
+            frames += Int(buffer.frameLength)
+            if let deliver { deliver(buffer) } else { buffers.append(buffer) }
+        }
+    }
+    private var passages: [Passage] = []
+    private var rendering: Passage?
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange, utterance: AVSpeechUtterance) {
         onMain { [weak self] in
-            guard let self, self.phrase === utterance else { return }
-            self.words.append((self.generatedFrames, range))
+            guard let passage = self?.rendering, passage.utterance === utterance else { return }
+            passage.words.append((passage.frames, range))
         }
     }
     private var timer: Timer?
@@ -6812,53 +6838,72 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
 
     var readerVoice: ReaderVoice?
-    func speak(_ text: String, highlight: @escaping (NSRange) -> Void, finished: @escaping () -> Void) {
-        utterance += 1
-        let ticket = utterance, phrase = AVSpeechUtterance(string: text)
-        self.phrase = phrase; generatedFrames = 0; words = []; synth.delegate = self
-        var next = 0, outstanding = 0, exhausted = false
-        func checkEnd() {
-            if exhausted && outstanding == 0 && self.phrase === phrase {
-                self.phrase = nil
-                self.timer?.invalidate(); self.player.stop(); finished()
+    private func renderNextPassage() {
+        guard !stopped, rendering == nil, let passage = passages.first(where: { !$0.complete }) else { return }
+        rendering = passage
+        func complete() {
+            passage.complete = true; rendering = nil
+            passage.deliver?(nil)
+            renderNextPassage()
+        }
+        func systemVoice() {
+            synth.delegate = self
+            synth.write(passage.utterance) { [weak self] audio in
+                guard let buffer = audio as? AVAudioPCMBuffer else { return }
+                onMain {
+                    guard let self, !self.stopped, self.rendering === passage else { return }
+                    if buffer.frameLength > 0 { passage.append(buffer) } else { complete() }
+                }
             }
         }
-        func enqueue(_ buffer: AVAudioPCMBuffer) {
-            guard !self.stopped, ticket == self.utterance else { return }
-            guard buffer.frameLength > 0 else { exhausted = true; checkEnd(); return }
-            if self.generatedFrames == 0 && self.player.outputFormat(forBus: 0) != buffer.format {
+        if let readerVoice {
+            readerVoice.generate(passage.utterance.speechString) { [weak self] buffer, words in
+                guard let self, !self.stopped, self.rendering === passage else { return }
+                guard let buffer else { readerVoice.stop(); self.readerVoice = nil; systemVoice(); return }
+                passage.words = words; passage.append(buffer); complete()
+            }
+        } else { systemVoice() }
+    }
+    func speak(_ text: String, following: [String] = [], highlight: @escaping (NSRange) -> Void, finished: @escaping () -> Void) {
+        guard !stopped else { return }
+        let window = [text] + following
+        passages.append(contentsOf: window.dropFirst(passages.count).map(Passage.init))
+        let passage = passages[0]
+        var nextWord = 0, outstanding = 0, started = false
+        func checkEnd() {
+            guard passage.complete, outstanding == 0, self.passages.first === passage else { return }
+            passage.deliver = nil; self.passages.removeFirst()
+            self.timer?.invalidate(); self.player.stop(); finished()
+        }
+        func enqueue(_ buffer: AVAudioPCMBuffer?) {
+            guard !self.stopped, self.passages.first === passage else { return }
+            guard let buffer else { checkEnd(); return }
+            if !started && self.player.outputFormat(forBus: 0) != buffer.format {
                 self.engine.connect(self.player, to: self.engine.mainMixerNode, format: buffer.format)
             }
-            self.generatedFrames += Int(buffer.frameLength)
-            outstanding += 1
+            started = true; outstanding += 1
             self.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
                 onMain { [weak self] in
-                    guard let self, !self.stopped, ticket == self.utterance else { return }
+                    guard let self, !self.stopped, self.passages.first === passage else { return }
                     outstanding -= 1; checkEnd()
                 }
             }
             if !self.paused && !self.player.isPlaying { self.player.play() }
         }
-        func systemVoice() {
-            synth.write(phrase) { audio in
-                if let buffer = audio as? AVAudioPCMBuffer { onMain { enqueue(buffer) } }
-            }
-        }
-        if let readerVoice {
-            readerVoice.generate(text) { [weak self] buffer, words in
-                guard let self, !self.stopped, ticket == self.utterance else { return }
-                guard let buffer else { readerVoice.stop(); self.readerVoice = nil; systemVoice(); return }
-                self.words = words; exhausted = true; enqueue(buffer)
-            }
-        } else { systemVoice() }
         timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
             guard let self, !self.paused, let rendered = self.player.lastRenderTime,
                   let time = self.player.playerTime(forNodeTime: rendered) else { return }
-            let position = Int(time.sampleTime)
             var current: NSRange?
-            while next < self.words.count, self.words[next].0 <= position { current = self.words[next].1; next += 1 }
+            while nextWord < passage.words.count, passage.words[nextWord].0 <= Int(time.sampleTime) {
+                current = passage.words[nextWord].1; nextWord += 1
+            }
             if let current { highlight(current) }
         }
+        passage.deliver = enqueue
+        for buffer in passage.buffers { enqueue(buffer) }
+        passage.buffers.removeAll()
+        if passage.complete { checkEnd() }
+        renderNextPassage()
     }
     private var paused = false
     func pause() { paused = true; if player.engine != nil { player.pause() } }
@@ -6866,6 +6911,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     func stop() {
         guard !stopped else { return }; stopped = true
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
         readerVoice?.stop(); readerVoice = nil
         micWatch?.invalidate(); timer?.invalidate(); synth.stopSpeaking(at: .immediate)
         if player.engine != nil { player.stop() }
@@ -7366,7 +7412,12 @@ final class SpokenReview {
         editor.showMic("Listening", "mic.fill", .systemGreen)
         editor.reviewStatus("Reading · speak to comment")
         editor.highlightReview(range)
-        audio.speak((editor.reader.string as NSString).substring(with: range), highlight: { [weak self] relative in
+        let document = editor.reader.string as NSString
+        var following: [String] = [], offset = position
+        while following.count < 3, let next = Self.passage(in: document, from: offset) {
+            following.append(document.substring(with: next)); offset = NSMaxRange(next)
+        }
+        audio.speak(document.substring(with: range), following: following, highlight: { [weak self] relative in
             guard let self, !self.holding, relative.location >= 0, NSMaxRange(relative) <= range.length else { return }
             self.word = NSRange(location: range.location + relative.location, length: relative.length)
             self.editor?.highlightReview(self.word)
