@@ -27,6 +27,7 @@ pub(super) const TABLES: &[&str] = &[
     "scheduled_jobs",
     "scheduled_job_revisions",
     "scheduled_job_runs",
+    "scheduled_job_logs",
     "worker_runs",
     "worker_allocations",
     "distributed_members",

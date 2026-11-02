@@ -28,7 +28,10 @@ pub struct Definition {
     pub name: String,
     pub cron: String,
     pub timezone: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     /// Empty Codex model inherits the project's current execution settings.
     #[serde(default)]
     pub model: String,
@@ -49,7 +52,15 @@ impl Definition {
     }
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
-        if !self.model.is_empty() || self.harness != "codex" {
+        if let Some(executable) = &self.executable {
+            identifier(executable, "executable", 4096)?;
+            if !self.harness.is_empty()
+                || !self.model.is_empty()
+                || self.thread_mode != ThreadMode::New
+            {
+                return Err(Error::invalid("Script jobs cannot use agent settings"));
+            }
+        } else if !self.model.is_empty() || self.harness != "codex" {
             identifier(&self.model, "logical model", 256)?;
         }
         if self.all_machines && !self.machines.is_empty() {
@@ -74,8 +85,12 @@ impl Definition {
                 ));
             }
         }
-        serde_json::from_value::<crate::agent_runtime::Provider>(serde_json::json!(self.harness))
+        if self.executable.is_none() {
+            serde_json::from_value::<crate::agent_runtime::Provider>(serde_json::json!(
+                self.harness
+            ))
             .map_err(|_| Error::invalid("Job harness must be codex, claude, or pi"))?;
+        }
         schedule::Schedule::parse(&self.cron, &self.timezone)?;
         Ok(())
     }
@@ -89,6 +104,7 @@ pub struct Snapshot {
     pub revision: i64,
     pub definition: Definition,
     /// SHA-256 of the exact UTF-8 bytes in the managed .md file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instruction_digest: String,
 }
 
@@ -106,6 +122,7 @@ pub enum Operation {
     Create {
         id: String,
         definition: Definition,
+        #[serde(default)]
         markdown: String,
         enabled: bool,
     },
@@ -159,6 +176,12 @@ pub enum Operation {
         id: String,
         run_id: String,
     },
+    Log {
+        id: String,
+        run_id: String,
+        #[serde(default)]
+        offset: u64,
+    },
     RunNow {
         id: String,
     },
@@ -191,7 +214,11 @@ impl Operation {
             } => {
                 validate_id(id)?;
                 definition.validate()?;
-                files::validate(markdown)?;
+                if definition.executable.is_none() {
+                    files::validate(markdown)?;
+                } else if !markdown.is_empty() {
+                    return Err(Error::invalid("Script jobs cannot use instructions"));
+                }
             }
             Self::Edit {
                 id,
@@ -202,6 +229,9 @@ impl Operation {
                 validate_id(id)?;
                 revision(*if_revision)?;
                 definition.validate()?;
+                if definition.executable.is_some() && markdown.is_some() {
+                    return Err(Error::invalid("Script jobs cannot use instructions"));
+                }
                 if let Some(markdown) = markdown {
                     files::validate(markdown)?;
                 }
@@ -249,7 +279,7 @@ impl Operation {
                 validate_id(id)?;
                 revision(*r)?;
             }
-            Self::Run { id, run_id } | Self::Stop { id, run_id } => {
+            Self::Run { id, run_id } | Self::Log { id, run_id, .. } | Self::Stop { id, run_id } => {
                 validate_id(id)?;
                 validate_id(run_id)?;
             }

@@ -64,6 +64,7 @@ fn definition() -> Definition {
         name: "Schedule fixture".into(),
         cron: "0 * * * *".into(),
         timezone: "UTC".into(),
+        executable: None,
         harness: "codex".into(),
         model: "gpt-6-astra".into(),
         machines: Vec::new(),

@@ -244,6 +244,7 @@ impl Fixture {
                 name: id.into(),
                 cron: "* * * * *".into(),
                 timezone: "UTC".into(),
+                executable: None,
                 harness: "codex".into(),
                 model: model.into(),
                 machines: Vec::new(),
@@ -986,6 +987,7 @@ fn all_machines_fans_out_once_pins_offline_targets_and_stops_as_a_group() {
                     cwd: None,
                     started_at: None,
                     finished_at: Some(now()),
+                    log: None,
                     reason: None,
                 },
             )
@@ -1069,6 +1071,7 @@ fn all_machines_aggregates_independent_outcomes_and_preserves_execution_snapshot
                         cwd: None,
                         started_at: Some(now()),
                         finished_at: Some(now() + 1),
+                        log: None,
                         reason: None,
                     },
                 )
@@ -1261,6 +1264,7 @@ fn selected_machines_fan_out_only_to_selected_nodes_and_stop_together() {
                         cwd: None,
                         started_at: None,
                         finished_at: Some(now()),
+                        log: None,
                         reason: None,
                     },
                 )
@@ -1280,4 +1284,64 @@ fn selected_machines_fan_out_only_to_selected_nodes_and_stop_together() {
             .iter()
             .all(|r| r["state"] == "cancelled")
     );
+}
+
+#[test]
+fn script_runs_in_checkout_and_keeps_output_after_worker_stops() {
+    let mut f = Fixture::new();
+    let outside = f.root.join("tools with spaces");
+    fs::create_dir(&outside).unwrap();
+    let script = outside.join("maintenance");
+    fs::write(&script, "#!/bin/sh\npwd\necho diagnostic >&2\nawk 'BEGIN {for(i=0;i<50000;i++)printf \"界\"}'\nexit 7\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let op = serde_json::from_value(json!({"command":"create","id":"script","enabled":false,
+        "definition":{"name":"Maintenance","cron":"* * * * *","timezone":"UTC","executable":script}})).unwrap();
+    f.op(op);
+    let run = f.op(Operation::RunNow {
+        id: "script".into(),
+    })["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut machines = f.machines();
+    machines[0]["jobs"]["runtimes"] = json!({});
+    schedule(&f.ctx, &machines).unwrap();
+    for handle in tick_worker(&f.ctx, "pool").unwrap() {
+        handle.join().unwrap();
+    }
+    // Lost acknowledgements retransmit the same page; stale acks must never skip a page.
+    while let Some(report) = reports(&f.ctx).unwrap().into_iter().next() {
+        for _ in 0..2 {
+            assert!(f.store.accept_job_report(&f.ctx.node, &report).unwrap());
+        }
+        for _ in 0..2 {
+            acknowledge(&f.ctx, &report).unwrap();
+        }
+    }
+    f.store.unregister_worker("pool").unwrap();
+    let detail = f.op(Operation::Run {
+        id: "script".into(),
+        run_id: run.clone(),
+    });
+    assert_eq!(detail["run"]["state"], "failed", "{detail}");
+    assert!(detail["run"]["session_id"].is_null());
+    assert!(detail["run"]["reason"].as_str().unwrap().contains('7'));
+    let detail = f.op(Operation::Log {id:"script".into(),run_id:run.clone(),offset:0});
+    let log = detail["log"].as_str().unwrap();
+    assert!(log.contains("diagnostic"), "{log}");
+    assert!(log.contains(f.root.to_str().unwrap()), "{log}");
+    let mut text = log.to_owned();
+    let mut next = detail["next_log_offset"].as_u64();
+    assert!(next.is_some());
+    while let Some(offset) = next {
+        let page = f.op(Operation::Log {
+            id: "script".into(),
+            run_id: run.clone(),
+            offset,
+        });
+        text.push_str(page["log"].as_str().unwrap());
+        next = page["next_log_offset"].as_u64();
+    }
+    assert!(text.ends_with(&"界".repeat(50000)));
 }

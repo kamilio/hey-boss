@@ -26,6 +26,7 @@ for (const name of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','CODEX_THREAD
 const children = [];
 let db;
 const command = args => {
+  if(args[0]==='job')args.push('--project','Job worker QA');
   const result = spawnSync(binary,args,{cwd:checkout,env,encoding:'utf8',timeout:15000});
   assert.equal(result.status,0,result.stdout+result.stderr);
   return JSON.parse(result.stdout);
@@ -47,7 +48,7 @@ async function main(){
   let supervisor=start(['fleet','supervisor']);
   await wait(()=>fs.existsSync(path.join(state,'fleet.sock')));
   command(['project','init','--project','Job worker QA','--yes','--prs','false','--worktree','true','--json']);
-  const worker=start([binary,'--name','Fixture worker','--concurrency','1','--worktree','--json'],path.join(__dirname,'../tests/fixtures/managed-worker.sh'));
+  const worker=start([binary,'--project','Job worker QA','--cwd',checkout,'--name','Fixture worker','--concurrency','1','--worktree','--json'],path.join(__dirname,'../tests/fixtures/managed-worker.sh'));
   db=new DatabaseSync(database,{readOnly:true});
   await wait(()=>db.prepare('SELECT count(*) n FROM local_job_workers').get().n===1);
   const workerId=db.prepare('SELECT worker_id FROM local_job_workers').get().worker_id;
@@ -55,6 +56,16 @@ async function main(){
   for(const args of [['init','-q','--initial-branch=legacy'],['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=/dev/null','commit','--allow-empty','-qm','fixture']]) {
     const r=spawnSync('git',args,{cwd:checkout,env,encoding:'utf8'});assert.equal(r.status,0,r.stderr);
   }
+
+  // An executable installed outside the project still sees the checkout, even on a worktree worker.
+  const executable=path.join(root,'maintenance script');
+  fs.writeFileSync(executable,'#!/bin/sh\npwd\necho "diagnostic" >&2\nexit 7\n',{mode:0o700});
+  command(['job','create','--id','script','--name','Maintenance','--cron','0 3 * * *','--timezone','UTC','--executable',executable,'--paused','--json']);
+  const scriptRun=command(['job','run-now','script','--json']).run;
+  await wait(()=>db.prepare('SELECT state FROM scheduled_job_runs WHERE id=?').get(scriptRun.id).state==='failed');
+  const scriptLog=command(['job','logs','script',scriptRun.id,'--json']).log;
+  assert.ok(scriptLog.includes('\n'+checkout+'\n') && scriptLog.includes('diagnostic'),scriptLog);
+  assert.match(command(['job','run','script',scriptRun.id,'--json']).run.reason,/7/);
 
   command(['job','create','--id','fixture-job','--name','Worker job','--cron','0 * * * *','--timezone','UTC','--harness','codex','--model','exact-model','--instructions',path.resolve('src/jobs/fixtures/original.md'),'--paused','--json']);
   const run=command(['job','run-now','fixture-job','--json']).run;
