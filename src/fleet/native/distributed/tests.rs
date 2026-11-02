@@ -518,6 +518,66 @@ fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn reused_logical_revision_converges_and_does_not_block_the_journal() {
+    use serde_json::json;
+    let fact = |clock, metadata: &str, last_seen| Revision {
+        protocol: PROTOCOL,
+        origin: "same-machine".into(),
+        clock,
+        table: "agents".into(),
+        before: None,
+        after: Some(json!({"id":"human:resume-test","metadata":metadata,"last_seen":last_seen})),
+        resource: None,
+        archive: None,
+    };
+    let first = fact(5, r#"{"name":"A"}"#, 1);
+    let second = fact(5, r#"{"name":"Z"}"#, 2);
+    let newer = fact(6, r#"{"name":"B"}"#, 3);
+    for order in [[&first, &second], [&second, &first]] {
+        let fixture = Fixture::new();
+        let db = fixture.db();
+        install(&db, "test").unwrap();
+        db.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer'")
+            .unwrap();
+        let mut engine = hey_boss_sync::Engine::open(&fixture.0.join("sync.db")).unwrap();
+        // One side has already projected its own revision when the conflicting
+        // revision arrives, as on the live fleet. Replaying either is harmless.
+        for revision in order {
+            engine
+                .put(&serde_json::to_string(revision).unwrap())
+                .unwrap();
+            while import(&db, &engine).unwrap() > 0 {}
+        }
+        for revision in [&first, &second] {
+            projection::reduce(&db, revision).unwrap();
+        }
+        let row = projection::row(&db, "agents", &json!({"id":"human:resume-test"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row["metadata"], second.after.as_ref().unwrap()["metadata"]);
+        assert_eq!(row["last_seen"], 2);
+        engine.put(&serde_json::to_string(&newer).unwrap()).unwrap();
+        while import(&db, &engine).unwrap() > 0 {}
+        assert_eq!(
+            db.query_row(
+                "SELECT metadata FROM agents WHERE id='human:resume-test'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            r#"{"name":"B"}"#
+        );
+        assert_eq!(
+            db.query_row("SELECT projected FROM distributed_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            engine.head().unwrap()
+        );
+    }
+}
+
+
+#[test]
 fn distributed_reservations_precede_agent_claims() {
     use rusqlite::OptionalExtension;
     let fa = Fixture::new();

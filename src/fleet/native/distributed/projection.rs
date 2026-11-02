@@ -1,5 +1,5 @@
 use super::*;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde_json::{Map, json};
 use std::collections::BTreeMap;
 
@@ -219,12 +219,9 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
     let mut order_changed = false;
     for (field, value) in changes {
         let encoded = value.to_string();
-        let previous: Option<String> = db.query_row("SELECT value FROM distributed_fields WHERE table_name=?1 AND entity=?2 AND field=?3 AND clock=?4 AND origin=?5",
-            params![fact.table,entity,field,fact.clock,fact.origin],|r|r.get(0)).optional()?;
-        if previous.is_some_and(|v| v != encoded) {
-            return Err(replica::invalid("A replica reused a logical revision"));
-        }
-        let accepted = db.execute("INSERT INTO distributed_fields VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(table_name,entity,field) DO UPDATE SET clock=excluded.clock,origin=excluded.origin,value=excluded.value WHERE (excluded.clock,excluded.origin)>(clock,origin)",
+        // Newer revisions win. Reused clocks fall back to canonical JSON so
+        // every replica picks the same value regardless of delivery order.
+        let accepted = db.execute("INSERT INTO distributed_fields VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(table_name,entity,field) DO UPDATE SET clock=excluded.clock,origin=excluded.origin,value=excluded.value WHERE (excluded.clock,excluded.origin,excluded.value)>(clock,origin,value)",
             params![fact.table,entity,field,fact.clock,fact.origin,encoded])?>0;
         changed |= accepted;
         order_changed |= accepted && fact.table == "issues" && field == "sort_order";
