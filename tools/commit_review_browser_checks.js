@@ -27,6 +27,17 @@ async page => {
   await page.locator('.comment-form').getByRole('button',{name:/Save/}).click();
   await page.getByText('Handle validation failures here.',{exact:true}).first().waitFor();
   check((await review({command:'comments'})).comments[0].body === 'Handle validation failures here.','Inline comment edits persist');
+  await page.getByRole('button',{name:'Comment on src/parser.rs new line 2',exact:true}).first().click();
+  await page.getByRole('button',{name:'Comment on src/parser.rs new line 3',exact:true}).first().click({modifiers:['Shift']});
+  await page.locator('.comment-form textarea').fill('Review both lines together.');
+  await page.locator('.comment-form .submit-comment').click();
+  await page.getByText('Review both lines together.',{exact:true}).first().waitFor();
+  const ranged = (await review({command:'comments'})).comments.find(c=>c.body==='Review both lines together.');
+  check(ranged.location.line===2 && ranged.location.endLine===3 && ranged.source==='    let value = input.trim_end();\n    validate(value);','Range comment preserves both source lines');
+  const rangeView=page.getByText('Review both lines together.',{exact:true}).first().locator('..');
+  await rangeView.getByRole('button',{name:'Delete',exact:true}).click();
+  await rangeView.locator('.confirm-delete').click();
+  await page.waitForFunction(()=>![...document.querySelectorAll('.comment-body')].some(el=>el.textContent==='Review both lines together.'));
   await page.getByRole('button',{name:'Split',exact:true}).click();
   check(await page.locator('body').evaluate(el=>el.classList.contains('split')),'Split layout works');
   check(await page.getByText('Handle validation failures here.',{exact:true}).last().isVisible(),'Comment appears in split layout');
@@ -64,6 +75,14 @@ async page => {
   await page.locator('.confirm-delete').first().click();
   await page.waitForFunction(()=>![...document.querySelectorAll('.comment-body')].some(el=>el.textContent==='Handle validation failures here.'));
   check((await review({command:'comments'})).comments.length === 0,'Deleting a review comment persists');
+  await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
+  await page.goto(base+'/#'+new URLSearchParams({project:scope.project,issue:scope.issue}));
+  await page.waitForFunction(number=>model?.detail?.issue.number===number,Number(scope.issue));
+  await page.locator('.commit-summary').click();
+  const link=page.locator('.commit-target[href^="/commit-review?"]').first();
+  check(await link.isVisible() && !(await link.getAttribute('target')),'Task opens the stored review inside the app');
+  await link.click();
+  await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
   check(errors.length===0,'No browser exceptions: '+errors.join('; '));
   return checks;
 }
