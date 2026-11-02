@@ -66,9 +66,10 @@ The proxy's configured routing, model rewrites, and authentication remain author
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
-Context is a spelling hint; the transcript takes priority. Capture uses macOS
-Accessibility alongside transcription, with a 200 ms budget and an 8,000-character
-cap. It skips password fields, unrelated editors, controls, navigation trees, and
+Context is a spelling hint; the transcript takes priority. Hey Talk takes one
+snapshot when microphone recording starts and uses it for correction even if
+you change tabs before stopping. Capture uses macOS Accessibility with a
+200 ms budget and an 8,000-character cap. It skips password fields, unrelated editors, controls, navigation trees, and
 clipped or off-screen text; cmux's rendered terminal viewport is included.
 Named regions and message headings separate the captured text into sections.
 T3 and Slack capture keep conversations and the current input, excluding navigation
@@ -345,6 +346,7 @@ These are local measurements, not latency guarantees.
 swift test
 ./test-signing.sh
 ./test-enter-exceptions.sh
+./test-context.sh # Installed app: change visible text during microphone dictation
 ./test-login.sh # Installed app: login startup and explicit quit, while idle
 swift test --sanitize=thread
 ./test-integration.sh
