@@ -706,6 +706,17 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ));
         }
         let asset: Option<(&str, &[u8])> = match path.as_str() {
+            "/commit-review" => Some(("text/html; charset=utf-8", include_bytes!("web/commit-review.html"))),
+            "/commit-review.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/commit-review.js"))),
+            "/commit-review.css" => Some(("text/css; charset=utf-8", include_bytes!("web/commit-review.css"))),
+            "/git-review/diff.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/diff.js"))),
+            "/git-review/git-page.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-page.js"))),
+            "/git-review/git-comments.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-comments.js"))),
+            "/git-review/git-layout.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-layout.js"))),
+            "/git-review/git-files.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-files.js"))),
+            "/git-review/git-rows.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-rows.js"))),
+            "/git-review/git-activity.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/git-review/git-activity.js"))),
+            "/git-review/review.css" => Some(("text/css; charset=utf-8", include_bytes!("web/git-review/review.css"))),
             "/errors" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/errors.html"),

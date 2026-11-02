@@ -1,0 +1,69 @@
+async page => {
+  const checks = [], errors = [];
+  const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
+  page.on('pageerror', e => errors.push(e.message));
+  page.on('console', e => { if (e.type()==='error' && /Content Security Policy/.test(e.text())) errors.push(e.text()); });
+  const base = new URL(page.url()).origin;
+  if (base !== 'http://127.0.0.1:59661') throw Error('Synthetic review fixture required');
+  const scope = Object.fromEntries(new URL(page.url()).searchParams);
+  const api = operation => page.evaluate(async ({scope, operation}) => {
+    const boot = await (await fetch('/api/bootstrap')).json();
+    const response = await fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':boot.csrf},body:JSON.stringify({project:scope.project,operation})});
+    const result = await response.json(); if (!response.ok || !result.ok) throw Error(JSON.stringify(result)); return result;
+  },{scope,operation});
+  const review = operation => api({action:'commit_review',number:Number(scope.issue),commit:scope.commit,operation});
+  const view = () => api({action:'view',number:Number(scope.issue)});
+  await page.getByRole('heading',{name:'Preserve whitespace when parsing',exact:true}).waitFor();
+  check(await page.locator('#task-state').innerText() === 'Ready','Task is Ready inside review');
+  check(await page.locator('.file').count() === 2,'Full stored patch rendered');
+  await page.getByRole('button',{name:'Comment on src/parser.rs new line 3',exact:true}).first().click();
+  await page.locator('.comment-form textarea').fill('Check the validation error before saving.');
+  await page.locator('.comment-form').getByRole('button',{name:/Save comment|Add comment|Comment/,exact:false}).last().click();
+  await page.getByText('Check the validation error before saving.',{exact:true}).first().waitFor();
+  let saved = await review({command:'comments'});
+  check(saved.comments[0].source === '    validate(value);','Agent gets exact commented source');
+  await page.getByRole('button',{name:'Edit',exact:true}).first().click();
+  await page.locator('.comment-form textarea').fill('Handle validation failures here.');
+  await page.locator('.comment-form').getByRole('button',{name:/Save/}).click();
+  await page.getByText('Handle validation failures here.',{exact:true}).first().waitFor();
+  check((await review({command:'comments'})).comments[0].body === 'Handle validation failures here.','Inline comment edits persist');
+  await page.getByRole('button',{name:'Split',exact:true}).click();
+  check(await page.locator('body').evaluate(el=>el.classList.contains('split')),'Split layout works');
+  check(await page.getByText('Handle validation failures here.',{exact:true}).last().isVisible(),'Comment appears in split layout');
+  await page.getByRole('button',{name:'Unified',exact:true}).click();
+  await page.getByRole('button',{name:'Edit commit message',exact:true}).click();
+  await page.getByLabel('Commit message',{exact:true}).fill('Preserve leading whitespace\n\nCheck validation before saving.');
+  await page.getByRole('button',{name:'Save message',exact:true}).click();
+  await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
+  const exported = await review({command:'patch'});
+  check(exported.patch.includes('Subject: [PATCH] Preserve leading whitespace\n\nCheck validation before saving.'),'Patch export uses edited message');
+  await page.getByRole('button',{name:'Not Ready · Assign to me',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#task-state')?.textContent === 'Open');
+  let task = (await view()).issue;
+  check(task.state==='open' && task.assignee==='human:boss','Rework sets Open + Boss together');
+  await page.getByRole('button',{name:'Ready',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#task-state')?.textContent === 'Ready');
+  await page.getByRole('button',{name:'Unassign',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#task-owner')?.textContent === 'Unassigned');
+  task = (await view()).issue;
+  check(task.state==='ready' && task.assignee===null,'Unassign leaves task Ready for delivery');
+  await page.reload();
+  await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
+  check(await page.getByText('Handle validation failures here.',{exact:true}).first().isVisible(),'Comments and message survive reload');
+  for (const scheme of ['light','dark']) {
+    await page.emulateMedia({colorScheme:scheme});
+    for (const width of [1440,768,390,320]) {
+      await page.setViewportSize({width,height:1000});
+      check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`No page overflow ${scheme}/${width}`);
+      check(await page.getByRole('button',{name:'Not Ready · Assign to me',exact:true}).isVisible(),`Rework action visible ${scheme}/${width}`);
+      await page.screenshot({path:`.qa/review-${scheme}-${width}.png`,fullPage:true});
+    }
+  }
+  await page.setViewportSize({width:1440,height:1000});
+  await page.getByRole('button',{name:'Delete',exact:true}).first().click();
+  await page.locator('.confirm-delete').first().click();
+  await page.waitForFunction(()=>![...document.querySelectorAll('.comment-body')].some(el=>el.textContent==='Handle validation failures here.'));
+  check((await review({command:'comments'})).comments.length === 0,'Deleting a review comment persists');
+  check(errors.length===0,'No browser exceptions: '+errors.join('; '));
+  return checks;
+}

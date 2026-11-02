@@ -844,15 +844,15 @@ function listPullRequests(issue) {
     .join("");
 }
 function listCommits(issue, prsEnabled) {
-  if (prsEnabled) return "";
   const commits = issue.commits || [];
   if (!commits.length) return "";
   const c = commits[commits.length - 1];
   const short = c.short_sha || (c.sha || "").slice(0, 7);
   const label = c.title ? `${short} · ${c.title}` : short;
+  const review = c.review_available ? `/commit-review?${new URLSearchParams({project:model.project.id,issue:issue.number,commit:c.sha,...(model.route.host?{host:model.route.host}:{})})}` : null;
   const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
   const more = commits.length > 1 ? `<a class="issue-pr-link issue-commits-more" data-issue="${issue.number}" href="${esc(routeHash({ ...model.route, issue: issue.number }))}" aria-label="View all ${commits.length} commits for issue #${issue.number}">+${commits.length - 1} more</a>` : "";
-  return `<span class="issue-commits-summary"><span class="issue-commit-chip"><a class="issue-pr-link issue-commit-link" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}" aria-label="Open commit ${esc(label)}">${icon("code")}<span class="pr-link-title">${esc(short)}</span></a>${trace ? `<a class="list-agent-trace issue-commit-trace" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}</span>${more}</span>`;
+  return `<span class="issue-commits-summary"><span class="issue-commit-chip"><a class="issue-pr-link issue-commit-link" href="${esc(review || c.url)}" ${review ? "" : 'target="_blank" rel="noopener noreferrer"'} title="${esc(label)}" aria-label="Open commit ${esc(label)}">${icon("code")}<span class="pr-link-title">${esc(short)}</span></a>${trace ? `<a class="list-agent-trace issue-commit-trace" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}</span>${more}</span>`;
 }
 function renderList(result) {
   if (model.orderDragging) return;
@@ -2495,7 +2495,8 @@ function renderCommits(issue, prsEnabled) {
     const short = c.short_sha || (c.sha || "").slice(0, 7);
     const trace = traceLinkForOrigin(c.origin, issue.number, c.added_by);
     const label = [c.sha, c.title].filter(Boolean).join(" ");
-    return `<div class="commit-link"><a class="commit-target" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}"><code>${esc(short)}</code>${c.title ? `<span class="commit-title">${esc(c.title)}</span>` : ""}</a>${trace ? `<a class="icon-button commit-trace-link" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}${issue.deleted_at ? "" : `<button type="button" class="icon-button" title="Remove commit ${esc(short)}" aria-label="Remove commit ${esc(short)}" data-remove-commit="${esc(c.sha)}">${icon("x")}</button>`}</div>`;
+    const review = c.review_available ? `/commit-review?${new URLSearchParams({project:model.project.id,issue:issue.number,commit:c.sha,...(model.route.host?{host:model.route.host}:{})})}` : null;
+    return `<div class="commit-link"><a class="commit-target" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer" title="${esc(label)}"><code>${esc(short)}</code>${c.title ? `<span class="commit-title">${esc(c.title)}</span>` : ""}${c.comment_count ? `<span class="commit-count" title="Review comments">${c.comment_count}</span>` : ""}</a>${trace ? `<a class="icon-button commit-trace-link" href="${esc(trace)}" title="Open agent trace for commit ${esc(short)}" aria-label="Open agent trace for commit ${esc(short)}">${icon("arrow-right")}</a>` : ""}${issue.deleted_at ? "" : `<button type="button" class="icon-button" title="Remove commit ${esc(short)}" aria-label="Remove commit ${esc(short)}" data-remove-commit="${esc(c.sha)}">${icon("x")}</button>`}</div>`;
   }).join("") || "<p>No commits attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add commit-add"><summary>${icon("plus")}Attach a commit</summary><form id="commit-form"><label class="field-label" for="commit-ref">Commit SHA, HEAD, or URL</label><input class="text-input" id="commit-ref" type="text" required placeholder="HEAD or https://github.com/…/commit/…"><button class="button small" type="submit">Attach commit</button></form></details><p id="commit-error" class="form-error" role="alert" hidden></p>`}</details>`;
 }
 async function changeCommit(action, commit) {
