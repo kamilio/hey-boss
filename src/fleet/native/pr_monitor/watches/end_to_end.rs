@@ -150,35 +150,37 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
     let owner = crate::database::Owner::start(&ctx.path).unwrap().unwrap();
     let logs = fs::File::create(root.join("worker.log")).unwrap();
     let mut worker = Worker(
-        Command::new(&binary)
-            .current_dir(&root)
-            .env("HEY_BOSS_ISSUE_DB", &ctx.path)
-            .env("HEY_BOSS_FLEET_STATE", &ctx.state)
-            .env("HEY_BOSS_INBOX_SOCKET", root.join("absent-inbox.sock"))
-            .env("HEY_BOSS_TEST_CLI", &binary)
-            .env(
-                "HEY_BOSS_TEST_REJECT_STEERING",
-                if reject_steering { "1" } else { "0" },
-            )
-            .env(
-                "HEY_BOSS_CODEX",
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/codex-github-watch.mjs"),
-            )
-            .env_remove("HEY_BOSS_ISSUE_HOST")
-            .env_remove("HEY_BOSS_ISSUE_PROJECT")
-            .args([
-                "worker",
-                "run",
-                "--project",
-                "Watcher E2E",
-                "--directory",
-                root.to_str().unwrap(),
-            ])
-            .stdout(Stdio::from(logs.try_clone().unwrap()))
-            .stderr(Stdio::from(logs))
-            .spawn()
-            .unwrap(),
+        Command::new(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/managed-worker.sh"),
+        )
+        .arg(&binary)
+        .current_dir(&root)
+        .env("HEY_BOSS_ISSUE_DB", &ctx.path)
+        .env("HEY_BOSS_FLEET_STATE", &ctx.state)
+        .env("HEY_BOSS_INBOX_SOCKET", root.join("absent-inbox.sock"))
+        .env("HEY_BOSS_TEST_CLI", &binary)
+        .env(
+            "HEY_BOSS_TEST_REJECT_STEERING",
+            if reject_steering { "1" } else { "0" },
+        )
+        .env(
+            "HEY_BOSS_CODEX",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex-github-watch.mjs"),
+        )
+        .env_remove("HEY_BOSS_ISSUE_HOST")
+        .env_remove("HEY_BOSS_ISSUE_PROJECT")
+        .args([
+            "--project",
+            "Watcher E2E",
+            "--directory",
+            root.to_str().unwrap(),
+        ])
+        .stdout(Stdio::from(logs.try_clone().unwrap()))
+        .stderr(Stdio::from(logs))
+        .spawn()
+        .unwrap(),
     );
     let scalar = |query: &str| {
         Store::open_connection(&ctx.path)

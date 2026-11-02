@@ -441,17 +441,6 @@ fn reconnect_store(store: &mut Store, path: &Path, error: &Error) {
 }
 
 impl Worker {
-    pub fn start(path: PathBuf) -> Result<Self> {
-        Self::start_for(path, None)
-    }
-    pub fn start_for(path: PathBuf, worker_id: Option<String>) -> Result<Self> {
-        Self::start_for_control(
-            path,
-            worker_id,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
     fn start_for_control(
         path: PathBuf,
         worker_id: Option<String>,
@@ -642,17 +631,6 @@ pub(crate) fn install_signals_for_upgrade(
         stop.store(true, Ordering::Relaxed);
     })
     .map_err(|e| Error::new("worker_error", e.to_string()))
-}
-pub fn serve() -> Result<()> {
-    let worker = Worker::start(super::database_path()?)?;
-    install_signals(worker.stop.clone())?;
-    println!(
-        "Hey Boss issue workers · monitoring enabled managed workers. Ctrl+C stops owned sessions."
-    );
-    while !worker.stop.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(200));
-    }
-    Ok(())
 }
 fn alive(pid: u32, start: &str) -> bool {
     crate::agents::process_identity(pid).as_deref() == Some(start)
@@ -2116,38 +2094,15 @@ pub fn print_status_with_history(v: &Value, redraw: bool, history_limit: usize) 
         }
     }
 }
-pub fn serve_instance(
-    settings: Settings,
-    id: Option<&str>,
-    project: Project,
-    json_output: bool,
-) -> Result<()> {
-    serve_instance_with_history(settings, id, project, json_output, 3)
-}
-pub fn serve_instance_with_history(
-    settings: Settings,
-    id: Option<&str>,
-    project: Project,
-    json_output: bool,
-    history_limit: usize,
-) -> Result<()> {
-    let result = Startup::new()?.serve_instance(settings, id, project, json_output, history_limit);
-    match result {
-        Err(error) if error.code == "cancelled" => Ok(()),
-        result => result,
-    }
-}
-
 impl Startup {
     pub fn serve_instance(
         &self,
         settings: Settings,
-        id: Option<&str>,
+        id: &str,
         project: Project,
         json_output: bool,
         history_limit: usize,
     ) -> Result<()> {
-        use std::io::IsTerminal;
         validate_settings(&settings)?;
         // Linux current_exe() gains " (deleted)" after an atomic replacement.
         // Retain the installed path while it still names the running executable.
@@ -2171,7 +2126,7 @@ impl Startup {
             },
         )?;
         // Keep the same ID if registration committed but its acknowledgment was lost.
-        let id = id.map(str::to_owned).map(Ok).unwrap_or_else(random_id)?;
+        let id = id.to_owned();
         self.register(&mut store, &path, &id, &settings, &machine)?;
         struct Registration {
             path: PathBuf,
@@ -2205,32 +2160,9 @@ impl Startup {
                 return Err(error);
             }
         };
-        let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal() && !json_output;
-        if tty {
-            use crate::worker_tui::{backend::Client, runtime};
-            let exit = runtime::run(
-                runtime::Options {
-                    client: Client {
-                        binary: reload_executable.clone(),
-                        host: None,
-                        directory: Some(std::env::current_dir()?),
-                        timeout: Duration::from_secs(10),
-                    },
-                    id: Some(id.clone()),
-                    history: history_limit > 0,
-                    owned_worker: true,
-                    project_tabs: false,
-                },
-                worker.stop.clone(),
-            )
-            .map_err(|e| Error::new("worker_error", e.to_string()))?;
-            if exit == runtime::Exit::Quit {
-                worker.reload.store(false, Ordering::Relaxed);
-            }
-        }
         let mut last = String::new();
         let mut heartbeat = Instant::now() - Duration::from_secs(30);
-        while !tty && !worker.stop.load(Ordering::Relaxed) {
+        while !worker.stop.load(Ordering::Relaxed) {
             let value = store.execute(&super::Request {
                 version: 1,
                 project: project.clone(),
@@ -2300,7 +2232,6 @@ impl Startup {
             let mut command = Command::new(reload_executable);
             command.args([
                 "worker",
-                "run",
                 "--id",
                 &id,
                 "--history",

@@ -77,7 +77,7 @@ fn configuration(ctx: &Context) -> Result<(std::path::PathBuf, Vec<Value>, &'sta
     };
     if config.is_null() {
         return Err(replica::invalid(&format!(
-            "No saved worker configuration. Use auto-workers add or add a worker to {}.",
+            "No saved worker configuration. Use workers add or add a worker to {}.",
             ctx.desired.display()
         )));
     }
@@ -128,15 +128,8 @@ fn save_owned_ids(ctx: &Context, ids: &HashSet<String>) -> Result<()> {
     )
 }
 
-pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
+pub(super) fn snapshot(config_only: bool) -> Result<Value> {
     let ctx = Context::new()?;
-    // Read, persist intent and reconcile under the same control lock as removal
-    // and fleet configuration, so a launch cannot revive a concurrent removal.
-    let control_lock = if apply {
-        ctx.lock("fleet-worker-control.lock", true)?
-    } else {
-        None
-    };
     let (fleet_source, all_definitions, role) = configuration(&ctx)?;
     let ids = owned_ids(&ctx)?;
     let selected: Vec<_> = all_definitions
@@ -144,36 +137,13 @@ pub(super) fn run(apply: bool, config_only: bool) -> Result<Value> {
         .filter(|w| w["id"].as_str().is_some_and(|id| ids.contains(id)))
         .cloned()
         .collect();
-    let selected = if apply && role == "controller" {
-        super::projects::prepare(
-            &ctx,
-            &super::projects::desired(&ctx, "local")?,
-            &json!(selected),
-        )?
-    } else {
-        json!(selected)
-    };
-    let definitions = definitions(&selected)?;
+    let definitions = definitions(&json!(selected))?;
     let source = fleet_source.clone();
     if config_only {
         return Ok(
             json!({"ok":true,"machine":ctx.node,"source":source,"fleet_source":fleet_source,"workers":definitions}),
         );
     }
-    if apply {
-        // Observation must remain available when a checkout or Codex is missing.
-        // Validate every startup before applying any worker configuration.
-        for definition in &definitions {
-            if !matches!(definition["intent"].as_str(), Some("stop" | "drain")) {
-                validate_settings(&serde_json::from_value(definition["config"].clone())?)?;
-            }
-        }
-        let failures = control::apply_workers_locked(&ctx, &definitions)?;
-        if !failures.is_empty() {
-            return Err(replica::invalid(&failures.join("; ")));
-        }
-    }
-    drop(control_lock);
     let mut workers = ctx.workers_for(Some(&ids))?;
     workers.retain(|worker| {
         definitions.iter().any(|definition| {
@@ -224,7 +194,7 @@ pub(super) fn add(settings: &Settings, requested_id: Option<&str>) -> Result<Val
                 "Worker ID must use 1–128 letters, digits or hyphens",
             ));
         }
-        None => format!("auto-{}", crate::issues::worker::random_id()?),
+        None => crate::issues::worker::random_id()?,
     };
     let worker = json!({"id":id,"config":settings,"intent":"running"});
     let mut ids = owned_ids(&ctx)?;
@@ -285,29 +255,34 @@ pub(super) fn add(settings: &Settings, requested_id: Option<&str>) -> Result<Val
     Ok(json!({"ok":true,"worker_id":id}))
 }
 
-pub(super) fn remove(id: &str) -> Result<Value> {
+pub(super) fn set_intent(id: &str, intent: &str) -> Result<Value> {
     let ctx = Context::new()?;
     let Some(_lock) = ctx.lock("fleet-worker-control.lock", true)? else {
         unreachable!()
     };
     if !owned_ids(&ctx)?.contains(id) {
-        return Err(replica::invalid("Worker is not owned by auto-workers"));
+        return Err(replica::invalid("Worker is not configured on this machine"));
     }
     let (_, mut workers, role) = configuration(&ctx)?;
     let worker = workers
         .iter_mut()
         .find(|w| w["id"] == id)
         .ok_or_else(|| replica::invalid("Configured worker was not found"))?;
-    worker["intent"] = json!("drain");
-    worker["config"]["enabled"] = json!(false);
+    if !matches!(intent, "pause" | "running" | "drain")
+        || (intent != "drain" && matches!(worker["intent"].as_str(), Some("stop" | "drain")))
+    {
+        return Err(replica::invalid("Cannot change pickup on a removed worker"));
+    }
+    worker["intent"] = json!(intent);
+    worker["config"]["enabled"] = json!(intent == "running");
     let definition = worker.clone();
     save_changes(&ctx, role, workers, &[id.to_owned()])?;
     // Configuration disables pickup without setting stop_requested on live runs.
-    let failures = control::configure_workers(&ctx, &[definition])?;
+    let failures = control::apply_workers_locked(&ctx, &[definition])?;
     if !failures.is_empty() {
         return Err(replica::invalid(&failures.join("; ")));
     }
-    Ok(json!({"ok":true,"worker_id":id,"state":"draining"}))
+    Ok(json!({"ok":true,"worker_id":id,"state":if intent=="drain" {"draining"} else {intent}}))
 }
 
 fn save_changes(ctx: &Context, role: &str, workers: Vec<Value>, changed: &[String]) -> Result<()> {

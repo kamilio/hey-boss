@@ -261,7 +261,7 @@ pub(super) fn legacy_local_workers(ctx: &Context, doc: &Value) -> Result<Value> 
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let owned = super::auto_workers::legacy_owned_ids(ctx)?;
+    let owned = super::workers::legacy_owned_ids(ctx)?;
     let main = ctx.read_json(&ctx.state.join("fleet-main.json"), json!({}))?;
     for row in main["workers"].as_array().into_iter().flatten() {
         if let Some(saved) = workers.iter_mut().find(|w| w["id"] == row["id"]) {

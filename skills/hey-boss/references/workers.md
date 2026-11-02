@@ -1,30 +1,16 @@
 # Workers and agents
 
-## Start or observe
+## Workers
+
+Create a worker explicitly; it starts automatically. Watching or closing the dashboard does not change pickup.
 
 ```sh
-hey-boss worker run --concurrency 2 --tag ready
-hey-boss worker status --json
-hey-boss worker watch
-hey-boss auto-workers status --json
-hey-boss auto-workers watch
-```
-
-`worker run` starts an independent worker; omit `--tag` for unrestricted pickup.
-Standalone queues are per machine. `status` prints one snapshot; `watch` opens
-the dashboard. Bare `worker` and `auto-workers` show help.
-Local startup connection outages leave `worker run` idle until recovery; Ctrl+C cancels the wait.
-
-`auto-workers run` applies saved configuration while preserving paused or stopped
-intent. Use `status`, `config`, or `watch` to observe. Quitting the dashboard
-leaves workers running.
-
-## Saved workers and fleet
-
-```sh
-hey-boss auto-workers add --name 'Tools' -C /work/hey-boss --concurrency 1
-hey-boss auto-workers config
-hey-boss auto-workers remove WORKER_ID
+hey-boss workers add --name Tools -C /work/hey-boss --concurrency 2
+hey-boss workers status --json
+hey-boss workers watch
+hey-boss workers pause WORKER_ID
+hey-boss workers resume WORKER_ID
+hey-boss workers remove WORKER_ID
 ```
 
 Repeat `-C` to share one worker's slots across several project checkouts.
@@ -32,9 +18,7 @@ Repeat `-C` to share one worker's slots across several project checkouts.
 creation, reuse `add --id ID` with identical settings to avoid duplicate workers.
 
 `hey-boss fleet setup --source /path/to/hey-boss` enables automatic configuration,
-software deployment, and replica sync for the saved SSH inventory. For remote
-standalone workers, `worker --host HOST` runs on that host and `-C` paths belong
-to it.
+software deployment, and replica sync for the saved SSH inventory.
 
 ## Agent sessions
 

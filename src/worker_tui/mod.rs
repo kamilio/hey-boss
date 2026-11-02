@@ -64,7 +64,7 @@ pub fn project_name(id: &str, snapshot: &Value) -> String {
 #[derive(Default)]
 pub struct Dashboard {
     pub snapshot: Value,
-    pub owned_worker: bool,
+
     pub worker_id: Option<String>,
     pub selected_tab: Option<DashboardTab>,
     pub manage_workers: bool,
@@ -280,10 +280,9 @@ impl Dashboard {
             }
         }
         let workers = self.workers();
-        if !self.owned_worker
-            && !workers
-                .iter()
-                .any(|w| w["id"].as_str() == self.worker_id.as_deref())
+        if !workers
+            .iter()
+            .any(|w| w["id"].as_str() == self.worker_id.as_deref())
         {
             self.worker_id = self.snapshot["worker_id"]
                 .as_str()

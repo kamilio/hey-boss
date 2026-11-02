@@ -1,3 +1,5 @@
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
 use hey_boss::{agent_runtime::Provider, issues::worker::Settings};
@@ -41,9 +43,10 @@ impl Fixture {
         let mut f = Self { root, child: None };
         f.cli(&["issue", "create", "--title", "Provider worker"]);
         let mut c = f.command();
-        c.args([
+        c.env("HEY_BOSS_FLEET_MANAGED", "1").args([
             "worker",
-            "run",
+            "--id",
+            &managed_worker::register(&f.root.join("issues.db")),
             "--project",
             "Provider test",
             "--directory",
@@ -222,18 +225,20 @@ fn provider_workers_always_start_fresh_after_stopping() {
             "cancelled"
         );
         let mut c = f.command();
-        c.args([
-            "worker",
-            "run",
-            "--project",
-            "Provider test",
-            "--directory",
-            f.root.to_str().unwrap(),
-            "--provider",
-            next,
-        ])
-        .env("HEY_BOSS_FIXTURE_PROVIDER", next)
-        .stdout(Stdio::null());
+        c.env("HEY_BOSS_FLEET_MANAGED", "1")
+            .args([
+                "worker",
+                "--id",
+                &managed_worker::register(&f.root.join("issues.db")),
+                "--project",
+                "Provider test",
+                "--directory",
+                f.root.to_str().unwrap(),
+                "--provider",
+                next,
+            ])
+            .env("HEY_BOSS_FIXTURE_PROVIDER", next)
+            .stdout(Stdio::null());
         f.child = Some(c.spawn().unwrap());
         let job: serde_json::Value = serde_json::from_str(&f.wait(
             "SELECT job FROM worker_runs WHERE claimed_at IS NOT NULL AND finished_at IS NULL",
@@ -327,9 +332,11 @@ fn real_provider_workers_complete_their_claimed_issue() {
             .env_remove("HEY_BOSS_CLAUDE")
             .env_remove("HEY_BOSS_PI")
             .env("HEY_BOSS_INBOX_SOCKET", f.root.join("inbox.sock"))
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
             .args([
                 "worker",
-                "run",
+                "--id",
+                &managed_worker::register(&f.root.join("issues.db")),
                 "--provider",
                 provider,
                 "--project",

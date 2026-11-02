@@ -1,3 +1,5 @@
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
 use std::{fs, os::unix::fs::PermissionsExt};
@@ -176,9 +178,12 @@ fn quota_pool_startup_releases_five_issues_and_recovers_with_one_identity_check(
                 ),
             )
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
             .args([
                 "worker",
                 "run",
+                "--id",
+                &managed_worker::register(&db_path),
                 "--project",
                 "Worker fixture",
                 "--concurrency",
@@ -327,7 +332,8 @@ fn repository_override_blocks_check_setup_and_worker_before_start() {
     let o = f
         .command(env!("CARGO_BIN_EXE_hey-boss"))
         .env("HEY_BOSS_ISSUE_DB", f.root.join("issues.db"))
-        .args(["worker", "run", "--json"])
+        .env("HEY_BOSS_FLEET_MANAGED", "1")
+        .args(["worker", "run", "--id", "fixture", "--json"])
         .output()
         .unwrap();
     assert!(!o.status.success());

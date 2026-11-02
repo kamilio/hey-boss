@@ -49,7 +49,7 @@ fn main() {
                     },
                     id: options.id,
                     history: options.history,
-                    owned_worker: false,
+
                     project_tabs: options.projects,
                 },
                 cancelled,

@@ -22,22 +22,22 @@ pub(crate) fn test_replica(
 mod status;
 use status::status_text;
 
-/// Apply or inspect this machine's saved workers, retaining their stable IDs.
-pub fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
-    native::auto_workers(apply, config_only)
+/// Inspect this machine's saved workers without changing them.
+pub fn saved_workers(config_only: bool) -> std::io::Result<Value> {
+    native::saved_workers(config_only)
 }
 /// Verify local worker executables and safely replace outdated running workers.
 pub fn rollout_workers(build: &str, apply: bool) -> std::io::Result<Value> {
     native::rollout_workers(build, apply)
 }
-pub fn add_auto_worker(
+pub fn add_worker(
     settings: &crate::issues::worker::Settings,
     id: Option<&str>,
 ) -> std::io::Result<Value> {
-    native::add_auto_worker(settings, id)
+    native::add_worker(settings, id)
 }
-pub fn remove_auto_worker(id: &str) -> std::io::Result<Value> {
-    native::remove_auto_worker(id)
+pub fn set_worker_intent(id: &str, intent: &str) -> std::io::Result<Value> {
+    native::set_worker_intent(id, intent)
 }
 
 // Persisted roles and protocol-v1 frames keep their original names so existing

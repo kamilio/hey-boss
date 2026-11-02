@@ -60,7 +60,8 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Start an independent worker; wait idle through temporary connection outages.
+    // Kept for managed processes re-executing an older command line during upgrade.
+    #[command(hide = true)]
     Run,
     /// Print one status snapshot without starting workers or opening a dashboard.
     #[command(visible_alias = "list")]
@@ -94,11 +95,13 @@ pub fn run(o: &Options) -> Result<()> {
 }
 
 fn run_inner(o: &Options) -> Result<()> {
-    // Already-running older workers re-exec with --id during an upgrade.
-    // Keep that restore path while requiring an explicit run for new workers.
-    if o.action.is_none() && o.id.is_none() {
+    if matches!(o.action, None | Some(Action::Run))
+        && (o.id.is_none()
+            || o.host.is_some()
+            || std::env::var("HEY_BOSS_FLEET_MANAGED").as_deref() != Ok("1"))
+    {
         return Err(Error::invalid(
-            "Use hey-boss worker run to start a worker, status for a snapshot, or watch for a live view",
+            "Workers start automatically. Use hey-boss workers add to create one.",
         ));
     }
     if dashboard_enabled(o) {
@@ -116,7 +119,7 @@ fn run_inner(o: &Options) -> Result<()> {
                 },
                 id: o.id.clone(),
                 history: o.history > 0,
-                owned_worker: false,
+
                 project_tabs: false,
             },
             cancelled,
@@ -283,27 +286,21 @@ fn run_inner(o: &Options) -> Result<()> {
         return Ok(());
     }
     let startup = startup.expect("One-shot actions returned before worker startup");
-    let mut c = if let Some(id) = &o.id {
-        serde_json::from_value(
-            startup.execute(
-                &mut store,
-                &path,
-                &request(
-                    Operation::Workers {
-                        worker_id: Some(id.clone()),
-                    },
-                    None,
-                ),
-            )?["config"]
-                .clone(),
-        )?
-    } else {
-        Settings {
-            name: format!("Worker {}", std::process::id()),
-            ..Settings::default()
-        }
-    };
-    if o.id.is_none() || o.all_projects || !o.project.is_empty() || !o.directory.is_empty() {
+    let id = o.id.as_ref().expect("Managed startup requires an ID");
+    let mut c: Settings = serde_json::from_value(
+        startup.execute(
+            &mut store,
+            &path,
+            &request(
+                Operation::Workers {
+                    worker_id: Some(id.clone()),
+                },
+                None,
+            ),
+        )?["config"]
+            .clone(),
+    )?;
+    if o.all_projects || !o.project.is_empty() || !o.directory.is_empty() {
         let selected = o
             .project
             .iter()
@@ -365,7 +362,7 @@ fn run_inner(o: &Options) -> Result<()> {
     }
     c.enabled = true;
     issues::worker::validate_settings(&c)?;
-    startup.serve_instance(c, o.id.as_deref(), base, o.json, o.history as usize)
+    startup.serve_instance(c, id, base, o.json, o.history as usize)
 }
 
 fn dashboard_enabled(o: &Options) -> bool {

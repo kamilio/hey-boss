@@ -132,35 +132,6 @@ fn confirmation_captures_exact_worker_and_is_disabled_during_requests_or_errors(
 }
 
 #[test]
-fn owned_worker_footer_and_help_describe_shutdown_instead_of_detachment() {
-    let mut app = Dashboard::default();
-    app.apply(snapshot());
-    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
-    for owned in [false, true] {
-        app.owned_worker = owned;
-        for help in [false, true] {
-            app.help = help;
-            terminal.draw(|frame| ui::render(frame, &app)).unwrap();
-            let screen: String = terminal
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            if owned {
-                assert!(
-                    screen.contains("stops this worker") || screen.contains("Stop this worker")
-                );
-                assert!(!screen.contains("workers keep running"));
-            } else {
-                assert!(screen.contains("workers keep running"));
-            }
-        }
-    }
-}
-
-#[test]
 fn renders_resizes_empty_states_modals_and_untrusted_text_without_panicking() {
     let mut app = Dashboard::default();
     app.apply(snapshot());
@@ -453,17 +424,11 @@ fn supervisor_connectivity_accepts_status_from_older_workers() {
 }
 
 #[test]
-fn initial_selection_uses_status_worker_and_owned_dashboard_stays_pinned() {
+fn initial_selection_uses_status_worker() {
     let mut value = snapshot();
     value["worker_id"] = json!("b");
     let mut app = Dashboard::default();
     app.apply(value);
-    assert_eq!(app.worker_id.as_deref(), Some("b"));
-    app.owned_worker = true;
-    app.apply(snapshot());
-    assert_eq!(app.worker_id.as_deref(), Some("b"));
-    assert!(app.runs().is_empty());
-    app.apply(json!({"worker_id":"a", "workers":[{"id":"a"}], "runs":[]}));
     assert_eq!(app.worker_id.as_deref(), Some("b"));
 }
 

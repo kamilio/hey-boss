@@ -299,51 +299,24 @@ versions deliberately reject the upgraded schema.
 
 ## Automatic Codex workers
 
-Run an independent worker in a checkout:
+Workers start automatically when you add them in **Project workers** or with the CLI:
 
 ```sh
-hey-boss worker --concurrency 2 --tag ready
-hey-boss worker --concurrency 4                   # No tag restrictions
-hey-boss worker --all-projects --concurrency 2
-hey-boss worker --project poe2 --tag ready
-hey-boss worker status
-hey-boss worker --id WORKER_ID --json status
-hey-boss worker pause WORKER_ID                  # Existing sessions continue
-hey-boss worker stop WORKER_ID                   # Stop and reap its sessions
-hey-boss worker --id WORKER_ID                   # Restore saved settings
-hey-boss worker --host devbox --directory /home/me/poe-code --concurrency 1
-hey-boss worker -C ~/Workspace/atlas -C ~/Workspace/beacon --concurrency 2
-hey-boss worker --host devbox -C /work/atlas -C /work/beacon
+hey-boss workers add --name Tools -C ~/Workspace/atlas -C ~/Workspace/beacon --concurrency 2
+hey-boss workers status
+hey-boss workers watch
+hey-boss workers pause WORKER_ID
+hey-boss workers resume WORKER_ID
 ```
 
-Concurrency and tags belong to each worker instance. There is no global or
-project cap. Repeated `--tag` requires every tag. Repeated `--project` scans
-several projects; `--all-projects` scans visible projects with known checkouts.
-Use `-C PATH` or `--cwd PATH` to select a checkout without changing your shell's
-directory. Repeat it to pick issues from several repositories, each in its own
-checkout. `--directory` remains an alias. Paths are resolved independently against
-the shell's working directory; remote paths are resolved on `--host`.
-Explicit `--project` filters restrict pickup to those projects; supplied checkouts
-must match them. A single checkout and single project also support custom named
-projects. Other selected projects use discovered checkouts. One worker can select
-only one checkout per project. Saved worker IDs retain these mappings through
-restart; new scope flags replace the saved scope. `--all-projects` cannot be
-combined with explicit checkout paths.
-Each worker displays free/busy slots, pickup pipeline, session IDs, elapsed time,
-and latest Codex activity. `--json` emits status snapshots. Ctrl+C stops that
-worker and reaps its Codex processes before releasing claims.
-
-Standalone workers start from the CLI in the project directory. Managed fleet
-workers also accept controls from the Workers web view. **Project settings** edits the project's
+Each worker shares its agent limit across its selected projects. Closing a dashboard leaves its workers running. **Project settings** edits the project's
 inherited prompt and PR toggle and previews the exact resulting instructions.
 
 Pickup is an atomic reservation, leaving the issue **unassigned**. Codex must
 run `hey-boss issue claim NUMBER`. Another agent cannot claim an unexpired
-reservation without explicit force. `--claim-timeout SECONDS` defaults to 600
+reservation without explicit force. The claim timeout defaults to 600
 (ten minutes), starting at the first model activity. Queued model startup has a
-separate fifteen-minute deadline. Saved workers retain their configured timeout;
-use `--id WORKER_ID --claim-timeout 600` when starting an older saved worker to
-adopt the longer window. Missed deadlines stop Codex and free the slot. Stopping or restarting a worker
+separate fifteen-minute deadline. Saved workers retain their configured timeout. Missed deadlines stop Codex and free the slot. Stopping or restarting a worker
 reaps its agents, unassigns their unfinished issues, and makes those issues eligible
 immediately. Recovery does the same for a killed worker. Failed/blocked/timed
 out issues become eligible again while open and unassigned after a retry delay
@@ -394,7 +367,7 @@ Attachment purposes distinguish fixes and prerequisites from supporting evidence
 Workers do not merge PRs.
 
 Worktree and PR settings are off by default.
-`worker --worktree` selects worktrees only when the project allows them;
+Workers use dedicated worktrees only when the project allows them;
 `--no-worktree` or no workspace flag uses the existing checkout. Disabling
 **Allow worktrees** prevents worktree use for future jobs, including saved workers
 with `--worktree`. `--prs` / `--no-prs` still override project delivery choices. Worktree mode instructs

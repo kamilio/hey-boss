@@ -75,46 +75,29 @@ The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Cod
 and Pi sessions through one API, including resume, activity, steering, interruption,
 explicit approvals/input, and provider-neutral goal continuation. Choose Codex,
 Claude Code or Pi in **Worker settings → Agent**, or pass `--provider claude|pi`
-to `worker run` or `auto-workers add`. Existing workers default to Codex; changes
+to `workers add`. Existing workers default to Codex; changes
 apply to newly picked issues. Each provider must be installed and authenticated
 on its worker's machine.
 
-Run `hey-boss auto-workers run` to start or resume saved workers, then
-`hey-boss auto-workers watch` to open their dashboard.
-Create a saved project worker with **Project workers → Add project worker** or
-`hey-boss auto-workers add --name Tools -C /path/to/project`. Project onboarding and fleet
-discovery leave worker creation to you.
+Create a worker with **Project workers → Add project worker** or
+`hey-boss workers add --name Tools -C /path/to/project`. It starts automatically.
+Project onboarding and machine discovery create no workers. Open
+`hey-boss workers watch` to see activity; closing the dashboard leaves workers running.
 
 Tab / Shift+Tab switches project tabs; `a` adds a worker, and `w` then `d` removes
 one after its current agents finish. Reopening the dashboard reuses the
 same workers. Separate checkouts and shared multi-project pools retain their own
-slots. See [per-machine configuration and live controls](docs/auto-workers.md).
+slots. See [per-machine configuration and live controls](docs/workers.md).
 
-The [worker terminal dashboard](worker-tui/README.md) shows the current worker, live sessions,
-activity, queue state, and worker controls. Run `hey-boss worker run` to start a worker
-with its dashboard, or `hey-boss worker watch` to watch existing workers.
-Use `hey-boss worker status` (or `list`) for one text snapshot; add `--json` for JSON.
-Bare `worker` and `auto-workers` commands show help and do not start work.
-The older `worker --id ID` restore form remains accepted so running workers can reload during upgrades.
-`worker restart ID --request-id KEY` and `fleet signal HOST WORKER SIGNAL --request-id KEY`
-reuse one durable signal receipt. Omit the key for a new operation; the CLI prints
+Use `hey-boss workers status --json` for a snapshot, or `workers pause ID` and
+`workers resume ID` to control pickup.
+`fleet signal HOST WORKER SIGNAL --request-id KEY`
+reuses one durable signal receipt. Omit the key for a new operation; the CLI prints
 its generated ID to stderr before sending. After an **Outcome unknown** error,
 retry identical arguments with that key. **Not sent** means this attempt failed
 before transmission. A changed payload with the same key is rejected; a new
 intentional restart needs a new key. JSON receipts remain on stdout.
-For a live log in scripts or agent sessions, use `hey-boss worker watch`.
-It observes every registered worker on the selected machine every two seconds,
-showing slots, pickup state, active issues, latest activity and session IDs.
-It never starts or controls workers. Stop with Ctrl-C, or use
-`hey-boss worker --json watch --count 3` for three newline-delimited JSON snapshots.
-Each JSON record contains `observed_at` (Unix milliseconds), the worker inventory,
-and per-worker `snapshots` with queue counts, active runs and recent events.
-Use `--id ID` to watch one worker, `--history 5` to include up to five finished
-attempts per worker (default: active only), or `--host HOST` for an SSH companion.
-Disconnected hosts fail explicitly; they never fall back to this Mac's queue.
-It is included in normal installations and SSH companion upgrades. The dashboard
-opens automatically in an interactive terminal; use `--json` for scripts. Quitting a started worker stops its
-sessions; quitting a watch dashboard leaves workers running.
+For a live log in scripts, use `hey-boss workers watch --json --count 3` for three snapshots. Closing the dashboard leaves workers running.
 
 Native macOS notifications and questions for coding agents. Short updates stack by project; Read update opens a Markdown preview. Rust library and CLI, Swift/AppKit daemon, SQLite history. No Python or Electron.
 
@@ -175,13 +158,7 @@ Forced creation leaves pickup paused. Turn off **Pause project** to resume, or u
 `hey-boss issue settings set --pause --reason 'Waiting for the next release'`
 and `hey-boss issue settings set --resume`.
 
-Codex workers launch from the CLI: `hey-boss worker run --concurrency 2 --tag ready`.
-Each worker owns its concurrency and filters, uses its current directory, and
-shows only that worker, with prominent availability and busy/free slot counts.
-Active work is the default; h switches to a separate completed-attempt history.
-`--history 20` starts in history. In plain terminal output, finished attempts
-appear separately only when `--history` is supplied. Concurrency limits active
-sessions only. Open, unassigned
+Set the number of parallel agents with `workers add --concurrency N`. Open, unassigned
 issues retry after unsuccessful attempts with a delay of 30 seconds to five
 minutes. Codex command, network, file-change and permission approvals appear as
 issue-linked questions in Hey Boss Inbox. The worker keeps its session and claim
@@ -367,12 +344,11 @@ Issue database writes are coordinated by one owner inside an existing local
 service. CLI commands, web requests, workers and replication connect to it
 automatically; no database server setup is needed. Reads remain available while
 another transaction writes, and the service starts automatically when absent.
-Standalone workers still use their local queue. `worker run --host HOST --directory
-/remote/checkout` runs a worker and its Codex agents on that host.
+Workers run agents on the machine where their projects are checked out.
 **Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
 with a live assembled preview. Implementation instructions contain only the shared
 prompt and selected workspace and delivery branches; no extra cleanup or PR handoff
-paragraphs are appended. Each branch inherits a code default or uses a project override. `worker run --worktree` selects a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
+paragraphs are appended. Each branch inherits a code default or uses a project override. Worker settings select a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
 For validation queue diagnosis and the single-admission workflow, see
 [nested verification reservations](docs/verification-slots.md).

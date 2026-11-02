@@ -1,13 +1,13 @@
 //! Native fleet implementation. Protocol-v1 and durable filenames stay stable.
 mod archive;
 mod authority;
-mod auto_workers;
 mod companion;
 mod configuration;
 mod context;
 mod control;
 mod conversation;
 mod distributed;
+mod workers;
 pub(crate) use distributed::restore_history_row;
 mod github_reads;
 mod github_relay;
@@ -95,17 +95,17 @@ pub(super) fn signal_request(mut value: Value) -> crate::issues::Result<Value> {
         super::signal::exchange(stream, &value)
     }
 }
-pub(super) fn auto_workers(apply: bool, config_only: bool) -> std::io::Result<Value> {
-    self::auto_workers::run(apply, config_only).map_err(std::io::Error::other)
+pub(super) fn saved_workers(config_only: bool) -> std::io::Result<Value> {
+    self::workers::snapshot(config_only).map_err(std::io::Error::other)
 }
-pub(super) fn add_auto_worker(
+pub(super) fn add_worker(
     settings: &crate::issues::worker::Settings,
     id: Option<&str>,
 ) -> std::io::Result<Value> {
-    self::auto_workers::add(settings, id).map_err(std::io::Error::other)
+    self::workers::add(settings, id).map_err(std::io::Error::other)
 }
-pub(super) fn remove_auto_worker(id: &str) -> std::io::Result<Value> {
-    self::auto_workers::remove(id).map_err(std::io::Error::other)
+pub(super) fn set_worker_intent(id: &str, intent: &str) -> std::io::Result<Value> {
+    self::workers::set_intent(id, intent).map_err(std::io::Error::other)
 }
 use serde_json::{Value, json};
 use std::{io::Write, os::unix::net::UnixStream, time::Duration};
