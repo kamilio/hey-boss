@@ -4145,6 +4145,36 @@ func auditSpokenReview(_ id: String) {
     precondition(editor.previewing && editor.reviewButton.title == "Read Aloud")
     wait("render") { !editor.reviewButton.isHidden && editor.reviewButton.isEnabled }
     precondition(editor.micIcon.isHidden && editor.micLabel.isHidden, "Idle reader has no microphone indicator")
+    // Time the handoff from the end of one passage to the start of playback
+    // for the next. This excludes pauses recorded in the narrator's own audio.
+    for useSystemVoice in [false, true] {
+        let probe = SpokenReview(editor); editor.review = probe
+        if useSystemVoice { probe.audio.readerVoice = nil }
+        probe.audio.engine.attach(probe.audio.player)
+        probe.audio.engine.connect(probe.audio.player, to: probe.audio.engine.mainMixerNode, format: nil)
+        probe.audio.engine.mainMixerNode.outputVolume = 0
+        try! probe.audio.engine.start()
+        probe.readNext()
+        wait("first passage playing") { probe.audio.player.isPlaying }
+        var handoffs: [Double] = []
+        for _ in 0..<3 {
+            let previous = probe.phrase
+            wait("next highlighted passage") { probe.phrase != previous }
+            let boundary = ProcessInfo.processInfo.systemUptime
+            wait("next passage playing") { probe.audio.player.isPlaying }
+            handoffs.append(ProcessInfo.processInfo.systemUptime - boundary)
+        }
+        // The next passage can finish rendering while playback is interrupted.
+        probe.receive(.candidate); probe.receive(.began)
+        let anchor = probe.word
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.4))
+        precondition(probe.holding && !probe.audio.player.isPlaying && probe.word == anchor)
+        probe.resume()
+        precondition(probe.audio.player.isPlaying)
+        editor.endReview()
+        print(useSystemVoice ? "System voice handoffs (ms):" : "Reader voice handoffs (ms):", handoffs.map { Int($0 * 1000) })
+        precondition(handoffs.allSatisfy { $0 < 0.15 }, "Ready passages should start within 150 ms of finishing the previous one: \(handoffs)")
+    }
     let title = editor.session.title
     precondition(editor.reader.string.hasPrefix(title + "\nFirst heading"))
     let opening = SpokenReview.passage(in: editor.reader.string as NSString, from: 0)!
@@ -4369,7 +4399,8 @@ func auditConversation(_ root: String) {
     feed("second")
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
-    precondition(ui.action.title == "End" && ui.turns.bounds.width > 320 && ui.status.bounds.width > 60)
+    precondition(ui.action.title == "End" && ui.turns.bounds.width > 320)
+    precondition(ui.status.stringValue == "Speaking" && ui.status.bounds.width >= ui.status.attributedStringValue.size().width)
     // Playback can begin before the fixture finishes writing its trailing silence.
     microphone.sync {}
     ui.window.close()
