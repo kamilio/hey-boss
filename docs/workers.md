@@ -1,13 +1,6 @@
 # Worker fleet
 
-Open **Agents → Workers** (`/workers`). **Activity** is a compact outline:
-machine → project combination → worker → tasks. A combination such as
-**ashby-mcp + hey-gh + hey-proxy** appears once, with its shared workers underneath.
-Groups start collapsed and show their occupied slots and current task. Expand a
-group for its workers, then a worker for task activity and conversation links.
-The current task shows its agent runtime beside its title, even when collapsed;
-durations tick each second and use the same compact units as the TUI.
-Shared workers and their capacity are counted once.
+Open **Project workers** (`/workers`). Each machine lists its saved workers. Use **Add project worker** to create one, or **Add project** on an existing worker to share its agent slots across projects.
 Offline machines show last-known activity and contribute no available capacity.
 Organizers have a separate disclosure because they do not consume issue-agent slots.
 
@@ -33,9 +26,7 @@ The local web app and paired web app edit the same supervisor file.
 The supervisor owns `~/.hey-boss/fleet.yaml`. Machine keys are SSH host names;
 `local` means the supervisor. Worker IDs are stable and unique across the fleet.
 Registered companions in `~/.hey-boss/config.json` also stay connected for sync,
-even with no saved workers. Live standalone workers receive allocations without
-being enrolled in the YAML. Removing a saved worker drains it; it does not
-disconnect that machine's journal or independent workers.
+even with no saved workers. Removing a worker drains it without disconnecting the machine.
 
 ```yaml
 machines:
@@ -92,18 +83,14 @@ never enrolls independent workers or Codex sessions in this configuration.
 ## Terminal controls
 
 ```sh
-hey-boss auto-workers run       # Apply this machine's config; preserve pause/stop
-hey-boss auto-workers watch     # Observe the live dashboard
-hey-boss auto-workers status    # Print one snapshot
-hey-boss auto-workers config    # Show this machine's definitions and source
-hey-boss auto-workers add --name Tools -C /work/hey-boss --concurrency 2
-hey-boss auto-workers remove WORKER_ID
+hey-boss workers watch     # Observe the live dashboard
+hey-boss workers status    # Print one snapshot
+hey-boss workers config    # Show this machine's definitions and source
+hey-boss workers add --name Tools -C /work/hey-boss --concurrency 2
+hey-boss workers remove WORKER_ID
 ```
 
-Repeated `run` calls reuse worker identities and live processes. Unlike the
-previous behavior, `run` does not resume paused workers; use the web Resume
-pickup control or change their YAML intent. Closing the auto-workers dashboard
-leaves its workers running.
+Creation starts the worker automatically. Use `workers pause ID` or `workers resume ID` to change pickup; quitting the dashboard leaves workers running.
 
 The TUI keeps project tabs and a Shared tab for multi-project pools. Tab switches
 projects, `w` lists workers, `a` adds one, `d` removes the selected worker, `h`

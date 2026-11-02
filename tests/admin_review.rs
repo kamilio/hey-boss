@@ -30,8 +30,8 @@ fn catalog_contains_nested_commands_help_and_output_support() {
         "agent overview",
         "agent configure",
         "agent control",
-        "worker run",
-        "auto-workers watch",
+        "workers add",
+        "workers watch",
     ] {
         let item = commands.iter().find(|v| v["id"] == name).unwrap();
         assert!(item["help"].as_str().unwrap().contains("Usage:"));

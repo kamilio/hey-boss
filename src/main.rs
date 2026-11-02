@@ -2,7 +2,6 @@ mod admin_cli;
 mod agent_permissions;
 mod artifact_cli;
 mod attachment_cli;
-mod auto_workers_cli;
 mod autoconnect;
 mod broker;
 mod cli_request;
@@ -26,6 +25,7 @@ mod upgrade_cli;
 mod upgrade_provenance;
 mod utils_cli;
 mod worker_cli;
+mod workers_cli;
 mod workspace_chat;
 use clap::{Args, Parser, Subcommand};
 use hey_boss::{Client, Request, Severity, resolve_icon_file};
@@ -228,10 +228,11 @@ enum Command {
     Attachment(attachment_cli::Options),
     /// Global profile settings shared across all projects.
     Settings(issue_cli::GlobalOptions),
-    /// Run an independent Codex issue worker with its own slots and tag filter.
+    /// Legacy worker inspection and supervised process handoff.
+    #[command(hide = true)]
     Worker(worker_cli::Options),
-    /// Run saved workers for this machine, with project tabs in one dashboard.
-    AutoWorkers(auto_workers_cli::Options),
+    /// Manage workers. New workers start automatically.
+    Workers(workers_cli::Options),
     /// Machine health, orphan process harvesting, and safe worktree cleanup.
     Health {
         /// Run on a configured SSH client (macOS or Linux).
@@ -517,12 +518,12 @@ fn run() -> std::io::Result<()> {
         Command::Upgrade(options) => return upgrade_cli::run(options),
         Command::Fleet { action } => return hey_boss::fleet::run(action),
         Command::Notif(notif_cli::Action::Secret(options)) => return secret_cli::run(options),
-        Command::AutoWorkers(options) => {
-            if let Err(error) = auto_workers_cli::run(options) {
+        Command::Workers(options) => {
+            if let Err(error) = workers_cli::run(options) {
                 if options.json {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
-                    eprintln!("hey-boss auto-workers: {error}");
+                    eprintln!("hey-boss workers: {error}");
                 }
                 std::process::exit(error.exit_code());
             }
@@ -952,11 +953,16 @@ mod tests {
 
     #[test]
     fn worker_commands_require_an_action_and_accept_trailing_json() {
-        for group in ["worker", "auto-workers"] {
-            assert!(Cli::try_parse_from(["hey-boss", group]).is_err());
-            for action in ["run", "status", "list", "watch"] {
-                assert!(Cli::try_parse_from(["hey-boss", group, action, "--json"]).is_ok());
-            }
+        for argv in [
+            vec!["workers", "run"],
+            vec!["workers", "start"],
+            vec!["auto-workers", "run"],
+            vec!["issue", "worker", "run"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("hey-boss").chain(argv)).is_err());
+        }
+        for action in ["status", "list", "watch", "config"] {
+            assert!(Cli::try_parse_from(["hey-boss", "workers", action, "--json"]).is_ok());
         }
     }
 

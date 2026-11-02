@@ -5,7 +5,6 @@ requests run on a background thread; keyboard input and rendering stay responsiv
 during slow local or SSH requests. Only changed terminal cells are written.
 
 ```sh
-hey-boss worker run                      # Start a worker with its dashboard
 hey-boss worker watch                   # Watch workers without starting one
 hey-boss worker --host devbox watch      # Watch an SSH host
 hey-boss worker --json status             # Machine-readable output
@@ -24,10 +23,9 @@ This package is independent of the root crate. The main CLI embeds the same
 library source from `src/worker_tui`, so ordinary installation and fleet upgrades include the dashboard
 without installing a separate executable. `runtime::run` accepts a cancellation
 token so workers can restore the terminal before shutdown or reload.
-When started by `hey-boss worker run`, q / Ctrl+C stops that worker and its sessions.
-With `worker watch` or the standalone executable, quitting leaves workers running.
+Quitting a dashboard leaves workers running.
 
-Only the current worker appears. Starting a worker pins its own ID; `worker watch`
+Only the current worker appears. `worker watch`
 shows the latest worker, or use `--id WORKER_ID` to watch a specific one. A prominent
 AVAILABLE / BUSY badge and busy/available slot counts show its capacity. Pause and
 update states explain that existing sessions finish before pickup resumes.
@@ -50,7 +48,7 @@ an inventory refresh; an owning dashboard stays pinned to its worker.
 Session durations and claim deadlines update once per second. Requests time out
 after ten seconds. Output retention is bounded.
 
-`hey-boss auto-workers watch` gives dedicated projects their own tabs, followed by one
+`hey-boss workers watch` gives dedicated projects their own tabs, followed by one
 **Shared** tab for all workers serving multiple projects (or all projects). Its
 label shows the worker and unique-project counts. Shared agents stay
 together, with project names on their rows and completed attempts under History.
@@ -121,7 +119,7 @@ npm run test:terminal
 npm run test:activity
 node tests/runtime-terminal.mjs
 cargo build --locked --manifest-path ../Cargo.toml
-node tests/integrated-terminal.mjs
+node tests/resume-terminal.mjs
 python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
 ```
 

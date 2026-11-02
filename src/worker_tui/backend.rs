@@ -48,7 +48,7 @@ impl Client {
                 request,
                 Request::RefreshProjects | Request::AddWorker { .. } | Request::RemoveWorker(_)
             ) {
-                "auto-workers"
+                "workers"
             } else {
                 "worker"
             },

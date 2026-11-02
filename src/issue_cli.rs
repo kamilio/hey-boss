@@ -803,8 +803,6 @@ enum SettingsAction {
 enum WorkerAction {
     /// List independent workers. Prefer `hey-boss worker status`.
     Status,
-    /// Monitor enabled managed workers without the web interface.
-    Run,
 }
 
 fn read_text(reader: impl Read, limit: usize) -> Result<String> {
@@ -1081,7 +1079,6 @@ impl Options {
             },
             Action::Worker { command } => match command {
                 WorkerAction::Status => Operation::Workers { worker_id: None },
-                WorkerAction::Run => unreachable!(),
             },
             Action::Projects { all } => Operation::Projects {
                 include_hidden: *all,
@@ -1562,19 +1559,6 @@ pub fn run(options: &Options) -> Result<()> {
             }
         }
         std::process::exit(command.status()?.code().unwrap_or(1));
-    }
-    if let Action::Worker {
-        command: WorkerAction::Run,
-    } = options.action
-    {
-        if options.host.is_some()
-            || std::env::var_os("HEY_BOSS_ISSUE_HOST").is_some_and(|v| !v.is_empty())
-        {
-            return Err(Error::invalid(
-                "Start the worker service on the authoritative host; worker run uses the local database",
-            ));
-        }
-        return issues::worker::serve();
     }
     if let Action::Web {
         port,

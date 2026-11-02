@@ -517,7 +517,7 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
         header.push(Line::from(if app.pending {
             " Connecting to queue…"
         } else {
-            " No current worker. Start: hey-boss worker run"
+            " No workers. Use hey-boss workers add to create one."
         }));
         header.push(Line::default());
         header.push(Line::default());
@@ -703,12 +703,8 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     );
     let status = if let Some(error) = app.error.as_ref().or(app.diagnostic.as_ref()) {
         format!(" {}", text(&Value::String(error.clone())))
-    } else if size.width < 90 && app.owned_worker {
-        " Live · q / Ctrl+C stops worker + agents".into()
     } else if size.width < 90 && !app.pending {
         " Live · q exits; workers keep running".into()
-    } else if app.owned_worker {
-        " Live · refresh every 2s · q / Ctrl+C stops this worker and its sessions".into()
     } else if app.pending {
         " Refreshing… navigation remains available".into()
     } else {
@@ -736,23 +732,9 @@ pub fn render(frame: &mut Frame, app: &Dashboard) {
     );
     if app.help {
         let message = if size.width < 90 {
-            format!(
-                "↑↓ / j k  Select session\nh         Active / history\nPgUp/PgDn Scroll activity\nr         Refresh / retry\np         Pause pickup (confirm)\ns         Stop worker + agents (confirm)\nq / Ctrl+C {}\nEsc / ?   Close help",
-                if app.owned_worker {
-                    "Stop worker + agents"
-                } else {
-                    "Exit; workers keep running"
-                }
-            )
+            "↑↓ / j k  Select session\nh         Active / history\nPgUp/PgDn Scroll activity\nr         Refresh / retry\np         Pause pickup (confirm)\ns         Stop worker + agents (confirm)\nq / Ctrl+C Exit; workers keep running\nEsc / ?   Close help".to_owned()
         } else {
-            format!(
-                "↑/↓ or j/k  Select session\nh          Switch active work / completed history\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; existing sessions finish normally\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C {}\nEsc / ?    Close help",
-                if app.owned_worker {
-                    "Stop this worker and its sessions"
-                } else {
-                    "Quit dashboard; workers keep running"
-                }
-            )
+            "↑/↓ or j/k  Select session\nh          Switch active work / completed history\nPgUp/PgDn  Scroll session activity\nr          Refresh now / retry after an error\np          Pause pickup; existing sessions finish normally\ns          Stop worker and its sessions (confirmation)\nq / Ctrl+C Quit dashboard; workers keep running\nEsc / ?    Close help".to_owned()
         };
         let message = if app.project_tabs() {
             format!(

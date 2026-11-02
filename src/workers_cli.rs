@@ -11,7 +11,7 @@ use std::{
 
 #[derive(Args)]
 #[command(
-    about = "Manage this machine's saved workers. Use run to apply configuration, status for one snapshot, and watch for a live view.",
+    about = "Manage this machine's workers. Added workers start automatically.",
     subcommand_required = true,
     arg_required_else_help = true
 )]
@@ -24,8 +24,6 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Apply saved configuration without changing paused or stopped intent.
-    Run,
     /// Watch saved workers without starting or resuming them.
     Watch {
         /// Stop after this many snapshots; omit for the live terminal dashboard.
@@ -46,6 +44,10 @@ enum Action {
         #[arg(long = "directory", short = 'C', required = true)]
         directories: Vec<std::path::PathBuf>,
     },
+    /// Pause new pickup while active agents finish.
+    Pause { id: String },
+    /// Resume pickup on a paused worker.
+    Resume { id: String },
     /// Stop new pickup, then remove the worker once its agents finish.
     Remove { id: String },
     /// Show this machine's saved workers and the configuration file to edit.
@@ -88,20 +90,22 @@ pub fn run(options: &Options) -> issues::Result<()> {
         if settings.directories.len() == 1 {
             settings.directory = settings.directories.pop_first().unwrap().1;
         }
-        let value = fleet::add_auto_worker(&settings, id.as_deref())?;
-        print_value(&value, options.json, "Started")?;
+        let value = fleet::add_worker(&settings, id.as_deref())?;
+        print_value(&value, options.json, "Added")?;
         return Ok(());
     }
-    if let Some(Action::Remove { id }) = &options.action {
-        let value = fleet::remove_auto_worker(id)?;
-        print_value(&value, options.json, "Removal queued for")?;
-        return Ok(());
+    if let Some(action @ (Action::Pause { id } | Action::Resume { id } | Action::Remove { id })) =
+        &options.action
+    {
+        let (intent, verb) = match action {
+            Action::Pause { .. } => ("pause", "Paused"),
+            Action::Resume { .. } => ("running", "Resumed"),
+            _ => ("drain", "Removal queued for"),
+        };
+        return print_value(&fleet::set_worker_intent(id, intent)?, options.json, verb);
     }
     if !matches!(options.action, Some(Action::Watch { .. })) {
-        let snapshot = fleet::auto_workers(
-            matches!(options.action, Some(Action::Run)),
-            matches!(options.action, Some(Action::Config)),
-        )?;
+        let snapshot = fleet::saved_workers(matches!(options.action, Some(Action::Config)))?;
         return print_value(&snapshot, options.json, "");
     }
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -117,7 +121,7 @@ pub fn run(options: &Options) -> issues::Result<()> {
         use std::sync::atomic::Ordering;
         let mut emitted = 0;
         while !cancelled.load(Ordering::Relaxed) {
-            let snapshot = fleet::auto_workers(false, false)?;
+            let snapshot = fleet::saved_workers(false)?;
             print_value(&snapshot, options.json, "")?;
             emitted += 1;
             if count.is_some_and(|limit| emitted >= limit) {
@@ -142,7 +146,7 @@ pub fn run(options: &Options) -> issues::Result<()> {
             },
             id: None,
             history: false,
-            owned_worker: false,
+
             project_tabs: true,
         },
         cancelled,

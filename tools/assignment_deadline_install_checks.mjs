@@ -23,8 +23,8 @@ const env = {...process.env, HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:ro
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR','HEY_BOSS_AGENT_ID','HEY_BOSS_WORKER_RUN','CODEX_THREAD_ID']) delete env[key];
 const children = [];
 let db;
-const start = args => {
-  const child = spawn(binary,args,{env,cwd:root,stdio:['ignore','ignore','pipe']});
+const start = (args, executable = binary) => {
+  const child = spawn(executable,args,{env,cwd:root,stdio:['ignore','ignore','pipe']});
   child.errors=''; child.stderr.on('data',chunk=>{child.errors=(child.errors+chunk).slice(-4000);});
   children.push(child); return child;
 };
@@ -75,9 +75,9 @@ try {
   assert.equal(db.prepare('SELECT count(*) n FROM worker_runs').get().n,0);
   db.prepare("INSERT INTO distributed_attempts VALUES('remote-before-reservation','remote',?,1,'running',1,NULL,'','{}')").run('named:Assignment deadline QA');
   // Two actual worker processes race for the same expired assignment.
-  const workerArgs=['worker','run','--project','Assignment deadline QA','--directory',root,'--no-prs','--no-worktree','--concurrency','1'];
-  const first=start([...workerArgs,'--name','Deadline first']);
-  const second=start([...workerArgs,'--name','Deadline second']);
+  const workerArgs=[binary,'--project','Assignment deadline QA','--directory',root,'--no-prs','--no-worktree','--concurrency','1'];
+  const first=start([...workerArgs,'--name','Deadline first'],new URL('../tests/fixtures/managed-worker.sh',import.meta.url).pathname);
+  const second=start([...workerArgs,'--name','Deadline second'],new URL('../tests/fixtures/managed-worker.sh',import.meta.url).pathname);
   await wait(()=>db.prepare('SELECT count(*) n FROM issue_workers').get().n===2);
   await delay(2500);
   assert.equal(db.prepare('SELECT count(*) n FROM worker_runs').get().n,0,'Remote activity without its reservation still holds pickup');

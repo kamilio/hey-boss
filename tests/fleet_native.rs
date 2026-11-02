@@ -1,4 +1,6 @@
 //! Fleet migration and shutdown tests run only against private fixture databases.
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
 use serde_json::Value;
@@ -1105,7 +1107,8 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
     let mut worker = Service(
         f.command(&[
             "worker",
-            "run",
+            "--id",
+            &managed_worker::register(&f.root.join("issues.db")),
             "--project",
             "Worker fixture",
             "--directory",
@@ -1113,6 +1116,7 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
             "--concurrency",
             "2",
         ])
+        .env("HEY_BOSS_FLEET_MANAGED", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -1206,13 +1210,15 @@ fn supervisor_shutdown_preserves_running_worker_and_agent() {
     let mut worker = Service(
         f.command(&[
             "worker",
-            "run",
+            "--id",
+            &managed_worker::register(&f.root.join("issues.db")),
             "--project",
             "Worker fixture",
             "--directory",
             f.root.to_str().unwrap(),
             "--json",
         ])
+        .env("HEY_BOSS_FLEET_MANAGED", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -1267,12 +1273,14 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
     let mut worker = Service(
         f.command(&[
             "worker",
-            "run",
+            "--id",
+            &managed_worker::register(&f.root.join("issues.db")),
             "--project",
             "Worker fixture",
             "--directory",
             f.root.to_str().unwrap(),
         ])
+        .env("HEY_BOSS_FLEET_MANAGED", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -1609,13 +1617,15 @@ fn companion_shutdown_preserves_existing_worker_and_claimed_agent() {
     let mut worker = Service(
         f.command(&[
             "worker",
-            "run",
+            "--id",
+            &managed_worker::register(&f.root.join("issues.db")),
             "--project",
             "Worker fixture",
             "--directory",
             f.root.to_str().unwrap(),
             "--json",
         ])
+        .env("HEY_BOSS_FLEET_MANAGED", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()

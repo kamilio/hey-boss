@@ -44,8 +44,8 @@ const command = args => {
   assert.equal(result.status,0,result.stdout+result.stderr);
   return JSON.parse(result.stdout);
 };
-const start = args => {
-  const child = spawn(binary,args,{cwd:checkout,env,stdio:['ignore','pipe','pipe']});
+const start = (args, executable = binary) => {
+  const child = spawn(executable,args,{cwd:checkout,env,stdio:['ignore','pipe','pipe']});
   child.output='';child.stdout.on('data',b=>{child.output=(child.output+b).slice(-64000);});
   child.errors='';child.stderr.on('data',b=>{child.errors=(child.errors+b).slice(-4000);});
   children.push(child);return child;
@@ -62,7 +62,7 @@ async function main(){
   let supervisor=start(['fleet','supervisor']);
   await wait(()=>fs.existsSync(path.join(state,'fleet.sock')));
   command(['project','init','--project','Worker fixture','--yes','--prs','false','--worktree','false','--json']);
-  const worker=start(['worker','run','--name','Fixture worker','--concurrency','1','--no-worktree','--json']);
+  const worker=start([binary,'--name','Fixture worker','--concurrency','1','--no-worktree','--json'],path.join(__dirname,'../tests/fixtures/managed-worker.sh'));
   db=new DatabaseSync(database);
   await wait(()=>db.prepare('SELECT count(*) n FROM local_job_workers').get().n===1);
   const workerId=db.prepare('SELECT worker_id FROM local_job_workers').get().worker_id;

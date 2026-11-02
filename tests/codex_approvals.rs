@@ -1,3 +1,5 @@
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
 use serde_json::{Value, json};
@@ -109,12 +111,20 @@ impl Fixture {
         fs::copy(source, &fixture).unwrap();
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         f.worker = Some(
-            f.command(&["worker", "run", "--directory", f.root.to_str().unwrap()])
-                .env("HEY_BOSS_CODEX", fixture)
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .unwrap(),
+            f.command(&[
+                "worker",
+                "run",
+                "--id",
+                &managed_worker::register(&f.root.join("issues.db")),
+                "--directory",
+                f.root.to_str().unwrap(),
+            ])
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
+            .env("HEY_BOSS_CODEX", fixture)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
         );
         f
     }

@@ -77,7 +77,7 @@ fn project_controls_pass_paths_and_worker_ids_without_shell_interpretation() {
     let _fixtures = FIXTURES.lock().unwrap();
     let cancelled = Arc::new(AtomicBool::new(false));
     let add = client(
-        "test \"$1\" = auto-workers && test \"$2\" = --json && test \"$3\" = add && test \"$5\" = 'Tools' && test \"$7\" = 2 && test \"$9\" = '/work/one; literal' && test \"${11}\" = '/work/two space' || exit 2\nprintf '{\"ok\":true}'",
+        "test \"$1\" = workers && test \"$2\" = --json && test \"$3\" = add && test \"$5\" = 'Tools' && test \"$7\" = 2 && test \"$9\" = '/work/one; literal' && test \"${11}\" = '/work/two space' || exit 2\nprintf '{\"ok\":true}'",
         "project-add",
     );
     add.execute(
@@ -92,7 +92,7 @@ fn project_controls_pass_paths_and_worker_ids_without_shell_interpretation() {
     .unwrap();
     std::fs::remove_file(add.binary).unwrap();
     let remove = client(
-        "test \"$1\" = auto-workers && test \"$3\" = remove && test \"$4\" = 'id; literal' || exit 2\nprintf '{\"ok\":true}'",
+        "test \"$1\" = workers && test \"$3\" = remove && test \"$4\" = 'id; literal' || exit 2\nprintf '{\"ok\":true}'",
         "project-remove",
     );
     remove

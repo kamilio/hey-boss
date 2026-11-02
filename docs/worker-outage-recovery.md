@@ -1,8 +1,8 @@
 # Worker outage recovery
 
-`hey-boss worker run` stays idle through temporary local database-service
+A worker stays idle through temporary local database-service
 disconnects during startup, retrying after 1, 2, 4, 8, 16, then 30 seconds until
-the service returns. Ctrl+C cancels the wait. Invalid settings and permission
+the service returns. Invalid settings and permission
 denials still fail with an actionable error. Registration retries reconcile the
 same worker ID after an uncertain commit; project-setting retries reuse their
 request ID. No scheduler starts before startup succeeds, and disconnected

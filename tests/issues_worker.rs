@@ -1,3 +1,5 @@
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
 use serde_json::Value;
@@ -102,9 +104,12 @@ impl Fixture {
                     },
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
+                .env("HEY_BOSS_FLEET_MANAGED", "1")
                 .args([
                     "worker",
                     "run",
+                    "--id",
+                    &managed_worker::register(&self.db),
                     "--project",
                     "Worker fixture",
                     "--directory",
@@ -515,7 +520,13 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
                         .join("tests/fixtures/codex-worker.mjs"),
                 )
                 .env_remove("HEY_BOSS_ISSUE_HOST")
+                .env("HEY_BOSS_FLEET_MANAGED", "1")
                 .args(["worker", "run", "--json"])
+                .args(if args.contains(&"--id") {
+                    vec![]
+                } else {
+                    vec!["--id".to_owned(), managed_worker::register(&f.db)]
+                })
                 .args(args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
@@ -1784,9 +1795,12 @@ fn private_issue_database_does_not_modify_default_fleet_configuration() {
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_FLEET_STATE")
             .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
             .args([
                 "worker",
                 "run",
+                "--id",
+                &managed_worker::register(&f.db),
                 "--project",
                 "Worker fixture",
                 "--directory",

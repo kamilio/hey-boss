@@ -30,7 +30,6 @@ pub struct Options {
     pub id: Option<String>,
     pub history: bool,
     /// Quitting an embedded dashboard stops its owning worker's sessions.
-    pub owned_worker: bool,
     pub project_tabs: bool,
 }
 
@@ -106,7 +105,7 @@ pub fn run(
         snapshot: serde_json::json!({"project_tabs":options.project_tabs}),
         worker_id: options.id,
         history: options.history,
-        owned_worker: options.owned_worker,
+
         ..Dashboard::default()
     };
     let result = event_loop(
@@ -179,8 +178,7 @@ fn event_loop(
                     app.error = Some(error);
                     // Recover the inventory if the selected worker disappeared.
                     // Keep the last good snapshot visible during ordinary outages.
-                    recover_inventory =
-                        !app.owned_worker && matches!(request, Request::Refresh(Some(_)));
+                    recover_inventory = matches!(request, Request::Refresh(Some(_)));
                     next_refresh = Instant::now() + Duration::from_secs(2);
                 }
             }

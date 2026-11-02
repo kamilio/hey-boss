@@ -1,4 +1,6 @@
 //! Real CLI startup against an unavailable private database service.
+#[path = "support/managed_worker.rs"]
+mod managed_worker;
 use hey_boss::issues::Store;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -21,6 +23,7 @@ use std::{
 
 struct Fixture {
     root: hey_boss::admin::Temporary,
+    id: String,
     socket: PathBuf,
     stop: Arc<AtomicBool>,
     server: Option<thread::JoinHandle<()>>,
@@ -37,6 +40,7 @@ impl Fixture {
         fs::set_permissions(root.0.join("ssh"), fs::Permissions::from_mode(0o755)).unwrap();
         let db = root.0.join("issues.db");
         drop(Store::open(&db).unwrap());
+        let id = managed_worker::register(&db);
         let digest = format!(
             "{:x}",
             Sha256::digest(db.canonicalize().unwrap().as_os_str().as_encoded_bytes())
@@ -84,6 +88,7 @@ impl Fixture {
             }
         });
         Self {
+            id,
             root,
             socket,
             stop,
@@ -110,7 +115,8 @@ impl Fixture {
             .env("HEY_BOSS_INBOX_SOCKET", self.root.0.join("no-inbox.sock"))
             .env("HEY_BOSS_CODEX", "/usr/bin/false")
             .env_remove("HEY_BOSS_ISSUE_HOST")
-            .args(["worker", "run", "--json"])
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
+            .args(["worker", "run", "--id", &self.id, "--json"])
             .stdout(fs::File::create(self.root.0.join("stdout")).unwrap())
             .stderr(fs::File::create(self.root.0.join("stderr")).unwrap());
         c

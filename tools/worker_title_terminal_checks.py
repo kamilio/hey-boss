@@ -84,7 +84,8 @@ def check(binary, mode):
                         "--worktree", "false", "--yes", "--json"], cwd=root, env=env,
                        capture_output=True, check=True)
         title = f"hey-boss · {project} · {root}"
-        terminal = Terminal(binary, ["run", "--project", project, "--directory", str(root)], root, env)
+        worker = subprocess.Popen([str(pathlib.Path(__file__).resolve().parents[1] / "tests/fixtures/managed-worker.sh"), binary, "--project", project, "--directory", str(root), "--json"], cwd=root, env=env, stdout=subprocess.DEVNULL)
+        terminal = Terminal(binary, ["watch"], root, env)
         dashboard = None
         try:
             terminal.wait(lambda: b"AVAILABLE" in terminal.output)
@@ -120,6 +121,8 @@ def check(binary, mode):
                                    capture_output=True, check=True)
             assert b"\x1b" not in plain.stdout, "Redirected status contains terminal controls"
         finally:
+            worker.terminate()
+            worker.wait(timeout=15)
             if dashboard:
                 dashboard.close()
             terminal.close()
