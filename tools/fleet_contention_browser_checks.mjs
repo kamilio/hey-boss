@@ -40,7 +40,7 @@ try{
   for(const colorScheme of ['light','dark'])for(const width of [1440,768,390,320]){
     await page.setViewportSize({width,height:900});await page.emulateMedia({colorScheme});
     await page.goto(`http://127.0.0.1:${server.address().port}/workers`);
-    await page.locator('.activity-machine').waitFor();
+    await page.locator('.project-worker-machine').waitFor();
     for(const next of ['healthy','syncing','waiting','sync_waiting','recovered','offline']){
       state=next;await page.locator('#refresh').click();
       await page.waitForFunction(expected=>{
@@ -48,14 +48,10 @@ try{
         return ['waiting','sync_waiting'].includes(expected)?message.includes('Database busy'):expected==='offline'?message.includes('offline; activity is last known'):!message.trim();
       },state);
       assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Layout fits '+width);
-      assert.equal(await page.locator('.activity-machine').count(),1);
-      assert.equal(await page.locator('.activity-machine .machine-connection').innerText(),state==='offline'?'Offline':'Connected');
-      assert.match(await page.locator('.activity-machine-usage').innerText(),state==='offline'?/Last known activity/:/2 agents running · 1 available/);
-      const scope=page.locator('.worker-scope-group');
-      if(!await scope.evaluate(el=>el.open))await scope.locator('summary').first().click();
-      const worker=page.locator('.activity-worker');
-      if(await worker.count()&&!await worker.evaluate(el=>el.open))await worker.locator('summary').first().click();
-      assert.equal(await page.locator('.activity-task').count(),2,'Both current tasks are retained');
+      assert.equal(await page.locator('.project-worker-machine').count(),1);
+      assert.equal(await page.locator('.project-worker-machine .machine-connection').innerText(),state==='offline'?'Offline · changes apply after reconnecting':'Connected');
+      assert.match(await page.locator('.project-worker-status').innerText(),state==='offline'?/Last known activity/:/2 agents running/);
+      assert.equal(await page.locator('.project-worker-task').count(),2,'Both current tasks are retained');
       if(['waiting','sync_waiting'].includes(state))assert.match(await page.locator('#fleet-attention').innerText(),/Database busy; data sync will retry/);
       if(process.env.FLEET_SCREENSHOTS&&[1440,390,320].includes(width)){
         mkdirSync(process.env.FLEET_SCREENSHOTS,{recursive:true});

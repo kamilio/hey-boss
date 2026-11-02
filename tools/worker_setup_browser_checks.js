@@ -52,8 +52,8 @@ async page => {
   }
   machine.configuration_error=project+': Git clone failed: the background service could not authenticate with SSH.';
   await page.reload();await page.waitForFunction(()=>document.querySelector('.capacity-status')?.textContent==='Blocked');
-  await page.screenshot({path:'/tmp/hb-setup-mobile.png',fullPage:true});
-  await page.setViewportSize({width:1440,height:950});await page.emulateMedia({colorScheme:'light'});await page.screenshot({path:'/tmp/hb-setup-desktop.png',fullPage:true});
+  await page.screenshot({path:'output/playwright/hb-setup-mobile.png',fullPage:true});
+  await page.setViewportSize({width:1440,height:950});await page.emulateMedia({colorScheme:'light'});await page.screenshot({path:'output/playwright/hb-setup-desktop.png',fullPage:true});
   machine.configuration_error=null;machine.state='disconnected';await page.reload();await page.waitForFunction(()=>document.querySelector('.capacity-status')?.textContent==='Queued');
   machine.state='connected';worker.config.concurrency=2;worker.active=3;await page.reload();await page.waitForFunction(()=>document.querySelector('.capacity-status')?.textContent==='Finishing');
   worker.active=0;await page.reload();await minus().waitFor();check(await page.locator('.capacity-status').count()===0,'Applied idle limit clears pending status');

@@ -51,22 +51,20 @@ try {
   }
   await trigger.focus();await page.keyboard.press('Enter');await page.keyboard.press('Tab');
   assert.equal(await workers.evaluate(el=>el===document.activeElement),true,'Keyboard reaches Workers first');
-  await page.keyboard.press('Enter');await page.locator('#worker-board .activity-machine').waitFor();
-  await page.locator('.worker-scope-heading').click();
-  await page.locator('.activity-worker-summary').click();
+  await page.keyboard.press('Enter');await page.locator('#worker-board .project-worker-machine').waitFor();
   if(process.env.WORKERS_SCREENSHOTS)await page.screenshot({path:resolve(process.env.WORKERS_SCREENSHOTS,'workers-phone.png'),fullPage:true});
-  await page.locator('.activity-task').click();
+  await page.locator('.project-worker-task').click();
   await page.locator('#session-title').filter({hasText:run.title}).waitFor();
   assert.match(await page.locator('#back').getAttribute('href'),/issue=42/,'Clicking a running task opens its conversation with a task return');
   await visit('/workers');
   assert.equal(await page.locator('.fleet-tabs').count(),0,'No standalone conversation browser');
-  assert.equal(await page.locator('#worker-status-view').getAttribute('href'),'/workers');
-  await page.locator('#worker-config-view').click();await page.locator('#config-editor').waitFor();
+  await page.getByRole('heading',{name:'Project workers',exact:true}).waitFor();
+  await page.locator('#config-editor').waitFor();
   await page.locator('#project-trigger').click();await page.locator('[data-project="named:Beacon"]').click();
   assert.equal(await page.locator('#config-editor').isVisible(),true,'Project selection preserves global worker settings');
   assert.equal(await workers.getAttribute('href'),'/workers');
   await visit('/agents#project=named%3AAtlas&view=conversations');
-  await page.locator('#worker-board .activity-machine').waitFor();
+  await page.locator('#worker-board .project-worker-machine').waitFor();
   assert.equal(await page.locator('#projects').count(),0,'Legacy browse URL opens Workers');
   for(const width of [1440,390,320]) {
     await page.setViewportSize({width,height:900});

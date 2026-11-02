@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>Workers · Hey Boss</title>
+    <title>Project workers · Hey Boss</title>
     <link rel="icon" href="/icon.png" />
     <link rel="stylesheet" href="/components.css" />
     <link rel="stylesheet" href="/fleet.css" />
@@ -18,12 +18,11 @@
     <main id="main" tabindex="-1">
       <div id="error" class="error" role="alert" hidden></div>
       <div id="overview-page">
-        <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Worker activity</h1><p id="overview-note" class="page-description">Running agents and agent limits across all projects.</p></div></div>
+        <div class="page-heading"><div><div class="eyebrow"><span data-icon="spark"></span>Making things happen</div><h1>Project workers</h1><p id="overview-note" class="page-description">Choose the projects. Set how many agents can work on them.</p></div></div>
         <section id="worker-config" hidden aria-label="Worker configuration">
-          <nav class="worker-views" aria-label="Worker views"><a id="worker-status-view" href="/workers">Activity</a><a id="worker-config-view" href="/workers#view=configuration">Workers &amp; settings</a></nav>
           <section id="fleet-attention" class="fleet-attention" aria-label="Fleet health"></section>
           <p id="worker-save-note" class="worker-save-note" role="status" hidden></p>
-          <div class="worker-toolbar"><div id="worker-filters" class="worker-filters" aria-label="Filter workers"></div><input id="worker-search" type="search" aria-label="Find workers or tasks" placeholder="Find a worker or task…"></div>
+          <div class="worker-toolbar"><div id="worker-filters" class="worker-filters" aria-label="Filter workers"></div><input id="worker-search" type="search" aria-label="Find projects or tasks" placeholder="Find a project or task…"></div>
           <p id="worker-view-help" class="device-help"></p>
           <div id="worker-board"></div>
           <details id="config-editor" class="config-editor">
@@ -37,7 +36,6 @@
             <div class="config-actions"><button id="config-reload" class="button" type="button">Reload file</button><button id="config-validate" class="button" type="button" disabled>Preview changes</button><button id="config-save" class="button primary" type="button" disabled>Save configuration</button></div>
           </details>
         </section>
-        <details id="device-settings" class="device-settings"><summary>Manage workers</summary><p id="device-help" class="device-help"></p><p class="device-help">Pause pickup lets current agents finish. Restart worker and Stop worker stop its current agents. Enabled workers keep running in the background after you close their terminal.</p><div id="device-list"></div></details>
       </div>
       <div id="session-page" hidden>
         <header class="session-header">
@@ -65,10 +63,8 @@
         <div class="eyebrow" id="machine-editor-context"></div><h2 id="machine-editor-title"></h2>
         <p id="machine-editor-description"></p>
         <div class="worker-form-grid">
-          <label id="machine-template-field" class="full">Copy settings from<select id="machine-template"></select></label>
           <label id="machine-slots-field" class="full">Agent limit<input id="machine-slots" type="number" min="1" max="1024" value="1"></label>
           <label id="machine-project-field" class="full">Project<select id="machine-project"></select></label>
-          <label id="machine-worker-field" class="full">Worker<select id="machine-worker"></select></label>
           <label id="machine-git-field" class="full">Git repository<input id="machine-git" placeholder="git@github.com:team/my-project.git" autocomplete="off"></label>
           <label id="machine-workspace-field" class="full">Workspace folder<input id="machine-workspace" placeholder="~/Workspace" autocomplete="off"><small>Remembered for this machine.</small></label>
           <label id="machine-path-field" class="full">Checkout path (optional)<input id="machine-path" autocomplete="off"><small>Leave blank to reuse a matching checkout or clone into the workspace. Enter a path to use a specific directory.</small></label>
@@ -94,7 +90,7 @@
         </div>
         <p id="worker-editor-status" role="status">Changes are written to fleet.yaml after review.</p>
         <ul id="worker-editor-changes" class="config-changes"></ul>
-        <div class="takeover-dialog-actions"><button id="worker-editor-cancel" type="button" class="button">Cancel</button><button id="worker-editor-preview" type="submit" class="button">Review changes</button><button id="worker-editor-save" type="button" class="button primary" disabled>Save worker</button></div>
+        <div class="takeover-dialog-actions"><button id="worker-editor-cancel" type="button" class="button">Cancel</button><button id="worker-editor-preview" type="submit" class="button">Review changes</button><button id="worker-editor-save" type="button" class="button primary" disabled>Save settings</button></div>
       </form>
     </dialog>
     <dialog id="takeover-dialog" class="takeover-dialog" aria-labelledby="takeover-title"><h2 id="takeover-title">Take over this task?</h2><p>Stop this agent and assign its issue to you. You can continue its saved session in your terminal.</p><p id="takeover-task" class="takeover-task"></p><div class="takeover-dialog-actions"><button id="takeover-cancel" class="button" type="button">Keep agent working</button><button id="takeover-confirm" class="button primary" type="button">Take over</button></div></dialog>
