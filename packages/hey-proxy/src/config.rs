@@ -53,6 +53,8 @@ pub struct Config {
     pub retry: Retry,
     #[serde(default)]
     pub logging: Logging,
+    #[serde(default)]
+    pub auto_approve: bool,
     /// User-level direction to skip blocked security work and continue permitted work.
     #[serde(default)]
     pub skip_blocked_security_work: bool,
@@ -67,10 +69,8 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
-    // Standalone proxy configs may retain this retired option. Accept its
-    // boolean shape without enabling approval overrides or changing policy.
-    #[serde(default, rename = "auto_approve", skip_serializing)]
-    _legacy_auto_approve: bool,
+    #[serde(default)]
+    auto_approve: bool,
     #[serde(default)]
     routes: Vec<routes::Route>,
     #[serde(default)]
@@ -196,6 +196,7 @@ impl TryFrom<ConfigFile> for Config {
             aliases: file.aliases,
             retry: file.retry,
             logging: file.logging,
+            auto_approve: file.auto_approve,
             skip_blocked_security_work: file.skip_blocked_security_work,
             ip_version: file.ip_version,
             proxy_url: file.proxy_url,
@@ -222,7 +223,7 @@ impl Serialize for Config {
                 codex: self.codex.clone(),
             }
         };
-        let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"skip_blocked_security_work":self.skip_blocked_security_work});
+        let mut value = serde_json::json!({"mode":self.mode,"listen":self.listen,"aliases":self.aliases,"retry":self.retry,"logging":self.logging,"ip_version":self.ip_version,"auto_approve":self.auto_approve,"skip_blocked_security_work":self.skip_blocked_security_work});
         if let Some(url) = &self.proxy_url {
             value["proxy_url"] = serde_json::json!(url);
         }
@@ -531,6 +532,7 @@ impl Default for Config {
             aliases: Vec::new(),
             retry: Retry::default(),
             logging: Logging::default(),
+            auto_approve: false,
             skip_blocked_security_work: false,
             ip_version: IpVersion::Auto,
             proxy_url: None,
@@ -1037,20 +1039,28 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_approval_setting_does_not_break_config_loading() {
+    fn auto_approve_loads_and_roundtrips_across_json_and_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        for enabled in [false, true] {
-            let bytes = serde_json::to_vec(&serde_json::json!({
-                "listen": "127.0.0.1:8080", "auto_approve": enabled,
-                "providers": {"claude": {}}
-            }))
-            .unwrap();
-            fs::write(&path, &bytes).unwrap();
-            let config = load(&path).unwrap();
-            assert!(config.claude.is_some());
-            assert!(!config.skip_blocked_security_work);
-            assert_eq!(fs::read(&path).unwrap(), bytes);
+        for extension in ["json", "yaml"] {
+            let path = dir.path().join(format!("config.{extension}"));
+            for enabled in [false, true] {
+                let raw = encode(
+                    &serde_json::json!({
+                        "listen": "127.0.0.1:8080",
+                        "auto_approve": enabled,
+                        "providers": {"claude": {}}
+                    }),
+                    &path,
+                )
+                .unwrap();
+                fs::write(&path, &raw).unwrap();
+                let config = load(&path).unwrap();
+                assert_eq!(config.auto_approve, enabled);
+                assert!(config.claude.is_some());
+                assert!(!config.skip_blocked_security_work);
+                let exported = serde_json::to_value(&config).unwrap();
+                assert_eq!(exported["auto_approve"], enabled);
+            }
         }
     }
 
