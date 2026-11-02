@@ -6,14 +6,14 @@ async page => {
   await page.setViewportSize({width:1440,height:1050});
   await page.goto('http://127.0.0.1:59688/workers');
   await page.locator('.project-worker-machine').first().waitFor();
-  check(await page.locator('.project-worker').count()===7,'Stopped history and independent workers stay out of project workers');
-  check(await page.locator('.worker-scope-group').count()===0,'Project workers have no extra grouping layer');
+  check(await page.locator('.project-worker').count()===7,'Stopped history and independent workers stay out of workers');
+  check(await page.locator('.worker-scope-group').count()===0,'Workers have no extra grouping layer');
   check(await page.locator('.project-worker-task:visible').count()===4,'Current tasks are directly visible');
   await page.locator('.project-worker-task').first().focus();
   await page.waitForTimeout(3300);
   check(await page.locator('.project-worker-task').first().evaluate(el=>document.activeElement===el),'Refresh preserves the focused task link');
   await page.locator('[data-activity-filter="busy"]').click();
-  check(await page.locator('.project-worker').count()===2,'Working filter shows project workers doing work');
+  check(await page.locator('.project-worker').count()===2,'Working filter shows workers doing work');
   await page.locator('[data-activity-filter="all"]').click();
   await page.locator('#worker-search').fill('keyboard navigation');
   check(await page.locator('.project-worker').count()===1,'Search finds current tasks');

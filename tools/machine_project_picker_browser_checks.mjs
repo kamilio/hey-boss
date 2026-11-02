@@ -44,7 +44,7 @@ try{
   const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
   page.setDefaultTimeout(5000);page.on('pageerror',e=>errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/workers`);
-  const open=()=>page.getByRole('button',{name:'Add project worker',exact:true}).click();
+  const open=()=>page.getByRole('button',{name:'Add worker',exact:true}).click();
   await open();
   const picker=page.getByRole('combobox',{name:'Project',exact:true}),git=page.getByRole('textbox',{name:'Git repository',exact:true});
   await picker.waitFor();
@@ -64,13 +64,13 @@ try{
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth&&document.querySelector('dialog[open]').getBoundingClientRect().right<=innerWidth),`${colorScheme} ${width}px fits`);
     if(process.env.PROJECT_PICKER_SCREENSHOTS)await page.screenshot({path:resolve(process.env.PROJECT_PICKER_SCREENSHOTS,`${colorScheme}-${width}.png`)});
   }
-  await page.getByRole('button',{name:'Create project worker',exact:true}).click();
+  await page.getByRole('button',{name:'Create worker',exact:true}).click();
   await page.locator('#machine-editor').waitFor({state:'hidden'});
   const {id,...update}=writes.at(-1).machine_update;assert(id);assert.deepEqual(update,{host:'local',action:'add',concurrency:1,git:'git@github.com:acme/atlas.git',workspace:'~/Work',path:''});
   await open();await picker.selectOption(tools);
   await git.fill('https://github.com/acme/manual.git');
   assert.equal(await picker.inputValue(),'','Typing another repository clears the previous selection');
-  await page.getByRole('button',{name:'Create project worker',exact:true}).click();await page.locator('#machine-editor').waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Create worker',exact:true}).click();await page.locator('#machine-editor').waitFor({state:'hidden'});
   assert.equal(writes.at(-1).machine_update.git,'https://github.com/acme/manual.git');
   await open();await picker.selectOption(atlas);await picker.selectOption('');
   assert.equal(await git.inputValue(),'','New repository starts with a blank Git field');

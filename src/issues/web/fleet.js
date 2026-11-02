@@ -252,7 +252,7 @@ if (typeof document !== 'undefined') (() => {
   }
   function machineControls(machine) {
     const bar=element('div','machine-controls');
-    const add=element('button','button small','Add project worker');add.type='button';Object.assign(add.dataset,{machineAction:'add',host:machine.host,focus:machine.host+':add'});
+    const add=element('button','button small','Add worker');add.type='button';Object.assign(add.dataset,{machineAction:'add',host:machine.host,focus:machine.host+':add'});
     bar.append(add);
     return bar;
   }
@@ -339,8 +339,8 @@ if (typeof document !== 'undefined') (() => {
     while(cursor){const next=cursor.nextSibling;cursor.remove();cursor=next;}
   }
   function renderWorkerBoard(data) {
-    document.querySelector('.page-heading h1').textContent='Project workers';
-    document.title='Project workers · Hey Boss';
+    document.querySelector('.page-heading h1').textContent='Workers';
+    document.title='Workers · Hey Boss';
     $('overview-note').textContent='Choose the projects. Set how many agents can work on them.';
     $('worker-view-help').hidden=true;
     document.body.classList.add('workers-page');
@@ -369,7 +369,7 @@ if (typeof document !== 'undefined') (() => {
         const phase=workerPhase(w,machine),usage=slotUsage(w,machine),key=machine.host+':'+w.id;
         const card=element('article','project-worker');card.dataset.key=key;card.dataset.worker=w.id;
         const header=element('div','project-worker-header'),identity=element('div','project-worker-identity');
-        identity.append(element('span','project-worker-label','Project worker'),element('h3','',workerLabel(w)));
+        identity.append(element('span','project-worker-label','Worker'),element('h3','',workerLabel(w)));
         header.append(identity,capacityControls(machine,w));card.append(header);
         const status=element('div','project-worker-status');
         status.append(element('span','worker-state is-'+phase.group,w.retiring?'Removing · finishing agents':phase.label),element('span','',online?usage.occupied+' '+(usage.occupied===1?'agent':'agents')+' running':'Last known activity'));
@@ -377,7 +377,7 @@ if (typeof document !== 'undefined') (() => {
         if(phase.group==='attention')card.append(element('p','activity-problem',phase.note));
         const actions=element('div','project-worker-actions');actions.dataset.key=key+':actions';
         if(!w.retiring){
-          const add=element('button','button small','Add project');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,projectWorker:w.id,focus:key+':project'});add.disabled=!(w.config?.projects||[]).length;add.title=add.disabled?'This project worker already includes all projects.':'';actions.append(add);
+          const add=element('button','button small','Add project');add.type='button';Object.assign(add.dataset,{machineAction:'project',host:machine.host,projectWorker:w.id,focus:key+':project'});add.disabled=!(w.config?.projects||[]).length;add.title=add.disabled?'This worker already includes all projects.':'';actions.append(add);
           const paused=w.intent==='pause'||w.intent==='drain'||w.intent==='stop'||w.config?.enabled===false;
           const pickup=element('button','button small',paused?'Resume':'Pause');pickup.type='button';Object.assign(pickup.dataset,{signal:paused?'resume':'pause',worker:w.id,host:machine.host,focus:key+':pickup'});pickup.disabled=signalRequests.has(key);pickup.title=paused?'Start picking up tasks.':'Let current agents finish and pause new tasks.';actions.append(pickup);
           const edit=element('button','button small','Settings');edit.type='button';Object.assign(edit.dataset,{editWorker:w.id,host:machine.host,focus:key+':settings'});actions.append(edit);
@@ -394,10 +394,10 @@ if (typeof document !== 'undefined') (() => {
         }else if(usage.occupied||w.job_active)card.append(element('p','activity-note',w.job_active?jobActivity(w.job_active):'Agents are working. Task details are not available yet.'));
         cards.append(card);
       }
-      if(!shown.length)cards.append(element('p','project-worker-empty','Add a project worker to start running agents on this machine.'));
+      if(!shown.length)cards.append(element('p','project-worker-empty','Add a worker to start running agents on this machine.'));
       section.append(cards);sections.push(section);
     }
-    updateWorkerNodes(board,sections.length?sections:[element('p','worker-empty','No project workers match this filter.')]);
+    updateWorkerNodes(board,sections.length?sections:[element('p','worker-empty','No workers match this filter.')]);
     if(focusedMachine&&document.activeElement===document.body)[...board.querySelectorAll('.project-worker-machine')].find(section=>section.dataset.host===focusedMachine)?.querySelector('h2')?.focus({preventScroll:true});
   }
 
@@ -687,7 +687,7 @@ if (typeof document !== 'undefined') (() => {
       const worker=data.document?.machines?.[host]?.workers?.find(w=>w.id===id);
       if(!worker)throw Error(data.error||'This worker is no longer configured. Reload the page.');
       workerEdit={host,id,worker};$('worker-scope').open=!!last?.machines?.find(m=>m.host===host)?.configuration_error?.includes(id);workerEditRevision=data.revision;workerEditPreview=undefined;
-      $('worker-editor-title').textContent='Project worker settings';
+      $('worker-editor-title').textContent='Worker settings';
       $('worker-editor-context').textContent=workerLabel(worker)+' · '+host;
       $('worker-name').value=worker.config?.name||'Worker';$('worker-provider').value=worker.config?.provider||'codex';$('worker-slots').value=worker.config?.concurrency||1;$('worker-intent').value=worker.intent;
       $('worker-workspace').value=String(worker.config?.worktree_enabled===true);
@@ -728,13 +728,13 @@ if (typeof document !== 'undefined') (() => {
       const data=await configRequest(),machine=data.document?.machines?.[host]||(last?.machines?.some(m=>m.host===host)?{workers:[]}:null);
       if(!machine)throw Error('Machine is no longer configured. Reload the page.');
       const worker=machine.workers?.find(w=>w.id===workerId&&!w.retiring);
-      if(['remove','project'].includes(action)&&!worker)throw Error('This project worker is no longer configured. Reload the page.');
+      if(['remove','project'].includes(action)&&!worker)throw Error('This worker is no longer configured. Reload the page.');
       if(action==='edit-project'&&!machine.projects?.[projectId])throw Error('Project is no longer configured. Reload the page.');
       machineEdit={host,action,workerId,projectId,revision:data.revision,id:HeyBossUI.requestId()};machinePathEdited=false;
       const name=last?.machines?.find(m=>m.host===host)?.hostname||host;
       $('machine-editor-context').textContent=(worker?workerLabel(worker)+' · ':'')+name;
-      $('machine-editor-title').textContent=({add:'Add project worker',remove:'Remove project worker',project:'Add project','edit-project':'Edit checkout'})[action];
-      $('machine-editor-description').textContent=({add:'Choose its first project and agent limit. You can add more projects to it later.',remove:'Stop picking up tasks and let current agents finish. The project worker will disappear when its work is done. Project files are kept.',project:'Add a project to this project worker. Its projects share the same agent limit.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
+      $('machine-editor-title').textContent=({add:'Add worker',remove:'Remove worker',project:'Add project','edit-project':'Edit checkout'})[action];
+      $('machine-editor-description').textContent=({add:'This worker starts automatically. Choose its first project and how many agents can run at once.',remove:'Stop picking up tasks and let current agents finish. The worker will disappear when its work is done. Project files are kept.',project:'Add a project to this worker. Its projects share the same agent limit.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
       for(const field of ['slots','project','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['slots','project','git','workspace','path'],remove:[],project:['project','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
       const choices=new Map(projects.map(p=>[p.id,{...p}]));
       for(const configured of Object.values(data.document?.machines||{}))for(const [id,checkout] of Object.entries(configured.projects||{}))choices.set(id,{...choices.get(id),id,name:choices.get(id)?.name||projectLabel(id),git:checkout.git});
@@ -747,7 +747,7 @@ if (typeof document !== 'undefined') (() => {
       $('machine-slots').value='1';$('machine-workspace').value=machine.workspace||'~/Workspace';$('machine-git').value='';$('machine-path').value='';
       if(projectId&&machine.projects?.[projectId]){const project=machine.projects[projectId];$('machine-git').value=project.git;$('machine-path').value=project.reuse_existing?'':project.path;machinePathEdited=!project.reuse_existing;$('machine-project').value=projectId;}
       $('machine-editor-status').textContent=last?.machines?.find(m=>m.host===host)?.state==='disconnected'?'This machine is offline. Changes apply when it reconnects.':'';
-      $('machine-editor-save').textContent=({add:'Create project worker',remove:'Remove project worker',project:'Add project','edit-project':'Save & retry'})[action];
+      $('machine-editor-save').textContent=({add:'Create worker',remove:'Remove worker',project:'Add project','edit-project':'Save & retry'})[action];
       suggestCheckout();$('machine-editor').showModal();
     }catch(error){fail(error);}finally{machineBusy=false;machineButtons();}
   }
@@ -765,7 +765,7 @@ if (typeof document !== 'undefined') (() => {
       if(['add','project','edit-project'].includes(action))Object.assign(update,{git:$('machine-git').value.trim(),workspace:$('machine-workspace').value.trim(),path:$('machine-path').value.trim(),...(action==='edit-project'?{project:projectId}:action==='project'?{worker:workerId}:{})});
       const saved=await configRequest({machine_update:update,revision,save:true});
       if(configRevision){configRevision=saved.revision;configOriginal=saved.text;$('config-text').value=saved.text;configPreview=undefined;configButtons();}
-      $('worker-save-note').textContent=action==='remove'?'Project worker removed. Any current agents will finish; project files are kept.':action==='project'?'Project added. It shares this project worker’s agent limit.':action==='edit-project'?'Checkout saved. Retrying setup.':'Project worker created. Its machine will prepare the checkout and start picking up tasks.';$('worker-save-note').hidden=false;
+      $('worker-save-note').textContent=action==='remove'?'Worker removed. Any current agents will finish; project files are kept.':action==='project'?'Project added. It shares this worker’s agent limit.':action==='edit-project'?'Checkout saved. Retrying setup.':'Worker created. Its machine will prepare the checkout and start picking up tasks.';$('worker-save-note').hidden=false;
       if(action==='edit-project')await configRequest({retry_project:{host,project:projectId}});
       $('machine-editor').close();machineEdit=null;render(await read('/api/fleet/status'));
     }catch(error){$('machine-editor-status').textContent=error.message;}finally{machineBusy=false;machineButtons();}

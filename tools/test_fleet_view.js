@@ -106,8 +106,8 @@ const visibleWorkers=projectWorkers({workers:[
  {id:'finishing',managed:true,retiring:true,intent:'drain',pid:12,active:1},
  {id:'job',managed:true,retiring:true,intent:'drain',pid:12,job_active:1},
 ]});
-assert.deepEqual(visibleWorkers.map(w=>w.id),['running','paused','finishing','job'],'Keep resumable project workers and finishing agents; omit stopped history and removed idle processes');
-console.log('Project worker visibility checks passed');
+assert.deepEqual(visibleWorkers.map(w=>w.id),['running','paused','finishing','job'],'Keep resumable workers and finishing agents; omit stopped history and removed idle processes');
+console.log('Worker visibility checks passed');
 
 const {workerCapacityUpdate} = require('../src/issues/web/fleet.js');
 const capacityDocument={machines:{local:{workers:[
@@ -124,7 +124,7 @@ assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','small',-1),/bet
 assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','large',1),/between 1 and 1024/);
 assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','retired',1),/no longer/);
 assert.throws(()=>workerCapacityUpdate(capacityDocument,'local','missing',1),/no longer/);
-console.log('Project worker agent limit checks passed');
+console.log('Worker agent limit checks passed');
 
 const {workerLimitState,configurationProblems}=require('../src/issues/web/fleet.js');
 const limitWorker={id:'limit-worker',pid:123,active:0,config:{concurrency:3},desired_concurrency:2};

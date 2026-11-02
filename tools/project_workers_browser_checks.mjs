@@ -49,7 +49,7 @@ try{
  browser=await chromium.launch({channel:'chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
  page.setDefaultTimeout(5000);page.on('pageerror',e=>errors.push(e.message));
  await page.goto(`http://127.0.0.1:${server.address().port}/workers`);
- await page.getByRole('heading',{name:'Project workers',exact:true}).waitFor();
+ await page.getByRole('heading',{name:'Workers',exact:true}).waitFor();
  const card=id=>page.locator('.project-worker[data-worker="'+id+'"]');
  await card(shared.id).waitFor();assert.equal(await page.locator('.project-worker').count(),2);
  assert.equal(await page.locator('.worker-scope-group').count(),0,'There is no extra group layer');
@@ -57,7 +57,7 @@ try{
  assert(await card(paused.id).getByRole('button',{name:'Resume',exact:true}).isVisible());
  if(process.env.PROJECT_WORKER_SCREENSHOTS)await page.screenshot({path:resolve(process.env.PROJECT_WORKER_SCREENSHOTS,'initial.png'),fullPage:true});
  await card(shared.id).getByRole('button',{name:'Add project',exact:true}).click();
- assert.equal(await page.locator('#machine-worker-field').isVisible(),false,'Adding a project keeps the clicked project worker as the target');
+ assert.equal(await page.locator('#machine-worker-field').isVisible(),false,'Adding a project keeps the clicked worker as the target');
  await page.locator('#machine-project').selectOption(projects[4].id);
  await page.getByRole('button',{name:'Add project',exact:true}).last().click();await page.locator('#machine-editor').waitFor({state:'hidden'});
  await page.waitForFunction(()=>document.querySelector('.project-worker').textContent.includes('ans'));
@@ -66,7 +66,7 @@ try{
  assert.equal(writes.at(-1).worker,paused.id);
  await card(shared.id).getByRole('button',{name:/Increase agent limit/}).click();await page.waitForFunction(()=>document.querySelector('.project-worker .worker-count').textContent==='4');
  assert.equal(shared.config.concurrency,4);
- await page.getByRole('button',{name:'Add project worker',exact:true}).click();await page.locator('#machine-project').selectOption(projects[3].id);await page.locator('#machine-slots').fill('5');
+ await page.getByRole('button',{name:'Add worker',exact:true}).click();await page.locator('#machine-project').selectOption(projects[3].id);await page.locator('#machine-slots').fill('5');
  await page.locator('#machine-editor-save').click();await page.locator('#machine-editor').waitFor({state:'hidden'});await page.waitForFunction(()=>document.querySelectorAll('.project-worker').length===3);
  assert.equal(writes.at(-1).machine_update.action,'add');assert.equal(writes.at(-1).machine_update.concurrency,5);
  // Reproduce a refresh between pointer-down and pointer-up: it must not replace the button.
@@ -76,13 +76,13 @@ try{
  await page.locator('#machine-editor').waitFor({state:'visible'});assert.equal(await page.locator('#machine-worker-field').isVisible(),false);
  failSave=true;await page.locator('#machine-editor-save').click();await page.getByText('Configuration changed. Reload before saving.',{exact:true}).waitFor();assert(await card(shared.id).isVisible());
  failSave=false;await page.locator('#machine-editor-save').click();await page.locator('#machine-editor').waitFor({state:'hidden'});await card(shared.id).waitFor({state:'detached'});
- assert.equal(writes.at(-1).machine_update.id,shared.id,'Removal targets the clicked project worker');assert(await card(paused.id).isVisible());
+ assert.equal(writes.at(-1).machine_update.id,shared.id,'Removal targets the clicked worker');assert(await card(paused.id).isVisible());
  const created=machine.workers.at(-1);created.active=1;await page.locator('#refresh').click();
  await card(created.id).getByRole('button',{name:'Remove',exact:true}).click();await page.locator('#machine-editor-save').click();await page.locator('#machine-editor').waitFor({state:'hidden'});
  await card(created.id).getByText('Removing · finishing agents',{exact:true}).waitFor();
  assert(await card(created.id).getByRole('button',{name:'Stop now',exact:true}).isVisible(),'Busy removal keeps agents visible until they finish');
  created.active=0;await page.locator('#refresh').click();await card(created.id).waitFor({state:'detached'});
- machine.state='disconnected';await page.locator('#refresh').click();await page.locator('.machine-connection').filter({hasText:'Offline'}).waitFor();await page.getByRole('button',{name:'Add project worker',exact:true}).click();
+ machine.state='disconnected';await page.locator('#refresh').click();await page.locator('.machine-connection').filter({hasText:'Offline'}).waitFor();await page.getByRole('button',{name:'Add worker',exact:true}).click();
  await page.getByText('This machine is offline. Changes apply when it reconnects.',{exact:true}).waitFor();await page.getByRole('button',{name:'Cancel',exact:true}).click();
  machine.state='connected';await page.locator('#refresh').click();
  for(const colorScheme of ['light','dark'])for(const width of [1440,768,390,320]){
@@ -90,5 +90,5 @@ try{
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${colorScheme} ${width}px fits`);
   if(process.env.PROJECT_WORKER_SCREENSHOTS)await page.screenshot({path:resolve(process.env.PROJECT_WORKER_SCREENSHOTS,`${colorScheme}-${width}.png`),fullPage:true});
  }
- assert.deepEqual(errors,[]);console.log('PASS project workers: flat hierarchy, hidden history and IDs, add project, create, resume, agent limit, stable refresh, failed removal and successful removal, mobile and themes');
+ assert.deepEqual(errors,[]);console.log('PASS workers: flat hierarchy, hidden history and IDs, add project, create, resume, agent limit, stable refresh, failed removal and successful removal, mobile and themes');
 }finally{await browser?.close();server.closeAllConnections();await new Promise(done=>server.close(done));}

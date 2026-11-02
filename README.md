@@ -79,7 +79,7 @@ to `workers add`. Existing workers default to Codex; changes
 apply to newly picked issues. Each provider must be installed and authenticated
 on its worker's machine.
 
-Create a worker with **Project workers → Add project worker** or
+Create a worker with **Workers → Add worker** or
 `hey-boss workers add --name Tools -C /path/to/project`. It starts automatically.
 Project onboarding and machine discovery create no workers. Open
 `hey-boss workers watch` to see activity; closing the dashboard leaves workers running.

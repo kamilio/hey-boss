@@ -43,7 +43,7 @@ try{
  await session.type('Quiet tools');await session.press('Tab');await session.press('Backspace');await session.type('2');await session.press('Tab');await session.type('/work/Tool One');
  await session.press('Control+n');await session.type('/work/Tool Two');await capture(session,'add-worker');await session.press('Enter');
  await wait(session,'Alpha agent');
- await open(session,'w','Project workers');await wait(session,'Quiet tools');
+ await open(session,'w','Workers');await wait(session,'Quiet tools');
  assert.deepEqual((await current()).mutations[0],{action:'add',name:'Quiet tools',slots:2,directories:['/work/Tool One','/work/Tool Two']});
  await open(session,'d','Remove worker?');await session.press('Escape');assert.equal((await current()).mutations.length,1);
  await open(session,'d','Remove worker?');await session.press('Enter');await wait(session,'Removing after completion');
