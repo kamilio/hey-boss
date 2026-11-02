@@ -62,7 +62,7 @@ impl Context {
             .unwrap_or_else(|| home.join(".local/share/hey-boss"));
         let desired = std::env::var_os("HEY_BOSS_FLEET_DESIRED")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".hey-boss/fleet.yaml"));
+            .unwrap_or_else(|| crate::fleet::config_directory(&home, &state).join("fleet.yaml"));
         let binary = std::env::var_os("HEY_BOSS_FLEET_BINARY")
             .map(PathBuf::from)
             .unwrap_or(std::env::current_exe()?)
@@ -289,7 +289,9 @@ impl Context {
     pub fn legacy_inventory(&self) -> Result<Vec<Value>> {
         let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.home.join(".hey-boss/config.json"));
+            .unwrap_or_else(|| {
+                crate::fleet::config_directory(&self.home, &self.state).join("config.json")
+            });
         let value = self.read_json(&config, json!({}))?;
         let mut hosts = vec![];
         for entry in value["ssh_hosts"].as_array().into_iter().flatten() {
@@ -882,6 +884,70 @@ pub(super) mod tests {
             stop: Arc::new(AtomicBool::new(false)),
         };
         (root, ctx, store)
+    }
+    #[test]
+    fn isolated_fleet_does_not_inherit_home_inventory() {
+        const ENV: &str = "HEY_BOSS_ISOLATION_TEST";
+        if std::env::var_os(ENV).is_none() {
+            let (root, ctx, store) = test_context();
+            fs::create_dir_all(root.join(".hey-boss")).unwrap();
+            fs::write(
+                root.join(".hey-boss/config.json"),
+                r#"{"ssh_hosts":["production-host"]}"#,
+            )
+            .unwrap();
+            fs::write(
+                root.join(".hey-boss/fleet.yaml"),
+                "machines: {production-worker: {workers: []}}\n",
+            )
+            .unwrap();
+            for (state, explicit, expected) in [
+                (ctx.state.clone(), false, "isolated"),
+                (root.join(".local/share/hey-boss"), false, "default"),
+                (ctx.state.clone(), true, "explicit"),
+            ] {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "fleet::native::context::tests::isolated_fleet_does_not_inherit_home_inventory", "--nocapture"])
+                    .env(ENV, expected).env("HOME", &root)
+                    .env("HEY_BOSS_ISSUE_DB", &ctx.path)
+                    .env("HEY_BOSS_FLEET_STATE", state)
+                    .env_remove("HEY_BOSS_FLEET_CONFIG")
+                    .env_remove("HEY_BOSS_FLEET_DESIRED")
+                    .env_remove("HEY_BOSS_FLEET_BINARY");
+                if explicit {
+                    command
+                        .env("HEY_BOSS_FLEET_CONFIG", root.join(".hey-boss/config.json"))
+                        .env("HEY_BOSS_FLEET_DESIRED", root.join(".hey-boss/fleet.yaml"));
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let ctx = Context::new().unwrap();
+        if std::env::var(ENV).unwrap() == "isolated" {
+            assert_eq!(ctx.desired, ctx.state.join("fleet.yaml"));
+            assert!(ctx.inventory().unwrap().is_empty());
+            fs::write(
+                ctx.state.join("config.json"),
+                r#"{"ssh_hosts":["private-host"]}"#,
+            )
+            .unwrap();
+            assert_eq!(
+                ctx.inventory().unwrap(),
+                vec![json!({"host":"private-host","workers":[]})]
+            );
+        } else {
+            assert_eq!(ctx.desired, ctx.home.join(".hey-boss/fleet.yaml"));
+            assert_eq!(ctx.inventory().unwrap().len(), 2);
+        }
     }
     #[test]
     fn fleet_connection_reads_do_not_wait_for_shared_writer() {

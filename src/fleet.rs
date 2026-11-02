@@ -121,6 +121,15 @@ pub enum Action {
     },
 }
 
+pub(crate) fn config_directory(home: &std::path::Path, state: &std::path::Path) -> PathBuf {
+    if state == home.join(".local/share/hey-boss") {
+        home.join(".hey-boss")
+    } else {
+        // A private fleet must not silently inherit the user's live SSH hosts.
+        state.to_owned()
+    }
+}
+
 pub fn socket_path() -> std::io::Result<PathBuf> {
     if let Some(state) = std::env::var_os("HEY_BOSS_FLEET_STATE") {
         return Ok(PathBuf::from(state).join("fleet.sock"));

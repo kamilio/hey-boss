@@ -985,9 +985,8 @@ mod tests {
     fn sync_inventory_keeps_registered_companions_without_saved_workers() {
         let fixture = Fixture::new();
         let ctx = &fixture.ctx;
-        fs::create_dir_all(ctx.home.join(".hey-boss")).unwrap();
         fs::write(
-            ctx.home.join(".hey-boss/config.json"),
+            ctx.state.join("config.json"),
             r#"{"ssh_hosts":["devbox","peer",{"host":"disabled","enabled":false}]}"#,
         )
         .unwrap();
@@ -1007,11 +1006,7 @@ mod tests {
 
         // Connection inventory changes must take effect without restarting or
         // rewriting the saved-worker document.
-        fs::write(
-            ctx.home.join(".hey-boss/config.json"),
-            r#"{"ssh_hosts":[]}"#,
-        )
-        .unwrap();
+        fs::write(ctx.state.join("config.json"), r#"{"ssh_hosts":[]}"#).unwrap();
         fs::write(ctx.state.join("companion-hosts"), "devbox\n").unwrap();
         let hosts = ctx.inventory().unwrap();
         assert_eq!(hosts.len(), 1);

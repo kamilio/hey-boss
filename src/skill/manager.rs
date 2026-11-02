@@ -274,7 +274,7 @@ fn hosts(home: &Path) -> Result<Vec<String>> {
     }
     let config = std::env::var_os("HEY_BOSS_FLEET_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".hey-boss/config.json"));
+        .unwrap_or_else(|| crate::fleet::config_directory(home, &state_dir).join("config.json"));
     if config.exists() {
         let value: Value = serde_json::from_slice(&fs::read(config)?)?;
         for entry in value["ssh_hosts"].as_array().into_iter().flatten() {
@@ -285,7 +285,7 @@ fn hosts(home: &Path) -> Result<Vec<String>> {
     }
     let desired = std::env::var_os("HEY_BOSS_FLEET_DESIRED")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".hey-boss/fleet.yaml"));
+        .unwrap_or_else(|| crate::fleet::config_directory(home, &state_dir).join("fleet.yaml"));
     if desired.exists() {
         let value: Value = serde_yaml_ng::from_slice(&fs::read(desired)?)
             .map_err(|e| Error::invalid(format!("Cannot read fleet machines: {e}")))?;
