@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import TalkCore
 import Darwin
 
@@ -14,6 +15,7 @@ enum CLI {
     hey-talk toggle [--submit]                  Start or stop; --submit matches Hyper+R
     hey-talk cancel                            Discard audio; never paste
     hey-talk transcribe FILE [--json]           Transcribe an audio file
+    hey-talk transcribe-file FILE [--json]      Transcribe recordings of any length locally, without history
     hey-talk status [--json]                    State, audio levels, worker PID
     hey-talk last [--original] [--json]         Last transcript; --original skips AI edits
     hey-talk history [--json]                  Latest 50 saved transcripts
@@ -63,6 +65,22 @@ enum CLI {
         let args = arguments.filter { !["--json", "--original", "--no-overlay", "--no-paste", "--submit"].contains($0) }
         guard !args.isEmpty else { throw TalkError("Missing command. Run hey-talk --help.") }
         let verb = args[0]
+        if verb == "transcribe-file" {
+            guard args.count == 2, arguments.count == (json ? 3 : 2) else { throw TalkError("Use transcribe-file FILE [--json]") }
+            let file = try AVAudioFile(forReading: URL(fileURLWithPath: (args[1] as NSString).expandingTildeInPath))
+            let inference = Inference()
+            var text: [String] = []
+            try AudioCapture.readFileChunks(file) { samples in
+                let finished = DispatchSemaphore(value: 0)
+                var result: Result<(String, Double), Error>!
+                inference.transcribe(samples) { result = $0; finished.signal() }
+                finished.wait()
+                let (chunk, _) = try result.get()
+                if !chunk.isEmpty { text.append(chunk) }
+            }
+            try output(["ok": true, "text": text.joined(separator: "\n\n")], json: json)
+            return
+        }
         let known = ["start", "stop", "toggle", "cancel", "record", "transcribe", "status", "last", "history", "devices", "input", "auto", "correction", "speech", "enter-exceptions", "vocabulary", "overlay", "permissions", "warm", "doctor", "quit"]
         guard known.contains(verb) else { throw TalkError("Unknown command: \(verb). Run hey-talk --help.") }
         let needsValue = ["transcribe", "input", "overlay", "permissions"].contains(verb)

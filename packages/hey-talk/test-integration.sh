@@ -24,6 +24,9 @@ for iteration in {1..20}; do long_speech+='This longer recording checks that can
 say -v Samantha -o "$long_fixture" "$long_speech"
 "$cli" warm --json > .build/warm.json
 service_pid=$("$cli" status --json | jq -r .pid)
+ln -sfn "$cli" "$PWD/.build/hey-talk"
+standalone=$(PATH="$PWD/.build:$PATH" hey-talk transcribe-file "$fixture" --json)
+jq -e '.ok and (.text | ascii_downcase | contains("everything runs locally on this mac"))' <<< "$standalone" >/dev/null
 for iteration in {1..20}; do
   "$cli" transcribe "$fixture" --json > ".build/inference-$iteration.json"
   remember_history ".build/inference-$iteration.json"
