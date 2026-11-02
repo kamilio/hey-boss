@@ -33,14 +33,12 @@ pub(super) fn validate_path(path: &str) -> Result<()> {
     if path.is_empty()
         || path.len() > 4096
         || path.chars().any(char::is_control)
-        || (!path.starts_with("~/") && !Path::new(path).is_absolute())
+        || (path != "~" && !path.starts_with("~/") && !Path::new(path).is_absolute())
         || Path::new(expanded)
             .components()
             .any(|c| matches!(c, Component::ParentDir))
     {
-        return Err(invalid(
-            "Use an absolute checkout path or ~/folder, without ..",
-        ));
+        return Err(invalid("Use an absolute path, ~ or ~/folder, without .."));
     }
     Ok(())
 }
@@ -76,6 +74,9 @@ pub(super) fn identity(git: &str) -> Result<String> {
 }
 fn expand(home: &Path, path: &str) -> Result<PathBuf> {
     validate_path(path)?;
+    if path == "~" {
+        return Ok(home.to_path_buf());
+    }
     Ok(path
         .strip_prefix("~/")
         .map(|p| home.join(p))
@@ -762,10 +763,14 @@ mod tests {
             assert!(identity(bad).is_err(), "{bad}");
         }
         assert_eq!(
+            expand(Path::new("/home/remote"), "~").unwrap(),
+            Path::new("/home/remote")
+        );
+        assert_eq!(
             expand(Path::new("/home/remote"), "~/Workspace/project").unwrap(),
             Path::new("/home/remote/Workspace/project")
         );
-        for bad in ["relative", "~/../outside", "/tmp/../other"] {
+        for bad in ["", "relative", "~other", "~/../outside", "/tmp/../other"] {
             assert!(validate_path(bad).is_err());
         }
         assert_ne!(
