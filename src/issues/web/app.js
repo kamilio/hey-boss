@@ -360,7 +360,7 @@ function updateHeader() {
   $("#all-count").textContent = (p.open || 0) + (p.blocked || 0) + (p.ready || 0) + (p.closed || 0);
   $("#blocked-count").textContent = p.blocked || 0;
   $("#ready-count").textContent = p.ready || 0;
-  $('[data-state="ready"]').hidden = !p.prs_enabled && !p.ready && model.route.state !== "ready";
+  $('[data-state="ready"]').hidden = false;
   $("#closed-count").textContent = p.closed;
   $("#deleted-count").textContent = p.deleted;
   $(".page-description").textContent =
@@ -667,14 +667,14 @@ function emptyState() {
   const state = model.route.state;
   const title = filtered
     ? "No matching issues"
-    : state === "ready" ? "No PRs ready for review" : state === "blocked" ? "No blocked issues" : state === "closed"
+    : state === "ready" ? "No ready tasks" : state === "blocked" ? "No blocked issues" : state === "closed"
       ? "Nothing closed yet"
       : state === "deleted"
         ? "No deleted issues"
         : "A clear place to start";
   const description = filtered
     ? "Try another search or clear your filters."
-    : state === "ready" ? "Tasks with PRs ready for Boss will appear here. Their dependent tasks can start before merge." : state === "blocked" ? "Issues that need help to proceed will appear here. Reopen them when the blocker is resolved." : state === "closed"
+    : state === "ready" ? "Ready tasks appear here. Unassign a task to let a worker pick it up." : state === "blocked" ? "Issues that need help to proceed will appear here. Reopen them when the blocker is resolved." : state === "closed"
       ? "Completed work will appear here."
       : state === "deleted"
         ? "Deleted issues can be restored from this view."
@@ -1370,10 +1370,10 @@ function renderReadiness(value) {
   const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
   const reason = draftUnavailable(i, value.drafts_enabled);
-  const status = i.state === "ready" ? i.draft ? "Development handoff · draft retained" : "Ready · awaiting PR review" : i.state === "blocked" ? `${IssueBlockers.description(i)} · pickup paused` : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
+  const status = i.state === "ready" ? i.draft ? "Development handoff · draft retained" : "Ready" : i.state === "blocked" ? `${IssueBlockers.description(i)} · pickup paused` : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Ready for agents";
   const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
   const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
-  const note = value.drafts_enabled === false && !i.draft && ["open", "blocked"].includes(i.state) ? "" : i.state === "ready" ? i.draft ? "No worker pickup for this source. Eligible dependents can start. CI, review, merge and production approval remain separate. Reopen to withdraw the handoff." : "Dependent tasks can start. Reopen this task before reworking its PR." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
+  const note = value.drafts_enabled === false && !i.draft && ["open", "blocked"].includes(i.state) ? "" : i.state === "ready" ? i.draft ? "No worker pickup for this source. Eligible dependents can start. CI, review, merge and production approval remain separate. Reopen to withdraw the handoff." : "Unassign to let a worker pick up this task. Move it out of Ready to request rework." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
   return `<div class="side-section issue-readiness"><h2 class="side-heading">Readiness${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${value.drafts_enabled === false || (i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}</div>`;
 }
 function issueStateActions(issue) {
@@ -1383,7 +1383,7 @@ function issueStateActions(issue) {
   let buttons = `<button type="button" class="button" data-action="${clearHold ? "clear_manual_hold" : reopen ? "reopen" : "close"}" ${reopen && issue.state !== "closed" && !clearHold && issue.blocked_by?.length ? 'disabled title="Resolve or unlink blocking issues first"' : ""}>${icon(reopen ? "issue" : "closed")}${clearHold ? "Release hold" : reopen ? "Reopen issue" : "Close issue"}</button>`;
   if (issue.state === "open") buttons += `<button type="button" class="button" data-action="block">${icon("blocked")}Block issue</button>`;
   if (issue.state === "blocked" || issue.state === "ready") buttons += `<button type="button" class="button" data-action="close">${icon("closed")}Close issue</button>`;
-  if ((issue.state === "open" || (issue.state === "blocked" && issue.manual_blocked)) && model.detail?.prs_enabled) buttons += `<button type="button" class="button" data-action="ready" ${issue.pull_requests?.some(pr => ["fix", "unspecified"].includes(pr.purpose)) ? "" : 'disabled title="Attach the task’s PR first"'}>${icon("pull-request")}${issue.draft ? "Development handoff" : "PR ready"}</button>`;
+  if (issue.state === "open" || (issue.state === "blocked" && issue.manual_blocked)) buttons += `<button type="button" class="button" data-action="ready">${icon("check")}${issue.draft ? "Development handoff" : "Ready"}</button>`;
   return buttons;
 }
 function renderDraftNotice(issue) {
@@ -1695,7 +1695,7 @@ async function performAction(action, button, context = null) {
         claim: "Assigned to you",
         assign_boss: `Assigned to ${model.boss.name}`,
         unassign: "Claim released",
-        ready: i.draft ? "Development handoff recorded; draft retained" : "PR ready for review",
+        ready: i.draft ? "Development handoff recorded; draft retained" : "Ready",
         block: "Issue blocked",
         close: "Issue closed",
         reopen: result?.issue?.state === "blocked" ? "Issue reopened; waiting for dependencies" : "Issue reopened",
@@ -1786,7 +1786,7 @@ function issueActivitySummary(event) {
   }
   const verbs = {
     created:"opened this issue", worker_selected:"selected this issue for a worker", allocation_released:"released the fleet reservation",
-    comment_resolved:"resolved a comment", comment_unresolved:"reopened a comment", ready:"marked the PR ready for review",
+    comment_resolved:"resolved a comment", comment_unresolved:"reopened a comment", ready:"marked the Ready",
     requirements_preserved:"preserved the delivery handoff",
     blocked:"blocked this issue", blockers_changed:"changed the blocking issues", dependency_rework:"notified dependent work of upstream changes",
     closed:"closed this issue", reopened:"reopened this issue", manual_hold_cleared:"released the hold", deleted:"deleted this issue", restored:"restored this issue",

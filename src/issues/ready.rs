@@ -201,23 +201,6 @@ pub(super) fn handoff(
         ));
     }
     let watching = assignments::is_watching(db, &project.id, issue.number)?;
-    if !watching && registry::project_settings(db, project)?["prs_enabled"] != true {
-        if *keep_draft {
-            return Err(Error::conflict(
-                "Ready requires pull requests enabled for this project",
-            ));
-        }
-        db.execute(
-            "INSERT INTO project_settings(project_id,prompt,prs_enabled,version,subtask_scheduling) VALUES(?1,'',1,1,'explicit') ON CONFLICT(project_id) DO UPDATE SET prs_enabled=1,version=version+1",
-            params![project.id],
-        )?;
-    }
-    let attached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))", params![project.id,issue.number], |r| r.get(0))?;
-    if !attached {
-        return Err(Error::conflict(
-            "Attach the task's PR before marking it Ready",
-        ));
-    }
     let own_handoff = issue.assignee.as_deref() == Some("human:boss") && db.query_row(
         "SELECT coalesce((SELECT actor=?3 AND json_extract(data,'$.previous_assignee')=?3 FROM events WHERE project_id=?1 AND issue_number=?2 AND action IN ('claimed','ready','unassigned','closed','reopened') ORDER BY id DESC LIMIT 1),0)",
         params![project.id,issue.number,actor.id], |r| r.get::<_,bool>(0),

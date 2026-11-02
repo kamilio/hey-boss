@@ -111,7 +111,7 @@ fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
     if assignments::own_handoff(db, job, issue)? {
         return Ok(true);
     }
-    if !job.requires_pr()
+    if (!job.requires_pr() && issue.state != "ready")
         || !matches!(issue.state.as_str(), "open" | "ready")
         || issue.deleted_at.is_some()
         || issue.assignee.as_deref() != Some("human:boss")
@@ -181,7 +181,7 @@ fn status(db: &Connection, project: &Project) -> Result<Value> {
         [],
         |r| r.get(0),
     )?;
-    let mut stmt = db.prepare("SELECT r.id,r.issue_number,json_extract(r.job,'$.issue.title'),r.actor_id,r.session_id,r.state,r.pid,r.started_at,r.updated_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count FROM worker_runs r JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number WHERE r.project_id=?1 ORDER BY r.started_at DESC,r.id DESC LIMIT 20")?;
+    let mut stmt = db.prepare("SELECT r.id,r.issue_number,json_extract(r.job,'$.issue.title'),r.actor_id,r.session_id,r.state,r.pid,r.started_at,r.updated_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,CASE WHEN r.retry_allowed=0 AND i.state IN ('open','ready') AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count FROM worker_runs r JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number WHERE r.project_id=?1 ORDER BY r.started_at DESC,r.id DESC LIMIT 20")?;
     let rows = stmt.query_map([&project.id], |r| Ok(json!({
         "id":r.get::<_,String>(0)?,"number":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,
         "actor_id":r.get::<_,String>(3)?,"session_id":r.get::<_,Option<String>>(4)?,"state":r.get::<_,String>(5)?,
@@ -205,7 +205,7 @@ fn status(db: &Connection, project: &Project) -> Result<Value> {
                 .collect::<Vec<_>>()
         );
     }
-    let mut stmt = db.prepare(&format!("SELECT i.number FROM issues i WHERE i.project_id=?1 AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL
+    let mut stmt = db.prepare(&format!("SELECT i.number FROM issues i WHERE i.project_id=?1 AND i.state IN ('open','ready') AND i.deleted_at IS NULL AND i.assignee IS NULL
         AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))
         {}", super::registry::PICKUP_READY))?;
     let eligible = stmt
@@ -231,7 +231,7 @@ pub(super) fn execute(
             let next: Option<i64> = if let Some(number) = number {
                 Some(*number)
             } else {
-                db.query_row(&format!("SELECT i.number FROM issues i WHERE i.project_id=?1 AND i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL
+                db.query_row(&format!("SELECT i.number FROM issues i WHERE i.project_id=?1 AND i.state IN ('open','ready') AND i.deleted_at IS NULL AND i.assignee IS NULL
                     AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))
                     {} ORDER BY i.sort_order,i.created_at,i.project_id,i.number LIMIT 1", super::registry::PICKUP_READY), params![project.id,serde_json::to_string(&config.labels)?], |r|r.get(0)).optional()?
             };
@@ -302,7 +302,7 @@ pub(super) fn execute(
                     "retry" => {
                         let number: Option<i64> = db.query_row("SELECT issue_number FROM worker_runs WHERE id=?1 AND project_id=?2 AND finished_at IS NOT NULL AND state!='completed'",params![id,project.id],|r|r.get(0)).optional()?;
                         let number=number.ok_or_else(||Error::conflict("Only a stopped, blocked or failed run can be retried"))?;
-                        if get_issue(db, &project.id, number, false)?.state != "open" {
+                        if !matches!(get_issue(db, &project.id, number, false)?.state.as_str(), "open" | "ready") {
                             return Err(Error::conflict("Reopen the issue before retrying its agent"));
                         }
                         db.execute("UPDATE worker_runs SET retry_allowed=1 WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NOT NULL",params![project.id,number])?
@@ -341,7 +341,7 @@ impl Store {
         let repeated = stopping && issue.assignee.as_deref() == Some("human:boss");
         if !repeated {
             if finished
-                || issue.state != "open"
+                || !matches!(issue.state.as_str(), "open" | "ready")
                 || (issue.assignee.is_some()
                     && issue.assignee.as_deref() != Some(&job.actor.id)
                     && !own_pr_handoff(&tx, &job, &issue)?)
@@ -432,7 +432,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let issue = get_issue(&tx, &job.project.id, job.number(), true)?;
         if (issue.assignee.is_some() && issue.assignee.as_deref() != Some(&job.actor.id))
-            || issue.state != "open"
+            || !matches!(issue.state.as_str(), "open" | "ready")
             || issue.deleted_at.is_some()
         {
             return Err(Error::conflict(
@@ -485,7 +485,7 @@ impl Store {
         if claimed.is_none() {
             return Ok(
                 crate::issues::project_pause::reason(&self.db, &job.project.id)?.is_some()
-                    || state != "open"
+                    || !matches!(state.as_str(), "open" | "ready")
                     || (assignee.is_some() && assignee.as_deref() != Some(&job.actor.id)),
             );
         }
@@ -596,7 +596,7 @@ impl Store {
                 "Issue ownership or requirements changed while Codex worked. Review the session before closing.\n\n{summary}"
             );
         }
-        if state == "completed" && !own_closed {
+        if state == "completed" && !own_closed && !handed_off {
             let delivered_pr = (job.requires_pr() || watching) && tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM issue_pull_requests WHERE project_id=?1 AND issue_number=?2 AND purpose IN ('fix','unspecified'))",
                 params![job.project.id,job.number()], |r| r.get::<_,bool>(0),
@@ -676,7 +676,7 @@ impl Store {
             }
         }
         if approval_hold
-            && issue.state == "open"
+            && matches!(issue.state.as_str(), "open" | "ready")
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none())
             && issue.title == job.issue["title"]
@@ -714,7 +714,7 @@ impl Store {
             && !watcher_waiting;
         let count = if retrying { retry_count(&tx, job)? } else { 0 };
         let retry_at = (retrying
-            && issue.state == "open"
+            && matches!(issue.state.as_str(), "open" | "ready")
             && issue.deleted_at.is_none()
             && (own || issue.assignee.is_none()))
         .then(|| {
@@ -934,6 +934,41 @@ mod tests {
     }
 
     #[test]
+    fn ready_without_prs_hands_off_and_can_be_claimed_for_delivery() {
+        let mut f = HandoffFixture::new(false);
+        f.store
+            .db
+            .execute("DELETE FROM issue_pull_requests", [])
+            .unwrap();
+        f.apply(Operation::Ready {
+            number: 1,
+            force: false,
+            guard: None,
+            acknowledge_requirements: false,
+            clear_manual_hold: false,
+            keep_draft: false,
+        });
+        assert!(!f.store.worker_cancelled(&f.job).unwrap());
+        f.store
+            .worker_finish(&f.job, "completed", "Shelved for review")
+            .unwrap();
+        assert_eq!(f.state(), "completed");
+        assert_eq!(f.issue().state, "ready");
+        assert_eq!(f.issue().assignee.as_deref(), Some("human:boss"));
+        f.apply(Operation::Unassign {
+            number: 1,
+            force: false,
+        });
+        assert_eq!(f.issue().state, "ready");
+        assert!(f.store.db.query_row("SELECT EXISTS(SELECT 1 FROM issue_pickup_ready WHERE project_id=?1 AND number=1)", [&f.job.project.id], |r| r.get::<_,bool>(0)).unwrap());
+        f.apply(Operation::Claim {
+            number: 1,
+            force: false,
+        });
+        assert_eq!(f.issue().state, "ready");
+    }
+
+    #[test]
     fn distributed_claim_waits_for_launch_and_losing_worker_cancels_locally() {
         use crate::issues::allocations::{self, Clock, Timing};
         let mut f = HandoffFixture::new(false);
@@ -1073,7 +1108,9 @@ mod tests {
         for (claimed, state, owner, closed_by, deleted, stopped, cancelled) in [
             (false, "open", None, None, false, false, false),
             (false, "open", Some("self"), None, false, false, false),
-            (false, "ready", Some("self"), None, false, false, true),
+            (false, "ready", Some("self"), None, false, false, false),
+            (false, "ready", None, None, false, false, false),
+            (false, "ready", Some("boss"), None, false, false, true),
             (false, "open", Some("boss"), None, false, false, true),
             (true, "open", Some("self"), None, false, false, false),
             (true, "ready", Some("self"), None, false, false, false),

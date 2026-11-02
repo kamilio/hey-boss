@@ -3,7 +3,7 @@ use super::*;
 use crate::issues::worker::{self, Job, ProjectConfig, Settings, now, random_id};
 use std::collections::{BTreeMap, HashMap};
 pub(super) const FINISHED_HISTORY_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_finished_history ON worker_runs(worker_id,started_at DESC,id DESC) WHERE finished_at IS NOT NULL;";
-pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state='open' AND assignee IS NULL;";
+pub(super) const PROJECT_QUEUE_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_project_queue ON issues(project_id,sort_order,created_at,number) WHERE deleted_at IS NULL AND state IN ('open','ready') AND assignee IS NULL;";
 pub(super) const LEGACY_RUNTIME_INDEX: &str = "CREATE INDEX IF NOT EXISTS worker_legacy_runtime ON issue_workers(id) WHERE json_type(config,'$.upgrading') IS NOT NULL;";
 
 #[cfg(test)]
@@ -174,7 +174,7 @@ pub(super) const PROJECT_DIRECTORIES: &str = "SELECT json_extract(metadata,'$.cw
 // Resolve the bounded set of IDs first. An outer worker_id/OR filter scans all
 // attempts even when the history subquery is indexed.
 const STATUS_RUNS: &str = "SELECT r.id,r.project_id,p.name,r.issue_number,json_extract(r.job,'$.issue.title'),r.session_id,r.state,r.pid,r.started_at,r.finished_at,r.stop_requested,r.summary,r.last_event,r.goal,r.reservation_expires,r.claimed_at,r.actor_id,
- CASE WHEN r.retry_allowed=0 AND i.state='open' AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count,r.worker_id
+ CASE WHEN r.retry_allowed=0 AND i.state IN ('open','ready') AND i.assignee IS NULL AND i.deleted_at IS NULL AND r.id=(SELECT id FROM worker_runs WHERE project_id=r.project_id AND issue_number=r.issue_number AND finished_at IS NOT NULL ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1) AND NOT EXISTS(SELECT 1 FROM worker_runs live WHERE live.project_id=r.project_id AND live.issue_number=r.issue_number AND live.finished_at IS NULL) THEN r.retry_at END,r.retry_count,r.worker_id
  FROM json_each(?1) selected CROSS JOIN worker_runs r JOIN projects p ON p.id=r.project_id JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number
  WHERE r.id IN(SELECT id FROM worker_runs WHERE worker_id=selected.value AND finished_at IS NULL
  UNION ALL SELECT id FROM(SELECT id FROM worker_runs WHERE worker_id=selected.value AND finished_at IS NOT NULL ORDER BY started_at DESC,id DESC LIMIT 20))
@@ -401,8 +401,7 @@ impl Store {
     }
 }
 // Callers constrain projects separately so their queries can use project indexes.
-const ELIGIBLE: &str =
-    "i.state='open' AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL";
+const ELIGIBLE: &str = "i.state IN ('open','ready') AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL";
 const TAG_FILTER: &str = "AND NOT EXISTS(SELECT 1 FROM json_each(?2) wanted WHERE NOT EXISTS(SELECT 1 FROM json_each(i.labels) existing WHERE existing.value=wanted.value))";
 // Failed attempts wait for their durable retry deadline without reserving capacity.
 // Explicit unanswered/declined input remains under the user's control.
@@ -644,7 +643,7 @@ fn worker_queue(db: &Connection, config: &Settings) -> Result<Value> {
              {tag_filtered},
              coalesce(sum(CASE WHEN i.assignee IS NULL {tag_filter} {PICKUP_READY} THEN 1 ELSE 0 END),0)
              FROM issues i JOIN projects p ON p.id=i.project_id
-             WHERE i.state='open' AND i.deleted_at IS NULL AND p.hidden_at IS NULL
+             WHERE i.state IN ('open','ready') AND i.deleted_at IS NULL AND p.hidden_at IS NULL
              AND {project_filter}"
     ))?;
     let parameters = [
@@ -775,7 +774,7 @@ pub(super) fn execute(
                         params![p, n],
                         |r| r.get(0),
                     )?;
-                    if state != "open" {
+                    if !matches!(state.as_str(), "open" | "ready") {
                         return Err(Error::conflict(
                             "Reopen the issue before retrying its agent",
                         ));
@@ -2636,6 +2635,57 @@ mod tests {
             tx.rollback().unwrap();
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ready_queue_preserves_status_through_reservation_startup_and_claim() {
+        let root = std::env::temp_dir().join(format!("hb-ready-worker-{}", random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        {
+            let mut store = Store::open(&root.join("issues.db")).unwrap();
+            store.db.execute_batch("INSERT INTO projects(id,name,next_number) VALUES('named:Ready','Ready',2);
+                INSERT INTO agents VALUES('human:boss','{}',0);
+                INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('named:Ready',1,'Deliver','Existing instructions','ready','human:boss',0,0,1,'[]');").unwrap();
+            let config = Settings {
+                enabled: true,
+                directory: root.to_string_lossy().into(),
+                projects: vec!["named:Ready".into()],
+                ..Settings::default()
+            };
+            let id = store.register_worker(None, &config, "unit").unwrap();
+            let mut job = store.worker_reserve("unit", Some(&id)).unwrap().unwrap();
+            assert_eq!(job.issue["state"], "ready");
+            assert!(!store.worker_cancelled(&job).unwrap());
+            store.worker_attach(&mut job, "ready-session").unwrap();
+            assert_eq!(job.issue["state"], "ready");
+            store
+                .execute(&Request {
+                    version: 1,
+                    project: job.project.clone(),
+                    project_override: None,
+                    actor: Some(job.actor.clone()),
+                    request_id: None,
+                    operation: Operation::Claim {
+                        number: 1,
+                        force: false,
+                    },
+                })
+                .unwrap();
+            assert_eq!(
+                get_issue(&store.db, &job.project.id, 1, false)
+                    .unwrap()
+                    .state,
+                "ready"
+            );
+            assert!(!store.worker_cancelled(&job).unwrap());
+            store
+                .worker_finish(&job, "failed", "Retry delivery")
+                .unwrap();
+            let issue = get_issue(&store.db, &job.project.id, 1, false).unwrap();
+            assert_eq!(issue.state, "ready");
+            assert!(issue.assignee.is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

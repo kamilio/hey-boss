@@ -23,11 +23,11 @@ async page => {
   await action({action:'create',title:'Use the handed-off API',body:'Depends on the guarded source handoff.',labels:[]});
   await action({action:'set_blockers',number:2,blockers:[1],force:false});
   await detail(1);
-  let button=page.getByRole('button',{name:'PR ready',exact:true});
-  check(await button.isDisabled(),'Missing PR keeps Ready disabled');
+  let button=page.getByRole('button',{name:'Ready',exact:true});
+  check(await button.isEnabled(),'Ready is available without a PR');
   await action({action:'add_pull_request',number:1,url:'https://github.com/example/repo/pull/683'});
   await page.reload();await button.waitFor();
-  check(await button.isEnabled(),'Attached PR enables Ready');
+  check(await button.isEnabled(),'Ready remains available with a PR');
   await page.locator('#comment-body').fill('Preserve this unsent review note.');
   let sent, newer;
   const race=async route=>{
@@ -66,7 +66,7 @@ async page => {
   const ready=await view(1);
   check(ready.assignee==='human:boss'&&ready.closed_at===null,'Ready assigns Boss without closing');
   check(ready.pull_requests[0].status==='unknown','Ready does not require or invent green CI');
-  check((await page.locator('.issue-readiness').innerText()).includes('awaiting PR review'),'Ready status explains review handoff');
+  check((await page.locator('.readiness-status').innerText()) === 'Ready','Ready status explains review handoff');
   await page.locator('#issue-assignment').selectOption('github');
   await page.waitForFunction(()=>model.detail?.issue.assignment?.kind==='github');
   check((await view(1)).state==='ready','Watcher assignment preserves Ready');
