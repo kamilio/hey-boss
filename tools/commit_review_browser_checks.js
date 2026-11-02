@@ -75,12 +75,14 @@ async page => {
   await page.locator('.confirm-delete').first().click();
   await page.waitForFunction(()=>![...document.querySelectorAll('.comment-body')].some(el=>el.textContent==='Handle validation failures here.'));
   check((await review({command:'comments'})).comments.length === 0,'Deleting a review comment persists');
+  const settings=await api({action:'project_settings'});
+  await api({action:'project_init',settings:{if_version:settings.version,prs_enabled:true,worktree_enabled:false,drafts_enabled:true,artifacts_enabled:true}});
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.goto(base+'/#'+new URLSearchParams({project:scope.project,issue:scope.issue}));
   await page.waitForFunction(number=>model?.detail?.issue.number===number,Number(scope.issue));
   await page.locator('.commit-summary').click();
   const link=page.locator('.commit-target[href^="/commit-review?"]').first();
-  check(await link.isVisible() && !(await link.getAttribute('target')),'Task opens the stored review inside the app');
+  check(await link.isVisible() && !(await link.getAttribute('target')),'Task opens the stored review inside the app, including PR-enabled projects');
   await link.click();
   await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
   check(errors.length===0,'No browser exceptions: '+errors.join('; '));
