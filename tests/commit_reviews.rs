@@ -227,3 +227,16 @@ fn review_and_feedback_follow_task_transfer_and_stale_comments_are_rejected() {
     assert_eq!(review["comments"][0]["body"], "After");
     assert_eq!(review["comments"][0]["id"], id);
 }
+
+#[test]
+fn attachments_without_a_remote_and_url_prefixes_resolve_to_the_stored_review() {
+    let mut f = Fixture::new();
+    let snapshot = f.review(json!({"command":"view"}))["review"].clone();
+    let added=f.call(json!({"action":"add_commit","number":1,"commit":format!("https://github.com/commit/{SHA}"),"review":snapshot}));
+    assert_eq!(
+        added["commits"][0]["url"],
+        format!("https://github.com/commit/{SHA}")
+    );
+    let shown=f.call(json!({"action":"commit_review","number":1,"commit":format!("https://github.com/commit/{}.patch",&SHA[..7]),"operation":{"command":"view"}}));
+    assert_eq!(shown["review"]["patch"], PATCH);
+}

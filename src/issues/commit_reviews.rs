@@ -192,14 +192,14 @@ fn resolve(db: &Connection, project: &str, number: i64, commit: &str) -> Result<
     if commit.trim().is_empty() {
         return Err(Error::invalid("Commit reference cannot be empty"));
     }
+    let target = super::commits::parse_url_commit(commit)
+        .map(|(_, sha)| sha)
+        .unwrap_or_else(|| commit.to_ascii_lowercase());
     let rows = super::commits::list(db, project, number)?;
     let matches: Vec<_> = rows
         .iter()
         .filter(|row| {
-            row["sha"]
-                .as_str()
-                .is_some_and(|s| s.starts_with(&commit.to_ascii_lowercase()))
-                || row["url"] == commit
+            row["sha"].as_str().is_some_and(|s| s.starts_with(&target)) || row["url"] == commit
         })
         .collect();
     if matches.len() != 1 {
