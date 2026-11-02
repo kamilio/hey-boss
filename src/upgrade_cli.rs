@@ -626,7 +626,7 @@ fn remote_apply(
     // Compile the staged implementation on the target, so old installed CLIs also
     // enter the new guard on their very first upgrade. No downloaded executable.
     let script = format!(
-        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; upgrade_stage=\"$stage\"; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; {}; if [ \"$(uname -s)\" = Darwin ]; then /usr/bin/swift \"$stage/package_hey_boss.swift\" --cli \"$stage/guard\"; fi; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
+        "set -eu; export PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:$PATH\"; stage=$(mktemp -d \"$PWD/.hey-boss-upgrade.XXXXXX\"); trap 'rm -rf \"$stage\"' EXIT; tar -xzf - -C \"$stage\"; upgrade_stage=\"$stage\"; export CARGO_TARGET_DIR=\"$HOME/.cache/hey-boss/bootstrap\"; {}; if [ \"$(uname -s)\" = Darwin ]; then /usr/bin/swift \"$stage/package_hey_boss.swift\" --cli \"$stage/guard\"; fi; \"$stage/guard\" upgrade --apply-snapshot \"$stage\" --binary \"$HOME/.local/bin/hey-boss\" --json{}{}",
         bootstrap_script(),
         observed
             .map(|n| format!(" --observed-generation {n}"))
