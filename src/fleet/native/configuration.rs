@@ -812,6 +812,35 @@ mod tests {
     }
 
     #[test]
+    fn home_workspace_saves_automatic_checkout_without_changing_workers() {
+        let fixture = Fixture::new();
+        let ctx = &fixture.ctx;
+        fs::write(&ctx.desired, "machines: {local: {workers: [{id: tools, intent: pause, config: {projects: [github.com/acme/tools]}}]}}\n").unwrap();
+        for workspace in ["~", "~/"] {
+            let current = request(ctx, &json!({})).unwrap();
+            let saved = request(ctx, &json!({"revision":current["revision"],"save":true,"machine_update":{"host":"local","action":"project","git":"https://github.com/acme/atlas.git","workspace":workspace,"path":"","worker":""}})).unwrap();
+            let machine = &saved["document"]["machines"]["local"];
+            assert_eq!(machine["workspace"], "~");
+            assert_eq!(
+                machine["projects"]["github.com/acme/atlas"]["path"],
+                "~/atlas"
+            );
+            assert_eq!(
+                machine["projects"]["github.com/acme/atlas"]["reuse_existing"],
+                true
+            );
+            assert_eq!(
+                machine["workers"],
+                current["document"]["machines"]["local"]["workers"]
+            );
+            assert_eq!(
+                request(ctx, &json!({})).unwrap()["document"],
+                saved["document"]
+            );
+        }
+    }
+
+    #[test]
     fn project_path_is_automatic_only_when_not_explicitly_chosen() {
         let mut doc = parse("machines: {local: {workers: []}}\n").unwrap();
         let mut update = json!({"host":"local","action":"project","git":"https://github.com/acme/atlas.git","workspace":"~/Work"});

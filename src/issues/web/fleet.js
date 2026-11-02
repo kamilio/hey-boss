@@ -906,7 +906,7 @@ if (typeof document !== 'undefined') (() => {
       const name=last?.machines?.find(m=>m.host===host)?.hostname||host;
       $('machine-editor-context').textContent=name;
       $('machine-editor-title').textContent=({add:'Add a worker',remove:'Remove a worker',project:'Add a project','edit-project':'Edit checkout'})[action];
-      $('machine-editor-description').textContent=({add:'Choose its settings. The new worker will start picking up tasks.',remove:'This worker will stop picking up tasks and finish its current work. You can kill it immediately while it is finishing.',project:'Set up a checkout on this machine and choose which worker can use it.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
+      $('machine-editor-description').textContent=({add:'Choose its settings. The new worker will start picking up tasks.',remove:'This worker will stop picking up tasks and finish its current work. You can kill it immediately while it is finishing.',project:'Set up a checkout on this machine. Choose a worker to let it pick up tasks for this project, or prepare the checkout only and keep worker assignments unchanged.','edit-project':'Update the repository URL or checkout path. Saved changes apply automatically.'})[action];
       for(const field of ['template','slots','project','worker','git','workspace','path'])$('machine-'+field+'-field').hidden=!({add:['template','slots'],remove:['worker'],project:['project','worker','git','workspace','path'],'edit-project':['git','workspace','path']}[action].includes(field));
       const choices=new Map(projects.map(p=>[p.id,{...p}]));
       for(const configured of [...Object.values(data.document?.machines||{}),machine])for(const [id,checkout] of Object.entries(configured.projects||{})){
@@ -920,7 +920,7 @@ if (typeof document !== 'undefined') (() => {
       }
       $('machine-git').required=['project','edit-project'].includes(action);$('machine-workspace').required=['project','edit-project'].includes(action);$('machine-path').required=false;
       const options=(select,empty)=>{select.replaceChildren();if(empty){const option=element('option','',empty);option.value='';select.append(option);}for(const worker of workers){const option=element('option','',workerLabel(worker)+' · '+worker.id.slice(0,12));option.value=worker.id;select.append(option);}};
-      options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Machine only · assign later':null);
+      options($('machine-template'),template?null:Object.keys(machine.projects||{}).length?'New settings · machine projects':'New settings · all projects');options($('machine-worker'),action==='project'?'Prepare checkout only':null);
       if(action==='project'&&!workers.length){$('machine-worker-field').hidden=true;$('machine-editor-description').textContent='Set up the checkout, then add a worker and choose its agent limit.';}
       if(template){$('machine-template').value=template.id;$('machine-slots-field').hidden=true;$('machine-editor-context').textContent=scopeLabel({projects:template.config?.projects||[]})+' · '+name;}
       if(action==='add'&&projectId){$('machine-template-field').hidden=true;$('machine-template').value='';$('machine-editor-context').textContent=projectLabel(projectId)+' · '+name;}
