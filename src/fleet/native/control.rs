@@ -273,7 +273,7 @@ fn retain_pending_changes(previous: &Value, message: &Value) -> Result<Value> {
         pending["base_revision"] = message["revision"].clone();
         if let Some(row) = workers.iter_mut().find(|w| w["id"] == id) {
             *row = pending;
-        } else {
+        } else if pending["local_add"] == true {
             workers.push(pending);
         }
     }
@@ -571,6 +571,26 @@ fn apply_signal_locked(
         return Err(invalid("Unknown signal"));
     }
     let mut worker = worker_snapshot(&message["worker"], |query| ctx.rpc(query))?;
+    let role = ctx.service_role()?;
+    let config_path = ctx.state.join(if role == "controller" {
+        "fleet-main.json"
+    } else {
+        "fleet-agent.json"
+    });
+    let mut saved = ctx.read_json(&config_path, json!({}))?;
+    if super::worker_rollout::request_build(
+        message["id"].as_str().unwrap_or_default(),
+        message["worker"].as_str().unwrap_or_default(),
+    )
+    .is_some()
+        && !saved["workers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|w| w["id"] == message["worker"])
+    {
+        return Err(invalid("An upgrade cannot restart an unconfigured worker"));
+    }
     replica::execute(
         db,
         "INSERT OR IGNORE INTO fleet_signals VALUES(?,?,?,?,'pending',NULL,?)",
@@ -600,13 +620,6 @@ fn apply_signal_locked(
         && phase == "starting"
         && !worker["pid"].is_null()
         && worker["pid"] != prior;
-    let role = ctx.service_role()?;
-    let config_path = ctx.state.join(if role == "controller" {
-        "fleet-main.json"
-    } else {
-        "fleet-agent.json"
-    });
-    let mut saved = ctx.read_json(&config_path, json!({}))?;
     set_intent(
         &mut saved,
         &worker["id"],

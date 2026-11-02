@@ -119,7 +119,7 @@ function slotUsage(worker,machine,now=Date.now()) {
   return {capacity,occupied,available:pickup?Math.max(0,capacity-occupied):0,paused:pickup?0:Math.max(0,capacity-occupied),online,running};
 }
 function projectWorkers(machine) {
-  return (machine.workers||[]).filter(w=>w.managed!==false &&
+  return (machine.workers||[]).filter(w=>w.managed===true &&
     ((w.active||w.job_active||(w.runs||[]).some(r=>r.finished_at==null)) ||
       !w.retiring && w.intent!=='stop' && w.intent!=='drain' && (w.pid>0||w.intent==='running'||w.intent==='pause')));
 }

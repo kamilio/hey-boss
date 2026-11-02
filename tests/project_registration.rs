@@ -199,6 +199,17 @@ fn fixture_owns_an_empty_database_and_stops_it_before_removing_state() {
 }
 
 #[test]
+fn project_onboarding_and_worker_status_leave_the_fleet_empty() {
+    let f = Fixture::new();
+    let checkout = f.root.join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    f.init(&checkout);
+    let status = f.json(&checkout, &["worker", "status", "--json"]);
+    assert_eq!(status["workers"], serde_json::json!([]));
+    assert!(!f.root.join("home/.hey-boss/fleet.yaml").exists());
+}
+
+#[test]
 fn ordinary_commands_reject_unknown_projects_without_registering_them() {
     let f = Fixture::new();
     for args in [

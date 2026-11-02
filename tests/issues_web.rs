@@ -1036,6 +1036,7 @@ fn web_and_cli_share_ownership_revisions_and_project_counts() {
 #[test]
 fn opening_web_does_not_start_standalone_workers() {
     let web = Web::start();
+    web.init_project("named:Onboarding");
     let html = String::from_utf8(web.http("GET", "/", &[], b"").body).unwrap();
     for absent in [
         "worker-dialog",
@@ -1044,8 +1045,8 @@ fn opening_web_does_not_start_standalone_workers() {
         "worker-concurrency",
         "worker-claim-timeout",
         "worker-labels",
-        "New worker",
-        "Start worker",
+        ">New worker<",
+        ">Start worker<",
         "worker-runs",
     ] {
         assert!(!html.contains(absent), "Unexpected worker UI: {absent}");
@@ -1064,6 +1065,8 @@ fn opening_web_does_not_start_standalone_workers() {
         ..Default::default()
     };
     let db = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
+    let count: i64 = db.query_row("SELECT count(*) FROM issue_workers", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0, "Opening the app and setting up a project must leave workers empty");
     db.execute("INSERT INTO issue_workers(id,kind,config,version,updated_at) VALUES('must-not-launch','managed',?1,1,0)",[serde_json::to_string(&config).unwrap()]).unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     let count: i64 = db
