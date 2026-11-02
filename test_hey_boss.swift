@@ -4156,13 +4156,41 @@ func auditSpokenReview(_ id: String) {
         try! probe.audio.engine.start()
         probe.readNext()
         wait("first passage playing") { probe.audio.player.isPlaying }
+        // Measure the narrator's rendered signal too: a playing node can still
+        // be delivering several hundred milliseconds of silent PCM.
+        let measure = probe.audio.readerVoice != nil
+        let lock = NSLock()
+        var voiced = [Double](), boundaries = [Double]()
+        if measure {
+            probe.audio.player.installTap(onBus: 0, bufferSize: 512, format: nil) { buffer, time in
+                guard let samples = buffer.floatChannelData?[0], time.isHostTimeValid else { return }
+                let start = AVAudioTime.seconds(forHostTime: time.hostTime), rate = buffer.format.sampleRate
+                lock.lock(); defer { lock.unlock() }
+                for i in stride(from: 0, to: Int(buffer.frameLength), by: 220) {
+                    let end = min(i + 220, Int(buffer.frameLength))
+                    var power: Float = 0
+                    for j in i..<end { power += samples[j] * samples[j] }
+                    if power > Float(end - i) * 0.000015 { voiced.append(start + Double(i) / rate) }
+                }
+            }
+        }
         var handoffs: [Double] = []
         for _ in 0..<3 {
             let previous = probe.phrase
             wait("next highlighted passage") { probe.phrase != previous }
+            boundaries.append(AVAudioTime.seconds(forHostTime: mach_absolute_time()))
             let boundary = ProcessInfo.processInfo.systemUptime
             wait("next passage playing") { probe.audio.player.isPlaying }
             handoffs.append(ProcessInfo.processInfo.systemUptime - boundary)
+        }
+        if measure {
+            let last = boundaries.last!
+            wait("audible next passage") { lock.lock(); defer { lock.unlock() }; return (voiced.last ?? 0) > last }
+            probe.audio.player.removeTap(onBus: 0)
+            lock.lock(); let times = voiced; lock.unlock()
+            let gaps = boundaries.map { t in times.first(where: { $0 >= t })! - times.last(where: { $0 < t })! }
+            print("Audible passage gaps (ms):", gaps.map { Int($0 * 1000) })
+            precondition(gaps.allSatisfy { $0 < 0.30 }, "Excessive silence between passages: \(gaps)")
         }
         // The next passage can finish rendering while playback is interrupted.
         probe.receive(.candidate); probe.receive(.began)
@@ -4175,6 +4203,10 @@ func auditSpokenReview(_ id: String) {
         print(useSystemVoice ? "System voice handoffs (ms):" : "Reader voice handoffs (ms):", handoffs.map { Int($0 * 1000) })
         precondition(handoffs.allSatisfy { $0 < 0.15 }, "Ready passages should start within 150 ms of finishing the previous one: \(handoffs)")
     }
+    let chapter = "DNS\n\nImagine you run a bakery. " + String(repeating: "Your website takes orders. ", count: 9)
+    let firstSentence = SpokenReview.passage(in: chapter as NSString, from: 3)!
+    precondition((chapter as NSString).substring(with: firstSentence) == "Imagine you run a bakery.",
+                 "A short heading must not wait for synthesis of an entire paragraph")
     let title = editor.session.title
     precondition(editor.reader.string.hasPrefix(title + "\nFirst heading"))
     let opening = SpokenReview.passage(in: editor.reader.string as NSString, from: 0)!
