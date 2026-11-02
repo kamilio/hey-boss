@@ -3399,20 +3399,20 @@ func auditArtifactEditor() {
         ])
     ])
     editor.installPreview(taskNode, source: editor.text.string)
-    precondition(editor.reader.string.hasPrefix("☐\t"))
-    precondition(editor.reader.textStorage!.attribute(.nativeTaskLine, at: 0, effectiveRange: nil) as? Int == 1)
-    let previewLink = editor.reader.textStorage!.attribute(.link, at: 0, effectiveRange: nil)!
-    precondition(editor.textView(editor.reader, clickedOnLink: previewLink, at: 0))
+    precondition((editor.reader.string as NSString).substring(from: editor.previewTitleLength).hasPrefix("☐\t"))
+    precondition(editor.reader.textStorage!.attribute(.nativeTaskLine, at: editor.previewTitleLength, effectiveRange: nil) as? Int == 1)
+    let previewLink = editor.reader.textStorage!.attribute(.link, at: editor.previewTitleLength, effectiveRange: nil)!
+    precondition(editor.textView(editor.reader, clickedOnLink: previewLink, at: editor.previewTitleLength))
     RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    precondition(editor.reader.string.hasPrefix("☑\t") && editor.text.string.hasPrefix("- [x]"), "Read-view checkboxes update both source and preview")
-    editor.window.makeFirstResponder(editor.reader); editor.reader.setSelectedRange(NSRange(location: 3, length: 0))
+    precondition((editor.reader.string as NSString).substring(from: editor.previewTitleLength).hasPrefix("☑\t") && editor.text.string.hasPrefix("- [x]"), "Read-view checkboxes update both source and preview")
+    editor.window.makeFirstResponder(editor.reader); editor.reader.setSelectedRange(NSRange(location: editor.previewTitleLength + 3, length: 0))
     precondition(editor.window.performKeyEquivalent(with: checkKey))
     RunLoop.main.run(until: Date().addingTimeInterval(0.01))
-    precondition(editor.reader.string.hasPrefix("☐\t") && editor.text.string.hasPrefix("- [ ]"), "Command-Return also toggles from preview text")
+    precondition((editor.reader.string as NSString).substring(from: editor.previewTitleLength).hasPrefix("☐\t") && editor.text.string.hasPrefix("- [ ]"), "Command-Return also toggles from preview text")
     wait { !editor.session.dirty && !editor.session.saving }
     precondition(try! String(contentsOf: file, encoding: .utf8) == editor.text.string, "Read-view completion autosaves")
     editor.previewSource = "stale"
-    precondition(!editor.togglePreviewTask(at: 0), "An outdated preview cannot change another source line")
+    precondition(!editor.togglePreviewTask(at: editor.previewTitleLength), "An outdated preview cannot change another source line")
     editor.text.undoManager?.undo(); editor.text.undoManager?.undo(); editor.text.undoManager?.undo()
     precondition(editor.text.string == "A native note 🦀\n")
     editor.window.makeFirstResponder(editor.text)
@@ -3439,6 +3439,7 @@ func auditArtifactEditor() {
         checklist.togglePreview()
         wait { checklist.previewSource != nil }
         snapshot("read")
+        precondition(checklist.reader.string.components(separatedBy: "A calmer workday").count == 2 && checklist.previewTitleLength == 0, "An existing opening title must be read only once")
         let previewStorage = checklist.reader.textStorage!
         var taskIndices: [Int] = []
         previewStorage.enumerateAttribute(.nativeTaskLine, in: NSRange(location: 0, length: previewStorage.length)) { value, range, _ in
@@ -4144,6 +4145,12 @@ func auditSpokenReview(_ id: String) {
     precondition(editor.previewing && editor.reviewButton.title == "Read Aloud")
     wait("render") { !editor.reviewButton.isHidden && editor.reviewButton.isEnabled }
     precondition(editor.micIcon.isHidden && editor.micLabel.isHidden, "Idle reader has no microphone indicator")
+    let title = editor.session.title
+    precondition(editor.reader.string.hasPrefix(title + "\nFirst heading"))
+    let opening = SpokenReview.passage(in: editor.reader.string as NSString, from: 0)!
+    precondition((editor.reader.string as NSString).substring(with: opening) == title)
+    editor.reader.setSelectedRange(opening)
+    precondition(editor.prepareComments()?.quote == nil, "The saved title is a document comment target, not a source line")
     let range = (editor.reader.string as NSString).range(of: "Second passage")
     editor.reader.setSelectedRange(NSRange(location: range.location, length: 0))
     let review = SpokenReview(editor); editor.review = review; editor.updateReviewControls()
@@ -4279,7 +4286,16 @@ func auditSpokenReview(_ id: String) {
     panel.input.string = "Whole document note."; panel.submit()
     wait("unanchored note") { panel.entries.contains { $0.quote == nil && $0.parent == nil && $0.body == "Whole document note." } }
     reopened.commentPopover.performClose(nil); reopened.window.orderOut(nil)
-    print("PASS manual selection, reply, resolve, document comment and microphone states")
+    reopened.reader.setSelectedRange(NSRange(location: 0, length: 0))
+    let intro = SpokenReview(reopened)
+    intro.phrase = SpokenReview.passage(in: reopened.reader.string as NSString, from: 0)!
+    intro.word = intro.phrase
+    intro.receive(.candidate)
+    precondition(intro.anchor != nil && intro.anchor?.line == nil)
+    intro.submit("Shorten the title.")
+    wait("title comment saved") { !reopened.postingSpoken && reopened.pendingSpoken == nil }
+    intro.stop()
+    print("PASS spoken title comment, manual selection, reply, resolve, document comment and microphone states")
     print("PASS final-line interruption and silent completion")
 }
 

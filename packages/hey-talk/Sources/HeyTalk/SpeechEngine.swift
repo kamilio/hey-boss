@@ -148,7 +148,9 @@ func runSpeechWorker(model: String, library: String, alignmentModel: String) thr
         guard let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
               let text = object["text"] as? String, !text.isEmpty, text.count <= 240 else { throw TalkError("Invalid speech chunk") }
         var count: Int32 = 0, rate: Int32 = 0
-        guard let samples = ht_speech_generate(speech, text, &count, &rate) else { throw TalkError("Could not generate speech") }
+        let speaker = object["speaker"] as? Int32 ?? 6
+        guard (0..<10).contains(speaker) else { throw TalkError("Unknown Supertonic speaker") }
+        guard let samples = ht_speech_generate(speech, text, speaker, &count, &rate) else { throw TalkError("Could not generate speech") }
         let data = Data(bytes: samples, count: Int(count) * MemoryLayout<Float>.size)
         ht_speech_free(samples)
         try Wire.write(Wire.json(["count": Int(count), "rate": Int(rate)]), to: STDOUT_FILENO)
