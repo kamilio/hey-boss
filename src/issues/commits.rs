@@ -182,7 +182,7 @@ pub fn is_commit_url(url: &str) -> bool {
     parse_url_commit(url).is_some()
 }
 
-fn parse_url_commit(url: &str) -> Option<(Option<(String, String)>, String)> {
+pub(super) fn parse_url_commit(url: &str) -> Option<(Option<(String, String)>, String)> {
     let trimmed = url.trim();
     let after = trimmed
         .strip_prefix("https://")
@@ -200,7 +200,10 @@ fn parse_url_commit(url: &str) -> Option<(Option<(String, String)>, String)> {
                 .trim_end_matches(".patch")
                 .trim_end_matches(".diff");
             if is_hex_sha(raw_sha) {
-                let repo = if parts.len() >= 3 && parts[0].eq_ignore_ascii_case("github.com") {
+                let repo = if parts.len() >= 5
+                    && idx >= 3
+                    && parts[0].eq_ignore_ascii_case("github.com")
+                {
                     Some((parts[1].to_owned(), parts[2].to_owned()))
                 } else {
                     None
@@ -898,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_projects_reject_commit_attachments() {
+    fn pr_projects_also_accept_commit_attachments() {
         let db = test_db();
         db.execute_batch("INSERT INTO project_settings VALUES('github.com/kamilio/hey-boss', 1);")
             .unwrap();
@@ -910,13 +913,13 @@ mod tests {
             &db,
             &project,
             704,
-            "abcdef1234567890abcdef1234567890abcdef1234",
+            "abcdef1234567890abcdef1234567890abcdef12",
             None,
             &test_actor(),
             1000,
         );
-        assert!(result.unwrap_err().message.contains("Attach a PR"));
-        assert!(list(&db, &project.id, 704).unwrap().is_empty());
+        assert!(result.unwrap().0);
+        assert_eq!(list(&db, &project.id, 704).unwrap().len(), 1);
     }
 
     struct HookFixture(PathBuf);
