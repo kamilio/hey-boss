@@ -17,8 +17,8 @@ Model and reasoning inherit when left unset.
 Use **Workers & settings** to find a saved worker, inspect its state, or edit its
 name, slot count, pickup mode, projects, and checkout paths. Review and save the
 changes directly to the supervisor's YAML. Other settings are preserved; structured
-edits may reformat the file. Stopped workers are collapsed by default. **Advanced:
-edit YAML** exposes the whole file, including adding and removing definitions.
+edits may reformat the file. Stopped workers are collapsed by default. The configuration
+file path is shown below the workers; edit that file in your own editor for YAML changes.
 The local web app and paired web app edit the same supervisor file.
 
 ## One configuration
