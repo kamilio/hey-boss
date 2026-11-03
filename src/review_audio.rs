@@ -21,14 +21,14 @@ mod tests {
             }
         }
         assert_eq!(
-            (0..10).filter_map(|_| gate.push(false)).last(),
+            (0..80).filter_map(|_| gate.push(false)).last(),
             Some(Edge::End)
         );
     }
 
     #[test]
     fn short_noise_doesnt_interrupt_and_a_thinking_pause_stays_in_one_turn() {
-        for (conversation, quiet) in [(false, 40), (true, 55)] {
+        for (conversation, quiet) in [(false, 40), (true, 125)] {
             let mut gate = Turn::new(conversation);
             let mut advance = |frames, speech| {
                 (0..frames)
@@ -63,7 +63,7 @@ struct Turn {
 
 impl Turn {
     fn new(conversation: bool) -> Self {
-        // 20 ms frames: allow 1.1 s to think in chat, 800 ms for review comments.
+        // 20 ms frames: allow 2.5 s to think in chat, 800 ms for review comments.
         Self {
             active: false,
             consecutive: 0,
@@ -88,7 +88,7 @@ impl Turn {
             self.consecutive += 1;
             let threshold = match (self.active, self.conversation) {
                 (false, _) => 8,
-                (true, true) => 55,
+                (true, true) => 125,
                 (true, false) => 40,
             };
             if self.consecutive >= threshold {

@@ -6806,7 +6806,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     private let worker = Process(), input = Pipe(), output = Pipe()
     private var tapped = false
     private var micWatch: Timer?
-    private var routeObserver: NSObjectProtocol?
+    static let log = Logger(subsystem: "local.hey-boss.desktop", category: "voice")
     // Audio can be rendered before its turn, but only the playing passage
     // publishes word offsets or advances the document.
     private final class Passage {
@@ -6847,6 +6847,35 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
 
     func start(cli: String, ready: @escaping () -> Void) throws {
         let lastInput = OSAllocatedUnfairLock(initialState: TimeInterval.zero)
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        let writer = try listen(cli: cli, duplex: true)
+        try openMicrophone(writer, lastInput)
+        var attempted = ProcessInfo.processInfo.systemUptime, waiting = true, recovering = false
+        micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, !self.stopped else { return }
+            let now = ProcessInfo.processInfo.systemUptime, last = lastInput.withLock { $0 }
+            if self.engine.isRunning && last >= attempted && now - last < 1 {
+                if recovering { Self.log.notice("Microphone reconnected"); recovering = false }
+                if waiting { waiting = false; ready() }
+            } else if now - attempted >= 1 {
+                if !recovering { Self.log.notice("Microphone interrupted; reconnecting"); recovering = true }
+                attempted = now
+                self.engine.stop()
+                self.removeTaps()
+                do {
+                    try self.openMicrophone(writer, lastInput)
+                    if !self.paused && self.passages.first?.deliver != nil { self.player.play() }
+                } catch { /* A device can be absent while macOS switches routes. */ }
+            }
+        }
+    }
+
+    private func removeTaps() {
+        if tapped { engine.inputNode.removeTap(onBus: 0); engine.mainMixerNode.removeTap(onBus: 0); tapped = false }
+    }
+
+    private func openMicrophone(_ writer: FileHandle, _ lastInput: OSAllocatedUnfairLock<TimeInterval>) throws {
         let mic = engine.inputNode
         try mic.setVoiceProcessingEnabled(true)
         mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
@@ -6854,11 +6883,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         guard source.sampleRate > 0, source.channelCount > 0, let converter = microphoneConverter(from: source) else {
             throw StorageError(description: "No microphone available. Check Sound settings.")
         }
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
         // VoiceProcessingIO requires both client buses to agree, including with a USB input and built-in speakers.
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: source)
-        let writer = try listen(cli: cli, duplex: true)
         let target = format
         let renderFormat = engine.mainMixerNode.outputFormat(forBus: 0)
         guard let renderConverter = microphoneConverter(from: renderFormat) else { throw StorageError(description: "Cannot read playback audio.") }
@@ -6881,9 +6907,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
         }
         mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
-            guard let pcm = mono(buffer, converter) else {
-                onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Could not convert microphone audio.") }; return
-            }
+            guard let pcm = mono(buffer, converter) else { return }
             let n = Int(pcm.frameLength)
             guard n > 0 else { return }
             lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
@@ -6900,20 +6924,6 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
         tapped = true
         try engine.start()
-        let started = ProcessInfo.processInfo.systemUptime
-        var waiting = true
-        micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, !self.stopped else { return }
-            let last = lastInput.withLock { $0 }
-            if ProcessInfo.processInfo.systemUptime - max(started, last) > 3 {
-                self.failed("No audio from the microphone. Check the input in Sound settings.")
-            } else if waiting && last > 0 {
-                waiting = false; ready()
-            }
-        }
-        routeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
-            guard let self, !self.stopped else { return }; self.failed("Sound device changed. Start again.")
-        }
     }
 
     var conversation = false
@@ -7010,7 +7020,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
                     outstanding -= 1; checkEnd()
                 }
             }
-            if !self.paused && !self.player.isPlaying { self.player.play() }
+            if self.engine.isRunning && !self.paused && !self.player.isPlaying { self.player.play() }
             if first { self.playbackStarted() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
@@ -7033,13 +7043,12 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     func resume() { paused = false; if engine.isRunning { player.play() } }
     func stop() {
         guard !stopped else { return }; stopped = true
-        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
         readerVoice?.stop(); readerVoice = nil
         micWatch?.invalidate(); timer?.invalidate(); synth.stopSpeaking(at: .immediate)
         if player.engine != nil { player.stop() }
         engine.stop()
-        if tapped { engine.inputNode.removeTap(onBus: 0); engine.mainMixerNode.removeTap(onBus: 0); tapped = false }
+        removeTaps()
         try? input.fileHandleForWriting.close()
         if worker.isRunning { worker.terminate() }
     }
@@ -7472,6 +7481,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
+        if phase != next {
+            ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): \(String(describing: self.phase), privacy: .public) → \(String(describing: next), privacy: .public)")
+        }
         phase = next; status.stringValue = message
         meter.show(next)
         let voiceAction = next == .idle ? "Start voice" : next == .recording ? "Send voice message" : audio == nil ? "Stop reply" : "Stop voice"
@@ -7500,7 +7512,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         input.stringValue = ""; respond(text)
     }
     @objc func toggle() {
-        if phase == .recording { if recording?.isEmpty == false { receive(.ended) }; return }
+        if phase == .recording { if recording?.isEmpty == false { endRecording("manual") }; return }
         if phase == .decoding { return }
         guard phase == .idle else { stop("Conversation ended"); return }
         guard modelReady() else { return }
@@ -7524,29 +7536,37 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.listening, "Listening")
     }
     func receive(_ event: ReviewAudio.Event) {
-        guard let audio else { return }
+        guard audio != nil else { return }
         switch event {
         case .began where phase == .listening:
             recording = Data(); state(.recording, "Pause or press Hyper+R to send")
         case .pcm(let pcm) where phase == .recording:
-            guard recording!.count + pcm.count <= 32000 * 60 else { stop("Turn exceeded one minute. Start a new conversation."); return }
             recording!.append(pcm); meter.capture(pcm)
-        case .ended where phase == .recording:
-            guard let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
-            recording = nil; state(.decoding, "Transcribing…")
-            do {
-                timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
-                decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self, weak audio] result in
-                    guard let self, let audio, self.audio === audio else { return }
-                    self.timeout?.invalidate(); self.decoding = nil
-                    switch result {
-                    case .failure(let error): self.stop(error.localizedDescription)
-                    case .success(let text): if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
-                    }
-                }
-            } catch { stop(error.localizedDescription) }
+            if recording!.count >= 32000 * 60 { endRecording("duration limit") }
+        case .ended where phase == .recording: endRecording("pause")
         default: break
         }
+    }
+    private func endRecording(_ reason: String) {
+        guard let audio, let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
+        ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
+        recording = nil; state(.decoding, "Transcribing…")
+        do {
+            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
+            decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self, weak audio] result in
+                guard let self, let audio, self.audio === audio else { return }
+                self.timeout?.invalidate(); self.decoding = nil
+                switch result {
+                case .failure(let error):
+                    let failure = error as NSError
+                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcription failed \(failure.domain, privacy: .public) \(failure.code)")
+                    self.stop(error.localizedDescription)
+                case .success(let text):
+                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
+                    if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
+                }
+            }
+        } catch { stop(error.localizedDescription) }
     }
     func append(_ text: String, from speaker: String, capture: Capture? = nil) {
         let mine = speaker == "You"
