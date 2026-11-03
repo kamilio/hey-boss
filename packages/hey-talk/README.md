@@ -13,6 +13,11 @@ Return to the original app to paste automatically. In T3, return to the starting
 thread **and focus the original field**. Esc or × copies the waiting transcript to the clipboard and cancels the automatic paste;
 starting another dictation replaces it. The transcript stays in History.
 
+Enable **Return to Field Before Pasting** in the waveform menu or the pill’s
+right-click menu to bring the destination window and field forward when text is
+ready. In T3, Hey Talk can reopen the original composer’s thread. It tries once
+and waits if focus cannot be restored. The toggle starts off and remembers your choice.
+
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to start recording, then press plain Enter to transcribe,

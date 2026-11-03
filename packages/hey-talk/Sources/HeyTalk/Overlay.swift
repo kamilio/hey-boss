@@ -133,6 +133,8 @@ final class Overlay {
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
     var onToggleAutoSubmit: (() -> Void)?
+    var onToggleReturnToField: (() -> Void)?
+    var returnToFieldEnabled: () -> Bool = { false }
     var onToggleCorrection: (() -> Void)?
     var onShowHistory: (() -> Void)?
     var onPreviewContext: (() -> Void)?
@@ -419,7 +421,8 @@ final class Overlay {
             ("Dictation", [
                 ("AI Correction", #selector(toggleCorrection), correctionEnabled, ""),
                 ("Auto Submit", #selector(toggleAutoSubmit), autoSubmitEnabled, "e"),
-                ("Auto Dictation", #selector(toggleAutoMode), autoMode, "v")
+                ("Auto Dictation", #selector(toggleAutoMode), autoMode, "v"),
+                ("Return to Field Before Pasting", #selector(toggleReturnToField), returnToFieldEnabled(), "")
             ]),
             ("Speech", [("Read Aloud", #selector(toggleSpeechMode), speechEnabled(), "t")])
         ] {
@@ -444,6 +447,7 @@ final class Overlay {
     @objc private func toggleSpeechMode() { onToggleSpeech?() }
     @objc private func toggleAutoMode() { onToggleAuto?() }
     @objc private func toggleAutoSubmit() { onToggleAutoSubmit?() }
+    @objc private func toggleReturnToField() { onToggleReturnToField?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
     @objc private func showHistory() { onShowHistory?() }
     @objc private func previewContext() { onPreviewContext?() }

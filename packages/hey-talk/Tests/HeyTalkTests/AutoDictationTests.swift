@@ -78,6 +78,14 @@ final class AutoDictationTests: XCTestCase {
         XCTAssertNotEqual(field(first, nil, "Message A"), field(other, nil, "Message A"))
     }
 
+    func testOnlyExactT3ThreadRoutesCanReopenAComposer() {
+        let ids = "0a75001f-0193-4acc-b0e8-abc0dd3b8a77/80d9fef0-18a1-4f4b-b1d4-9b9defac6d1d"
+        XCTAssertEqual(FocusedInput.threadLink("t3code://app/#/" + ids)?.absoluteString, "t3code://threads/" + ids)
+        for route in ["https://example.org/#/" + ids, "t3code://app/#/new", "t3code://app/#/" + ids + "?prompt=hello", "t3code://app/#/one/two"] {
+            XCTAssertNil(FocusedInput.threadLink(route))
+        }
+    }
+
     func testFocusGraceExpiresOnceAndResetsAfterReturningToAnInput() {
         var recording = AutoRecording(target: "composer", followsFocus: false)
         recording.focusChanged(nil, at: 10)
