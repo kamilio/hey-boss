@@ -4449,14 +4449,21 @@ func auditConversation(_ root: String) {
     wait("all streamed speech drained") { ui.phase == .listening }
     precondition(highlighted() == nil && ui.rows.count == 2 && ui.rows.last!.stringValue.hasSuffix("Last line."))
     let microphone = DispatchQueue(label: "conversation-audit.microphone")
-    func feed(_ name: String) {
+    func feed(_ name: String, finishManually: Bool = false) {
         let pcm = try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent(name + ".pcm"))
         microphone.async {
-            var frames = Data(count: 12800); frames.append(pcm); frames.append(Data(count: 48000))
+            var frames = Data(count: 12800); frames.append(pcm)
+            if !finishManually { frames.append(Data(count: 48000)) }
             for index in stride(from: 0, to: frames.count, by: 640) {
                 try! writer.write(contentsOf: frames[index..<min(index + 640, frames.count)])
                 Thread.sleep(forTimeInterval: 0.019)
             }
+            if finishManually { DispatchQueue.main.async {
+                precondition(ui.phase == .recording && ui.meter.accessibilityLabel() == "Send voice message")
+                ui.meter.performClick(nil)
+                precondition(ui.phase == .decoding && ui.audio === audio)
+                ui.receive(.ended)
+            } }
         }
     }
     ui.openWithContext(source: "Test Editor", text: "The fruit on this page is pineapple.")
@@ -4466,7 +4473,7 @@ func auditConversation(_ root: String) {
     ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
     precondition(ui.phase == .speaking && ui.recording == nil)
     wait("listen again") { ui.phase == .listening }
-    feed("second")
+    feed("second", finishManually: true)
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
     precondition(ui.meter.accessibilityLabel() == "Stop voice" && ui.turns.bounds.width > 320)

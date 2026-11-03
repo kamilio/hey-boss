@@ -6,6 +6,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn brief_noise_during_a_chat_pause_does_not_hold_the_turn_open() {
+        let mut gate = Turn::new(true);
+        assert_eq!(
+            (0..8).filter_map(|_| gate.push(true)).last(),
+            Some(Edge::Start)
+        );
+        for _ in 0..3 {
+            for _ in 0..15 {
+                assert_eq!(gate.push(false), None);
+            }
+            for _ in 0..4 {
+                assert_eq!(gate.push(true), None);
+            }
+        }
+        assert_eq!(
+            (0..10).filter_map(|_| gate.push(false)).last(),
+            Some(Edge::End)
+        );
+    }
+
+    #[test]
     fn short_noise_doesnt_interrupt_and_a_thinking_pause_stays_in_one_turn() {
         for (conversation, quiet) in [(false, 40), (true, 55)] {
             let mut gate = Turn::new(conversation);
@@ -36,7 +57,8 @@ enum Edge {
 struct Turn {
     active: bool,
     consecutive: usize,
-    quiet_frames: usize,
+    conversation: bool,
+    speech_run: usize,
 }
 
 impl Turn {
@@ -45,16 +67,31 @@ impl Turn {
         Self {
             active: false,
             consecutive: 0,
-            quiet_frames: if conversation { 55 } else { 40 },
+            conversation,
+            speech_run: 0,
         }
     }
 
     fn push(&mut self, speech: bool) -> Option<Edge> {
+        // In chat, a short burst during a pause is not enough to resume speech.
+        if self.conversation && self.active && speech {
+            self.speech_run += 1;
+            if self.speech_run < 8 {
+                return None;
+            }
+        } else {
+            self.speech_run = 0;
+        }
         if speech == self.active {
             self.consecutive = 0;
         } else {
             self.consecutive += 1;
-            if self.consecutive >= if self.active { self.quiet_frames } else { 8 } {
+            let threshold = match (self.active, self.conversation) {
+                (false, _) => 8,
+                (true, true) => 55,
+                (true, false) => 40,
+            };
+            if self.consecutive >= threshold {
                 self.consecutive = 0;
                 self.active = speech;
                 return Some(if speech { Edge::Start } else { Edge::End });
