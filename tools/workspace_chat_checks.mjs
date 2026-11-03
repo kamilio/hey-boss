@@ -23,6 +23,7 @@ rl.on('line', line=>{
  } else if(q.id==='ask'){
    fs.appendFileSync('decisions',q.result.decision+'\\n');
    send({method:'item/completed',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',status:q.result.decision==='accept'?'completed':'declined'}}});
+   send({method:'item/agentMessage/delta',params:{threadId,turnId,delta:'reply '+n}});
    send({method:'item/completed',params:{threadId,turnId,item:{type:'agentMessage',text:'reply '+n}}});
    send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}});
  } else if(q.id!==undefined)send({id:q.id,result:{}});
@@ -33,16 +34,18 @@ rl.on('line', line=>{
   const exit=new Promise(res=>child.on('close',res));
   const timeout=setTimeout(()=>child.kill(), 30000);
   const commands=o=>child.stdin.write(JSON.stringify(o)+'\n');
-  let turns=0, starts=0, ends=0;
+  let turns=0, starts=0, ends=0, messages=0, streamed=0;
   commands({turn:'Hello'});
   for await(const line of createInterface({input:child.stdout})){
     const e=JSON.parse(line);
     if(e.ToolStarted){assert.equal(e.ToolStarted.input.command,'pwd'); starts++;}
     if(e.Approval)commands({decision:e.Approval.id,allow:turns===1});
     if(e.ToolCompleted){assert.equal(e.ToolCompleted.failed,turns===0); ends++;}
+    if(e.TextDelta){assert.equal(e.TextDelta.text,'reply '+(turns+1)); streamed++;}
+    if(e.Message){assert.equal(e.Message.text,'reply '+(turns+1)); messages++;}
     if(e.TurnCompleted){assert.equal(e.TurnCompleted.output,'reply '+(++turns)); if(turns===1)commands({turn:'Hello'}); else child.stdin.end();}
   }
   clearTimeout(timeout);
-  assert.equal(await exit,0); assert.deepEqual([turns,starts,ends],[2,2,2]); assert.equal(await readFile(join(dir,'decisions'),'utf8'),'decline\naccept\n');
+  assert.equal(await exit,0); assert.deepEqual([turns,starts,ends,streamed,messages],[2,2,2,2,2]); assert.equal(await readFile(join(dir,'decisions'),'utf8'),'decline\naccept\n');
   console.log('PASS workspace cwd, tool events, decline and allow, second turn, disconnect');
 } finally { await rm(dir,{recursive:true,force:true}); }

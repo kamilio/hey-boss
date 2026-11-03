@@ -6944,6 +6944,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
 
     var readerVoice: ReaderVoice?
+    var playbackStarted: () -> Void = {}
     private func renderNextPassage() {
         guard !stopped, rendering == nil, let passage = passages.first(where: { !$0.complete }) else { return }
         rendering = passage
@@ -6973,6 +6974,9 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     func speak(_ text: String, following: [String] = [], highlight: @escaping (NSRange) -> Void, finished: @escaping () -> Void) {
         guard !stopped else { return }
         let window = [text] + following
+        if let first = passages.first, first.utterance.speechString != text {
+            passages.removeAll(); rendering = nil
+        }
         passages.append(contentsOf: window.dropFirst(passages.count).map(Passage.init))
         let passage = passages[0]
         var nextWord = 0, outstanding = 0, started = false
@@ -6987,6 +6991,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             if !started && self.player.outputFormat(forBus: 0) != buffer.format {
                 self.engine.connect(self.player, to: self.engine.mainMixerNode, format: buffer.format)
             }
+            let first = !started
             started = true; outstanding += 1
             self.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
                 onMain { [weak self] in
@@ -6995,6 +7000,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
                 }
             }
             if !self.paused && !self.player.isPlaying { self.player.play() }
+            if first { self.playbackStarted() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
             guard let self, !self.paused, let rendered = self.player.lastRenderTime,
@@ -7086,12 +7092,96 @@ func recognizeTurn(_ samples: Data, format: AVAudioFormat, recognizer: SFSpeechR
 
 #if canImport(FoundationModels)
 @available(macOS 26, *)
+final class ConversationMeter: NSView {
+    private(set) var phase = VoiceConversation.Phase.idle
+    private var heights = Array(repeating: CGFloat(4), count: 11)
+    private var lastSample: TimeInterval = 0
+    private lazy var width = widthAnchor.constraint(equalToConstant: 56)
+    private let glass = NSGlassEffectView()
+    private let face = NSView()
+    private let mark = CAShapeLayer(), wave = CAShapeLayer(), rim = CAShapeLayer()
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        glass.style = .clear; glass.cornerRadius = 18; glass.contentView = face
+        glass.frame = bounds; glass.autoresizingMask = [.width, .height]; addSubview(glass)
+        face.wantsLayer = true
+        for layer in [mark, wave, rim] { face.layer?.addSublayer(layer) }
+        rim.fillColor = nil; rim.lineWidth = 1
+        width.isActive = true
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { fatalError("ConversationMeter is not archived") }
+    func show(_ next: VoiceConversation.Phase) {
+        guard next != phase else { return }
+        phase = next; heights = Array(repeating: 4, count: 11)
+        let expanded = next == .listening || next == .recording
+        let motion = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = motion ? 0.18 : 0
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
+            width.animator().constant = expanded ? 104 : 56
+        }
+        rim.removeAnimation(forKey: "breathe")
+        rim.isHidden = ![.starting, .decoding, .thinking].contains(next)
+        if !rim.isHidden && motion {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 0.35; pulse.toValue = 1; pulse.duration = 0.95
+            pulse.autoreverses = true; pulse.repeatCount = .infinity
+            rim.add(pulse, forKey: "breathe")
+        }
+        needsLayout = true
+    }
+    func capture(_ pcm: Data) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - lastSample >= 0.078 else { return }; lastSample = now
+        let rms = pcm.withUnsafeBytes { bytes -> Double in
+            let samples = bytes.bindMemory(to: Int16.self)
+            return sqrt(samples.reduce(0) { let v = Double($1)/32768; return $0 + v*v } / Double(max(1, samples.count)))
+        }
+        heights.removeFirst(); heights.append(4 + 18 * pow(min(1, rms * 8), 0.75)); needsLayout = true
+    }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsLayout = true }
+    override func layout() {
+        super.layout()
+        let expanded = phase == .listening || phase == .recording
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        // Hey Talk's glass control: three-bar identity, teal capture, indigo processing rim.
+        let rgb = expanded ? (dark ? 0x80cfca : 0x168179) : (dark ? 0xa1afff : 0x4655b5)
+        let ink = NSColor(srgbRed: CGFloat(rgb >> 16)/255, green: CGFloat(rgb >> 8 & 255)/255, blue: CGFloat(rgb & 255)/255, alpha: 1)
+        let mid = bounds.midY, x = expanded ? CGFloat(20) : bounds.midX
+        let logo = CGMutablePath(), bars = CGMutablePath()
+        if phase == .speaking, let speaker = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: nil) {
+            mark.contents = speaker.withSymbolConfiguration(.init(paletteColors: [ink]))?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            mark.contentsGravity = .resizeAspect
+        } else {
+            mark.contents = nil
+            for (dx, h): (CGFloat, CGFloat) in [(-5, 6), (0, 14), (5, 9)] {
+                logo.addRoundedRect(in: CGRect(x: x + dx - 1, y: mid - h/2, width: 2, height: h), cornerWidth: 1, cornerHeight: 1)
+            }
+        }
+        if expanded {
+            for (i,h) in heights.enumerated() {
+                bars.addRoundedRect(in: CGRect(x: 39 + CGFloat(i)*5, y: mid-h/2, width: 2, height: h), cornerWidth: 1, cornerHeight: 1)
+            }
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        mark.frame = phase == .speaking ? CGRect(x: x-9, y: mid-9, width: 18, height: 18) : bounds
+        mark.path = logo; mark.fillColor = ink.cgColor
+        wave.path = bars; wave.fillColor = ink.withAlphaComponent(phase == .listening ? 0.5 : 1).cgColor
+        rim.isHidden = ![.starting, .thinking, .decoding].contains(phase)
+        rim.path = CGPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), cornerWidth: mid-1, cornerHeight: mid-1, transform: nil)
+        rim.strokeColor = ink.withAlphaComponent(0.7).cgColor
+        CATransaction.commit()
+    }
+}
+
+@available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 630, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let status = NSTextField(wrappingLabelWithString: "")
     let action = NSButton()
-    let symbol = NSImageView()
+    let meter = ConversationMeter()
     let welcome = NSStackView()
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
@@ -7117,6 +7207,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     var decoding: SFSpeechRecognitionTask?
     var timeout: Timer?
     var reply: Task<Void, Never>?
+    private var stream = "", published = "", lastMessage: String?
+    private var messageLabel: NSTextField?
+    private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
+    private var reading = false, turnDone = false
+    private var lit: (NSTextField, NSRange)?
 
     init(cli: String) {
         self.cli = cli
@@ -7152,7 +7247,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         action.bezelStyle = .rounded; action.target = self; action.action = #selector(toggle)
         action.setContentCompressionResistancePriority(.required, for: .horizontal)
         for view in [title,scope,line,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
-        for view in [input,send,symbol,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
+        for view in [input,send,meter,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), title.topAnchor.constraint(equalTo: body.topAnchor, constant: 43),
             scope.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 10), scope.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -20), scope.centerYAnchor.constraint(equalTo: title.centerYAnchor),
@@ -7163,9 +7258,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
             dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
             input.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16), input.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8),
             send.centerYAnchor.constraint(equalTo: input.centerYAnchor), send.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
-            symbol.leadingAnchor.constraint(equalTo: input.leadingAnchor), symbol.centerYAnchor.constraint(equalTo: action.centerYAnchor), symbol.widthAnchor.constraint(equalToConstant: 17),
-            status.leadingAnchor.constraint(equalTo: symbol.trailingAnchor, constant: 6), status.centerYAnchor.constraint(equalTo: action.centerYAnchor), status.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
-            action.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 11), action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8), action.trailingAnchor.constraint(equalTo: send.trailingAnchor), action.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
+            meter.leadingAnchor.constraint(equalTo: input.leadingAnchor), meter.centerYAnchor.constraint(equalTo: action.centerYAnchor), meter.heightAnchor.constraint(equalToConstant: 36),
+            status.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), status.centerYAnchor.constraint(equalTo: action.centerYAnchor), status.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
+            meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8), action.trailingAnchor.constraint(equalTo: send.trailingAnchor)
         ])
         refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center()
     }
@@ -7203,15 +7298,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         action.title = next == .idle ? "Start voice" : "End"
         action.image = NSImage(systemSymbolName: next == .idle ? "mic" : "stop.fill", accessibilityDescription: nil)
         action.imagePosition = .imageLeading
-        let glyph: String
-        switch next {
-        case .recording, .listening: glyph = "mic.fill"
-        case .thinking, .decoding: glyph = "ellipsis.bubble"
-        case .speaking: glyph = "speaker.wave.2.fill"
-        default: glyph = directory == nil ? "laptopcomputer" : "folder"
-        }
-        symbol.contentTintColor = [.recording,.listening].contains(next) ? .systemGreen : .secondaryLabelColor
-        symbol.image = NSImage(systemSymbolName: glyph, accessibilityDescription: nil)
+        meter.show(next)
         scope.isEnabled = next == .idle
         send.isEnabled = next == .idle || next == .listening
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
@@ -7249,6 +7336,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     }
     func connect(_ audio: ReviewAudio) {
         self.audio = audio
+        audio.readerVoice = ReaderVoice()
+        audio.playbackStarted = { [weak self] in self?.state(.speaking, "Speaking") }
         audio.event = { [weak self] in self?.receive($0) }
         state(.listening, "Listening")
     }
@@ -7259,7 +7348,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
             recording = Data(); state(.recording, "Hearing you…")
         case .pcm(let pcm) where phase == .recording:
             guard recording!.count + pcm.count <= 32000 * 60 else { stop("Turn exceeded one minute. Start a new conversation."); return }
-            recording!.append(pcm)
+            recording!.append(pcm); meter.capture(pcm)
         case .ended where phase == .recording:
             guard let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
             recording = nil; state(.decoding, "Transcribing…")
@@ -7306,6 +7395,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     }
     func respond(_ text: String) {
         if model == nil && process == nil && !rows.isEmpty { clearTurns() }
+        turnDone = false; lastMessage = nil
         append(text, from: "You"); state(.thinking, "Thinking…")
         if let directory {
             do {
@@ -7318,21 +7408,88 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         guard let model else { return }
         reply = Task { @MainActor [weak self] in
             do {
-                let answer = try await model.respond(to: text).content
+                for try await part in model.streamResponse(to: text) {
+                    guard !Task.isCancelled, let self else { return }
+                    self.stream = part.content; self.publish(final: false)
+                }
                 guard !Task.isCancelled, let self else { return }
-                self.reply = nil; self.answer(answer)
+                self.reply = nil; self.finishTurn(self.stream)
             } catch {
                 guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
         }
     }
-    func answer(_ text: String) {
-        if !text.isEmpty { append(text, from: directory == nil ? "Hey Boss" : "Codex") }
-        guard let audio, !text.isEmpty else { state(audio == nil ? .idle : .listening, audio == nil ? (directory == nil ? "On-device chat" : "Codex workspace") : "Listening"); return }
-        state(.speaking, "Speaking")
-        audio.speak(text, highlight: { _ in }) { [weak self, weak audio] in
-            if let self, let audio, self.audio === audio { self.state(.listening, "Listening") }
+    // Only completed paragraphs are stable enough to narrate. Keep unfinished
+    // Markdown out of the audio queue, and measure offsets in the rendered text.
+    private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
+    private func publish(final: Bool) {
+        let text: String
+        if final { text = stream }
+        else {
+            let raw = stream as NSString, start = min(published.utf16.count, raw.length)
+            let tail = NSRange(location: start, length: raw.length - start)
+            guard let boundary = Self.paragraphBreak.matches(in: stream, range: tail).last,
+                  boundary.range.location > start else { return }
+            text = raw.substring(to: boundary.range.location)
         }
+        guard !text.isEmpty, text != published else { return }
+        if messageLabel == nil {
+            append("", from: directory == nil ? "Hey Boss" : "Codex"); messageLabel = rows.last
+        }
+        guard let label = messageLabel else { return }
+        let old = label.stringValue
+        let rendered = markdown(text, size: 15, color: .labelColor)
+        label.attributedStringValue = rendered; published = text
+        let visible = rendered.string as NSString
+        // A final provider snapshot can correct an earlier paragraph. Keep
+        // already heard audio, discard stale queued passages for this message.
+        var offset = old.utf16.count
+        if !rendered.string.hasPrefix(old) {
+            offset = speech.first(where: { $0.label === label })?.span.location ?? offset
+            speech.removeAll { $0.label === label }
+            offset = min(offset, visible.length)
+        }
+        if let (field, range) = lit, field === label { highlight(label, range) }
+        if audio != nil {
+            while let span = SpokenReview.passage(in: visible, from: offset) {
+                speech.append((label, span, visible.substring(with: span))); offset = NSMaxRange(span)
+            }
+        }
+        reveal(label); playNext()
+    }
+    private func finishMessage(_ text: String) {
+        stream = text; publish(final: true); lastMessage = text
+        stream = ""; published = ""; messageLabel = nil
+    }
+    private func finishTurn(_ text: String) {
+        if lastMessage != text || !stream.isEmpty { finishMessage(text) }
+        turnDone = true; playNext()
+    }
+    private func highlight(_ label: NSTextField, _ range: NSRange?) {
+        let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
+        if let (_, old) = lit, NSMaxRange(old) <= styled.length { styled.removeAttribute(.backgroundColor, range: old) }
+        lit = nil
+        if let range, NSMaxRange(range) <= styled.length {
+            styled.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.42), range: range)
+            lit = (label, range)
+        }
+        label.attributedStringValue = styled
+    }
+    private func playNext() {
+        guard !reading else { return }
+        if let audio, !speech.isEmpty {
+            let part = speech.removeFirst()
+            reading = true
+            audio.speak(part.text, following: speech.prefix(3).map(\.text), highlight: { [weak self] word in
+                guard NSMaxRange(word) <= part.span.length else { return }
+                self?.highlight(part.label, NSRange(location: part.span.location + word.location, length: word.length))
+            }, finished: { [weak self] in
+                guard let self else { return }
+                self.highlight(part.label, nil); self.reading = false; self.playNext()
+            })
+        } else if turnDone {
+            state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "On-device chat" : "Codex workspace")
+        } else if phase == .speaking { state(.thinking, "Waiting for reply…") }
     }
     func startCodex(_ folder: URL) throws {
         let child = Process(), stdin = Pipe(), stdout = Pipe()
@@ -7367,6 +7524,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
         switch kind {
+        case "TextDelta":
+            if let delta = data["text"] as? String { stream += delta; if delta.contains("\n") { publish(final: false) } }
+        case "Message":
+            if let text = data["text"] as? String { finishMessage(text) }
         case "ToolStarted", "ToolCompleted":
             guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
             let button = tools[id] ?? NSButton()
@@ -7381,7 +7542,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
             if tools[id] == nil { tools[id] = button; turns.addArrangedSubview(button); button.widthAnchor.constraint(lessThanOrEqualTo: turns.widthAnchor).isActive = true }
             let result = item["aggregatedOutput"] as? String ?? (item["result"] ?? item["changes"]).map { String(describing: $0) } ?? ""
             details[button] = title + (result.isEmpty ? "" : "\n\n" + String(result.prefix(10000)))
-            reveal(button); state(.thinking, done ? "Thinking…" : "Using tools…")
+            reveal(button); if phase != .speaking { state(.thinking, done ? "Thinking…" : "Using tools…") }
         case "Approval":
             guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { stop("Incomplete approval request."); return }
             approvals.append((id,params)); presentApproval()
@@ -7390,7 +7551,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
             approvals.removeAll { $0.0 == id }
             if showing, let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window); presentApproval() }
         case "TurnCompleted":
-            if data["status"] as? String == "Completed" { answer(data["output"] as? String ?? "") }
+            if data["status"] as? String == "Completed" { finishTurn(data["output"] as? String ?? "") }
             else { stop("Codex did not finish this turn.") }
         default: break
         }
@@ -7427,6 +7588,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         }
     }
     func stop(_ message: String) {
+        if let (field, _) = lit { highlight(field, nil) }
+        speech.removeAll(); reading = false; turnDone = false
+        stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; model = nil; timeout?.invalidate(); timeout = nil
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
         process = nil; try? writer?.close(); writer = nil
