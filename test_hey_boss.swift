@@ -4521,7 +4521,15 @@ func auditConversation(_ root: String) {
     resumed.openWithContext(source: "Another Window", text: "Different contents.")
     precondition(oldAudio.stopped && resumed.phase == .starting && resumed.contextChip.title == "Another Window")
     precondition(resumed.rows.isEmpty && resumed.model == nil && resumed.historyList.numberOfRows == 1)
-    resumed.toggle() // Switch to typing in the new chat.
+    let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: resumed.window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+    resumed.window.sendEvent(escape)
+    precondition(resumed.phase == .idle && resumed.audio == nil && resumed.window.isVisible)
+    let cancelled = ReviewAudio(); resumed.connect(cancelled)
+    resumed.receive(.began); resumed.receive(.pcm(Data(count: 640)))
+    resumed.input.stringValue = "Typed draft"; resumed.window.makeFirstResponder(resumed.input)
+    resumed.window.sendEvent(escape); resumed.receive(.ended)
+    precondition(cancelled.stopped && resumed.recording == nil && resumed.phase == .idle && resumed.rows.isEmpty)
+    precondition(resumed.window.isVisible && resumed.input.stringValue == "Typed draft" && resumed.contextChip.title == "Another Window")
     resumed.input.stringValue = "Hello"; resumed.sendTyped(); wait("second chat") { resumed.phase == .idle }
     precondition(resumed.historyList.numberOfRows == 2)
     resumed.window.close()
