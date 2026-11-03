@@ -45,13 +45,16 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(session.lastText, "Next utterance")
     }
 
-    func testWaveformMatchesReferenceAndRejectsInvalidLevels() {
+    func testWaveformShowsQuietDictationAboveRoomNoise() {
         XCTAssertEqual(Waveform.count, 11)
         XCTAssertEqual(Waveform.height(0), 4)
         XCTAssertEqual(Waveform.height(1), 22)
         XCTAssertEqual(Waveform.height(.nan), 4)
         XCTAssertEqual(Waveform.height(-1), 4)
-        XCTAssertGreaterThan(Waveform.height(0.02), 4)
+        // Levels observed on the built-in MacBook Pro microphone.
+        XCTAssertEqual(Waveform.height(0.00076), 4)
+        XCTAssertGreaterThan(Waveform.height(0.0058), 10)
+        XCTAssertLessThan(Waveform.height(0.0058), Waveform.height(0.02))
         XCTAssertLessThan(Waveform.height(0.02), Waveform.height(0.1))
     }
 
