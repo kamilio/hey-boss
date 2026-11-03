@@ -107,28 +107,55 @@ struct FocusedInput: Equatable {
         AXUIElementSetMessagingTimeout(field, 0.1)
         let role = value(field, kAXRoleAttribute) as? String ?? ""
         let label = value(field, kAXDescriptionAttribute) as? String ?? ""
+        // Editable NSTextViews may omit AXEnabled entirely.
+        var enabled: CFTypeRef?
+        let enabledStatus = AXUIElementCopyAttributeValue(field, kAXEnabledAttribute as CFString, &enabled)
         var editable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(field, kAXValueAttribute as CFString, &editable) == .success,
               isEligible(bundleID: bundleID, role: role,
                          subrole: value(field, kAXSubroleAttribute) as? String,
-                         enabled: value(field, kAXEnabledAttribute) as? Bool ?? false, editable: editable.boolValue,
+                         enabled: enabled as? Bool ?? (!forAuto && enabledStatus == .attributeUnsupported), editable: editable.boolValue,
                          label: label, forAuto: forAuto) else { return nil }
-        var ancestor: AXUIElement? = field
-        var document: String?
-        // Electron may keep the same editor node when navigating to another thread.
-        // Include the containing document URL so that cannot redirect a transcript.
-        for _ in 0..<48 {
-            guard let current = ancestor else { break }
-            let url = value(current, kAXURLAttribute)
-            if let url = url as? URL { document = url.absoluteString; break }
-            if let url = url as? String { document = url; break }
-            ancestor = axElement(current, kAXParentAttribute)
-        }
+        let document = documentURL(of: field)
         let window = axElement(field, kAXWindowAttribute)
         let t3 = bundleID == "com.t3tools.t3code"
         guard !t3 || (window != nil && document?.isEmpty == false) else { return nil }
         let composer = t3 && role == "AXTextArea" && (value(field, "AXDOMClassList") as? [String])?.contains("composer-tiptap") == true
         return Self(app: app, element: field, window: window, document: document, composerLabel: composer && !label.isEmpty ? label : nil)
+    }
+    private static func documentURL(of field: AXUIElement) -> String? {
+        var ancestor: AXUIElement? = field
+        // Electron may keep the same editor node when navigating to another thread.
+        // Include the containing document URL so that cannot redirect a transcript.
+        for _ in 0..<48 {
+            guard let current = ancestor else { break }
+            let url = value(current, kAXURLAttribute)
+            if let url = url as? URL { return url.absoluteString }
+            if let url = url as? String { return url }
+            ancestor = axElement(current, kAXParentAttribute)
+        }
+        return nil
+    }
+    static func threadLink(_ document: String) -> URL? {
+        let prefix = "t3code://app/#/"
+        guard document.hasPrefix(prefix) else { return nil }
+        let route = document.dropFirst(prefix.count)
+        let ids = route.split(separator: "/", omittingEmptySubsequences: false)
+        guard ids.count == 2, ids.allSatisfy({ $0.count == 36 && UUID(uuidString: String($0)) != nil }) else { return nil }
+        return URL(string: "t3code://threads/" + route)
+    }
+    func restoreFocus() {
+        guard let window, Self.value(window, kAXRoleAttribute) as? String == kAXWindowRole else { return }
+        app.activate(options: [])
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        if Self.equal(Self.axElement(element, kAXWindowAttribute), window),
+           Self.documentURL(of: element) == document,
+           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return }
+
+        // Switching threads can destroy the saved editor. T3 focuses its new composer on navigation.
+        guard app.bundleIdentifier == "com.t3tools.t3code", composerLabel != nil,
+              let document, let link = Self.threadLink(document), let bundle = app.bundleURL else { return }
+        NSWorkspace.shared.open([link], withApplicationAt: bundle, configuration: .init(), completionHandler: nil)
     }
     func isFocused() -> Bool {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }

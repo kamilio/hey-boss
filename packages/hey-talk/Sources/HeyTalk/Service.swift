@@ -9,6 +9,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let correction = Correction()
     private let contextQueue = DispatchQueue(label: "hey-talk.app-context", qos: .userInitiated)
     private let correctionSettings = CorrectionSettings()
+    private var returnToField: Bool { UserDefaults.standard.bool(forKey: "returnToField") }
+    private var returnMenuItem: NSMenuItem?
     private var correctionMenuItem: NSMenuItem?
     private var overlayMenuItem: NSMenuItem?
     private let speech = SpeechController()
@@ -43,7 +45,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var targetName: String?
     private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
     private var recordingContext: ContextSnapshot?
-    private var startingT3Input: FocusedInput?
+    private var startingInput: FocusedInput?
     private var waitingPaste: Timer? { didSet { oldValue?.invalidate() } }
     private var paste = true
     private var pressEnter = false { didSet { updateSubmitIndicator() } }
@@ -132,6 +134,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
         let correctionItem = NSMenuItem(title: "AI Correction", action: #selector(toggleCorrection), keyEquivalent: "")
         correctionItem.target = self; menu.insertItem(correctionItem, at: 3); correctionMenuItem = correctionItem
+        let returnItem = NSMenuItem(title: "Return to Field Before Pasting", action: #selector(toggleReturnToField), keyEquivalent: "")
+        returnItem.target = self; returnItem.state = returnToField ? .on : .off
+        menu.insertItem(returnItem, at: 4); returnMenuItem = returnItem
         applyCorrection()
         focusMonitor.onChange = { [weak self] input in self?.focusedInputChanged(input) }
         focusMonitor.onSuspend = { [weak self] in
@@ -204,6 +209,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleAutoSubmit = { [weak self] in self?.toggleAutoSubmit() }
+            view.onToggleReturnToField = { [weak self] in self?.toggleReturnToField() }
+            view.returnToFieldEnabled = { [weak self] in self?.returnToField ?? false }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onPreviewContext = { [weak self] in self?.previewContext() }
@@ -233,6 +240,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let text = "Hey Talk is running · Pill \(overlayEnabled ? "visible" : "hidden")"
         menuItem?.button?.toolTip = text
         menuItem?.button?.setAccessibilityLabel(text)
+    }
+    @objc private func toggleReturnToField() {
+        UserDefaults.standard.set(!returnToField, forKey: "returnToField")
+        returnMenuItem?.state = returnToField ? .on : .off
     }
     @objc private func toggleCorrection() {
         try? correctionSettings.command(["toggle"])
@@ -549,9 +560,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         automatic = focusedInput.map { AutoRecording(target: $0, followsFocus: $0.app.bundleIdentifier != "com.t3tools.t3code") }
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
         targetName = target?.localizedName
-        if paste || correctionSettings.enabled, let target, target.bundleIdentifier == "com.t3tools.t3code" {
-            startingT3Input = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
-        } else { startingT3Input = nil }
+        if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && returnToField) {
+            startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
+        } else { startingInput = nil }
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
@@ -569,13 +580,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 if self.correctionSettings.enabled, let target = self.target {
                     let pid = target.processIdentifier
                     let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
-                    self.recordingContext = Task.detached(priority: .userInitiated) { [startingT3Input = self.startingT3Input] in
+                    self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput] in
                         guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                              !isT3 || startingT3Input?.isFocused() == true else { return (nil, 0) }
+                              !isT3 || startingInput?.isFocused() == true else { return (nil, 0) }
                         let started = ProcessInfo.processInfo.systemUptime
                         let text = AppContext.capture(pid: pid)
                         let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                        guard !isT3 || startingT3Input?.isFocused() == true else { return (nil, elapsed) }
+                        guard !isT3 || startingInput?.isFocused() == true else { return (nil, elapsed) }
                         return (text, elapsed)
                     }
                 }
@@ -682,7 +693,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let targetName = self.targetName
         let focusedInput = self.autoTarget
         let t3 = target?.bundleIdentifier == "com.t3tools.t3code"
-        let originalField = self.startingT3Input ?? focusedInput
+        let originalField = focusedInput ?? self.startingInput
         self.history.save(entry) { saved in
             let report: (String, PasteBlockReason?) -> Void = { delivery, reason in
                 var response: [String: Any] = ["ok": true, "text": text, "original_text": originalText, "audio_seconds": audioSeconds,
@@ -711,11 +722,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
             if shouldPaste, self.session.generation == id {
                 let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
-                Paste.deliver(text, target: target, pressEnter: submit,
+                let needsField = t3 || self.returnToField
+                Paste.deliver(text, target: target, pressEnter: submit, returnToField: self.returnToField ? originalField : nil,
                               targetStillFocused: {
-                                  if t3 { return originalField?.isFocused() == true }
-                                  return focusedInput?.isFocused() ?? true
-                              }, onWait: (!t3 || originalField != nil) ? { timer in
+                                  originalField?.isFocused() ?? !needsField
+                              }, onWait: (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = timer
                                   self.hotkey?.captureEscape(true)
                                   self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(targetName ?? "the original app")", while: timer)

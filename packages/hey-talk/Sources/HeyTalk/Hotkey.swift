@@ -104,7 +104,7 @@ enum Paste {
         retry.invalidate()
         return true
     }
-    static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool,
+    static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool, returnToField: FocusedInput?,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
         func check() -> PasteBlockReason? {
@@ -137,7 +137,10 @@ enum Paste {
             RunLoop.main.add(timer, forMode: .common)
             onWait(timer)
         }
-        if let onWait, check() == .focusChanged { retry(onWait) } else { paste() }
+        if let onWait, check() == .focusChanged {
+            retry(onWait)
+            returnToField?.restoreFocus()
+        } else { paste() }
     }
 
     static func send(pressEnter: Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
