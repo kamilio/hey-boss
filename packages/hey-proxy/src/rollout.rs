@@ -27,12 +27,14 @@ const CODEX_SETTINGS: &[(&str, Setting, bool)] = &[
     ("model_provider", Setting::Str("hey-proxy"), true),
     ("approval_policy", Setting::Str("on-request"), true),
     ("approvals_reviewer", Setting::Str("auto_review"), true),
+    ("check_for_update_on_startup", Setting::Bool(false), false),
     (
         "features.enable_request_compression",
         Setting::Bool(false),
         true,
     ),
     ("analytics.enabled", Setting::Bool(false), true),
+    ("feedback.enabled", Setting::Bool(false), false),
     ("otel.metrics_exporter", Setting::Str("none"), false),
 ];
 fn apply_codex_settings(item: &mut Item, profile: bool) -> Result<()> {
@@ -594,6 +596,61 @@ pub fn configure_codex_authenticated(
     println!("Codex configured: {} → {base_url}", path.display());
     Ok(())
 }
+pub fn configure_claude_authenticated(
+    base_url: &str,
+    home: Option<&Path>,
+    token: Option<&str>,
+) -> Result<()> {
+    let trimmed = base_url.strip_suffix("/v1").unwrap_or(base_url);
+    let url = reqwest::Url::parse(trimmed).context("Invalid Claude base URL")?;
+    if url.scheme() != "http"
+        || !matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        bail!("Claude base URL must be a local HTTP proxy URL");
+    }
+    let home = match home {
+        Some(path) => path.to_path_buf(),
+        None => std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(Into::into)
+            .unwrap_or(
+                std::path::PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?)
+                    .join(".claude"),
+            ),
+    };
+    let path = home.join("settings.json");
+    let mut settings = match fs::read_to_string(&path) {
+        Ok(raw) => serde_json::from_str::<Value>(&raw)
+            .context("Invalid Claude settings.json; left unchanged")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    let root = settings
+        .as_object_mut()
+        .context("Claude settings.json must be a JSON object; left unchanged")?;
+    root.remove("apiKeyHelper");
+    let env_entry = root.entry("env").or_insert_with(|| json!({}));
+    let env_map = env_entry
+        .as_object_mut()
+        .context("Claude settings.json env must be a JSON object; left unchanged")?;
+    let clean_base = trimmed.trim_end_matches('/');
+    env_map.insert("ANTHROPIC_BASE_URL".into(), json!(clean_base));
+    env_map.insert(
+        "ANTHROPIC_AUTH_TOKEN".into(),
+        json!(token.unwrap_or("hey-proxy")),
+    );
+    env_map.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), json!("1"));
+    env_map.insert("DISABLE_TELEMETRY".into(), json!("1"));
+    env_map.insert("DISABLE_ERROR_REPORTING".into(), json!("1"));
+    env_map.insert("ENABLE_CLAUDEAI_MCP_SERVERS".into(), json!("0"));
+    write_json(&path, &settings)?;
+    println!("Claude configured: {} → {clean_base}", path.display());
+    Ok(())
+}
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1010,6 +1067,22 @@ pub async fn run(config: &Config, selected: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn uses_default_openai_key(config: &Config) -> bool {
+    !config.api_keys.is_empty()
+        && !config.routes.iter().any(|route| {
+            route.model == "*"
+                && route
+                    .api_shape
+                    .is_none_or(|shape| shape == crate::config::ApiShape::Responses)
+                && route.legs.first().is_some_and(|leg| {
+                    !matches!(
+                        config.accounts.get(&leg.provider),
+                        Some(crate::config::accounts::AccountConfig::Openai { .. })
+                    )
+                })
+        })
+}
+
 pub async fn verify(
     config: &Config,
     config_path: &Path,
@@ -1052,8 +1125,8 @@ pub async fn verify(
     {
         bail!("Host logs API must reject unauthenticated requests");
     }
-    if !config.api_keys.is_empty() || config.mode == Mode::Client {
-        // No model generation: authenticated model listing verifies the entire forwarding connection.
+    let check_openai_models = uses_default_openai_key(config);
+    if check_openai_models || config.mode == Mode::Client {
         let mut request = client.get(format!("{base}/v1/models"));
         if let Some(token) = &token {
             request = request.bearer_auth(token);
@@ -1062,15 +1135,16 @@ pub async fn verify(
             .send()
             .await
             .context("Cannot reach upstream through this proxy")?;
-        if !response.status().is_success() {
+        if response.status().is_success() {
+            let models: serde_json::Value = response
+                .json()
+                .await
+                .context("Upstream model listing was not JSON")?;
+            if !models["data"].is_array() {
+                bail!("Upstream returned an invalid model listing");
+            }
+        } else if check_openai_models || response.status() != reqwest::StatusCode::UNAUTHORIZED {
             bail!("Upstream connection check returned {}", response.status());
-        }
-        let models: serde_json::Value = response
-            .json()
-            .await
-            .context("Upstream model listing was not JSON")?;
-        if !models["data"].is_array() {
-            bail!("Upstream returned an invalid model listing");
         }
     } else {
         check_credentials(config).await?;
@@ -1459,9 +1533,17 @@ mod tests {
             Some(false)
         );
         assert_eq!(doc["analytics"]["enabled"].as_bool(), Some(false));
+        assert_eq!(doc["feedback"]["enabled"].as_bool(), Some(false));
+        assert_eq!(doc["check_for_update_on_startup"].as_bool(), Some(false));
         assert_eq!(
             doc["profiles"]["work"]["analytics"]["enabled"].as_bool(),
             Some(false)
+        );
+        assert!(doc["profiles"]["work"].get("feedback").is_none());
+        assert!(
+            doc["profiles"]["work"]
+                .get("check_for_update_on_startup")
+                .is_none()
         );
         assert_eq!(doc["otel"]["exporter"].as_str(), Some("none"));
         assert_eq!(doc["otel"]["metrics_exporter"].as_str(), Some("none"));
@@ -1512,6 +1594,54 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn subscription_wildcard_route_skips_default_openai_model_probe() {
+        let openai_default: Config = serde_json::from_value(json!({
+            "listen": "127.0.0.1:8080",
+            "providers": {"openai": {"api_keys": {"codex": "revoked-key"}, "default": {"api_key": "codex"}}}
+        }))
+        .unwrap();
+        assert!(uses_default_openai_key(&openai_default));
+
+        let subscription_routed: Config = serde_json::from_value(json!({
+            "listen": "127.0.0.1:8080",
+            "account_schema_version": 1,
+            "accounts": {"codex": {"implementation": "codex", "auth": "subscription", "credentials_file": "codex.json"}},
+            "routes": [{"model": "*", "api_shape": "responses", "legs": [{"provider": "codex"}]}],
+            "providers": {"openai": {"api_keys": {"codex": "revoked-key"}, "default": {"api_key": "codex"}}}
+        }))
+        .unwrap();
+        assert!(!uses_default_openai_key(&subscription_routed));
+    }
+
+    #[test]
+    fn claude_configuration_preserves_settings_and_disables_telemetry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"apiKeyHelper":"echo old","model":"opus","permissions":{"defaultMode":"auto"},"env":{"CUSTOM":"kept"}}"#,
+        )
+        .unwrap();
+        configure_claude_authenticated(
+            "http://127.0.0.1:8080/v1",
+            Some(dir.path()),
+            Some("host-token"),
+        )
+        .unwrap();
+        let updated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(updated.get("apiKeyHelper").is_none());
+        assert_eq!(updated["model"], "opus");
+        assert_eq!(updated["permissions"]["defaultMode"], "auto");
+        assert_eq!(updated["env"]["CUSTOM"], "kept");
+        assert_eq!(updated["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8080");
+        assert_eq!(updated["env"]["ANTHROPIC_AUTH_TOKEN"], "host-token");
+        assert_eq!(updated["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
+        assert_eq!(updated["env"]["DISABLE_TELEMETRY"], "1");
+        assert_eq!(updated["env"]["DISABLE_ERROR_REPORTING"], "1");
+        assert_eq!(updated["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "0");
+    }
+
     #[test]
     fn named_accounts_stay_on_host_when_generating_a_client_config() {
         let config: Config = serde_json::from_value(serde_json::json!({

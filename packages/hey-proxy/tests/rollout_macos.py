@@ -39,6 +39,20 @@ with tempfile.TemporaryDirectory() as directory:
         assert operations == ['print'] + (['bootout'] if loaded else []) + ['bootstrap', 'bootstrap']
         assert len(set(paths)) == 2 and not any(p.exists() for p in paths)
 
+    disabled_operations = []
+    def fake_disabled(argv, **kwargs):
+        disabled_operations.append(argv[1])
+        if argv[1] == 'print':
+            return subprocess.CompletedProcess(argv, 1)
+        if argv[1] == 'enable':
+            return subprocess.CompletedProcess(argv, 0)
+        if argv[1] == 'bootstrap':
+            return subprocess.CompletedProcess(argv, 0 if 'enable' in disabled_operations else 5)
+        raise AssertionError(argv)
+    with patch.object(Path, 'home', return_value=home), patch.object(service.subprocess, 'run', side_effect=fake_disabled), patch.object(service.time, 'sleep'):
+        service.restart_macos(data, None)
+    assert disabled_operations == ['print', 'bootstrap', 'bootstrap', 'enable', 'bootstrap']
+
 with tempfile.TemporaryDirectory() as directory:
     # launchd pins an agent to its program's code signature; a stable system
     # shell keeps upgraded proxy binaries launchable without re-registration.

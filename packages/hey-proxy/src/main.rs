@@ -117,6 +117,16 @@ enum Command {
         #[arg(long)]
         proxy_config: Option<PathBuf>,
     },
+    /// Configure the current user's Claude Code to use a local proxy
+    ConfigureClaude {
+        #[arg(long)]
+        base_url: String,
+        #[arg(long)]
+        claude_home: Option<PathBuf>,
+        /// Read generated local host credentials from this proxy config
+        #[arg(long)]
+        proxy_config: Option<PathBuf>,
+    },
     /// Install/update the Gemini Codex profile without changing the default
     ConfigureGemini {
         #[arg(long)]
@@ -211,6 +221,28 @@ async fn main() -> Result<()> {
             base_url,
             codex_home.as_deref(),
             model.as_deref(),
+            token.as_deref(),
+        );
+    }
+    if let Some(Command::ConfigureClaude {
+        base_url,
+        claude_home,
+        proxy_config,
+    }) = &args.command
+    {
+        let token = if let Some(path) = proxy_config {
+            let config = config::load(path)?;
+            if config.mode == config::Mode::Host {
+                Some(access::ensure(path, &[])?.local)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        return rollout::configure_claude_authenticated(
+            base_url,
+            claude_home.as_deref(),
             token.as_deref(),
         );
     }
