@@ -14,8 +14,10 @@ thread **and focus the original field**. Esc or × copies the waiting transcript
 starting another dictation replaces it. The transcript stays in History.
 
 **Return to Field Before Pasting** is on by default. When text is ready, Hey Talk
-brings the destination window and field forward. In T3, it can reopen the
-original composer’s thread. If focus cannot be restored, Hey Talk waits.
+brings the destination window forward and focuses the original input. It can
+find a replaced composer in T3 or Slack, or reselect a cmux terminal tab in
+the same workspace. After two seconds it stops trying to move focus. While a
+paste is pending, it only checks whether you’ve returned; Esc cancels the wait.
 Turn it off in the waveform menu or the pill’s right-click menu to return manually.
 
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
