@@ -58,7 +58,9 @@ pub fn run() -> io::Result<()> {
         if let Some(event) = session.receive(Duration::from_millis(40))? {
             match event {
                 Event::TurnCompleted { .. } => active = false,
-                Event::Approval { .. }
+                Event::TextDelta { .. }
+                | Event::Message { .. }
+                | Event::Approval { .. }
                 | Event::RequestCancelled { .. }
                 | Event::ToolStarted { .. }
                 | Event::ToolCompleted { .. } => {}
