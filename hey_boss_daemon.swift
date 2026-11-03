@@ -7474,9 +7474,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func state(_ next: Phase, _ message: String) {
         phase = next; status.stringValue = message
         meter.show(next)
-        let voiceAction = next == .idle ? "Start voice" : audio == nil ? "Stop reply" : "Stop voice"
-        meter.toolTip = voiceAction + " (Hyper+R)"
-        meter.setAccessibilityLabel(voiceAction)
+        let voiceAction = next == .idle ? "Start voice" : next == .recording ? "Send voice message" : audio == nil ? "Stop reply" : "Stop voice"
+        meter.isEnabled = next != .decoding
+        meter.toolTip = meter.isEnabled ? voiceAction + " (Hyper+R)" : message
+        meter.setAccessibilityLabel(meter.isEnabled ? voiceAction : message)
         meter.setAccessibilityValue(message)
         send.isEnabled = next == .idle || next == .listening
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
@@ -7499,6 +7500,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         input.stringValue = ""; respond(text)
     }
     @objc func toggle() {
+        if phase == .recording { if recording?.isEmpty == false { receive(.ended) }; return }
+        if phase == .decoding { return }
         guard phase == .idle else { stop("Conversation ended"); return }
         guard modelReady() else { return }
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
@@ -7524,7 +7527,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let audio else { return }
         switch event {
         case .began where phase == .listening:
-            recording = Data(); state(.recording, "Hearing you…")
+            recording = Data(); state(.recording, "Pause or press Hyper+R to send")
         case .pcm(let pcm) where phase == .recording:
             guard recording!.count + pcm.count <= 32000 * 60 else { stop("Turn exceeded one minute. Start a new conversation."); return }
             recording!.append(pcm); meter.capture(pcm)
