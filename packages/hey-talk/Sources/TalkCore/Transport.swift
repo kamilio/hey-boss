@@ -48,6 +48,20 @@ public enum Wire {
         }
         throw TalkError("Response exceeds size limit")
     }
+    /// The Hey Boss desktop socket ends its JSON reply with EOF.
+    public static func response(from fd: Int32) throws -> Data {
+        let deadline = Date().addingTimeInterval(10)
+        var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+        while data.count < 16_384 {
+            try wait(fd, events: Int16(POLLIN), deadline: deadline)
+            let n = Darwin.read(fd, &buffer, buffer.count)
+            if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+            guard n >= 0 else { throw TalkError("Could not read the Hey Boss reply") }
+            if n == 0 { return data }
+            data.append(contentsOf: buffer.prefix(n))
+        }
+        throw TalkError("Response exceeds size limit")
+    }
     private static func wait(_ fd: Int32, events: Int16, deadline: Date) throws {
         while true {
             let ms = deadline.timeIntervalSinceNow * 1_000
@@ -83,7 +97,7 @@ public enum ControlSocket {
         address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
         return address
     }
-    public static func connect() throws -> Int32 {
+    public static func connect(path: String = ControlSocket.path) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw TalkError("Cannot create control socket") }
         var addr = try address(path)
@@ -92,7 +106,7 @@ public enum ControlSocket {
                 Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard result == 0 else { close(fd); throw TalkError("hey-talk is not running") }
+        guard result == 0 else { close(fd); throw TalkError(path == ControlSocket.path ? "hey-talk is not running" : "Hey Boss is unavailable") }
         do { try Wire.prepare(fd) } catch { close(fd); throw error }
         return fd
     }

@@ -4459,6 +4459,8 @@ func auditConversation(_ root: String) {
             }
         }
     }
+    ui.openWithContext(source: "Test Editor", text: "The fruit on this page is pineapple.")
+    precondition(ui.phase == .listening && ui.audio === audio && !ui.contextChip.isHidden)
     feed("first")
     wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
@@ -4467,12 +4469,12 @@ func auditConversation(_ root: String) {
     feed("second")
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
-    precondition(ui.action.title == "End" && ui.turns.bounds.width > 320)
+    precondition(ui.meter.accessibilityLabel() == "Stop voice" && ui.turns.bounds.width > 320)
     precondition(ui.status.stringValue == "Speaking" && ui.status.bounds.width >= ui.status.attributedStringValue.size().width)
     // Playback can begin before the fixture finishes writing its trailing silence.
     microphone.sync {}
     ui.window.close()
-    precondition(!ui.rows.isEmpty && ui.action.title == "Start voice")
+    precondition(!ui.rows.isEmpty && ui.meter.accessibilityLabel() == "Start voice")
     precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
     let resumed = VoiceConversation(cli: cli, saveURL: saved)
     resumed.show()
@@ -4528,10 +4530,13 @@ func auditWorkspaceChat(_ root: String) {
     ui.selectDirectory(folder)
     let value = UUID().uuidString
     try! value.write(to: folder.appendingPathComponent("example.txt"), atomically: true, encoding: .utf8)
-    ui.input.stringValue = "Copy example.txt to answer.txt using a shell command. Reply with its contents."
+    ui.openWithContext(source: "Test Editor", text: "Destination file: answer.txt")
+    precondition(ui.phase == .starting && ui.contextChip.title == "Test Editor" && !ui.contextChip.isHidden && ui.rows.isEmpty)
+    ui.meter.performClick(nil) // Keyboard fallback retains the attachment if the microphone is stopped.
+    ui.input.stringValue = "Copy example.txt to the destination file named in the captured context. Reply with its contents."
     ui.sendTyped(); wait()
     precondition(try! String(contentsOf: folder.appendingPathComponent("answer.txt"), encoding: .utf8) == value)
-    precondition(ui.rows.last!.stringValue.contains(value) && !ui.tools.isEmpty && ui.audio == nil, ui.rows.map(\.stringValue).description)
+    precondition(ui.contextChip.isHidden && ui.rows.last!.stringValue.contains(value) && !ui.tools.isEmpty && ui.audio == nil, ui.rows.map(\.stringValue).description)
     let tool = ui.tools.values.first!
     ui.showTool(tool)
     precondition(ui.window.attachedSheet != nil && !(ui.details[tool] ?? "").isEmpty)
