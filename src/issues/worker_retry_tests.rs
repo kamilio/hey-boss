@@ -49,7 +49,10 @@ fn pickup_readiness_does_not_scan_unrelated_attempt_history() {
         INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at)
         SELECT 'local-'||x,'other',1,'{}','human:test','completed',1,'synthetic','local',x,x,x FROM n;
         WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
-        INSERT INTO distributed_attempts SELECT 'remote-'||x,'remote','other',1,'completed',x,x,'','{}' FROM n;").unwrap();
+        INSERT INTO distributed_attempts SELECT 'remote-'||x,'remote','other',1,'completed',x,x,'','{}' FROM n;
+        WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+        INSERT INTO events(project_id,issue_number,actor,action,created_at,data)
+        SELECT 'other',1,'human:test','triaged',x,'{\"before\":{\"assignee\":\"human:boss\"},\"after\":{\"assignee\":null}}' FROM n;").unwrap();
     // Use a correlated lookup, as worker status and fleet admission do. A
     // standalone query with literal issue keys hides the UNION planner problem.
     let mut query = db.prepare("SELECT i.number FROM issues i WHERE i.project_id='p'
@@ -137,4 +140,58 @@ fn pickup_readiness_upgrade_is_idempotent_and_repairs_old_views() {
         "store startup must retain the optimized view"
     );
     drop(reopened);
+}
+
+#[test]
+fn boss_unassign_releases_retry_holds_without_releasing_worker_self_unassign() {
+    let fixture = Fixture::new();
+    let database = &fixture.db;
+    database
+        .execute_batch(
+            "INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at,summary)
+             VALUES('held-run','p',1,'{}','human:test','blocked',1,'synthetic','local',10,10,10,9000000000000,'Codex needs input or approval: answer');",
+        )
+        .unwrap();
+    assert!(!fixture.ready(1));
+
+    database
+        .execute_batch(
+            r#"INSERT INTO agents VALUES('codex:worker','{}',0);
+             INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES
+             ('p',1,'codex:worker','unassigned',11,'{"previous_assignee":"codex:worker"}'),
+             ('p',1,'codex:worker','assigned',12,'{"previous_assignee":"codex:worker","target":"unassigned"}'),
+             ('p',1,'human:test','triaged',13,'{"before":{"assignee":"codex:worker"},"after":{"assignee":null}}'),
+             ('p',1,'human:test','triaged',14,'{"before":{"assignee":null},"after":{"assignee":"human:boss"}}');"#,
+        )
+        .unwrap();
+    assert!(!fixture.ready(1));
+
+    for (timestamp, action, payload) in [
+        (20_i64, "unassigned", r#"{"previous_assignee":"human:boss"}"#),
+        (
+            30_i64,
+            "assigned",
+            r#"{"previous_assignee":"human:boss","target":"unassigned"}"#,
+        ),
+        (
+            40_i64,
+            "triaged",
+            r#"{"before":{"assignee":"human:boss"},"after":{"assignee":null}}"#,
+        ),
+    ] {
+        database
+            .execute(
+                "UPDATE worker_runs SET finished_at=?1 WHERE id='held-run'",
+                [timestamp - 1],
+            )
+            .unwrap();
+        assert!(!fixture.ready(1));
+        database
+            .execute(
+                "INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES('p',1,'human:test',?1,?2,?3)",
+                rusqlite::params![action, timestamp, payload],
+            )
+            .unwrap();
+        assert!(fixture.ready(1), "action {action} did not release hold");
+    }
 }
