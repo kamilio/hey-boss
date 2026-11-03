@@ -33,10 +33,22 @@ const CODEX_SETTINGS: &[(&str, Setting, bool)] = &[
         Setting::Bool(false),
         true,
     ),
+    (
+        "features.api_key_model_discovery",
+        Setting::Bool(false),
+        true,
+    ),
     ("analytics.enabled", Setting::Bool(false), true),
     ("feedback.enabled", Setting::Bool(false), false),
     ("otel.metrics_exporter", Setting::Str("none"), false),
 ];
+fn chatgpt_base_url(base_url: &str) -> String {
+    let origin = base_url
+        .strip_suffix("/v1")
+        .unwrap_or(base_url)
+        .trim_end_matches('/');
+    format!("{origin}/backend-api")
+}
 fn apply_codex_settings(item: &mut Item, profile: bool) -> Result<()> {
     for (key, setting, in_profile) in CODEX_SETTINGS {
         if profile && !in_profile {
@@ -68,7 +80,9 @@ fn edit_codex_token(
     let mut doc = content
         .parse::<DocumentMut>()
         .context("Invalid Codex config TOML; left unchanged")?;
+    let backend_url = chatgpt_base_url(base_url);
     apply_codex_settings(doc.as_item_mut(), false)?;
+    doc["chatgpt_base_url"] = value(&backend_url);
     if let Some(model) = model {
         doc["model"] = value(model);
     }
@@ -95,6 +109,7 @@ fn edit_codex_token(
             bail!("Active Codex profile must be a table");
         }
         apply_codex_settings(active, true)?;
+        active["chatgpt_base_url"] = value(&backend_url);
         if let Some(model) = model {
             active["model"] = value(model);
         }
@@ -175,6 +190,7 @@ pub fn configure_gemini_authenticated(
         .context("Invalid Gemini profile; left unchanged")?;
     doc["model"] = value(model);
     doc["model_provider"] = value("hey_proxy_gemini");
+    doc["chatgpt_base_url"] = value(chatgpt_base_url(base_url));
     if doc.get("model_reasoning_effort").is_none() {
         doc["model_reasoning_effort"] = value("high");
     }
@@ -182,6 +198,7 @@ pub fn configure_gemini_authenticated(
     doc["web_search"] = value("disabled");
     let features = table(doc.as_item_mut(), "features")?;
     features["enable_request_compression"] = value(false);
+    features["api_key_model_discovery"] = value(false);
     features["multi_agent"] = value(false);
     let providers = table(doc.as_item_mut(), "model_providers")?;
     let provider = table(providers, "hey_proxy_gemini")?;
@@ -643,7 +660,10 @@ pub fn configure_claude_authenticated(
         "ANTHROPIC_AUTH_TOKEN".into(),
         json!(token.unwrap_or("hey-proxy")),
     );
-    env_map.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(), json!("1"));
+    env_map.insert(
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+        json!("1"),
+    );
     env_map.insert("DISABLE_TELEMETRY".into(), json!("1"));
     env_map.insert("DISABLE_ERROR_REPORTING".into(), json!("1"));
     env_map.insert("ENABLE_CLAUDEAI_MCP_SERVERS".into(), json!("0"));
@@ -1201,9 +1221,13 @@ pub async fn verify(
         {
             bail!("Codex host credential is incorrect");
         }
+        let expected_chatgpt = chatgpt_base_url(expected);
+        if doc.get("chatgpt_base_url").and_then(Item::as_str) != Some(&expected_chatgpt) {
+            bail!("Codex chatgpt_base_url does not point to proxy");
+        }
         if doc
             .get("features")
-            .and_then(|f| f.get("enable_request_compression"))
+            .and_then(|features_item| features_item.get("enable_request_compression"))
             .and_then(Item::as_bool)
             != Some(false)
         {
@@ -1212,12 +1236,16 @@ pub async fn verify(
         Ok(())
     }
     check_provider(&doc, "hey-proxy", &expected, token.as_deref())?;
+    let expected_chatgpt = chatgpt_base_url(&expected);
     if let Some(profile) = doc.get("profile").and_then(Item::as_str) {
-        if let Some(active) = doc.get("profiles").and_then(|p| p.get(profile))
+        if let Some(active) = doc
+            .get("profiles")
+            .and_then(|profiles_item| profiles_item.get(profile))
             && (active.get("model_provider").and_then(Item::as_str) != Some("hey-proxy")
+                || active.get("chatgpt_base_url").and_then(Item::as_str) != Some(&expected_chatgpt)
                 || active
                     .get("features")
-                    .and_then(|f| f.get("enable_request_compression"))
+                    .and_then(|features_item| features_item.get("enable_request_compression"))
                     .and_then(Item::as_bool)
                     != Some(false))
         {
@@ -1529,7 +1557,19 @@ mod tests {
             Some("hey-proxy")
         );
         assert_eq!(
+            doc["chatgpt_base_url"].as_str(),
+            Some("http://127.0.0.1:8080/backend-api")
+        );
+        assert_eq!(
+            doc["profiles"]["work"]["chatgpt_base_url"].as_str(),
+            Some("http://127.0.0.1:8080/backend-api")
+        );
+        assert_eq!(
             doc["features"]["enable_request_compression"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            doc["features"]["api_key_model_discovery"].as_bool(),
             Some(false)
         );
         assert_eq!(doc["analytics"]["enabled"].as_bool(), Some(false));
@@ -1634,9 +1674,15 @@ mod tests {
         assert_eq!(updated["model"], "opus");
         assert_eq!(updated["permissions"]["defaultMode"], "auto");
         assert_eq!(updated["env"]["CUSTOM"], "kept");
-        assert_eq!(updated["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8080");
+        assert_eq!(
+            updated["env"]["ANTHROPIC_BASE_URL"],
+            "http://127.0.0.1:8080"
+        );
         assert_eq!(updated["env"]["ANTHROPIC_AUTH_TOKEN"], "host-token");
-        assert_eq!(updated["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1");
+        assert_eq!(
+            updated["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+            "1"
+        );
         assert_eq!(updated["env"]["DISABLE_TELEMETRY"], "1");
         assert_eq!(updated["env"]["DISABLE_ERROR_REPORTING"], "1");
         assert_eq!(updated["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"], "0");

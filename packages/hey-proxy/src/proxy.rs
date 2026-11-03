@@ -332,7 +332,10 @@ async fn authenticate(
     next: axum::middleware::Next,
 ) -> Response {
     let proxy = service.snapshot();
-    if proxy.config.mode != Mode::Host || request.uri().path() == "/logs/login" {
+    if proxy.config.mode != Mode::Host
+        || request.uri().path() == "/logs/login"
+        || is_stubbed_backend_api(request.uri().path())
+    {
         return next.run(request).await;
     }
     let accepted = token(&request).is_some_and(|token| service.accepts(token));
@@ -1149,20 +1152,22 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
     }
     let guard = logs::RequestGuard::new(service.logs.clone(), id);
     let proxy = Arc::new(snapshot);
-    let response = match approvals::intercept(&proxy, request).await {
-        Ok(request) => {
-            if gemini::native_path(request.uri().path())
-                || request.uri().path().trim_end_matches('/') == "/v1/messages"
-            {
-                // Native pass-through routes do not otherwise parse message content.
-                match probe::intercept(&proxy.config, request).await {
-                    Ok(request) => forward_api(proxy, request).await,
-                    Err(response) => response,
+    let response = match intercept_backend_api(&proxy, request) {
+        Ok(request) => match approvals::intercept(&proxy, request).await {
+            Ok(request) => {
+                if gemini::native_path(request.uri().path())
+                    || request.uri().path().trim_end_matches('/') == "/v1/messages"
+                {
+                    match probe::intercept(&proxy.config, request).await {
+                        Ok(request) => forward_api(proxy, request).await,
+                        Err(response) => response,
+                    }
+                } else {
+                    forward_api(proxy, request).await
                 }
-            } else {
-                forward_api(proxy, request).await
             }
-        }
+            Err(response) => response,
+        },
         Err(response) => response,
     };
     service.logs.finish(id, response.status().as_u16());
@@ -1186,6 +1191,51 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
         .and_then(|v| v.parse().ok());
     let (parts, body) = response.into_parts();
     Response::from_parts(parts, guard.wrap(body, length, is_sse))
+}
+
+fn is_stubbed_backend_api(path: &str) -> bool {
+    let trimmed = path.trim_end_matches('/');
+    (trimmed == "/backend-api" || trimmed.starts_with("/backend-api/"))
+        && !matches!(
+            trimmed,
+            "/backend-api/codex/responses" | "/backend-api/codex/responses/compact"
+        )
+}
+
+#[allow(clippy::result_large_err)]
+fn intercept_backend_api(proxy: &Proxy, mut request: Request) -> Result<Request, Response> {
+    let trimmed = request.uri().path().trim_end_matches('/');
+    let target_path = match trimmed {
+        "/backend-api/codex/responses" => Some("/v1/responses"),
+        "/backend-api/codex/responses/compact" => Some("/v1/responses/compact"),
+        "/backend-api/plugins/featured" => {
+            proxy
+                .service
+                .logs
+                .route(proxy.log_id, None, None, "local:codex_backend");
+            return Err(axum::Json(json!([])).into_response());
+        }
+        path if path == "/backend-api" || path.starts_with("/backend-api/") => {
+            proxy
+                .service
+                .logs
+                .route(proxy.log_id, None, None, "local:codex_backend");
+            return Err((
+                StatusCode::NOT_FOUND,
+                axum::Json(json!({"error":{"type":"not_found","message":"ChatGPT backend endpoint disabled on local proxy"}})),
+            )
+                .into_response());
+        }
+        _ => None,
+    };
+    if let Some(rewritten_path) = target_path {
+        let next_uri = match request.uri().query() {
+            Some(query) => format!("{rewritten_path}?{query}"),
+            None => rewritten_path.to_owned(),
+        };
+        *request.uri_mut() = next_uri.parse().expect("valid rewritten URI");
+    }
+    Ok(request)
 }
 
 async fn forward_api(proxy: Arc<Proxy>, request: Request) -> Response {
@@ -2602,5 +2652,66 @@ mod tests {
         assert_eq!(response.chunk().await.unwrap().unwrap(), "data: [DONE]\n\n");
         proxy_task.abort();
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn intercepts_backend_api_chatter_without_upstream_and_routes_codex_responses() {
+        let upstream_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = upstream_hits.clone();
+        let upstream = Router::new().fallback(any(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(json!({"id":"resp_upstream","object":"response","status":"completed","output":[]}))
+            }
+        }));
+        let (upstream_url, upstream_task) = serve(upstream).await;
+        let mut config = Config::test_fixture();
+        config.upstream_url = upstream_url;
+        config.auto_approve = true;
+        let (proxy_url, proxy_task) = serve(router(config).unwrap()).await;
+
+        let featured = reqwest::get(format!(
+            "{proxy_url}/backend-api/plugins/featured?platform=codex"
+        ))
+        .await
+        .unwrap();
+        assert_eq!(featured.status(), StatusCode::OK);
+        assert_eq!(featured.json::<Value>().await.unwrap(), json!([]));
+
+        let disabled = reqwest::get(format!("{proxy_url}/backend-api/ps/plugins/installed"))
+            .await
+            .unwrap();
+        assert_eq!(disabled.status(), StatusCode::NOT_FOUND);
+        assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let guardian = reqwest::Client::new()
+            .post(format!("{proxy_url}/backend-api/codex/responses"))
+            .header("x-codex-guardian", "reviewer")
+            .json(&json!({"model":"gpt-5.4","input":"review"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(guardian.status(), StatusCode::OK);
+        assert_eq!(
+            guardian
+                .headers()
+                .get("x-hey-proxy-auto-approved")
+                .and_then(|val| val.to_str().ok()),
+            Some("codex_reviewer")
+        );
+        assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let regular = reqwest::Client::new()
+            .post(format!("{proxy_url}/backend-api/codex/responses"))
+            .json(&json!({"model":"gpt-5.4","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(regular.status(), StatusCode::OK);
+        assert_eq!(upstream_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        proxy_task.abort();
+        upstream_task.abort();
     }
 }

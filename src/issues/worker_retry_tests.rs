@@ -167,7 +167,11 @@ fn boss_unassign_releases_retry_holds_without_releasing_worker_self_unassign() {
     assert!(!fixture.ready(1));
 
     for (timestamp, action, payload) in [
-        (20_i64, "unassigned", r#"{"previous_assignee":"human:boss"}"#),
+        (
+            20_i64,
+            "unassigned",
+            r#"{"previous_assignee":"human:boss"}"#,
+        ),
         (
             30_i64,
             "assigned",
