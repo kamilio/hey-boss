@@ -6906,8 +6906,9 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
     }
 
+    var conversation = false
     func listen(cli: String, duplex: Bool = false) throws -> FileHandle {
-        worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = duplex ? ["review-audio", "--duplex"] : ["review-audio"]
+        worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = ["review-audio"] + (duplex ? ["--duplex"] : []) + (conversation ? ["--conversation"] : [])
         worker.standardInput = input; worker.standardOutput = output; worker.standardError = FileHandle.nullDevice
         try worker.run()
         let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
@@ -7176,7 +7177,7 @@ final class ConversationMeter: NSView {
 }
 
 @available(macOS 26, *)
-final class VoiceConversation: NSObject, NSWindowDelegate {
+final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 630, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let status = NSTextField(wrappingLabelWithString: "")
@@ -7185,7 +7186,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     let welcome = NSStackView()
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
-    let scope = NSPopUpButton()
+    let settings = NSMenuToolbarItem(itemIdentifier: .init("conversation-settings"))
     let input = NSTextField()
     let send = NSButton()
     let scroll = NSScrollView()
@@ -7193,6 +7194,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     var rows: [NSTextField] = []
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
+    private struct Message: Codable { var text: String; let speaker: String }
+    private struct Saved: Codable {
+        let messages: [Message]
+        let directory: URL?
+        let thread: String?
+        let transcript: Transcript?
+    }
+    private let saveURL: URL
+    private var messages: [Message] = []
+    private var thread: String?
+    private var restoreError: String?
     var directory: URL?
     var process: Process?
     var writer: FileHandle?
@@ -7207,23 +7219,22 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     var decoding: SFSpeechRecognitionTask?
     var timeout: Timer?
     var reply: Task<Void, Never>?
+    private let instructions = Bundle.main.url(forResource: "conversation", withExtension: "md")
+        .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
     private var stream = "", published = "", lastMessage: String?
     private var messageLabel: NSTextField?
     private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
     private var reading = false, turnDone = false
     private var lit: (NSTextField, NSRange)?
 
-    init(cli: String) {
-        self.cli = cli
+    init(cli: String, saveURL: URL = URL.applicationSupportDirectory.appending(path: "Hey Boss/Conversation/current.json")) {
+        self.cli = cli; self.saveURL = saveURL
         super.init()
-        window.title = "Conversation"; window.titlebarAppearsTransparent = true; window.titleVisibility = .hidden
+        window.title = "Hey Boss"; window.toolbarStyle = .unified
+        let toolbar = NSToolbar(identifier: "VoiceConversation")
+        toolbar.delegate = self; toolbar.displayMode = .iconOnly; window.toolbar = toolbar
         window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 410, height: 360)
         let body = NSView(); window.contentView = body
-        let title = NSTextField(labelWithString: "Conversation")
-        title.font = .systemFont(ofSize: 23, weight: .semibold)
-        scope.controlSize = .small; scope.target = self; scope.action = #selector(chooseScope)
-        scope.setAccessibilityLabel("Conversation workspace")
-        let line = NSBox(); line.boxType = .separator
         scroll.contentView = FlippedClip(); scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         turns.orientation = .vertical; turns.alignment = .leading; turns.spacing = 16
         turns.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 16, right: 0)
@@ -7246,13 +7257,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
         action.bezelStyle = .rounded; action.target = self; action.action = #selector(toggle)
         action.setContentCompressionResistancePriority(.required, for: .horizontal)
-        for view in [title,scope,line,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
+        for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
         for view in [input,send,meter,status,action] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), title.topAnchor.constraint(equalTo: body.topAnchor, constant: 43),
-            scope.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 10), scope.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -20), scope.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            line.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 16), line.leadingAnchor.constraint(equalTo: body.leadingAnchor), line.trailingAnchor.constraint(equalTo: body.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: line.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
             turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
             dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
@@ -7262,23 +7270,41 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
             status.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), status.centerYAnchor.constraint(equalTo: action.centerYAnchor), status.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), action.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 8), action.trailingAnchor.constraint(equalTo: send.trailingAnchor)
         ])
-        refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center()
+        refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center(); restore()
     }
-    func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func show() {
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        if let row = rows.last { reveal(row) }
+    }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .init("new-conversation"), settings.itemIdentifier]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == settings.itemIdentifier {
+            settings.label = "Conversation settings"; settings.toolTip = settings.label
+            settings.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: settings.label)
+            settings.showsIndicator = false; return settings
+        }
+        let item = NSToolbarItem(itemIdentifier: id); item.label = "New Conversation"; item.toolTip = item.label
+        item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: item.label)
+        item.target = self; item.action = #selector(newConversation); return item
+    }
     func refreshScope() {
-        scope.removeAllItems()
-        scope.addItems(withTitles: ["On this Mac", "Choose folder for Codex…"])
-        if let directory { scope.addItem(withTitle: String(directory.lastPathComponent.prefix(24))); scope.selectItem(at: 2) }
-        scope.selectedItem?.image = NSImage(systemSymbolName: directory == nil ? "laptopcomputer" : "folder", accessibilityDescription: nil)
-        scope.toolTip = directory?.path ?? "Apple Intelligence on this Mac"
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Conversation settings", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: directory?.lastPathComponent ?? "On this Mac", action: nil, keyEquivalent: "").state = .on
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "New Conversation on This Mac", action: #selector(newLocal), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "New Conversation in Folder…", action: #selector(chooseFolder), keyEquivalent: "").target = self
+        settings.menu = menu
         headline.stringValue = directory == nil ? "Start a conversation" : "Work with Codex"
-        hint.stringValue = directory == nil ? "Type a message or turn on voice.\nChoose a folder to work with Codex." : "Run commands, edit files, and use tools\nwith your configured Codex account."
+        hint.stringValue = directory == nil ? "Type a message or turn on voice." : "Run commands, edit files, and use tools\nwith your configured Codex account."
         input.placeholderString = directory == nil ? "Message Hey Boss…" : "Message Codex…"
     }
-    @objc func chooseScope() {
-        if scope.indexOfSelectedItem == 0 { if directory != nil { selectDirectory(nil) }; return }
-        guard scope.indexOfSelectedItem == 1 else { return }
-        refreshScope()
+    @objc func newConversation() { selectDirectory(directory) }
+    @objc func newLocal() { selectDirectory(nil) }
+    @objc func chooseFolder() {
         let picker = NSOpenPanel(); picker.canChooseFiles = false; picker.canChooseDirectories = true; picker.prompt = "Use Folder"
         picker.message = "Codex will receive your messages and can use tools in this folder."
         picker.beginSheetModal(for: window) { [weak self] result in
@@ -7286,24 +7312,26 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         }
     }
     func selectDirectory(_ url: URL?) {
-        stop("Ready"); directory = url; clearTurns(); input.stringValue = ""; refreshScope()
-        state(.idle, url == nil ? "On-device chat" : "Codex workspace")
+        stop("Ready"); restoreError = nil; model = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
+        state(.idle, url == nil ? "On-device chat" : "Codex workspace"); save(); window.makeFirstResponder(input)
     }
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
-        rows.removeAll(); details.removeAll(); tools.removeAll()
+        rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll()
     }
     func state(_ next: Phase, _ message: String) {
         phase = next; status.stringValue = message
         action.title = next == .idle ? "Start voice" : "End"
         action.image = NSImage(systemSymbolName: next == .idle ? "mic" : "stop.fill", accessibilityDescription: nil)
-        action.imagePosition = .imageLeading
         meter.show(next)
-        scope.isEnabled = next == .idle
+        action.imagePosition = next == .idle ? .imageOnly : .imageLeading
+        action.toolTip = next == .idle ? "Start voice" : "Stop this turn"
+        action.setAccessibilityLabel(action.toolTip)
         send.isEnabled = next == .idle || next == .listening
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
     func modelReady() -> Bool {
+        if let restoreError { state(.idle, restoreError); return false }
         if directory != nil || model != nil { return true }
         switch SystemLanguageModel.default.availability {
         case .available: return true
@@ -7323,7 +7351,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         guard phase == .idle else { stop("Conversation ended"); return }
         guard modelReady() else { return }
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
-        let audio = ReviewAudio(); self.audio = audio
+        let audio = ReviewAudio(); audio.conversation = true; self.audio = audio
         state(.starting, "Opening microphone…")
         AVCaptureDevice.requestAccess(for: .audio) { [weak self, weak audio] granted in onMain {
             guard let self, let audio, self.audio === audio else { return }
@@ -7376,7 +7404,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         let label = NSTextField(wrappingLabelWithString: text); label.isSelectable = true
         label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
         if !mine { label.attributedStringValue = markdown(text, size: 15, color: .labelColor) }
-        turns.addArrangedSubview(row); rows.append(label)
+        turns.addArrangedSubview(row); rows.append(label); messages.append(Message(text: text, speaker: speaker))
         for v in [card,who,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
         let inset: CGFloat = mine ? 12 : 0
         NSLayoutConstraint.activate([
@@ -7391,20 +7419,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         reveal(row)
     }
     func reveal(_ row: NSView) {
-        welcome.isHidden = true; window.contentView?.layoutSubtreeIfNeeded(); row.scrollToVisible(row.bounds)
+        welcome.isHidden = true
+        guard window.isVisible else { return }
+        window.contentView?.layoutSubtreeIfNeeded(); row.scrollToVisible(row.bounds)
     }
     func respond(_ text: String) {
-        if model == nil && process == nil && !rows.isEmpty { clearTurns() }
+        guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
         turnDone = false; lastMessage = nil
         append(text, from: "You"); state(.thinking, "Thinking…")
         if let directory {
             do {
-                if process == nil { try startCodex(directory) }
-                try write(["turn":text])
+                let first = process == nil
+                if first { try startCodex(directory) }
+                try write(["turn": first && thread == nil ? instructions + "\n\n" + text : text])
             } catch { stop(error.localizedDescription) }
             return
         }
-        if model == nil { model = LanguageModelSession() }
+        if model == nil { model = LanguageModelSession(instructions: instructions) }
         guard let model else { return }
         reply = Task { @MainActor [weak self] in
             do {
@@ -7439,7 +7470,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         guard let label = messageLabel else { return }
         let old = label.stringValue
         let rendered = markdown(text, size: 15, color: .labelColor)
-        label.attributedStringValue = rendered; published = text
+        label.attributedStringValue = rendered; published = text; messages[messages.count-1].text = text
         let visible = rendered.string as NSString
         // A final provider snapshot can correct an earlier paragraph. Keep
         // already heard audio, discard stale queued passages for this message.
@@ -7463,7 +7494,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
-        turnDone = true; playNext()
+        turnDone = true; save(); playNext()
     }
     private func highlight(_ label: NSTextField, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -7493,7 +7524,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
     }
     func startCodex(_ folder: URL) throws {
         let child = Process(), stdin = Pipe(), stdout = Pipe()
-        child.executableURL = URL(fileURLWithPath: cli); child.arguments = ["workspace-chat"]; child.currentDirectoryURL = folder
+        child.executableURL = URL(fileURLWithPath: cli); child.arguments = ["workspace-chat"] + (thread.map { ["--resume", $0] } ?? []); child.currentDirectoryURL = folder
         child.standardInput = stdin; child.standardOutput = stdout
         try child.run(); process = child; writer = stdin.fileHandleForWriting
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -7524,6 +7555,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
         switch kind {
+        case "Session":
+            thread = data["id"] as? String; save()
         case "TextDelta":
             if let delta = data["text"] as? String { stream += delta; if delta.contains("\n") { publish(final: false) } }
         case "Message":
@@ -7591,14 +7624,36 @@ final class VoiceConversation: NSObject, NSWindowDelegate {
         if let (field, _) = lit { highlight(field, nil) }
         speech.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
-        reply?.cancel(); reply = nil; model = nil; timeout?.invalidate(); timeout = nil
+        reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
         process = nil; try? writer?.close(); writer = nil
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
         state(.idle, message)
     }
-    func windowWillClose(_ notification: Notification) { selectDirectory(nil) }
+    private func save() {
+        guard restoreError == nil else { return }
+        do {
+            let parent = saveURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let saved = Saved(messages: messages, directory: directory, thread: thread, transcript: model?.transcript)
+            try JSONEncoder().encode(saved).write(to: saveURL, options: .atomic)
+        } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription }
+    }
+    private func restore() {
+        guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
+        do {
+            let saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: saveURL))
+            directory = saved.directory; thread = saved.thread
+            if let transcript = saved.transcript { model = LanguageModelSession(transcript: transcript) }
+            for message in saved.messages { append(message.text, from: message.speaker) }
+            refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+        } catch {
+            restoreError = "Couldn’t reopen this conversation. Use New Conversation to start over."
+            state(.idle, restoreError!)
+        }
+    }
+    func windowWillClose(_ notification: Notification) { stop("Ready"); save() }
 }
 #endif
 

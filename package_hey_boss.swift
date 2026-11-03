@@ -21,7 +21,7 @@ precondition(identity.count == 40 && identity.allSatisfy { $0.isHexDigit }, "Inv
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/signing-identity.sha1"] {
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/signing-identity.sha1"] {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
@@ -133,6 +133,8 @@ try Data(contentsOf: source).write(to: executable, options: .atomic)
 try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 try Data(contentsOf: root.appendingPathComponent("assets/hey-boss.icns"))
     .write(to: resources.appendingPathComponent("hey-boss.icns"), options: .atomic)
+try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
+    .write(to: resources.appendingPathComponent("conversation.md"), options: .atomic)
 let manifest = try String(contentsOf: root.appendingPathComponent("Cargo.toml"), encoding: .utf8)
 let version = manifest.components(separatedBy: .newlines).first { $0.hasPrefix("version = ") }!.components(separatedBy: "\"")[1]
 let info: [String: Any] = [

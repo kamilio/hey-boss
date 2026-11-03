@@ -270,12 +270,17 @@ enum Command {
         action: BrowserAction,
     },
     #[command(hide = true)]
-    WorkspaceChat,
+    WorkspaceChat {
+        #[arg(long)]
+        resume: Option<String>,
+    },
     #[command(hide = true)]
     ReviewAudio {
         /// Input contains interleaved microphone and playback reference samples.
         #[arg(long)]
         duplex: bool,
+        #[arg(long)]
+        conversation: bool,
     },
     #[command(hide = true)]
     RenderMarkdown {
@@ -481,18 +486,22 @@ fn run() -> std::io::Result<()> {
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
-        Command::WorkspaceChat => {
-            if let Err(error) = workspace_chat::run() {
+        Command::WorkspaceChat { resume } => {
+            if let Err(error) = workspace_chat::run(resume.clone()) {
                 println!("{}", serde_json::json!({"error":error.to_string()}));
                 return Err(error);
             }
             return Ok(());
         }
-        Command::ReviewAudio { duplex } => {
+        Command::ReviewAudio {
+            duplex,
+            conversation,
+        } => {
             return review_audio::stream(
                 std::io::stdin().lock(),
                 std::io::BufWriter::new(std::io::stdout().lock()),
                 *duplex,
+                *conversation,
             );
         }
         Command::Utils(action) => return utils_cli::run(action, &git_args),

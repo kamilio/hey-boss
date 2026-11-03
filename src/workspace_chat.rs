@@ -1,5 +1,5 @@
 //! JSON lines between the native conversation window and its owned Codex thread.
-use hey_boss::agent_runtime::{AgentSession, Event, Launch, Provider};
+use hey_boss::agent_runtime::{AgentSession, Event, Launch, Provider, SessionRef};
 use serde::Deserialize;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
@@ -12,7 +12,7 @@ enum Input {
     Decision { decision: String, allow: bool },
 }
 
-pub fn run() -> io::Result<()> {
+pub fn run(resume: Option<String>) -> io::Result<()> {
     let (tx, rx) = mpsc::sync_channel(4);
     std::thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -26,7 +26,12 @@ pub fn run() -> io::Result<()> {
         cwd: std::env::current_dir()?,
         binary: None,
         model: None,
-        resume: None,
+        resume: resume.map(|id| SessionRef {
+            provider: Provider::Codex,
+            id,
+            path: None,
+            model: None,
+        }),
         env: Default::default(),
         output_schema: None,
         codex_execution: Default::default(),
@@ -58,7 +63,8 @@ pub fn run() -> io::Result<()> {
         if let Some(event) = session.receive(Duration::from_millis(40))? {
             match event {
                 Event::TurnCompleted { .. } => active = false,
-                Event::TextDelta { .. }
+                Event::Session(_)
+                | Event::TextDelta { .. }
                 | Event::Message { .. }
                 | Event::Approval { .. }
                 | Event::RequestCancelled { .. }
