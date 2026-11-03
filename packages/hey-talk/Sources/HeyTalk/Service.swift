@@ -591,6 +591,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         targetName = target?.localizedName
         if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && returnToField) {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
+            if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
@@ -649,7 +650,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             reply(failure("Stopped before the microphone was ready")); return
         }
         if automatic != nil {
-            let input = FocusedInput.current(bundleIDs: autoSettings.bundleIDs)
+            var input = FocusedInput.current(bundleIDs: autoSettings.bundleIDs)
+            if returnToField { input?.rememberCmuxTab() }
             guard automatic?.followsFocus == false || input != nil else {
                 reply(failure("Focus an allowed input before finishing Auto dictation")); return
             }

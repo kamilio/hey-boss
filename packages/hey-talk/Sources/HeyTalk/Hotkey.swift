@@ -126,10 +126,20 @@ enum Paste {
                 else { completion(delivery, reason) }
             }
         }
-        func retry(_ onWait: (Timer) -> Void) {
+        func retry(_ onWait: (Timer) -> Void, restoring field: FocusedInput? = nil) {
+            let deadline = ProcessInfo.processInfo.systemUptime + 2
+            var expectedTab: AXUIElement?
+            var focusedEditor = false
             let timer = Timer(timeInterval: 0.35, repeats: true) { timer in
                 guard isCurrent() else { timer.invalidate(); return }
-                guard check() != .focusChanged else { return }
+                if check() == .focusChanged {
+                    if let field, !focusedEditor, ProcessInfo.processInfo.systemUptime < deadline {
+                        if let expectedTab, SpeechAX.value(expectedTab, kAXSelectedAttribute) as? Bool != true { return }
+                        if let next = field.stepTowardCmuxTab() { expectedTab = next }
+                        else { focusedEditor = field.focusReturnedField() }
+                    }
+                    return
+                }
                 timer.invalidate()
                 paste()
             }
@@ -138,7 +148,7 @@ enum Paste {
             onWait(timer)
         }
         if let onWait, check() == .focusChanged {
-            retry(onWait)
+            retry(onWait, restoring: returnToField)
             returnToField?.restoreFocus()
         } else { paste() }
     }

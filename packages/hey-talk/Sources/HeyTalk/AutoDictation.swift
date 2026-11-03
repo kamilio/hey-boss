@@ -74,9 +74,10 @@ struct FocusedInput: Equatable {
     let document: String?
 
     let composerLabel: String?
+    var cmuxTab: AXUIElement?
 
     var returnInstruction: String {
-        if let label = composerLabel, label.hasPrefix("Message ") { return "Focus \(label.dropFirst(8)) in T3" }
+        if app.bundleIdentifier == "com.t3tools.t3code", let label = composerLabel, label.hasPrefix("Message ") { return "Focus \(label.dropFirst(8)) in T3" }
         return "Focus the original field in \(app.localizedName ?? "the original app")"
     }
 
@@ -84,7 +85,7 @@ struct FocusedInput: Equatable {
         guard lhs.app.processIdentifier == rhs.app.processIdentifier,
               equal(lhs.window, rhs.window), lhs.document == rhs.document else { return false }
         if CFEqual(lhs.element, rhs.element) { return lhs.composerLabel == rhs.composerLabel }
-        // T3 remounts the message editor when returning to a thread.
+        // T3 and Slack remount their message editors when returning to a conversation.
         return lhs.window != nil && lhs.document != nil && lhs.composerLabel != nil && lhs.composerLabel == rhs.composerLabel
     }
     private static func equal(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
@@ -100,10 +101,14 @@ struct FocusedInput: Equatable {
         guard AXIsProcessTrusted(), let bundleID = app.bundleIdentifier else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.1)
-        if !forAuto && bundleID == "com.t3tools.t3code" {
+        if !forAuto && ["com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(bundleID) {
             AXUIElementSetAttributeValue(application, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         }
         guard let field = axElement(application, kAXFocusedUIElementAttribute) else { return nil }
+        return identify(field, app: app, forAuto: forAuto)
+    }
+    static func identify(_ field: AXUIElement, app: NSRunningApplication, forAuto: Bool = false) -> Self? {
+        guard let bundleID = app.bundleIdentifier else { return nil }
         AXUIElementSetMessagingTimeout(field, 0.1)
         let role = value(field, kAXRoleAttribute) as? String ?? ""
         let label = value(field, kAXDescriptionAttribute) as? String ?? ""
@@ -116,25 +121,43 @@ struct FocusedInput: Equatable {
                          subrole: value(field, kAXSubroleAttribute) as? String,
                          enabled: enabled as? Bool ?? (!forAuto && enabledStatus == .attributeUnsupported), editable: editable.boolValue,
                          label: label, forAuto: forAuto) else { return nil }
-        let document = documentURL(of: field)
+        let classes = value(field, "AXDOMClassList") as? [String] ?? []
+        let slack = bundleID == "com.tinyspeck.slackmacgap" && classes.contains("ql-editor")
+        var ancestor: AXUIElement? = field, document: String?, threadInput: String?
+        var threadReply = false
+        for _ in 0..<48 {
+            guard let current = ancestor else { break }
+            if slack {
+                if let id = value(current, "AXDOMIdentifier") as? String, id.hasSuffix("-thread-list-Thread_input") { threadInput = id }
+                if (value(current, "AXDOMClassList") as? [String])?.contains("p-threads_footer__input") == true { threadReply = true }
+            }
+            let url = value(current, kAXURLAttribute)
+            if let url = url as? URL { document = url.absoluteString; break }
+            if let url = url as? String { document = url; break }
+            ancestor = axElement(current, kAXParentAttribute)
+        }
+        if slack {
+            guard let route = document, !threadReply || threadInput != nil,
+                  let link = slackLink(route, threadInput: threadInput) else { return nil }
+            document = link
+        }
         let window = axElement(field, kAXWindowAttribute)
         let t3 = bundleID == "com.t3tools.t3code"
         guard !t3 || (window != nil && document?.isEmpty == false) else { return nil }
-        let composer = t3 && role == "AXTextArea" && (value(field, "AXDOMClassList") as? [String])?.contains("composer-tiptap") == true
+        let composer = slack || (t3 && role == "AXTextArea" && classes.contains("composer-tiptap"))
         return Self(app: app, element: field, window: window, document: document, composerLabel: composer && !label.isEmpty ? label : nil)
     }
-    private static func documentURL(of field: AXUIElement) -> String? {
-        var ancestor: AXUIElement? = field
-        // Electron may keep the same editor node when navigating to another thread.
-        // Include the containing document URL so that cannot redirect a transcript.
-        for _ in 0..<48 {
-            guard let current = ancestor else { break }
-            let url = value(current, kAXURLAttribute)
-            if let url = url as? URL { return url.absoluteString }
-            if let url = url as? String { return url }
-            ancestor = axElement(current, kAXParentAttribute)
+    static func slackLink(_ route: String, threadInput: String?) -> String? {
+        guard let url = URL(string: route), url.scheme == "https", url.host == "app.slack.com" else { return nil }
+        let path = url.pathComponents
+        guard path.count >= 4, path[1] == "client", path[2].wholeMatch(of: #/^[TE][A-Z0-9]+$/#) != nil else { return nil }
+        let prefix = "slack://channel?team=\(path[2])&id="
+        if let threadInput {
+            guard let match = threadInput.wholeMatch(of: #/^([CDG][A-Z0-9]+)-([0-9]{10}\.[0-9]{6})-thread-list-Thread_input$/#) else { return nil }
+            return prefix + match.1 + "&thread_ts=" + match.2
         }
-        return nil
+        guard path[3].wholeMatch(of: #/^[CDG][A-Z0-9]+$/#) != nil else { return nil }
+        return prefix + path[3]
     }
     static func threadLink(_ document: String) -> URL? {
         let prefix = "t3code://app/#/"
@@ -146,16 +169,95 @@ struct FocusedInput: Equatable {
     }
     func restoreFocus() {
         guard let window, Self.value(window, kAXRoleAttribute) as? String == kAXWindowRole else { return }
-        app.activate(options: [])
+        if !app.isActive && !app.activate(options: []), let bundle = app.bundleURL {
+            NSWorkspace.shared.openApplication(at: bundle, configuration: .init())
+        }
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        if Self.equal(Self.axElement(element, kAXWindowAttribute), window),
-           Self.documentURL(of: element) == document,
+        if cmuxTab.map({ Self.value($0, kAXSelectedAttribute) as? Bool == true }) ?? true, Self.identify(element, app: app) == self,
            AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return }
+        guard composerLabel != nil, let document, let bundle = app.bundleURL else { return }
+        let link = app.bundleIdentifier == "com.tinyspeck.slackmacgap" && document.hasPrefix("slack://channel?")
+            ? URL(string: document) : Self.threadLink(document)
+        if let link { NSWorkspace.shared.open([link], withApplicationAt: bundle, configuration: .init(), completionHandler: nil) }
+    }
 
-        // Switching threads can destroy the saved editor. T3 focuses its new composer on navigation.
-        guard app.bundleIdentifier == "com.t3tools.t3code", composerLabel != nil,
-              let document, let link = Self.threadLink(document), let bundle = app.bundleURL else { return }
-        NSWorkspace.shared.open([link], withApplicationAt: bundle, configuration: .init(), completionHandler: nil)
+    // Search native containers only. Chromium can return its editors directly without reading chat history.
+    private func windowElements(_ visit: (AXUIElement, String) -> Bool) {
+        guard let window else { return }
+        var pending = [window]
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.12
+        for _ in 0..<160 {
+            guard ProcessInfo.processInfo.systemUptime < deadline, let node = pending.popLast() else { return }
+            guard let role = Self.value(node, kAXRoleAttribute) as? String else { continue }
+            if !visit(node, role) { continue }
+            pending.append(contentsOf: Self.value(node, kAXChildrenAttribute) as? [AXUIElement] ?? [])
+        }
+    }
+
+    mutating func rememberCmuxTab() {
+        guard app.bundleIdentifier == "com.cmuxterm.app", Self.value(element, kAXHelpAttribute) as? String == "Terminal content area",
+              let field = SpeechAX.frame(element) else { return }
+        var tabs: [AXUIElement] = []
+        windowElements { node, role in
+            if role == kAXButtonRole, Self.value(node, kAXSelectedAttribute) as? Bool == true,
+               let box = SpeechAX.frame(node), field.minX <= box.midX, box.midX <= field.maxX,
+               abs(box.maxY - field.minY) < 32 { tabs.append(node) }
+            return !["AXTable", "AXWebArea", "AXButton", "AXTextArea"].contains(role)
+        }
+        cmuxTab = tabs.count == 1 ? tabs[0] : nil
+    }
+
+    func stepTowardCmuxTab() -> AXUIElement? {
+        guard app.isActive, let tab = cmuxTab, Self.value(tab, kAXSelectedAttribute) as? Bool != true,
+              let window, Self.equal(Self.axElement(tab, kAXWindowAttribute), window),
+              Self.equal(Self.axElement(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute), window) else { return nil }
+        // Navigate through cmux's own View menu. AXPress on its tab buttons
+        // reports success without changing tabs.
+        guard let strip = Self.axElement(tab, kAXParentAttribute),
+              let children = Self.value(strip, kAXChildrenAttribute) as? [AXUIElement] else { return nil }
+        let tabs = children.filter { Self.value($0, kAXRoleAttribute) as? String == kAXButtonRole }
+        guard let target = tabs.firstIndex(where: { CFEqual($0, tab) }),
+              let current = tabs.firstIndex(where: { Self.value($0, kAXSelectedAttribute) as? Bool == true }),
+              target != current, var focused = Self.read(app: app, forAuto: false) else { return nil }
+        focused.rememberCmuxTab()
+        guard Self.equal(focused.cmuxTab, tabs[current]) else { return nil }
+        let forward = (target - current + tabs.count) % tabs.count
+        let step = forward <= tabs.count - forward ? 1 : -1
+        let title = step == 1 ? "Next Surface" : "Previous Surface"
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        guard let bar = Self.axElement(application, kAXMenuBarAttribute),
+              let menus = Self.value(bar, kAXChildrenAttribute) as? [AXUIElement],
+              let view = menus.first(where: { Self.value($0, kAXTitleAttribute) as? String == "View" }),
+              let menu = (Self.value(view, kAXChildrenAttribute) as? [AXUIElement])?.first,
+              let items = Self.value(menu, kAXChildrenAttribute) as? [AXUIElement],
+              let action = items.first(where: { Self.value($0, kAXTitleAttribute) as? String == title }) else { return nil }
+        guard AXUIElementPerformAction(action, kAXPressAction as CFString) == .success else { return nil }
+        return tabs[(current + step + tabs.count) % tabs.count]
+    }
+
+    func focusReturnedField() -> Bool {
+        guard app.isActive, let window,
+              Self.equal(Self.axElement(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute), window) else { return false }
+        if let cmuxTab, Self.value(cmuxTab, kAXSelectedAttribute) as? Bool != true { return false }
+        if Self.identify(element, app: app) == self,
+           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return true }
+        guard composerLabel != nil else { return false }
+        guard let editor = remountedEditor() else { return false }
+        return AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+    }
+
+    func remountedEditor() -> AXUIElement? {
+        var matches: [AXUIElement] = []
+        windowElements { node, role in
+            guard role == "AXWebArea" else { return true }
+            let query = ["AXSearchKey": "AXTextFieldSearchKey", "AXResultsLimit": 64] as CFDictionary
+            var result: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(node, "AXUIElementsForSearchPredicate" as CFString, query, &result) == .success {
+                matches += (result as? [AXUIElement] ?? []).filter { Self.identify($0, app: app) == self }
+            }
+            return false
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
     func isFocused() -> Bool {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }

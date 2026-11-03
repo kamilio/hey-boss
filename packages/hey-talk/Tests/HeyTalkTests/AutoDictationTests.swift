@@ -78,6 +78,19 @@ final class AutoDictationTests: XCTestCase {
         XCTAssertNotEqual(field(first, nil, "Message A"), field(other, nil, "Message A"))
     }
 
+    func testSlackDestinationSeparatesChannelDraftsAndIndividualThreadReplies() {
+        let channel = "https://app.slack.com/client/T123/C456"
+        let inbox = "https://app.slack.com/client/T123/activity-inbox"
+        XCTAssertEqual(FocusedInput.slackLink(channel, threadInput: nil), "slack://channel?team=T123&id=C456")
+        XCTAssertEqual(FocusedInput.slackLink("https://app.slack.com/client/E123/D456", threadInput: nil), "slack://channel?team=E123&id=D456")
+        let reply = "C456-1234567890.123456-thread-list-Thread_input"
+        XCTAssertEqual(FocusedInput.slackLink(inbox, threadInput: reply), "slack://channel?team=T123&id=C456&thread_ts=1234567890.123456")
+        XCTAssertNotEqual(FocusedInput.slackLink(channel, threadInput: nil), FocusedInput.slackLink(channel, threadInput: reply))
+        XCTAssertNil(FocusedInput.slackLink(inbox, threadInput: nil))
+        XCTAssertNil(FocusedInput.slackLink(channel, threadInput: "unknown"))
+        XCTAssertNil(FocusedInput.slackLink("https://example.org/client/T123/C456", threadInput: nil))
+    }
+
     func testOnlyExactT3ThreadRoutesCanReopenAComposer() {
         let ids = "0a75001f-0193-4acc-b0e8-abc0dd3b8a77/80d9fef0-18a1-4f4b-b1d4-9b9defac6d1d"
         XCTAssertEqual(FocusedInput.threadLink("t3code://app/#/" + ids)?.absoluteString, "t3code://threads/" + ids)
