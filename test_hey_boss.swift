@@ -4384,14 +4384,25 @@ func auditReviewEcho() {
         if stimulus.isRunning && audio.player.isPlaying { audio.pause(); paused = !audio.player.isPlaying; done = true }
     }
     audio.failed = { preconditionFailure($0) }
-    try! audio.start(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!) {
-        audio.speak("This is a speaker echo check. The reader should continue when only its own voice is audible.", highlight: { _ in
-            guard let fixture, !injected, audio.player.isPlaying else { return }; injected = true
-            // A separate player is audible at the mic but absent from the narrator's echo reference.
-            stimulus.executableURL = URL(fileURLWithPath: "/usr/bin/afplay"); stimulus.arguments = [fixture]
-            try! stimulus.run()
-        }, finished: { done = true })
-    }
+    var ready = 0
+    try! audio.start(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!) { ready += 1 }
+    let opening = Date().addingTimeInterval(5)
+    while ready == 0 && Date() < opening { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    precondition(ready == 1)
+    // A configuration notification alone is harmless. When Core Audio actually
+    // stops the graph, input must return without starting a second session.
+    NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: audio.engine)
+    precondition(audio.engine.isRunning && !audio.stopped)
+    audio.engine.stop()
+    let reconnect = Date().addingTimeInterval(6)
+    while !audio.engine.isRunning && Date() < reconnect { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+    precondition(audio.engine.isRunning && ready == 1, "Reconnect audio without reopening the chat")
+    audio.speak("This is a speaker echo check. The reader should continue when only its own voice is audible.", highlight: { _ in
+        guard let fixture, !injected, audio.player.isPlaying else { return }; injected = true
+        // A separate player is audible at the mic but absent from the narrator's echo reference.
+        stimulus.executableURL = URL(fileURLWithPath: "/usr/bin/afplay"); stimulus.arguments = [fixture]
+        try! stimulus.run()
+    }, finished: { done = true })
     let deadline = Date().addingTimeInterval(20)
     while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     RunLoop.current.run(until: Date().addingTimeInterval(1))
@@ -4453,7 +4464,7 @@ func auditConversation(_ root: String) {
         let pcm = try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent(name + ".pcm"))
         microphone.async {
             var frames = Data(count: 12800); frames.append(pcm)
-            if !finishManually { frames.append(Data(count: 48000)) }
+            if !finishManually { frames.append(Data(count: 112000)) }
             for index in stride(from: 0, to: frames.count, by: 640) {
                 try! writer.write(contentsOf: frames[index..<min(index + 640, frames.count)])
                 Thread.sleep(forTimeInterval: 0.019)
@@ -4470,6 +4481,7 @@ func auditConversation(_ root: String) {
     precondition(ui.phase == .listening && ui.audio === audio && !ui.contextChip.isHidden)
     feed("first")
     wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
+    precondition(ui.rows[2].stringValue.lowercased().hasPrefix("so") && ui.rows[2].stringValue.localizedCaseInsensitiveContains("fruit"), "A thinking pause after So must not cut off the question")
     ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
     precondition(ui.phase == .speaking && ui.recording == nil)
     wait("listen again") { ui.phase == .listening }
