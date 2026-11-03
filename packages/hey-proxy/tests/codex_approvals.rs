@@ -47,9 +47,16 @@ fn configure_codex_updates_approval_defaults_and_selected_profiles_idempotently(
             assert_eq!(
                 (
                     settings["approval_policy"].as_str(),
-                    settings["approvals_reviewer"].as_str()
+                    settings["approvals_reviewer"].as_str(),
+                    settings["chatgpt_base_url"].as_str(),
+                    settings["features"]["api_key_model_discovery"].as_bool(),
                 ),
-                (Some("on-request"), Some("auto_review"))
+                (
+                    Some("on-request"),
+                    Some("auto_review"),
+                    Some("http://127.0.0.1:8080/backend-api"),
+                    Some(false),
+                )
             );
         }
         assert_eq!(docs[0]["sandbox_mode"].as_str(), Some("danger-full-access"));

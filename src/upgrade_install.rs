@@ -400,7 +400,11 @@ fn publish_to(
         if let Some(proxy_home) = proxy_home
             && companion_bins.contains(&binary.with_file_name("hey-proxy"))
         {
-            refresh_proxy(Path::new("/bin/launchctl"), Path::new("systemctl"), proxy_home)?;
+            refresh_proxy(
+                Path::new("/bin/launchctl"),
+                Path::new("systemctl"),
+                proxy_home,
+            )?;
         }
         // The durable receipt is the last publication step. Failed installations
         // leave the previous generation authoritative.
@@ -436,7 +440,11 @@ fn publish_to(
             && let Some(proxy_home) = proxy_home
             && companion_bins.contains(&binary.with_file_name("hey-proxy"))
         {
-            let _ = refresh_proxy(Path::new("/bin/launchctl"), Path::new("systemctl"), proxy_home);
+            let _ = refresh_proxy(
+                Path::new("/bin/launchctl"),
+                Path::new("systemctl"),
+                proxy_home,
+            );
         }
         if replaced_binary
             && let Some(harvester) = harvester
