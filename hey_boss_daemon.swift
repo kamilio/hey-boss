@@ -7177,9 +7177,25 @@ final class ConversationMeter: NSView {
 }
 
 @available(macOS 26, *)
-final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
+final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 630, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let historyList = NSTableView()
+    private let split = NSSplitViewController()
+    private let emptyHistory = NSTextField(wrappingLabelWithString: "Your conversations appear here.")
+    private struct Chat: Codable {
+        let id: UUID
+        let title: String
+        let workspace: String
+        let updated: Date
+    }
+    private struct Library: Codable {
+        var selected = UUID()
+        var draftDirectory: URL?
+        var chats: [Chat] = []
+    }
+    private var library = Library()
+    private var refreshingHistory = false
     let status = NSTextField(wrappingLabelWithString: "")
     let action = NSButton()
     let meter = ConversationMeter()
@@ -7234,7 +7250,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
         let toolbar = NSToolbar(identifier: "VoiceConversation")
         toolbar.delegate = self; toolbar.displayMode = .iconOnly; window.toolbar = toolbar
         window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 410, height: 360)
-        let body = NSView(); window.contentView = body
+        let body = NSView()
+        configureSidebar(detail: body)
         scroll.contentView = FlippedClip(); scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         turns.orientation = .vertical; turns.alignment = .leading; turns.spacing = 16
         turns.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 16, right: 0)
@@ -7277,10 +7294,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
         if let row = rows.last { reveal(row) }
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .init("new-conversation"), settings.itemIdentifier]
+        [.init("conversation-sidebar"), .flexibleSpace, .init("new-conversation"), settings.itemIdentifier]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id.rawValue == "conversation-sidebar" {
+            let item = NSToolbarItem(itemIdentifier: id); item.label = "Chat History"; item.toolTip = "Show or hide chat history"
+            item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: item.label)
+            item.target = split; item.action = #selector(NSSplitViewController.toggleSidebar(_:)); return item
+        }
         if id == settings.itemIdentifier {
             settings.label = "Conversation settings"; settings.toolTip = settings.label
             settings.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: settings.label)
@@ -7289,6 +7311,87 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
         let item = NSToolbarItem(itemIdentifier: id); item.label = "New Conversation"; item.toolTip = item.label
         item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: item.label)
         item.target = self; item.action = #selector(newConversation); return item
+    }
+    private func configureSidebar(detail: NSView) {
+        let side = NSViewController(), main = NSViewController()
+        side.view = NSView(); main.view = detail
+        let sidebar = NSSplitViewItem(sidebarWithViewController: side)
+        sidebar.minimumThickness = 170; sidebar.maximumThickness = 300; sidebar.preferredThicknessFraction = 0.26
+        sidebar.canCollapse = true
+        let content = NSSplitViewItem(viewController: main); content.minimumThickness = 360
+        split.addSplitViewItem(sidebar); split.addSplitViewItem(content)
+        let title = NSTextField(labelWithString: "Chats")
+        title.font = .systemFont(ofSize: 13, weight: .semibold); title.textColor = .secondaryLabelColor
+        emptyHistory.font = .systemFont(ofSize: 12); emptyHistory.textColor = .tertiaryLabelColor
+        let column = NSTableColumn(identifier: .init("chat")); column.resizingMask = .autoresizingMask
+        historyList.addTableColumn(column); historyList.headerView = nil; historyList.style = .sourceList
+        historyList.rowHeight = 46; historyList.usesAutomaticRowHeights = false; historyList.backgroundColor = .clear
+        historyList.delegate = self; historyList.dataSource = self; historyList.setAccessibilityLabel("Chat history")
+        let list = NSScrollView(); list.drawsBackground = false; list.hasVerticalScroller = true; list.autohidesScrollers = true; list.documentView = historyList
+        for view in [title, list, emptyHistory] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 18), title.topAnchor.constraint(equalTo: side.view.safeAreaLayoutGuide.topAnchor, constant: 14),
+            list.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 4),
+            list.trailingAnchor.constraint(equalTo: side.view.trailingAnchor, constant: -4), list.bottomAnchor.constraint(equalTo: side.view.bottomAnchor),
+            emptyHistory.topAnchor.constraint(equalTo: list.topAnchor, constant: 8), emptyHistory.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            emptyHistory.trailingAnchor.constraint(lessThanOrEqualTo: side.view.trailingAnchor, constant: -12)
+        ])
+        window.contentViewController = split
+        window.setContentSize(NSSize(width: 860, height: 610))
+        sidebar.isCollapsed = false; split.view.layoutSubtreeIfNeeded(); split.splitView.setPosition(218, ofDividerAt: 0)
+    }
+    func windowDidResize(_ notification: Notification) {
+        if window.isVisible, window.frame.width < 580, let sidebar = split.splitViewItems.first, !sidebar.isCollapsed { sidebar.isCollapsed = true }
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { library.chats.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let chat = library.chats[row], id = NSUserInterfaceItemIdentifier("chat-row")
+        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? NSTableCellView()
+        if cell.identifier == nil {
+            cell.identifier = id
+            let title = NSTextField(labelWithString: ""), subtitle = NSTextField(labelWithString: "")
+            title.font = .systemFont(ofSize: 13, weight: .medium); subtitle.font = .systemFont(ofSize: 11)
+            subtitle.textColor = .secondaryLabelColor; subtitle.tag = 2
+            for label in [title, subtitle] {
+                label.lineBreakMode = .byTruncatingTail; label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 7).isActive = true
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -7).isActive = true
+            }
+            title.bottomAnchor.constraint(equalTo: cell.centerYAnchor).isActive = true
+            subtitle.topAnchor.constraint(equalTo: cell.centerYAnchor, constant: 2).isActive = true
+            cell.textField = title
+        }
+        cell.textField?.stringValue = chat.title; cell.toolTip = chat.title
+        let date = Calendar.current.isDateInToday(chat.updated) ? chat.updated.formatted(date: .omitted, time: .shortened) : chat.updated.formatted(date: .abbreviated, time: .omitted)
+        (cell.viewWithTag(2) as? NSTextField)?.stringValue = chat.workspace + "  ·  " + date
+        return cell
+    }
+    private func refreshHistory() {
+        refreshingHistory = true; defer { refreshingHistory = false }
+        historyList.reloadData()
+        if let row = library.chats.firstIndex(where: { $0.id == library.selected }) { historyList.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+        else { historyList.deselectAll(nil) }
+        emptyHistory.isHidden = !library.chats.isEmpty
+    }
+    private func rememberTurn() {
+        guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
+        let chat = Chat(id: library.selected, title: String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
+                        workspace: directory?.lastPathComponent ?? "On this Mac", updated: Date())
+        library.chats.removeAll { $0.id == chat.id }; library.chats.insert(chat, at: 0); refreshHistory()
+    }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = historyList.selectedRow
+        guard !refreshingHistory, library.chats.indices.contains(row) else { return }
+        let id = library.chats[row].id
+        guard id != library.selected else { return }
+        do {
+            let saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(id)))
+            stop("Ready")
+            if restoreError == nil && !save() { refreshHistory(); return }
+            restoreError = nil
+            library.selected = id; clearTurns(); input.stringValue = ""
+            apply(saved); try writeLibrary(); refreshHistory()
+        } catch { refreshHistory(); status.stringValue = "Couldn’t open that conversation: " + error.localizedDescription }
     }
     func refreshScope() {
         let menu = NSMenu()
@@ -7312,7 +7415,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
         }
     }
     func selectDirectory(_ url: URL?) {
-        stop("Ready"); restoreError = nil; model = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
+        stop("Ready")
+        if !messages.isEmpty && !save() { return }
+        library.selected = UUID(); refreshHistory(); restoreError = nil; model = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
         state(.idle, url == nil ? "On-device chat" : "Codex workspace"); save(); window.makeFirstResponder(input)
     }
     func clearTurns() {
@@ -7426,7 +7531,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
     func respond(_ text: String) {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
         turnDone = false; lastMessage = nil
-        append(text, from: "You"); state(.thinking, "Thinking…")
+        append(text, from: "You"); rememberTurn(); state(.thinking, "Thinking…")
         if let directory {
             do {
                 let first = process == nil
@@ -7631,23 +7736,42 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate {
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
         state(.idle, message)
     }
-    private func save() {
-        guard restoreError == nil else { return }
+    private func chatURL(_ id: UUID) -> URL { saveURL.deletingLastPathComponent().appendingPathComponent(id.uuidString + ".json") }
+    private func writeLibrary() throws {
+        library.draftDirectory = messages.isEmpty ? directory : nil
+        try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
+    }
+    @discardableResult private func save() -> Bool {
+        guard restoreError == nil else { return false }
         do {
-            let parent = saveURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let saved = Saved(messages: messages, directory: directory, thread: thread, transcript: model?.transcript)
-            try JSONEncoder().encode(saved).write(to: saveURL, options: .atomic)
-        } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription }
+            try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            if !messages.isEmpty {
+                let saved = Saved(messages: messages, directory: directory, thread: thread, transcript: model?.transcript)
+                try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
+            }
+            try writeLibrary(); return true
+        } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
+    }
+    private func apply(_ saved: Saved) {
+        directory = saved.directory; thread = saved.thread; model = saved.transcript.map { LanguageModelSession(transcript: $0) }
+        for message in saved.messages { append(message.text, from: message.speaker) }
+        refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
     }
     private func restore() {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
         do {
-            let saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: saveURL))
-            directory = saved.directory; thread = saved.thread
-            if let transcript = saved.transcript { model = LanguageModelSession(transcript: transcript) }
-            for message in saved.messages { append(message.text, from: message.speaker) }
-            refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+            let data = try Data(contentsOf: saveURL)
+            if let index = try? JSONDecoder().decode(Library.self, from: data) {
+                library = index; refreshHistory()
+                if library.chats.contains(where: { $0.id == library.selected }) {
+                    apply(try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(library.selected))))
+                } else {
+                    directory = library.draftDirectory; refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+                }
+            } else {
+                // Preserve the single conversation saved by earlier versions.
+                apply(try JSONDecoder().decode(Saved.self, from: data)); rememberTurn(); save()
+            }
         } catch {
             restoreError = "Couldn’t reopen this conversation. Use New Conversation to start over."
             state(.idle, restoreError!)

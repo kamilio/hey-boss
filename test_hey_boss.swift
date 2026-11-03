@@ -4481,8 +4481,18 @@ func auditConversation(_ root: String) {
     resumed.sendTyped()
     wait("voice to keyboard after reopening") { resumed.phase == .idle }
     precondition(resumed.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
-    resumed.newConversation(); precondition(resumed.rows.isEmpty && resumed.model == nil)
+    let originalHistory = resumed.rows.map(\.stringValue)
+    resumed.newConversation(); precondition(resumed.rows.isEmpty && resumed.model == nil && resumed.historyList.numberOfRows == 1)
+    resumed.input.stringValue = "Hello"; resumed.sendTyped(); wait("second chat") { resumed.phase == .idle }
+    precondition(resumed.historyList.numberOfRows == 2)
     resumed.window.close()
+    let library = VoiceConversation(cli: cli, saveURL: saved); library.show()
+    library.historyList.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+    precondition(library.rows.map(\.stringValue) == originalHistory)
+    library.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
+    library.sendTyped(); wait("recalled from sidebar") { library.phase == .idle }
+    precondition(library.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
+    library.window.close()
     ui.newConversation()
     let fresh = ReviewAudio()
     ui.connect(fresh)
@@ -4513,7 +4523,9 @@ func auditWorkspaceChat(_ root: String) {
         while ui.phase != .idle && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.03)) }
         precondition(ui.phase == .idle && ui.process != nil, ui.status.stringValue)
     }
-    ui.show(); snapshot("welcome"); ui.selectDirectory(folder)
+    ui.show(); snapshot("welcome")
+    precondition(ui.historyList.visibleRect.width >= 150 && !ui.historyList.isHiddenOrHasHiddenAncestor)
+    ui.selectDirectory(folder)
     let value = UUID().uuidString
     try! value.write(to: folder.appendingPathComponent("example.txt"), atomically: true, encoding: .utf8)
     ui.input.stringValue = "Copy example.txt to answer.txt using a shell command. Reply with its contents."
@@ -4528,10 +4540,14 @@ func auditWorkspaceChat(_ root: String) {
     let original = ui.process!, history = ui.rows.map(\.stringValue)
     ui.window.close(); ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
     ui.show(); precondition(ui.directory?.path == folder.path && ui.rows.map(\.stringValue) == history && ui.process == nil)
+    ui.newLocal(); precondition(ui.rows.isEmpty && ui.directory == nil)
+    ui.historyList.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+    precondition(ui.directory?.path == folder.path && ui.rows.map(\.stringValue) == history)
     ui.input.stringValue = "Without reading a file, repeat the value from your last reply."
     ui.sendTyped(); wait(); precondition(ui.process !== original && ui.rows.count >= history.count + 2 && ui.rows.last!.stringValue.contains(value))
     ui.window.setContentSize(NSSize(width: 415, height: 435)); ui.window.appearance = NSAppearance(named: .darkAqua); snapshot("compact")
-    precondition(ui.input.bounds.width > 150 && ui.rows.allSatisfy { $0.bounds.width > 45 && $0.bounds.width <= ui.scroll.bounds.width })
+    precondition(ui.historyList.visibleRect.isEmpty && ui.input.bounds.width > 150)
+    precondition(ui.rows.allSatisfy { $0.bounds.width > 0 && $0.alignmentRect(forFrame: $0.frame).width <= ui.scroll.bounds.width + 0.5 })
     ui.input.stringValue = "Hello"; ui.sendTyped(); ui.toggle()
     precondition(ui.phase == .idle && ui.process == nil && !ui.rows.isEmpty)
     ui.selectDirectory(nil)
