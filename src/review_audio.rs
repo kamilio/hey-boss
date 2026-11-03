@@ -7,21 +7,23 @@ mod tests {
 
     #[test]
     fn short_noise_doesnt_interrupt_and_a_thinking_pause_stays_in_one_turn() {
-        let mut gate = Turn::default();
-        let mut advance = |frames, speech| {
-            (0..frames)
-                .filter_map(|_| gate.push(speech))
-                .collect::<Vec<_>>()
-        };
-        assert!(advance(3, true).is_empty());
-        assert!(advance(20, false).is_empty());
-        assert_eq!(advance(10, true), [Edge::Start]);
-        assert!(advance(30, false).is_empty());
-        assert!(advance(15, true).is_empty());
-        assert!(advance(39, false).is_empty());
-        assert_eq!(advance(1, false), [Edge::End]);
-        assert!(advance(100, false).is_empty());
-        assert_eq!(advance(10, true), [Edge::Start]);
+        for (conversation, quiet) in [(false, 40), (true, 55)] {
+            let mut gate = Turn::new(conversation);
+            let mut advance = |frames, speech| {
+                (0..frames)
+                    .filter_map(|_| gate.push(speech))
+                    .collect::<Vec<_>>()
+            };
+            assert!(advance(3, true).is_empty());
+            assert!(advance(20, false).is_empty());
+            assert_eq!(advance(10, true), [Edge::Start]);
+            assert!(advance(quiet - 5, false).is_empty());
+            assert!(advance(15, true).is_empty());
+            assert!(advance(quiet - 1, false).is_empty());
+            assert_eq!(advance(1, false), [Edge::End]);
+            assert!(advance(100, false).is_empty());
+            assert_eq!(advance(10, true), [Edge::Start]);
+        }
     }
 }
 
@@ -31,21 +33,28 @@ enum Edge {
     End,
 }
 
-#[derive(Default)]
 struct Turn {
     active: bool,
     consecutive: usize,
+    quiet_frames: usize,
 }
 
 impl Turn {
-    // One frame is 20 ms. Wait for 160 ms of speech, then allow 800 ms of
-    // quiet within the same thought. WebRTC adds its own short hangover.
+    fn new(conversation: bool) -> Self {
+        // 20 ms frames: allow 1.1 s to think in chat, 800 ms for review comments.
+        Self {
+            active: false,
+            consecutive: 0,
+            quiet_frames: if conversation { 55 } else { 40 },
+        }
+    }
+
     fn push(&mut self, speech: bool) -> Option<Edge> {
         if speech == self.active {
             self.consecutive = 0;
         } else {
             self.consecutive += 1;
-            if self.consecutive >= if self.active { 40 } else { 8 } {
+            if self.consecutive >= if self.active { self.quiet_frames } else { 8 } {
                 self.consecutive = 0;
                 self.active = speech;
                 return Some(if speech { Edge::Start } else { Edge::End });
@@ -57,7 +66,12 @@ impl Turn {
 
 // Frames on stdout: little-endian u16 byte count, then that many PCM bytes.
 // 2 bookmarks the first voiced frame before debounce; 0 confirms a turn; 1 ends it.
-pub fn stream(mut input: impl Read, mut output: impl Write, duplex: bool) -> io::Result<()> {
+pub fn stream(
+    mut input: impl Read,
+    mut output: impl Write,
+    duplex: bool,
+    conversation: bool,
+) -> io::Result<()> {
     let format = aec3::nodes::audio::AudioFormat::ten_ms(16000, 1);
     let mut echo = if duplex {
         Some(
@@ -70,7 +84,7 @@ pub fn stream(mut input: impl Read, mut output: impl Write, duplex: bool) -> io:
         None
     };
     let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
-    let mut turn = Turn::default();
+    let mut turn = Turn::new(conversation);
     let mut history = std::collections::VecDeque::with_capacity(20);
     let mut frame = [0u8; 640];
     loop {

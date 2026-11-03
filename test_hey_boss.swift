@@ -4407,13 +4407,15 @@ func auditReviewEcho() {
 @available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
-    let ui = VoiceConversation(cli: cli)
+    let saved = URL(fileURLWithPath: root).appendingPathComponent("chat.json")
+    let ui = VoiceConversation(cli: cli, saveURL: saved)
     ui.show()
     let audio = ReviewAudio()
     audio.engine.attach(audio.player)
     audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
     audio.engine.mainMixerNode.outputVolume = 0
     try! audio.engine.start()
+    audio.conversation = true
     let writer = try! audio.listen(cli: cli)
     ui.connect(audio)
     func wait(_ step: String, _ check: () -> Bool) {
@@ -4470,8 +4472,18 @@ func auditConversation(_ root: String) {
     // Playback can begin before the fixture finishes writing its trailing silence.
     microphone.sync {}
     ui.window.close()
-    precondition(ui.rows.isEmpty && ui.action.title == "Start voice")
+    precondition(!ui.rows.isEmpty && ui.action.title == "Start voice")
     precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
+    let resumed = VoiceConversation(cli: cli, saveURL: saved)
+    resumed.show()
+    precondition(resumed.rows.count == ui.rows.count)
+    resumed.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
+    resumed.sendTyped()
+    wait("voice to keyboard after reopening") { resumed.phase == .idle }
+    precondition(resumed.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
+    resumed.newConversation(); precondition(resumed.rows.isEmpty && resumed.model == nil)
+    resumed.window.close()
+    ui.newConversation()
     let fresh = ReviewAudio()
     ui.connect(fresh)
     ui.respond("Hello")
@@ -4486,8 +4498,8 @@ func auditConversation(_ root: String) {
 @available(macOS 26, *)
 func auditWorkspaceChat(_ root: String) {
     let env = ProcessInfo.processInfo.environment
-    let ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!)
-    let folder = URL(fileURLWithPath: root)
+    let folder = URL(fileURLWithPath: root), saved = folder.appendingPathComponent("chat.json")
+    var ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
     func snapshot(_ name: String) {
         ui.window.displayIfNeeded()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
@@ -4513,9 +4525,11 @@ func auditWorkspaceChat(_ root: String) {
     precondition(ui.window.attachedSheet != nil && !(ui.details[tool] ?? "").isEmpty)
     ui.window.endSheet(ui.window.attachedSheet!)
     snapshot("workspace")
-    let original = ui.process!
+    let original = ui.process!, history = ui.rows.map(\.stringValue)
+    ui.window.close(); ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+    ui.show(); precondition(ui.directory?.path == folder.path && ui.rows.map(\.stringValue) == history && ui.process == nil)
     ui.input.stringValue = "Without reading a file, repeat the value from your last reply."
-    ui.sendTyped(); wait(); precondition(ui.process === original && ui.rows.count == 4 && ui.rows.last!.stringValue.contains(value))
+    ui.sendTyped(); wait(); precondition(ui.process !== original && ui.rows.count >= history.count + 2 && ui.rows.last!.stringValue.contains(value))
     ui.window.setContentSize(NSSize(width: 415, height: 435)); ui.window.appearance = NSAppearance(named: .darkAqua); snapshot("compact")
     precondition(ui.input.bounds.width > 150 && ui.rows.allSatisfy { $0.bounds.width > 45 && $0.bounds.width <= ui.scroll.bounds.width })
     ui.input.stringValue = "Hello"; ui.sendTyped(); ui.toggle()
