@@ -121,6 +121,12 @@ pub fn stream(
         None
     };
     let mut vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Aggressive);
+    let mut chat_vad = conversation
+        .then(silero_vad_crs::SileroVad::new)
+        .transpose()
+        .map_err(io::Error::other)?;
+    let mut pending = Vec::new();
+    let mut chat_speech = false;
     let mut turn = Turn::new(conversation);
     let mut history = std::collections::VecDeque::with_capacity(20);
     let mut frame = [0u8; 640];
@@ -151,7 +157,21 @@ pub fn stream(
         }
         let samples: [i16; 320] =
             std::array::from_fn(|i| i16::from_le_bytes([frame[i * 2], frame[i * 2 + 1]]));
-        let speech = vad.is_voice_segment(&samples).expect("20 ms frame");
+        let speech = if let Some(detector) = &mut chat_vad {
+            // Silero scores 32 ms at a time; keep its last decision between windows.
+            pending.extend(samples.iter().map(|&s| f32::from(s) / 32768.0));
+            let n = detector.source_window_samples();
+            if pending.len() >= n {
+                chat_speech = detector
+                    .forward_chunk(&pending[..n])
+                    .map_err(io::Error::other)?
+                    >= 0.5;
+                pending.drain(..n);
+            }
+            chat_speech
+        } else {
+            vad.is_voice_segment(&samples).expect("20 ms frame")
+        };
         if speech && !turn.active && turn.consecutive == 0 {
             output.write_all(&2u16.to_le_bytes())?;
             output.flush()?;

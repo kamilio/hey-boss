@@ -34,6 +34,19 @@ const noise = signal(48000, () => ((seed = seed * 16807 % 2147483647) / 21474836
 const click = signal(16000, i => i > 3000 && i < 3070 ? 20000 * Math.sin(i) : 0);
 assert.equal(detect(silence(1000), noise, silence(1000), click, silence(1500)).length, 0);
 const quiet = signal(voice.length / 2, i => voice.readInt16LE(i * 2) / 10);
+// Frequent key strikes can keep a conventional voice gate open for several seconds.
+const typing = signal(64000, i => (i % 2400 < 160 ? Math.exp(-(i % 2400) / 45) * noise.readInt16LE((i % 48000) * 2) * 18 : 0));
+const chat = (...parts) => readTurns(Buffer.concat([silence(1000), ...parts, silence(2000)]), ['--conversation']);
+const ping = spawnSync('ffmpeg', ['-loglevel', 'error', '-i', '/System/Library/Sounds/Ping.aiff', '-ar', '16000', '-ac', '1', '-f', 's16le', '-']);
+assert.equal(ping.status, 0, String(ping.stderr));
+assert.equal(chat(ping.stdout).length, 0, 'a notification must not open a chat turn');
+assert.equal(chat(typing).length, 0, 'typing alone must not open a chat turn');
+for (const speech of [voice, quiet]) {
+  const mixed = signal(speech.length / 2, i => Math.max(-32768, Math.min(32767, speech.readInt16LE(i * 2) + typing.readInt16LE((i * 2) % typing.length))));
+  const turns = chat(typing, mixed, typing);
+  assert.equal(turns.length, 1, 'speech amid typing opens one chat turn');
+  assert(turns[0].length < mixed.length + 32000 * 2, 'continued typing must not hold the turn open');
+}
 for (const sound of [voice, quiet]) {
   const input = Buffer.concat([silence(1000), sound, silence(1500)]);
   const turns = detect(input);
