@@ -48,13 +48,15 @@ public struct RecordingSession {
     }
 }
 
-// Geometry and signal response ported from OpenWhispr (MIT; see THIRD_PARTY.md).
+// Geometry adapted from OpenWhispr (MIT; see THIRD_PARTY.md).
 public enum Waveform {
     public static let count = 11
     public static let resting: [Double] = [6, 12, 5, 9, 7, 22, 18, 5, 20, 12, 17]
     public static func height(_ rms: Double) -> Double {
         guard rms.isFinite, rms > 0 else { return 4 }
-        return 4 + 18 * pow(min(1, rms * 8), 0.75)
+        // Map −60…−18 dBFS onto the available height so quiet syllables remain visible.
+        let decibels = 20 * log10(rms)
+        return 4 + 18 * min(1, max(0, (decibels + 60) / 42))
     }
 }
 

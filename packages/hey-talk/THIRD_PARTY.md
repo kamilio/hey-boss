@@ -1,6 +1,6 @@
 # Third-party components
 
-- Recording-pill geometry, waveform response, and listening icon adapted from
+- Recording-pill geometry and listening icon adapted from
   [OpenWhispr](https://github.com/OpenWhispr/openwhispr), MIT, copyright 2024 OpenWhispr Team.
   Swift implementation replaces its web renderer. License: `Licenses/OpenWhispr.txt`.
 - [sherpa-onnx 1.13.8](https://github.com/k2-fsa/sherpa-onnx), Apache-2.0,

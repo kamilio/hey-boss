@@ -255,11 +255,24 @@ final class OverlayTests: XCTestCase {
         XCTAssertTrue(waiting.isHidden, "Brief microphone startup must not flash the wide Connecting bubble")
         let recordingSize = panel.frame.size
         XCTAssertFalse(views.contains { ($0 as? NSButton)?.toolTip == "Cancel · Esc" }, "No separate close button")
+        overlay.level = { 0.0058 }
         overlay.update(.recording)
         XCTAssertFalse(wave.isHidden)
         XCTAssertEqual(wave.alphaValue, 1)
         XCTAssertTrue(waiting.isHidden)
         XCTAssertEqual(panel.frame.size, recordingSize)
+        // Check the drawn bars after real meter ticks, not just the view's visibility.
+        let live = expectation(description: "Quiet microphone input reaches the waveform")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if let pixels = wave.bitmapImageRepForCachingDisplay(in: wave.bounds) {
+                wave.cacheDisplay(in: wave.bounds, to: pixels)
+                let x = pixels.pixelsWide * 51 / 52
+                let rows = (0..<pixels.pixelsHigh).filter { (pixels.colorAt(x: x, y: $0)?.alphaComponent ?? 0) > 0.5 }
+                XCTAssertEqual(Double(rows.count) * wave.bounds.height / Double(pixels.pixelsHigh), 11, accuracy: 1)
+            } else { XCTFail("Could not render recording bars") }
+            live.fulfill()
+        }
+        wait(for: [live], timeout: 2)
         overlay.preparing()
         XCTAssertFalse(wave.isHidden, "Recovery must not collapse back to the idle icon")
         let early = expectation(description: "Connecting stays hidden before 700 ms")
