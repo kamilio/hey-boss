@@ -7244,7 +7244,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         contextChip.title = capture.text == nil ? "No readable text from " + capture.source : capture.source
         contextChip.toolTip = "View captured context"
     } }
-    private var listenAfterReply = false
     private struct Saved: Codable {
         let messages: [Message]
         var pendingCapture: Capture?
@@ -7335,16 +7334,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func openWithContext(source: String?, text: String?) {
         show()
-        if let source { pendingCapture = Capture(source: source, text: text) }
-        if phase == .idle { toggle() }
-        else if audio == nil { listenAfterReply = true }
+        guard selectDirectory(directory, capture: source.map { Capture(source: $0, text: text) }) else { return }
+        toggle()
     }
-    @objc private func inspectCapture() {
-        guard let capture = pendingCapture else { return }
+    @objc private func inspectCapture(_ sender: NSButton) {
+        let pending = sender === contextChip
+        guard let capture = pending ? pendingCapture : messages[sender.tag].capture else { return }
         let sheet = NSAlert(); sheet.messageText = capture.source
         if let text = capture.text { sheet.accessoryView = detailView(text) }
         else { sheet.informativeText = "This window didn’t expose readable text. You can still speak or type." }
-        sheet.addButton(withTitle: "Done"); sheet.addButton(withTitle: "Remove")
+        sheet.addButton(withTitle: "Done")
+        if pending { sheet.addButton(withTitle: "Remove") }
         sheet.beginSheetModal(for: window) { [weak self] result in
             if result == .alertSecondButtonReturn { self?.pendingCapture = nil }
         }
@@ -7470,11 +7470,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if result == .OK, let url = picker.url { self?.selectDirectory(url) }
         }
     }
-    func selectDirectory(_ url: URL?) {
+    @discardableResult func selectDirectory(_ url: URL?, capture: Capture? = nil) -> Bool {
         stop("Ready")
-        if !messages.isEmpty && !save() { return }
+        if !messages.isEmpty && !save() { return false }
+        if let sheet = window.attachedSheet { window.endSheet(sheet) }
         library.selected = UUID(); refreshHistory(); restoreError = nil; model = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
-        state(.idle, url == nil ? "On-device chat" : "Codex workspace"); save(); window.makeFirstResponder(input)
+        pendingCapture = capture
+        state(.idle, url == nil ? "On-device chat" : "Codex workspace"); window.makeFirstResponder(input)
+        return save()
     }
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
@@ -7573,7 +7576,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let row = NSView(), card = NSBox()
         card.boxType = .custom; card.cornerRadius = 12; card.borderWidth = 0
         card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
-        let who = NSTextField(labelWithString: capture.map { speaker + "  ·  " + $0.source } ?? speaker); who.toolTip = capture?.text
+        let who = NSTextField(labelWithString: speaker)
         who.font = .systemFont(ofSize: 11, weight: .semibold); who.textColor = mine ? .controlAccentColor : .secondaryLabelColor
         let label = NSTextField(wrappingLabelWithString: text); label.isSelectable = true
         label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -7588,8 +7591,24 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             card.widthAnchor.constraint(lessThanOrEqualTo: row.widthAnchor, multiplier: mine ? 0.84 : 1),
             who.topAnchor.constraint(equalTo: card.topAnchor, constant: mine ? 8 : 0), who.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
             label.topAnchor.constraint(equalTo: who.bottomAnchor, constant: 3), label.leadingAnchor.constraint(equalTo: who.leadingAnchor),
-            label.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset), label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: mine ? -9 : 0)
+            label.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset)
         ])
+        if let capture, let snapshot = capture.text {
+            let source = NSButton(title: capture.source, target: self, action: #selector(inspectCapture))
+            source.tag = messages.count - 1; source.isBordered = false; source.font = .systemFont(ofSize: 12, weight: .medium)
+            source.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil); source.imagePosition = .imageLeading
+            source.contentTintColor = .controlAccentColor; source.toolTip = "View full captured context"
+            let preview = NSTextField(wrappingLabelWithString: snapshot)
+            preview.maximumNumberOfLines = 2; preview.lineBreakMode = .byTruncatingTail
+            preview.font = .systemFont(ofSize: 12); preview.textColor = .secondaryLabelColor
+            for view in [source, preview] { view.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(view) }
+            NSLayoutConstraint.activate([
+                source.leadingAnchor.constraint(equalTo: label.leadingAnchor), source.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 8),
+                source.trailingAnchor.constraint(lessThanOrEqualTo: label.trailingAnchor),
+                preview.topAnchor.constraint(equalTo: source.bottomAnchor, constant: 2), preview.leadingAnchor.constraint(equalTo: label.leadingAnchor),
+                preview.trailingAnchor.constraint(equalTo: label.trailingAnchor), preview.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -9)
+            ])
+        } else { label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: mine ? -9 : 0).isActive = true }
         reveal(row)
     }
     func reveal(_ row: NSView) {
@@ -7604,8 +7623,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var question = text
         if let capture, let snapshot = capture.text {
             // Preserve the boundary between quoted window content and the user's request.
-            let data = try! JSONSerialization.data(withJSONObject: ["source_app": capture.source, "captured_text": snapshot, "user_message": text], options: [.sortedKeys])
-            question = String(decoding: data, as: UTF8.self)
+            let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
+            question = quote + "\n\n" + text
         }
         append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
         if let directory {
@@ -7701,7 +7720,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             })
         } else if turnDone {
             state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "On-device chat" : "Codex workspace")
-            if listenAfterReply { listenAfterReply = false; toggle() }
         } else if phase == .speaking { state(.thinking, "Waiting for reply…") }
     }
     func startCodex(_ folder: URL) throws {
@@ -7804,7 +7822,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func stop(_ message: String) {
         if let (field, _) = lit { highlight(field, nil) }
-        speech.removeAll(); reading = false; turnDone = false; listenAfterReply = false
+        speech.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil

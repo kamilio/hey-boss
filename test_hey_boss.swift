@@ -4420,7 +4420,10 @@ func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
     let saved = URL(fileURLWithPath: root).appendingPathComponent("chat.json")
     let ui = VoiceConversation(cli: cli, saveURL: saved)
-    ui.show()
+    let captured = "## Grocery list\nThe fruit on this page is pineapple."
+    ui.openWithContext(source: "Test Editor", text: captured)
+    precondition(ui.phase == .starting)
+    ui.toggle() // The fixture supplies the microphone below.
     let audio = ReviewAudio()
     audio.engine.attach(audio.player)
     audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
@@ -4477,7 +4480,6 @@ func auditConversation(_ root: String) {
             } }
         }
     }
-    ui.openWithContext(source: "Test Editor", text: "The fruit on this page is pineapple.")
     precondition(ui.phase == .listening && ui.audio === audio && !ui.contextChip.isHidden)
     feed("first")
     wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
@@ -4498,12 +4500,28 @@ func auditConversation(_ root: String) {
     let resumed = VoiceConversation(cli: cli, saveURL: saved)
     resumed.show()
     precondition(resumed.rows.count == ui.rows.count)
+    let sentCard = resumed.rows[2].superview!
+    let attachment = sentCard.subviews.compactMap { $0 as? NSButton }.first!
+    precondition(attachment.title.contains("Test Editor") && attachment.bounds.width > 0)
+    let preview = sentCard.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == captured }!
+    precondition(preview.visibleRect.height > 0)
+    attachment.performClick(nil)
+    let sheet = resumed.window.attachedSheet!
+    func showsCapture(_ view: NSView) -> Bool {
+        (view as? NSTextView)?.string == captured || view.subviews.contains(where: showsCapture)
+    }
+    precondition(showsCapture(sheet.contentView!), "Saved attachment must open with exact line breaks")
+    resumed.window.endSheet(sheet)
     resumed.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
     resumed.sendTyped()
     wait("voice to keyboard after reopening") { resumed.phase == .idle }
     precondition(resumed.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
     let originalHistory = resumed.rows.map(\.stringValue)
-    resumed.newConversation(); precondition(resumed.rows.isEmpty && resumed.model == nil && resumed.historyList.numberOfRows == 1)
+    let oldAudio = ReviewAudio(); resumed.connect(oldAudio)
+    resumed.openWithContext(source: "Another Window", text: "Different contents.")
+    precondition(oldAudio.stopped && resumed.phase == .starting && resumed.contextChip.title == "Another Window")
+    precondition(resumed.rows.isEmpty && resumed.model == nil && resumed.historyList.numberOfRows == 1)
+    resumed.toggle() // Switch to typing in the new chat.
     resumed.input.stringValue = "Hello"; resumed.sendTyped(); wait("second chat") { resumed.phase == .idle }
     precondition(resumed.historyList.numberOfRows == 2)
     resumed.window.close()
