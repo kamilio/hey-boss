@@ -47,6 +47,27 @@ fn refresh_shared_api(binary: &Path, companion: bool, home: &Path) -> io::Result
     }
     Ok(())
 }
+fn refresh_proxy(launchctl: &Path, systemctl: &Path, home: &Path) -> io::Result<()> {
+    if cfg!(target_os = "macos") {
+        let registration = home.join("Library/LaunchAgents/com.hey-proxy.plist");
+        if registration.try_exists()? {
+            reload_registration(launchctl, &registration, "com.hey-proxy")?;
+        }
+    } else if Command::new(systemctl)
+        .args(["--user", "is-active", "--quiet", "hey-proxy.service"])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        output(Command::new(systemctl).args(["--user", "restart", "hey-proxy.service"]))?;
+        output(Command::new(systemctl).args([
+            "--user",
+            "is-active",
+            "--quiet",
+            "hey-proxy.service",
+        ]))?;
+    }
+    Ok(())
+}
 fn refresh_fleet_controller(binary: &Path, registration: &Path) -> io::Result<()> {
     if registration.try_exists()? {
         output(Command::new(binary).args(["fleet", "setup"]))?;
@@ -192,6 +213,7 @@ pub(super) fn publish(
             skills,
             companion_bins: companion_bins(binary, &home()?),
             harvester: None,
+            proxy_home: Some(home()?),
         },
         |_| Ok(()),
     )
@@ -203,6 +225,7 @@ struct Services {
     skills: Vec<PathBuf>,
     companion_bins: Vec<PathBuf>,
     harvester: Option<PathBuf>,
+    proxy_home: Option<PathBuf>,
 }
 
 fn publish_to(
@@ -220,6 +243,7 @@ fn publish_to(
         skills,
         companion_bins,
         harvester,
+        proxy_home,
     } = services;
     let companion = *companion;
     let has_desktop = app.is_some();
@@ -373,6 +397,11 @@ fn publish_to(
         if companion_bins.contains(&binary.with_file_name("hey-gh")) {
             refresh_shared_api(binary, companion, &home()?)?;
         }
+        if let Some(proxy_home) = proxy_home
+            && companion_bins.contains(&binary.with_file_name("hey-proxy"))
+        {
+            refresh_proxy(Path::new("/bin/launchctl"), Path::new("systemctl"), proxy_home)?;
+        }
         // The durable receipt is the last publication step. Failed installations
         // leave the previous generation authoritative.
         write_json(&state.join("upgrade-receipt.json"), receipt)
@@ -402,6 +431,12 @@ fn publish_to(
             && adjacent.exists()
         {
             let _ = fs::remove_dir_all(adjacent);
+        }
+        if replaced_binary
+            && let Some(proxy_home) = proxy_home
+            && companion_bins.contains(&binary.with_file_name("hey-proxy"))
+        {
+            let _ = refresh_proxy(Path::new("/bin/launchctl"), Path::new("systemctl"), proxy_home);
         }
         if replaced_binary
             && let Some(harvester) = harvester
@@ -443,6 +478,36 @@ mod tests {
                         .contains("Could not check desktop build")
                 ),
             }
+        }
+    }
+    #[test]
+    fn proxy_upgrade_only_restarts_managed_service() {
+        let temp = Temp::new().unwrap();
+        let launchctl = temp.0.join("launchctl");
+        let systemctl = temp.0.join("systemctl");
+        let calls = temp.0.join("calls");
+        script(
+            &launchctl,
+            &format!("echo \"launchctl $*\" >> '{}'", calls.display()),
+        );
+        script(
+            &systemctl,
+            &format!(
+                "if [ \"$2\" = is-active ] && [ ! -f '{}/active' ]; then exit 3; fi; echo \"systemctl $*\" >> '{}'",
+                temp.0.display(),
+                calls.display()
+            ),
+        );
+        refresh_proxy(&launchctl, &systemctl, &temp.0).unwrap();
+        assert!(!calls.exists());
+        #[cfg(target_os = "macos")]
+        {
+            let registration = temp.0.join("Library/LaunchAgents/com.hey-proxy.plist");
+            fs::create_dir_all(registration.parent().unwrap()).unwrap();
+            fs::write(&registration, "managed proxy").unwrap();
+            refresh_proxy(&launchctl, &systemctl, &temp.0).unwrap();
+            let logged = fs::read_to_string(&calls).unwrap();
+            assert!(logged.contains("bootout") && logged.contains("bootstrap"));
         }
     }
     #[test]
@@ -515,6 +580,7 @@ mod tests {
                     companion_bins: vec![api.clone()],
                     skills: Vec::new(),
                     harvester: None,
+                    proxy_home: None,
                 },
                 |_| panic!("No harvester schedule in this fixture"),
             );
@@ -699,6 +765,7 @@ esac
                 companion: false,
                 companion_bins: vec![],
                 harvester: None,
+                proxy_home: None,
                 skills: Vec::new(),
             },
             |_| panic!("No harvester schedule in this fixture"),
@@ -757,6 +824,7 @@ esac
                 ],
                 skills: Vec::new(),
                 harvester: None,
+                proxy_home: None,
             },
             |_| panic!("No harvester schedule in this fixture"),
         );
@@ -810,6 +878,7 @@ esac
                     companion_bins: vec![harvester.clone()],
                     skills: Vec::new(),
                     harvester: Some(harvester.clone()),
+                    proxy_home: None,
                 },
                 |path| {
                     assert_eq!(path, harvester);
@@ -912,6 +981,7 @@ esac
                 ],
                 skills: vec![skill.clone()],
                 harvester: None,
+                proxy_home: None,
             },
             |_| panic!("No harvester schedule in this fixture"),
         )

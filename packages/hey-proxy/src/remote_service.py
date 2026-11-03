@@ -76,6 +76,8 @@ def restart_macos(data, previous=None):
     # SSH. A fresh private path avoids that cache; the login plist remains the
     # persistent definition. Registration reads the file before returning.
     for attempt in range(5):
+        if attempt == 2:
+            subprocess.run(['launchctl', 'enable', target], capture_output=True)
         fd, name = tempfile.mkstemp(prefix='service-registration-', suffix='.plist', dir=home / '.hey-boss/proxy')
         try:
             with os.fdopen(fd, 'wb') as file:
@@ -128,7 +130,8 @@ def install(binary, source_config, base_url, codex_home="", model=""):
             with opener.open(profile['base_url'].removesuffix('/v1') + '/logs/api', timeout=20) as response:
                 if response.status != 200:
                     raise RuntimeError('Gemini profile endpoint unavailable')
-    paths = [home / '.cargo/bin/hey-proxy', config_path, config_path.with_suffix('.credentials.key'),
+    paths = [home / '.cargo/bin/hey-proxy', home / '.local/bin/hey-proxy', config_path,
+             config_path.with_suffix('.credentials.key'),
              home / 'Library/LaunchAgents/com.hey-proxy.plist',
              home / '.hey-boss/proxy/service-registration.plist',
              home / '.config/systemd/user/hey-proxy.service']
@@ -167,7 +170,11 @@ def _install(binary, source_config, base_url, codex_home, model, prepared, profi
     os.chmod(config_path.parent, 0o700)
     # Check external references on the destination before replacing either its
     # running executable or configuration. Resolved secrets never enter the bundle.
-    atomic(binary_path, Path(binary).read_bytes(), 0o755)
+    binary_bytes = Path(binary).read_bytes()
+    atomic(binary_path, binary_bytes, 0o755)
+    local_binary = home / '.local/bin/hey-proxy'
+    if local_binary.exists():
+        atomic(local_binary, binary_bytes, 0o755)
     atomic(config_path, prepared, 0o600)
     run(str(binary_path), '--config', str(config_path), 'encrypt-config', stdout=subprocess.DEVNULL)
     config = json.loads(prepared)
@@ -191,6 +198,7 @@ def _install(binary, source_config, base_url, codex_home, model, prepared, profi
         atomic(unit, content.encode(), 0o600)
         run('systemctl', '--user', 'daemon-reload')
         run('systemctl', '--user', 'enable', 'hey-proxy.service')
+        subprocess.run(['systemctl', '--user', 'reset-failed', 'hey-proxy.service'], capture_output=True)
         run('systemctl', '--user', 'restart', 'hey-proxy.service')
         run('systemctl', '--user', 'is-active', '--quiet', 'hey-proxy.service')
     else:
@@ -245,6 +253,12 @@ def _install(binary, source_config, base_url, codex_home, model, prepared, profi
     if model:
         codex += ['--model', model]
     run(*codex, stdout=subprocess.DEVNULL)
+    if (
+        config.get('providers', {}).get('claude') is not None
+        or any(account.get('implementation') == 'claude' for account in config.get('accounts', {}).values())
+        or config.get('mode') == 'client'
+    ):
+        run(str(binary_path), 'configure-claude', '--base-url', base_url, '--proxy-config', str(config_path), stdout=subprocess.DEVNULL)
     print('Proxy service, connections and Codex configuration verified', flush=True)
 
 
