@@ -62,6 +62,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
 
     init(headless: Bool) { overlayEnabled = !headless; super.init() }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: ["returnToField": true])
         NSApp.setActivationPolicy(.accessory)
         NativeMenus.install()
         do { try server.start() }
