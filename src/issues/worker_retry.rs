@@ -16,7 +16,7 @@ fn distributed_history(db: &Connection) -> Result<bool> {
 }
 
 fn history_query(distributed: bool, scope: &str) -> String {
-    let release = "EXISTS(SELECT 1 FROM events e WHERE e.project_id=r.project_id AND e.issue_number=r.issue_number AND e.action='reopened' AND e.created_at>r.finished_at)";
+    let release = "EXISTS(SELECT 1 FROM events e WHERE e.project_id=r.project_id AND e.issue_number=r.issue_number AND e.action IN ('reopened','unassigned','assigned','triaged') AND e.created_at>r.finished_at AND (e.action='reopened' OR (e.action='unassigned' AND json_extract(e.data,'$.previous_assignee')='human:boss') OR (e.action='assigned' AND json_extract(e.data,'$.previous_assignee')='human:boss' AND json_extract(e.data,'$.target')='unassigned') OR (e.action='triaged' AND json_extract(e.data,'$.before.assignee')='human:boss' AND json_extract(e.data,'$.after.assignee') IS NULL)))";
     let mut sql = format!(
         "SELECT id,project_id,issue_number,state,started_at,finished_at,summary,
         retry_allowed OR {release} AS retry_allowed,retry_at,retry_count
@@ -59,7 +59,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
     );
     let current: Option<String> = db
         .query_row(
-            "SELECT sql FROM sqlite_master WHERE name='worker_retry_history' AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='worker_retry_reopens')",
+            "SELECT sql FROM sqlite_master WHERE name='worker_retry_history' AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='worker_retry_releases')",
             [],
             |r| r.get(0),
         )
@@ -82,7 +82,7 @@ pub(crate) fn migrate(db: &Connection) -> Result<()> {
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
-    tx.execute_batch("CREATE INDEX IF NOT EXISTS worker_retry_reopens ON events(project_id,issue_number,created_at DESC) WHERE action='reopened'")?;
+    tx.execute_batch("DROP INDEX IF EXISTS worker_retry_reopens; CREATE INDEX IF NOT EXISTS worker_retry_releases ON events(project_id,issue_number,created_at DESC) WHERE action IN ('reopened','unassigned','assigned','triaged')")?;
     if distributed {
         tx.execute_batch("CREATE INDEX IF NOT EXISTS distributed_retry_history ON distributed_attempts(project_id,issue_number,finished_at DESC,started_at DESC,id DESC) WHERE finished_at IS NOT NULL")?;
     }

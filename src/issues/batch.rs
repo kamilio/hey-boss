@@ -118,6 +118,7 @@ pub(super) fn execute(
             // Explicit version + owner guards authorize a handoff of that exact
             // claim, but never override an unclaimed worker reservation.
             if after.assignee != before.assignee {
+                attempts::guard(db, &project.id, edit.number)?;
                 let reserved: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND claimed_at IS NULL AND reservation_expires>?3)", params![project.id,edit.number,now], |r| r.get(0))?;
                 if reserved {
                     return Err(Error::conflict("Issue has an unclaimed worker reservation"));
@@ -137,7 +138,7 @@ pub(super) fn execute(
             Err(error)
                 if matches!(
                     error.code.as_str(),
-                    "conflict" | "not_found" | "invalid_input"
+                    "conflict" | "not_found" | "invalid_input" | "attempt_held"
                 ) =>
             {
                 accepted = false;
@@ -171,6 +172,9 @@ pub(super) fn execute(
                 boss.process_start = None;
                 boss.source = "Boss assignment".into();
                 db.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO NOTHING", params![boss.id,serde_json::to_string(&boss)?,now])?;
+            }
+            if before.assignee != after.assignee {
+                assignments::clear(db, &project.id, after.number)?;
             }
             db.execute("UPDATE issues SET labels=?3,assignee=?4,version=?5,updated_at=?6 WHERE project_id=?1 AND number=?2", params![project.id,after.number,serde_json::to_string(&after.labels)?,after.assignee,after.version,now])?;
             event(

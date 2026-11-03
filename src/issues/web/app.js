@@ -55,6 +55,7 @@ let model = {
   project: null,
   route: {},
   issues: [],
+  bossAssigned: [],
   detail: null,
   editor: null,
   sequence: 0,
@@ -220,6 +221,7 @@ async function post(path, data, reconnect = true) {
       model.boss = { ...value.boss, version };
       model.bossHost = host;
       updateProfile();
+      renderUnassignBossButton();
     }
   }
   if (HeyBossUI.rememberActors(value)) { detailCache.clear(); model.signature = ""; }
@@ -898,6 +900,17 @@ function renderList(result) {
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueFilters.matches(issue, model.route))};
+  model.bossAssigned = result.issues
+    .filter(
+      (issue) =>
+        ["open", "ready"].includes(issue.state) &&
+        !issue.deleted_at &&
+        !issue.draft &&
+        !issue.attempt_hold &&
+        issue.assignee === "human:boss",
+    )
+    .map((issue) => ({ number: issue.number, version: issue.version }));
+  renderUnassignBossButton();
   const createdIndex = createdHere && creation.reveal ? result.issues.findIndex(issue => issue.number === creation.number) : -1;
   const requestedPage = createdIndex < 0 ? model.route.page : Math.floor(createdIndex / HeyBossPagination.size) + 1;
   const page = HeyBossPagination.page(result.issues, requestedPage);
@@ -2022,6 +2035,80 @@ $("#copy-create-command").onclick = () => copyIssueCommand(
   `hey-boss issue create ${issueCommandScope()} --title '<title>' --body '<markdown>'`,
   "Agent command copied. Replace the title and Markdown placeholders.",
 );
+function renderUnassignBossButton() {
+  const button = $("#unassign-boss-all");
+  if (!button) return;
+  const count = model.bossAssigned.length;
+  button.hidden = !count;
+  if (!count) return;
+  const noun = count === 1 ? "issue" : "issues";
+  const label = `Unassign ${count} ${noun} from ${model.boss.name}`;
+  button.setAttribute("aria-label", label);
+  button.title = `${label} so agents can pick ${count === 1 ? "it" : "them"} up`;
+  button.innerHTML = `${icon("user")}<span>Unassign ${esc(model.boss.name)}</span><span class="tab-count">${count}</span>`;
+}
+$("#unassign-boss-all").onclick = async () => {
+  const button = $("#unassign-boss-all");
+  const targets = [...model.bossAssigned];
+  if (!targets.length || button.disabled) return;
+  const project = model.project.id;
+  const host = model.route.host || null;
+  const bossName = model.boss.name;
+  const noun = targets.length === 1 ? "issue" : "issues";
+  const confirmed = await confirmDialog(
+    `Unassign ${targets.length} ${noun} from ${bossName}?`,
+    `This clears ${bossName}’s assignment on ${targets.length} matching ${noun} so agents can pick ${targets.length === 1 ? "it" : "them"} up.`,
+    `Unassign ${targets.length}`,
+  );
+  if (!confirmed) return;
+  button.disabled = true;
+  try {
+    for (let offset = 0; offset < targets.length; offset += 100) {
+      const chunk = targets.slice(offset, offset + 100);
+      const edits = chunk.map((entry) => ({
+        number: entry.number,
+        if_version: entry.version,
+        expected_assignee: "human:boss",
+        assignment: "unassign",
+      }));
+      try {
+        const response = await mutate({ action: "batch", edits }, project, host);
+        if (!response.accepted) {
+          const rejected = (response.results || []).find(
+            (item) => item.status === "rejected",
+          );
+          throw new Error(
+            rejected?.error?.message || "Some issues changed; refreshed list",
+          );
+        }
+      } catch (error) {
+        if (!String(error?.message || "").includes("authoritative store")) {
+          throw error;
+        }
+        for (const entry of chunk) {
+          await mutate(
+            {
+              action: "assign",
+              number: entry.number,
+              target: "unassigned",
+              if_version: entry.version,
+            },
+            project,
+            host,
+          );
+        }
+      }
+    }
+    await renderRoute();
+    await refreshProjects(project);
+    toast(`Unassigned ${targets.length} ${noun} from ${bossName}`);
+  } catch (error) {
+    await renderRoute().catch(() => {});
+    toast(error.message || "Could not unassign issues", true);
+  } finally {
+    button.disabled = false;
+  }
+};
 $("#copy-list-command").onclick = () => {
   // Include search input even during its route-update debounce.
   const url = new URL(routeHash({...model.route, issue:null, host:model.route.host || model.defaultHost || "", search:$("#issue-search").value}), location.href).href;

@@ -2157,3 +2157,99 @@ fn removed_mindmap_routes_are_not_served_or_advertised() {
             .is_none()
     );
 }
+
+#[test]
+fn batch_unassign_from_boss_clears_allocations_protects_holds_and_releases_pickup() {
+    let web = Web::start();
+    let home_html = String::from_utf8(web.http("GET", "/", &[], b"").body).unwrap();
+    assert!(home_html.contains("id=\"unassign-boss-all\""));
+    let script_js = String::from_utf8(web.http("GET", "/app.js", &[], b"").body).unwrap();
+    assert!(script_js.contains("unassign-boss-all"));
+
+    for title in ["First bug", "Second bug", "Protected bug"] {
+        web.ok(json!({"action":"create","title":title,"body":"Repro","labels":[]}));
+    }
+    for number in [1, 2, 3] {
+        web.ok(json!({"action":"assign_boss","number":number,"force":false}));
+    }
+    let database = rusqlite::Connection::open(web.root.join("issues.db")).unwrap();
+    database
+        .execute_batch(&format!(
+            r#"UPDATE issues SET assignment_target='machine:stale-box' WHERE project_id='{project}' AND number IN (1,2);
+             INSERT INTO fleet_allocations(project_id,issue_number,node) VALUES('{project}',1,'stale-box'),('{project}',2,'stale-box');
+             INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,finished_at,retry_at,summary)
+             VALUES('blocked-1','{project}',1,'{{}}','human:web-test','blocked',1,'synthetic','local',10,10,10,9000000000000,'Approval HTTP 503'),
+                   ('blocked-2','{project}',2,'{{}}','human:web-test','blocked',1,'synthetic','local',10,10,10,9000000000000,'Codex needs input or approval: check');
+             UPDATE issues SET attempt_hold='{{"attempt_id":"a1","owner":"codex:1","pid":1,"process_start":"s","log_path":"/none","worktree":"/none","machine":"m","host":"h","reported_by":"r","reported_at":1,"worker_run":null,"git_dir":"g","git_head":"h","git_branch":"b"}}' WHERE project_id='{project}' AND number=3;"#,
+            project = web.project
+        ))
+        .unwrap();
+
+    let first_version = web.ok(json!({"action":"view","number":1}))["issue"]["version"]
+        .as_i64()
+        .unwrap();
+    let second_version = web.ok(json!({"action":"view","number":2}))["issue"]["version"]
+        .as_i64()
+        .unwrap();
+    let held_version = web.ok(json!({"action":"view","number":3}))["issue"]["version"]
+        .as_i64()
+        .unwrap();
+
+    let held_reply = web.action(
+        &web.project,
+        json!({
+            "action": "batch",
+            "edits": [
+                {"number": 3, "if_version": held_version, "expected_assignee": "human:boss", "assignment": "unassign"}
+            ]
+        }),
+        Some("batch-held-check"),
+    );
+    assert_eq!(held_reply.status, 200);
+    let held_attempt = held_reply.json();
+    assert_eq!(held_attempt["accepted"], false);
+    assert_eq!(held_attempt["results"][0]["error"]["code"], "attempt_held");
+
+    let released_reply = web.action(
+        &web.project,
+        json!({
+            "action": "batch",
+            "edits": [
+                {"number": 1, "if_version": first_version, "expected_assignee": "human:boss", "assignment": "unassign"},
+                {"number": 2, "if_version": second_version, "expected_assignee": "human:boss", "assignment": "unassign"}
+            ]
+        }),
+        Some("batch-release-boss"),
+    );
+    assert_eq!(released_reply.status, 200);
+    let released = released_reply.json();
+    assert_eq!(released["accepted"], true);
+    assert_eq!(released["changed"], true);
+
+    let ready_numbers: Vec<i64> = database
+        .prepare("SELECT number FROM issue_pickup_ready WHERE project_id=?1 ORDER BY number")
+        .unwrap()
+        .query_map([&web.project], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ready_numbers, vec![1, 2]);
+
+    let remaining_allocations: i64 = database
+        .query_row(
+            "SELECT count(*) FROM fleet_allocations WHERE project_id=?1",
+            [&web.project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_allocations, 0);
+
+    let remaining_targets: i64 = database
+        .query_row(
+            "SELECT count(*) FROM issues WHERE project_id=?1 AND assignment_target IS NOT NULL",
+            [&web.project],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_targets, 0);
+}
