@@ -137,7 +137,7 @@ final class Overlay {
     var returnToFieldEnabled: () -> Bool = { false }
     var onToggleCorrection: (() -> Void)?
     var onShowHistory: (() -> Void)?
-    var onPreviewContext: (() -> Void)?
+    var onChatWithContext: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
@@ -436,7 +436,7 @@ final class Overlay {
         }
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Setup"))
-        let context = NSMenuItem(title: "Context Preview", action: #selector(previewContext), keyEquivalent: "m")
+        let context = NSMenuItem(title: "Chat with Context", action: #selector(chatWithContext), keyEquivalent: "m")
         context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         context.target = self; menu.addItem(context)
         let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
@@ -450,7 +450,7 @@ final class Overlay {
     @objc private func toggleReturnToField() { onToggleReturnToField?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
     @objc private func showHistory() { onShowHistory?() }
-    @objc private func previewContext() { onPreviewContext?() }
+    @objc private func chatWithContext() { onChatWithContext?() }
     private func updateModeAppearance() {
         pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
