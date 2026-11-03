@@ -7202,9 +7202,22 @@ final class ConversationMeter: NSButton {
 }
 
 @available(macOS 26, *)
+final class ConversationWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.keyCode == 53, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           attachedSheet == nil, let chat = delegate as? VoiceConversation,
+           [.starting, .listening, .recording, .decoding].contains(chat.phase) {
+            chat.stop("Microphone off")
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
+@available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let historyList = NSTableView()
     private let split = NSSplitViewController()
     private let emptyHistory = NSTextField(wrappingLabelWithString: "Your conversations appear here.")
@@ -7542,7 +7555,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard audio != nil else { return }
         switch event {
         case .began where phase == .listening:
-            recording = Data(); state(.recording, "Pause or press Hyper+R to send")
+            recording = Data(); state(.recording, "Pause or Hyper+R to send · Esc to cancel")
         case .pcm(let pcm) where phase == .recording:
             recording!.append(pcm); meter.capture(pcm)
             if recording!.count >= 32000 * 60 { endRecording("duration limit") }
