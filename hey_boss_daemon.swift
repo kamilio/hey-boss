@@ -8031,8 +8031,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func stop(_ message: String) {
-        if let localTurn, !published.isEmpty {
-            keepPartial(published, question: localTurn.question, prior: localTurn.prior)
+        if !published.isEmpty {
+            if let localTurn { keepPartial(published, question: localTurn.question, prior: localTurn.prior) }
             append("Reply stopped before it finished.", from: "Conversation")
             save()
         }
