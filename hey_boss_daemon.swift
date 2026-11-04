@@ -6736,7 +6736,11 @@ final class ReaderVoice {
         _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         do { try child.run() } catch { return nil }
     }
-    func stop() { if child.isRunning { child.terminate() } }
+    func stop() {
+        if child.isRunning { child.terminate() }
+        let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
+        queue.async { try? writer.close(); try? reader.close() }
+    }
     deinit { stop() }
     private func message() throws -> [String: Any] {
         var bytes = Data()
@@ -6949,6 +6953,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         let flags = fcntl(writer.fileDescriptor, F_GETFL)
         _ = fcntl(writer.fileDescriptor, F_SETFL, flags | O_NONBLOCK)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { try? reader.close() }
             func read(_ count: Int) throws -> Data {
                 var bytes = Data()
                 while bytes.count < count {
