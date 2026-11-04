@@ -7316,6 +7316,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var lastTextUpdate: TimeInterval = 0
     private var textFlush: Timer?
     private var speech: [(label: ConversationText, span: NSRange, text: String)] = []
+    private var narratedItems: [String: Int] = [:]
     private var reading = false, turnDone = false
     private var lit: (ConversationText, NSRange)?
 
@@ -7831,19 +7832,28 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var offset = old.utf16.count
         if !rendered.string.hasPrefix(old) {
             offset = speech.first(where: { $0.label === label })?.span.location ?? offset
+            narratedItems.removeAll()
             speech.removeAll { $0.label === label }
             offset = min(offset, visible.length)
         }
         if let (field, range) = lit, field === label { highlight(label, range) }
         if audio != nil {
+            var checkedThrough = offset
             while let span = SpokenReview.passage(in: visible, from: offset) {
                 let item = visible.substring(with: span); offset = NSMaxRange(span)
-                // The local model can loop over one or two bullets hundreds
-                // of times. Keep the text intact and bound the spoken backlog.
-                if directory == nil, item.hasPrefix("•  "), speech.count >= 8 {
-                    let tail = speech.suffix(8), pair = tail.prefix(2).map(\.text)
-                    if pair.contains(item), pair.allSatisfy({ $0.hasPrefix("•  ") }),
-                       tail.enumerated().allSatisfy({ $0.element.label === label && $0.element.text == pair[$0.offset % 2] }) { continue }
+                if directory == nil, span.location >= checkedThrough {
+                    let line = visible.lineRange(for: span)
+                    checkedThrough = NSMaxRange(line)
+                    let text = visible.substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Compare the whole list item, even when playback splits it into sentences.
+                    let font = rendered.attribute(.font, at: span.location, effectiveRange: nil) as? NSFont
+                    if font?.fontDescriptor.symbolicTraits.contains(.monoSpace) != true, let marker = text.range(of: #"^(?:•\s+|[0-9]+\.\s+)"#, options: .regularExpression) {
+                        let body = String(text[marker.upperBound...])
+                        if narratedItems[body, default: 0] >= 2, speech.count >= 8 {
+                            offset = checkedThrough; continue
+                        }
+                        narratedItems[body, default: 0] += 1
+                    } else { narratedItems.removeAll() }
                 }
                 speech.append((label, span, item))
             }
@@ -7856,7 +7866,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishMessage(_ text: String) {
         stream = text; publish(final: true); lastMessage = text
-        stream = ""; published = ""; messageLabel = nil
+        stream = ""; published = ""; messageLabel = nil; narratedItems.removeAll()
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
@@ -7991,7 +8001,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func stop(_ message: String) {
         textFlush?.invalidate(); textFlush = nil
         if let (field, _) = lit { highlight(field, nil) }
-        speech.removeAll(); reading = false; turnDone = false
+        speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
