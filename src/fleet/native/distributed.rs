@@ -148,7 +148,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             tx.commit()?;
         }
         // Additive protocol data needs capture on already-enrolled replicas too.
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT')", [], |r|r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_published_pages_INSERT')", [], |r|r.get::<_,bool>(0))? {
             let tx=db.unchecked_transaction()?;
             capture::install(&tx)?;
             tx.commit()?;
@@ -262,6 +262,9 @@ pub(super) fn baseline(
                         | "scheduled_job_logs"
                         | "worker_allocations"
                         | "dictation_vocabulary"
+                        | "published_chunks"
+                        | "published_deployments"
+                        | "published_pages"
                 )
         })
         .copied()
@@ -391,11 +394,17 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
     {
         return Ok(0);
     }
+    // Published chunks are immutable and hash-verified. Flush their files before
+    // acquiring the application writer; interrupted receives can safely replay.
     for (_, _, payload) in &facts {
-        if let Some(fact) = archives::revision(payload)?
-            && let Some(archive) = &fact.archive
-        {
-            archives::receive_or_retain(db, engine, archive)?;
+        if let Some(fact) = archives::revision(payload)? {
+            resources::validate_page(&fact)?;
+            if fact.table == "published_chunks" {
+                if let Some(resource) = &fact.resource { resources::receive(db, resource)?; }
+            }
+            if let Some(archive) = &fact.archive {
+                archives::receive_or_retain(db, engine, archive)?;
+            }
         }
     }
     let tx = db.unchecked_transaction()?;
@@ -404,8 +413,8 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
             if let Some(archive) = &fact.archive {
                 archives::remember(&tx, archive)?;
             }
-            if let Some(resource) = &fact.resource {
-                resources::receive(&tx, resource)?;
+            if fact.table != "published_chunks" {
+                if let Some(resource) = &fact.resource { resources::receive(&tx, resource)?; }
             }
             projection::reduce(&tx, &fact)?;
             if fact.table == "distributed_members" {

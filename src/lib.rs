@@ -26,6 +26,7 @@ pub mod jobs;
 pub mod machine_config;
 pub mod markdown;
 pub mod notices;
+pub mod pages;
 pub mod quiet_hours;
 #[doc(hidden)]
 pub mod readiness;

@@ -82,6 +82,16 @@ pub(super) fn capture(db: &Connection, fact: &Revision) -> Result<Option<Resourc
     };
     let path = database_path(db)?;
     let (kind, id, sha, bytes) = match fact.table.as_str() {
+        "published_chunks" => {
+            let hash = row["hash"]
+                .as_str()
+                .ok_or_else(|| replica::invalid("Missing published chunk hash"))?;
+            let bytes = crate::pages::read_chunk(path, hash)?;
+            if row["size"].as_u64() != Some(bytes.len() as u64) {
+                return Err(replica::invalid("Invalid published chunk size"));
+            }
+            ("published_chunk", hash.to_owned(), hash.to_owned(), bytes)
+        }
         "file_attachments" => {
             let id = row["id"]
                 .as_str()
@@ -142,6 +152,12 @@ pub(super) fn receive(db: &Connection, resource: &Resource) -> Result<()> {
     }
     let path = database_path(db)?;
     match resource.kind.as_str() {
+        "published_chunk" => {
+            if resource.id != resource.digest {
+                return Err(replica::invalid("Invalid published chunk identity"));
+            }
+            crate::pages::write_chunk(path, &resource.digest, &bytes)?;
+        }
         "job" => {
             if resource.id != resource.digest {
                 return Err(replica::invalid("Invalid instruction identity"));
@@ -201,5 +217,64 @@ fn publish(path: &Path, bytes: &[u8]) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     fs::File::open(path.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+/// Validate immutable page records before advancing the replication checkpoint.
+pub(super) fn validate_page(fact: &Revision) -> Result<()> {
+    if !fact.table.starts_with("published_") {
+        return Ok(());
+    }
+    let row = fact
+        .after
+        .as_ref()
+        .ok_or_else(|| replica::invalid("Published history uses tombstones, not row deletion"))?;
+    match fact.table.as_str() {
+        "published_chunks" => {
+            let hash = row["hash"]
+                .as_str()
+                .ok_or_else(|| replica::invalid("Missing chunk hash"))?;
+            let resource = fact
+                .resource
+                .as_ref()
+                .ok_or_else(|| replica::invalid("Missing published chunk"))?;
+            if !crate::pages::valid_hash(hash)
+                || resource.kind != "published_chunk"
+                || resource.id != hash
+                || resource.digest != hash
+                || row["size"].as_u64().is_none_or(|size| {
+                    size == 0
+                        || size > crate::pages::CHUNK_SIZE as u64
+                        || STANDARD
+                            .decode(&resource.bytes)
+                            .map_or(true, |b| b.len() as u64 != size)
+                })
+            {
+                return Err(replica::invalid("Invalid published chunk record"));
+            }
+        }
+        "published_deployments" => {
+            let manifest = row["manifest"]
+                .as_str()
+                .ok_or_else(|| replica::invalid("Missing deployment manifest"))?;
+            if row["id"] != hey_boss_sync::digest(manifest.as_bytes()) {
+                return Err(replica::invalid("Invalid deployment identity"));
+            }
+            crate::pages::validate_manifest(&serde_json::from_str(manifest)?)?;
+        }
+        "published_pages" => {
+            crate::pages::valid_name(row["name"].as_str().unwrap_or(""))?;
+            if !row["deployment"]
+                .as_str()
+                .is_some_and(crate::pages::valid_hash)
+                || !matches!(row["deleted"].as_i64(), Some(0 | 1))
+                || row["updated_at"].as_i64().is_none_or(|n| n < 0)
+                || row["machine"].as_str().is_none_or(|s| s.len() > 1024)
+            {
+                return Err(replica::invalid("Invalid published page record"));
+            }
+        }
+        _ => return Err(replica::invalid("Unknown published table")),
+    }
     Ok(())
 }

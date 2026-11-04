@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "job_summary_tests.rs"]
 mod job_summary;
+#[path = "publishing_tests.rs"]
+mod publishing;
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
