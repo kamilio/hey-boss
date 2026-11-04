@@ -6,7 +6,9 @@ use hey_boss::{
 use std::path::PathBuf;
 
 #[derive(Args)]
-#[command(about = "Publish, list, download, or delete private pages replicated within your hey-boss fleet.")]
+#[command(
+    about = "Publish, list, download, or delete private pages replicated within your hey-boss fleet."
+)]
 pub struct Options {
     #[arg(long, global = true)]
     pub json: bool,
@@ -16,7 +18,9 @@ pub struct Options {
 #[derive(Subcommand)]
 enum Action {
     /// Publish a private HTML page or static site across your fleet; never public.
-    #[command(after_help = "Works offline; files replicate to every fleet machine when connected. Reusing a name replaces that page. Dotfiles are excluded; symlinks are rejected. Site assets should use relative URLs.")]
+    #[command(
+        after_help = "Works offline; files replicate to every fleet machine when connected. Reusing a name replaces that page. Dotfiles are excluded; symlinks are rejected. Site assets should use relative URLs."
+    )]
     Publish {
         /// HTML file, or directory containing index.html (up to 256 MiB).
         source: PathBuf,
@@ -34,7 +38,7 @@ enum Action {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Remove a page from private web access on every machine as deletion syncs.
+    /// Permanently delete a private page and reclaim its unshared files and sync payloads across the fleet.
     Delete { name: String },
 }
 pub fn run(options: &Options) -> Result<()> {
@@ -56,9 +60,11 @@ pub fn run(options: &Options) -> Result<()> {
             if !options.json {
                 for page in &entries {
                     println!(
-                        "{}  {} files  {}{}",
+                        "{}  {} files  {} bytes stored / {} bytes original  {}{}",
                         page.name,
                         page.files,
+                        page.stored_size,
+                        page.size,
                         page.path,
                         if page.syncing { "  syncing" } else { "" }
                     );
@@ -79,7 +85,9 @@ pub fn run(options: &Options) -> Result<()> {
         Action::Delete { name } => {
             pages::delete(&database, name)?;
             if !options.json {
-                println!("Deleted {name}. Other machines apply deletion when they sync.");
+                println!(
+                    "Deleted {name}. Unshared files and sync payloads are reclaimed as machines sync."
+                );
             }
             serde_json::json!({"ok":true,"deleted":name})
         }

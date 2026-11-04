@@ -12,6 +12,8 @@ This is private hosting on your machines, not a public upload. Open **Published
 Pages** in the top-right web menu. The same named URL works on each machine's
 existing hey-boss web origin. Publishing from a worker does not need a running
 supervisor; its files reach the other machines through normal fleet replication.
+The library shows compressed file sizes (including retained versions) and the
+current original size. Shared files count toward each page that uses them.
 
 Reusing a name replaces the page. A directory needs `index.html`; a single HTML
 file becomes `index.html`. Use relative URLs for site assets (for example Vite's
@@ -21,17 +23,17 @@ but cannot access hey-boss's session, APIs, or browser storage. No build server,
 server-side functions, or public DNS are involved.
 
 Downloads restore the entire original file tree into a new directory and never
-overwrite an existing destination. Deletion removes the named page and its old
-versions from web access. Offline copies apply deletion on their next sync.
-Immutable history and content remain retained for offline replay; deletion is
-not secure erasure of replicated storage.
+overwrite an existing destination. **Delete everywhere** removes the named page,
+its old versions, unshared files, and their journal payloads. Offline machines
+clean up after reconnecting. Small deletion identities remain to reject stale
+replays. Freed SQLite storage is reusable; the database file need not shrink.
 
 ## Storage and synchronization
 
 Files split into SHA-256-addressed 1 MiB chunks. A sorted manifest maps each path
 to its length and chunk hashes; the manifest's hash identifies the deployment.
-`published_chunks`, `published_deployments`, and `published_pages` join the existing
-CRDT capture/replication tables. File bytes use the existing hashed-resource
+`published_pages`, `published_publications`, and `published_page_chunks` join the
+existing CRDT capture/replication tables. File bytes use the existing hashed-resource
 transfer path, with bounded records. They are durably stored before their rows
 are exposed. There is no second sync service or cloud dependency.
 
@@ -41,14 +43,23 @@ chunk files are compressed on disk too. Legacy disk chunks convert when read,
 without changing their hashes. Retained journal payloads also compress in bounded
 background transactions; logical facts, delivery positions, and receipts stay
 unchanged. Decoded sizes are bounded and content hashes verify original bytes.
-Protocol version 4 requires upgrading every peer before synchronization resumes.
+Protocol version 5 requires upgrading every peer before synchronization resumes.
 
-Unchanged chunks produce no new rows or transfer records. An identical republish
-is a no-op. Every enrolled machine receives the complete content, including
+Updates within a page's lifetime reuse unchanged chunk facts. A new page or a
+republish after deletion gets independent resource facts, so deleting another
+page cannot strand its content on an offline peer. Disk chunks remain shared.
+An identical republish is a no-op. Every enrolled machine receives the complete content, including
 through another peer. Concurrent named updates use the existing deterministic
 logical-clock ordering and merge as a whole row, so a name cannot point to a
 mixture of two deployments. Tombstones stop stale replicas resurrecting deleted
-pages; deliberately publishing the name again creates a new live update.
+pages, including edits made offline to their old lifetime. Deliberately publishing
+the deleted name again creates a new lifetime.
+
+Cleanup waits for local capture, indexing, and projection to finish. It preserves
+unknown incoming owners and shared content, then prunes payloads without changing
+delivery positions or receipts. Empty journal payloads are permanent tombstones;
+replayed bytes cannot refill them. Existing publications acquire scoped resource
+facts automatically, and their historical ownership is indexed in bounded scans.
 
 A local, unreplicated `published_live` pointer retains the last complete version
 while a new manifest or chunks are pending. Viewer URLs pin a deployment so
