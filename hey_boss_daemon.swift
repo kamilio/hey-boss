@@ -7754,6 +7754,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.reply = nil; self.interruptPlayback()
                 self.messageLabel?.stringValue = ""; self.published = ""
                 self.finishTurn("The on-device model declined to answer this message.")
+            } catch LanguageModelSession.GenerationError.unsupportedLanguageOrLocale {
+                guard !Task.isCancelled, let self else { return }
+                self.reply = nil
+                if self.stream.isEmpty { self.model = LanguageModelSession(transcript: prior) }
+                else { self.finishMessage(self.stream) }
+                if self.input.stringValue.isEmpty { self.input.stringValue = text; self.pendingCapture = capture }
+                self.finishTurn("The on-device model reported an unsupported language. You can edit the message and try again.")
             } catch {
                 guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
