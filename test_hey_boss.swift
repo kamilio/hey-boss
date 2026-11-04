@@ -4568,10 +4568,15 @@ func auditConversation(_ root: String) {
         precondition(longChat.status.stringValue == "On-device chat" && longChat.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), longChat.status.stringValue)
         precondition(longChat.rows.first!.stringValue == old)
         let before = longChat.model!.transcript
+        longChat.input.stringValue = old; longChat.sendTyped(); longChat.stop("Reply stopped")
+        longChat.input.stringValue = "Which fruit did I mention earlier? Answer in one word."; longChat.sendTyped()
+        wait("follow-up after stopping an oversized message") { longChat.phase == .idle }
+        precondition(longChat.model!.transcript.starts(with: before), "An unanswered message too large to fit must not evict earlier exchanges")
+        let afterFollowUp = longChat.model!.transcript
         longChat.input.stringValue = old
         longChat.sendTyped()
         wait("oversized message") { longChat.phase == .idle }
-        precondition(longChat.input.stringValue == old && longChat.model?.transcript == before, "An oversized message must leave both the draft and the prior conversation intact")
+        precondition(longChat.input.stringValue == old && longChat.model?.transcript == afterFollowUp, "An oversized message must leave both the draft and the prior conversation intact")
         longChat.selectDirectory(nil, capture: .init(source: "Notes", text: old))
         longChat.input.stringValue = "Earlier notes"; longChat.sendTyped()
         wait("oversized capture") { longChat.phase == .idle }
@@ -4739,6 +4744,10 @@ func auditConversation(_ root: String) {
     ui.window.sendEvent(escape)
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1 && ui.input.stringValue == "Follow-up draft")
+    let reopened = VoiceConversation(cli: cli, saveURL: saved)
+    guard let transcript = reopened.model?.transcript, case .prompt(let question) = transcript.last,
+          case .text(let submitted) = question.segments.first else { preconditionFailure("Stopping before the first word must preserve the unanswered question") }
+    precondition(submitted.content == "Hello" && reopened.input.stringValue == "Follow-up draft")
     print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
 }
 #endif

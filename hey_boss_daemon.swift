@@ -7863,6 +7863,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if model == nil { model = LanguageModelSession(instructions: instructions) }
         guard let model else { return }
         let prior = model.transcript
+        localTurn = (prior, question)
         reply = Task { @MainActor [weak self] in
             do {
                 var session = model
@@ -7911,15 +7912,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             finishTurn(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
         } else {
             let partial = stream
-            keepPartial(partial, question: question, prior: prior)
+            keepInterruptedTurn(partial, question: question, prior: prior)
             finishMessage(partial)
             finishTurn("Reply cut short: on-device chat ran out of room.")
         }
     }
-    private func keepPartial(_ partial: String, question: String, prior: Transcript) {
-        let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: question))])),
-                                           .response(.init(assetIDs: [], segments: [.text(.init(content: partial))]))]
-        model = LanguageModelSession(transcript: Transcript(entries: Array(prior) + entries))
+    private func keepInterruptedTurn(_ partial: String, question: String, prior: Transcript) {
+        var entries = Array(prior)
+        entries.append(.prompt(.init(segments: [.text(.init(content: question))])))
+        if !partial.isEmpty { entries.append(.response(.init(assetIDs: [], segments: [.text(.init(content: partial))]))) }
+        model = LanguageModelSession(transcript: Transcript(entries: entries))
     }
     @available(macOS 26.4, *)
     private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession? {
@@ -7943,7 +7945,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             else { low = mid + 1 }
         }
         let entries = remaining(low)
-        if low == turns.count, try await model.tokenCount(for: entries + [incoming]) >= model.contextSize { return nil }
+        if low == turns.count {
+            guard try await model.tokenCount(for: entries + [incoming]) < model.contextSize else { return nil }
+            // A question stopped before its size check may not fit even on its own.
+            if turns.count > 1, case .prompt = transcript.last {
+                let earlier = Transcript(entries: transcript.dropLast())
+                return try await sessionWithRoom(for: question, in: LanguageModelSession(transcript: earlier))
+            }
+        }
         return LanguageModelSession(transcript: Transcript(entries: entries))
     }
     // An opening sentence of plain prose can play before the paragraph ends.
@@ -8163,11 +8172,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func stop(_ message: String) {
-        if !published.isEmpty {
-            if let localTurn { keepPartial(published, question: localTurn.question, prior: localTurn.prior) }
-            append("Reply stopped before it finished.", from: "Conversation")
-            save()
-        }
+        if let localTurn { keepInterruptedTurn(published, question: localTurn.question, prior: localTurn.prior) }
+        if !published.isEmpty { append("Reply stopped before it finished.", from: "Conversation") }
+        if localTurn != nil || !published.isEmpty { save() }
         localTurn = nil
         textFlush?.invalidate(); textFlush = nil
         if let (field, _) = lit { highlight(field, nil) }
