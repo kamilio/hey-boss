@@ -6750,6 +6750,40 @@ final class ReaderVoice {
         }
         throw CocoaError(.fileReadCorruptFile)
     }
+    static func wordTimings(_ text: String, _ spoken: [(String, Int)], frames: Int) -> [(Int, NSRange)] {
+        var ranges: [NSRange] = [], written: [String] = []
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, range, _, _ in
+            guard let word else { return }
+            written.append(word.lowercased()); ranges.append(NSRange(range, in: text))
+        }
+        // Match the whole passage: a missing word must not consume a later repetition.
+        let heard = spoken.map { $0.0.trimmingCharacters(in: .punctuationCharacters) }
+        var missing = IndexSet(), extra = IndexSet()
+        for edit in heard.difference(from: written) {
+            switch edit {
+            case .remove(let i, _, _): missing.insert(i)
+            case .insert(let i, _, _): extra.insert(i)
+            }
+        }
+        let native = written.indices.filter { !missing.contains($0) }
+        let audio = heard.indices.filter { !extra.contains($0) }
+        var result: [(Int, NSRange)] = [], next = 0, previousOffset = 0, previousFrame = 0
+        // Pace words the helper missed between their measured neighbors.
+        func fill(to index: Int, at offset: Int, frame: Int) {
+            for i in next..<index {
+                let position = ranges[i].location - previousOffset
+                result.append((previousFrame + (frame - previousFrame) * position / max(1, offset - previousOffset), ranges[i]))
+            }
+        }
+        for (i, j) in zip(native, audio) {
+            let frame = min(frames - 1, max(0, spoken[j].1)), offset = ranges[i].location
+            fill(to: i, at: offset, frame: frame)
+            result.append((frame, ranges[i]))
+            next = i + 1; previousOffset = offset; previousFrame = frame
+        }
+        fill(to: ranges.count, at: text.utf16.count, frame: frames)
+        return result
+    }
     func generate(_ text: String, completion: @escaping (AVAudioPCMBuffer?, [(Int, NSRange)]) -> Void) {
         let timeout = DispatchWorkItem { [weak self] in self?.stop() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
@@ -6779,11 +6813,6 @@ final class ReaderVoice {
                     if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * 44100))) }
                     spoken[spoken.count-1].0 += token.trimmingCharacters(in: CharacterSet(charactersIn: "▁ ")).lowercased()
                 }
-                var words: [(Int, NSRange)] = [], cursor = 0
-                text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, range, _, _ in
-                    guard let index = spoken[cursor...].firstIndex(where: { $0.0 == word?.lowercased() }) else { return }
-                    words.append((spoken[index].1, NSRange(range, in: text))); cursor = index + 1
-                }
                 // Supertonic includes silence on both edges of each clip. Keep
                 // a short breath and protect quiet consonants near the boundary.
                 let samples = buffer.floatChannelData![0]
@@ -6795,17 +6824,8 @@ final class ReaderVoice {
                     end = min(count, end + 2205)       // 50 ms after the last audible sample
                     if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
                     buffer.frameLength = AVAudioFrameCount(end - first)
-                    words = words.map { (min(end - first - 1, max(0, $0.0 - first)), $0.1) }
-                }
-                // Alignment warms independently. Pace the highlight across the first
-                // passage until the helper can supply measured timestamps.
-                if words.isEmpty {
-                    let length = max(1, text.utf16.count)
-                    text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { _, range, _, _ in
-                        let span = NSRange(range, in: text)
-                        words.append((Int(buffer.frameLength) * span.location / length, span))
-                    }
-                }
+                } else { first = 0 }
+                let words = Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength))
                 onMain { timeout.cancel(); completion(buffer, words) }
             } catch { onMain { timeout.cancel(); completion(nil, []) } }
         }
