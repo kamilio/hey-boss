@@ -4624,10 +4624,12 @@ func auditConversation(_ root: String) {
     precondition(transcribing.stopped && resumed.reply == nil && resumed.phase == .idle && resumed.rows.isEmpty)
     resumed.input.stringValue = "Hello"; resumed.sendTyped(); wait("second chat") { resumed.phase == .idle }
     precondition(resumed.historyList.numberOfRows == 2)
+    resumed.input.stringValue = "First line\nSecond line"
     resumed.window.close()
     let library = VoiceConversation(cli: cli, saveURL: saved); library.show()
+    precondition(library.input.stringValue == "First line\nSecond line")
     library.historyList.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-    precondition(library.rows.map(\.stringValue) == originalHistory)
+    precondition(library.rows.map(\.stringValue) == originalHistory && library.input.stringValue.isEmpty)
     library.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
     library.sendTyped(); wait("recalled from sidebar") { library.phase == .idle }
     precondition(library.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
