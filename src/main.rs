@@ -15,6 +15,7 @@ mod job_cli;
 mod lookup_cli;
 mod notif_cli;
 mod project_cli;
+mod publish_cli;
 mod proxy_cli;
 mod review_audio;
 mod secret_cli;
@@ -229,6 +230,10 @@ enum Command {
     /// Disk-backed files for issues and artifacts; SSH-aware downloads.
     #[command(visible_alias = "attachments")]
     Attachment(attachment_cli::Options),
+    /// Publish a private HTML page or static site across your fleet; never public.
+    Publish(publish_cli::Publish),
+    /// List, download, and delete private published pages.
+    Pages(publish_cli::Options),
     /// Global profile settings shared across all projects.
     Settings(issue_cli::GlobalOptions),
     /// Legacy worker inspection and supervised process handoff.
@@ -548,6 +553,22 @@ fn run() -> std::io::Result<()> {
                 } else {
                     eprintln!("hey-boss worker: {error}");
                 }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Publish(options) => {
+            if let Err(error) = publish_cli::publish(options) {
+                if options.json { println!("{}", serde_json::json!({"ok":false,"error":error})); }
+                else { eprintln!("hey-boss publish: {error}"); }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Pages(options) => {
+            if let Err(error) = publish_cli::run(options) {
+                if options.json { println!("{}", serde_json::json!({"ok":false,"error":error})); }
+                else { eprintln!("hey-boss pages: {error}"); }
                 std::process::exit(error.exit_code());
             }
             return Ok(());

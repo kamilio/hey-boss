@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark">
+<title>Published Pages · Hey Boss</title><link rel="icon" href="/icon.png"><link rel="stylesheet" href="/components.css"><link rel="stylesheet" href="/pages.css">
+<script src="/components.js" defer></script><script src="/quick-issue.js" defer></script><script src="/pages.js" defer></script>
+</head><body><a class="skip-link" href="#pages-main">Skip to published pages</a>
+<!--app-shell-->
+<main id="pages-main" tabindex="-1">
+<div class="pages-heading"><div><p class="pages-eyebrow">YOUR PRIVATE WEB</p><h1>Published Pages</h1><p>Reports, prototypes, and little tools. Available across your machines.</p></div><button id="pages-refresh" class="button" type="button"><span data-icon="refresh"></span>Refresh</button></div>
+<div class="publish-command"><span class="private-badge"><span data-icon="key"></span>Private to your fleet</span><code>hey-boss publish ./index.html --name my-page</code></div>
+<p id="pages-error" class="pages-error" role="alert" hidden></p>
+<div class="pages-list-heading"><h2>Your pages <span id="pages-count"></span></h2><span id="pages-status" role="status">Loading…</span></div>
+<div id="pages-list" class="pages-grid"></div>
+<div id="pages-empty" class="pages-empty" hidden><span class="empty-symbol" data-icon="code"></span><h2>A place for what you build.</h2><p>Publish an HTML file or a folder with <code>index.html</code>.<br>Your pages appear here when the files sync.</p></div>
+<button id="pages-more" class="button" hidden>Show more</button>
+<footer class="pages-footer">Stored on your machines. No public hosting. Offline copies update when machines reconnect.</footer>
+</main>
+<dialog id="pages-delete-dialog" aria-labelledby="pages-delete-title"><form id="pages-delete-form"><h2 id="pages-delete-title">Delete page?</h2><p id="pages-delete-description"></p><p class="muted">This removes web access across your fleet as machines sync.</p><p id="pages-delete-error" class="pages-error" role="alert" hidden></p><div class="dialog-actions"><button id="pages-delete-cancel" class="button" type="button">Cancel</button><button id="pages-delete-submit" class="button danger" type="submit">Delete page</button></div></form></dialog>
+</body></html>

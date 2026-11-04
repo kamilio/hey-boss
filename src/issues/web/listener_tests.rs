@@ -442,3 +442,37 @@ fn home_service_defaults_to_a_visible_real_project_without_overriding_explicit_c
         "github.com/example/checkout"
     );
 }
+
+#[test]
+fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletion() {
+    let fixture = Fixture::start();
+    let database = fixture.root.join("issues.db");
+    let source = fixture.root.join("report.html");
+    std::fs::write(&source, "<h1>Private page</h1><script>window.works=true</script>").unwrap();
+    crate::pages::publish(&database, &source, "report").unwrap();
+    let host = fixture.addresses[0].to_string();
+    let client = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{host}");
+    let library = client.get(format!("{base}/pages")).send().unwrap().text().unwrap();
+    assert!(library.contains("id=\"nav-pages\" href=\"/pages\" aria-current=\"page\""));
+    assert!(!library.contains("<!--app-shell-->"));
+    assert_eq!(client.get(format!("{base}/api/pages")).header("Origin","https://untrusted.example").send().unwrap().status(),403);
+    assert_eq!(client.get(format!("{base}/api/pages")).header("Origin","null").send().unwrap().status(),403);
+    let page: Value = client.get(format!("{base}/api/pages?name=report")).send().unwrap().json().unwrap();
+    let path = page["content_url"].as_str().unwrap();
+    let response = client.get(format!("{base}{path}")).header("Origin","null").header("Sec-Fetch-Site","cross-site").send().unwrap();
+    assert_eq!(response.status(),200);
+    let policy = response.headers()["content-security-policy"].to_str().unwrap();
+    assert!(policy.starts_with("sandbox allow-scripts"));
+    assert!(!policy.contains("allow-same-origin"));
+    assert_eq!(response.headers()["access-control-allow-origin"],"*");
+    let etag = response.headers()["etag"].clone();
+    assert!(response.text().unwrap().contains("Private page"));
+    let response = client.get(format!("{base}{path}")).header("If-None-Match",etag.clone()).send().unwrap();
+    assert_eq!(response.status(),304);
+    assert!(response.bytes().unwrap().is_empty());
+    assert_eq!(client.get(format!("{base}{}",path.replacen("/page-content/","/page-content/bad",1))).send().unwrap().status(),403);
+    assert_eq!(client.post(format!("{base}/api/pages/delete")).json(&json!({"name":"report"})).send().unwrap().status(),403);
+    assert_eq!(client.post(format!("{base}/api/pages/delete")).header("X-Hey-Boss-CSRF",&fixture.app.token).json(&json!({"name":"report"})).send().unwrap().status(),200);
+    assert_eq!(client.get(format!("{base}{path}")).header("If-None-Match",etag).send().unwrap().status(),404);
+}
