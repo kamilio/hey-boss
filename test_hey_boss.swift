@@ -4510,6 +4510,9 @@ func auditConversation(_ root: String) {
     ui.event(["TextDelta": ["text": "Read [the guide. It"]])
     precondition(ui.rows.isEmpty, "Wait for an unfinished Markdown link")
     ui.event(["Message": ["text": ""]])
+    let playbackStarted = audio.playbackStarted
+    var playedPassages = 0
+    audio.playbackStarted = { playedPassages += 1; playbackStarted() }
     ui.append("Read the reply", from: "You"); ui.state(.thinking, "Thinking…")
     let opening = "Meet Dr. Rose at noon."
     let first = opening + " The **early words** can play while the rest is still arriving."
@@ -4529,14 +4532,18 @@ func auditConversation(_ root: String) {
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
     precondition(ui.rows.last!.stringValue.contains("The early words"))
-    let full = first + "\n\nAnother paragraph\n\nLast line."
-    ui.event(["TextDelta": ["text": "\n\nLast line."]])
+    let repeatedList = String(repeating: "* Apples\n* Oranges\n", count: 12)
+    let full = first + "\n\nAnother paragraph\n\n" + repeatedList + "\nLast line."
+    ui.event(["TextDelta": ["text": "\n\n"]])
     wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
     ui.event(["TurnCompleted": ["status": "Completed", "output": full]])
     wait("second paragraph highlight") { highlighted() == "Another" }
+    wait("distinct text after repeated bullets") { highlighted() == "Last" }
     wait("all streamed speech drained") { ui.phase == .listening }
     precondition(highlighted() == nil && ui.rows.count == 2 && ui.rows.last!.stringValue.hasSuffix("Last line."))
+    precondition(ui.rows.last!.stringValue.components(separatedBy: "•  Apples").count == 13 && playedPassages < 18, "Keep every item visible without queuing every repeated bullet for speech")
+    audio.playbackStarted = playbackStarted
     let microphone = DispatchQueue(label: "conversation-audit.microphone")
     func feed(_ name: String, finishManually: Bool = false) {
         let pcm = try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent(name + ".pcm"))
