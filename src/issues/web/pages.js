@@ -22,6 +22,7 @@
         $('pages-error').hidden = true;
         $('page-status').hidden = !page.syncing;
         $('page-status').textContent = page.deployment ? 'An update is syncing. Showing the last complete version.' : 'Files are syncing to this machine. The page will open when they arrive.';
+        if (!content_url) { $('page-frame').hidden = true; $('page-frame').removeAttribute('src'); contentURL = ''; }
         if (content_url && contentURL !== content_url) {
           contentURL = content_url;
           $('page-frame').src = content_url;
@@ -38,18 +39,21 @@
     return;
   }
   let entries = [], next = null, csrf = '', selected = null, busy = false;
-  const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes/1024).toFixed(1)} KB` : `${(bytes/1048576).toFixed(1)} MB`;
+  const size = bytes => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes/1024).toFixed(1)} KiB` : `${(bytes/1048576).toFixed(1)} MiB`;
   function render() {
     $('pages-list').replaceChildren();
     for (const page of entries) {
       const card = node('article', null, 'page-card'), link = node('a', null, 'page-card-link'); link.href = page.path;
       const top = node('div', null, 'page-card-top'), mark = node('span', null, 'page-mark'); mark.append(icon('code'));
       top.append(mark, node('span', page.syncing ? 'Syncing' : 'Available here', `page-state${page.syncing?' syncing':''}`));
-      link.append(top, node('h3', page.name), node('p', `${page.files} ${page.files===1?'file':'files'} · ${size(page.size)}`));
+      const storage = node('div', null, 'page-storage');
+      storage.append(node('strong', size(page.stored_size)), node('span', page.syncing ? 'files stored so far' : 'stored across versions'));
+      storage.title = 'Compressed files on this machine, including retained versions. Shared files count toward each page.';
+      link.append(top, node('h3', page.name), storage, node('p', `${page.files} ${page.files===1?'file':'files'} · ${size(page.size)} original`));
       const footer = node('div', null, 'page-card-footer'), info = node('span', `${page.machine} · ${new Date(page.updated_at).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`);
       info.title = new Date(page.updated_at).toLocaleString();
-      const remove = node('button', null, 'icon-button'); remove.type = 'button'; remove.setAttribute('aria-label', `Delete ${page.name}`); remove.title = 'Delete page'; remove.append(icon('trash'));
-      remove.onclick = () => { selected = page; $('pages-delete-description').textContent = `Delete “${page.name}”?`; $('pages-delete-error').hidden = true; $('pages-delete-dialog').showModal(); $('pages-delete-cancel').focus(); };
+      const remove = node('button', null, 'icon-button'); remove.type = 'button'; remove.setAttribute('aria-label', `Delete ${page.name}`); remove.title = 'Delete from all machines'; remove.append(icon('trash'));
+      remove.onclick = () => { selected = page; $('pages-delete-description').textContent = `Delete “${page.name}” from all machines?`; $('pages-delete-error').hidden = true; $('pages-delete-dialog').showModal(); $('pages-delete-cancel').focus(); };
       footer.append(info, remove); card.append(link, footer); $('pages-list').append(card);
     }
     $('pages-empty').hidden = entries.length > 0; $('pages-count').textContent = entries.length ? `${entries.length}${next===null?'':'+'}` : '';
