@@ -1478,9 +1478,7 @@ impl Store {
         }
         super::chief::migrate(&db)?;
         jobs::migrate(&db)?;
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='published_page_list')", [], |r| r.get::<_,bool>(0))? {
-            db.execute_batch(crate::pages::SCHEMA)?;
-        }
+        crate::pages::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::ACTIVITY_INDEX)?;
         }

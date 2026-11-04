@@ -459,6 +459,8 @@ fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletio
     assert_eq!(client.get(format!("{base}/api/pages")).header("Origin","https://untrusted.example").send().unwrap().status(),403);
     assert_eq!(client.get(format!("{base}/api/pages")).header("Origin","null").send().unwrap().status(),403);
     let page: Value = client.get(format!("{base}/api/pages?name=report")).send().unwrap().json().unwrap();
+    assert!(page["page"]["stored_size"].as_u64().unwrap()>0);
+    crate::pages::publish(&database, &source, "keep").unwrap();
     let path = page["content_url"].as_str().unwrap();
     let response = client.get(format!("{base}{path}")).header("Origin","null").header("Sec-Fetch-Site","cross-site").send().unwrap();
     assert_eq!(response.status(),200);
@@ -475,4 +477,9 @@ fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletio
     assert_eq!(client.post(format!("{base}/api/pages/delete")).json(&json!({"name":"report"})).send().unwrap().status(),403);
     assert_eq!(client.post(format!("{base}/api/pages/delete")).header("X-Hey-Boss-CSRF",&fixture.app.token).json(&json!({"name":"report"})).send().unwrap().status(),200);
     assert_eq!(client.get(format!("{base}{path}")).header("If-None-Match",etag).send().unwrap().status(),404);
+    std::fs::write(&source,"<h1>New publication</h1>").unwrap();
+    crate::pages::publish(&database,&source,"report").unwrap();
+    assert_eq!(client.get(format!("{base}{path}")).send().unwrap().status(),404);
+    let kept: Value=client.get(format!("{base}/api/pages?name=keep")).send().unwrap().json().unwrap();
+    assert_eq!(client.get(format!("{base}{}",kept["content_url"].as_str().unwrap())).send().unwrap().status(),200);
 }

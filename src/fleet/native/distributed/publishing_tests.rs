@@ -2,6 +2,209 @@ use super::*;
 use crate::pages;
 use std::{fs, io::Read};
 
+fn capture_all(db: &Connection, engine: &mut hey_boss_sync::Engine) {
+    super::capture_all(db, engine);
+    while pages::index_history(db, engine).unwrap() {}
+    while pages::migrate_content(db).unwrap() > 0 {
+        super::capture_all(db, engine);
+    }
+    while pages::index_history(db, engine).unwrap() {}
+    super::capture_all(db, engine);
+    while pages::collect(db, Some(engine)).unwrap() > 0 {}
+}
+
+#[test]
+fn full_deletion_prunes_journal_and_disk_while_offline_shared_publish_survives() {
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let fc = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let c = peer(&fc, "c");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    let mut ec = hey_boss_sync::Engine::open(&fc.0.join("sync.db")).unwrap();
+    publish(&fa, &"shared evidence".repeat(20000));
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let stale = ea.batch(0).unwrap();
+    let old_ids: Vec<_> = stale
+        .records
+        .iter()
+        .filter(|r| r.payload.contains("\"resource\":"))
+        .map(|r| r.id.clone())
+        .collect();
+    assert!(!old_ids.is_empty());
+    // B is offline and reuses all bytes under a different name. A cannot know it.
+    let source = fb.0.join("copy.html");
+    fs::write(&source, "shared evidence".repeat(20000)).unwrap();
+    pages::publish(&fb.0.join("issues.db"), &source, "keep").unwrap();
+    capture_all(&b, &mut eb);
+    pages::delete(&fa.0.join("issues.db"), "report").unwrap();
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        fs::read_dir(pages::root(&fa.0.join("issues.db")))
+            .unwrap()
+            .count(),
+        0
+    );
+    for id in &old_ids {
+        assert!(ea.payload(id).unwrap().is_none());
+    }
+    // A brand-new relay gets pruned history, then the offline publication.
+    transfer(&ea, &mut ec);
+    capture_all(&c, &mut ec);
+    transfer(&eb, &mut ec);
+    capture_all(&c, &mut ec);
+    ec.ingest(&stale).unwrap();
+    capture_all(&c, &mut ec);
+    assert!(pages::view(&fc.0.join("issues.db"), "report").is_err());
+    pages::download(&fc.0.join("issues.db"), "keep", &fc.0.join("download")).unwrap();
+    assert_eq!(
+        fs::read_to_string(fc.0.join("download/index.html")).unwrap(),
+        "shared evidence".repeat(20000)
+    );
+    // Delete the final owner, reconnect through the relay, and replay from zero.
+    pages::delete(&fc.0.join("issues.db"), "keep").unwrap();
+    capture_all(&c, &mut ec);
+    transfer(&ec, &mut eb);
+    capture_all(&b, &mut eb);
+    b.execute("UPDATE distributed_meta SET projected=0", [])
+        .unwrap();
+    capture_all(&b, &mut eb);
+    assert!(pages::list(&fb.0.join("issues.db"), 0).unwrap().is_empty());
+    assert_eq!(
+        fs::read_dir(pages::root(&fb.0.join("issues.db")))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM distributed_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn deletion_wins_over_offline_edits_but_a_fresh_publication_can_reuse_the_name() {
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    publish(&fa, "first");
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    pages::delete(&fa.0.join("issues.db"), "report").unwrap();
+    capture_all(&a, &mut ea);
+    for i in 0..5 {
+        publish(&fb, &format!("offline edit {i}"));
+        capture_all(&b, &mut eb);
+    }
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    for f in [&fa, &fb] {
+        assert!(pages::view(&f.0.join("issues.db"), "report").is_err());
+        assert_eq!(
+            fs::read_dir(pages::root(&f.0.join("issues.db")))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+    publish(&fb, "explicitly republished");
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(body(&fa), "explicitly republished");
+}
+
+#[test]
+fn upgrading_legacy_page_history_reclaims_original_resource_records() {
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    publish(&fa, "legacy payload");
+    capture_all(&a, &mut ea);
+    let mut legacy_ids = Vec::new();
+    for (_, _, payload) in ea.pending(0).unwrap() {
+        let mut fact: Value = serde_json::from_str(&payload).unwrap();
+        match fact["table"].as_str().unwrap() {
+            "published_pages" => {
+                fact["after"].as_object_mut().unwrap().remove("generation");
+            }
+            "published_publications" => {
+                fact["table"] = serde_json::json!("published_deployments");
+                fact["after"]["id"] = serde_json::json!(hey_boss_sync::digest(
+                    fact["after"]["manifest"].as_str().unwrap().as_bytes()
+                ));
+            }
+            "published_page_chunks" => {
+                fact["table"] = serde_json::json!("published_chunks");
+                fact["after"].as_object_mut().unwrap().remove("publication");
+            }
+            _ => continue,
+        }
+        let id = eb.put(&fact.to_string()).unwrap();
+        if fact["table"] != "published_pages" {
+            legacy_ids.push(id);
+        }
+    }
+    capture_all(&b, &mut eb);
+    assert_eq!(body(&fb), "legacy payload");
+    pages::delete(&fb.0.join("issues.db"), "report").unwrap();
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        fs::read_dir(pages::root(&fb.0.join("issues.db")))
+            .unwrap()
+            .count(),
+        0
+    );
+    for id in legacy_ids {
+        assert!(eb.payload(&id).unwrap().is_none());
+    }
+}
+
+#[test]
+fn updating_a_page_does_not_retransmit_unchanged_assets() {
+    let f = Fixture::new();
+    let db = peer(&f, "a");
+    let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
+    let source = f.0.join("site");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("index.html"), "first").unwrap();
+    let asset = vec![19; pages::CHUNK_SIZE];
+    fs::write(source.join("shared.bin"), &asset).unwrap();
+    pages::publish(&f.0.join("issues.db"), &source, "report").unwrap();
+    capture_all(&db, &mut engine);
+    let after = engine.head().unwrap();
+    fs::write(source.join("index.html"), "second").unwrap();
+    pages::publish(&f.0.join("issues.db"), &source, "report").unwrap();
+    capture_all(&db, &mut engine);
+    let resources: Vec<_> = engine
+        .pending(after)
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, p)| serde_json::from_str::<Value>(&p).unwrap())
+        .filter(|f| f["resource"].is_object())
+        .collect();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(
+        resources[0]["resource"]["digest"],
+        hey_boss_sync::digest(b"second")
+    );
+}
+
 fn peer(f: &Fixture, name: &str) -> Connection {
     let db = f.db();
     install(&db, name).unwrap();
@@ -141,7 +344,7 @@ fn interrupted_out_of_order_delivery_keeps_the_previous_complete_deployment() {
     facts.reverse();
     for (_, _, payload) in &facts {
         let fact: Revision = serde_json::from_str(payload).unwrap();
-        if fact.table != "published_chunks" {
+        if fact.table != "published_page_chunks" {
             eb.put(payload).unwrap();
         }
     }
@@ -341,7 +544,7 @@ fn corrupted_incoming_page_resource_is_rejected_before_checkpoint_or_visibility(
     capture_all(&a, &mut ea);
     for (_, _, payload) in ea.pending(0).unwrap() {
         let mut value: Value = serde_json::from_str(&payload).unwrap();
-        if value["table"] == "published_chunks" {
+        if value["table"] == "published_page_chunks" {
             value["resource"]["bytes"] = serde_json::json!("Y29ycnVwdA==");
             eb.put(&value.to_string()).unwrap();
             break;
@@ -445,6 +648,20 @@ fn quarter_gib_publication_resumes_and_downloads_through_a_relay() {
     // Re-publishing the materialized directory verifies all paths and bytes.
     let restored = pages::publish(&fc.0.join("issues.db"), &output, "restored").unwrap();
     assert_eq!(restored.deployment, published.deployment);
+    capture_all(&c, &mut ec);
+    pages::delete(&fc.0.join("issues.db"), "large-site").unwrap();
+    pages::delete(&fc.0.join("issues.db"), "restored").unwrap();
+    capture_all(&c, &mut ec);
+    transfer(&ec, &mut eb);
+    capture_all(&b, &mut eb);
+    for f in [&fb, &fc] {
+        assert_eq!(
+            fs::read_dir(pages::root(&f.0.join("issues.db")))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
     eprintln!(
         "250 MiB: publish {published_at:?}; export {:?}; wire/ingest/project {:?} ({batches} batches); relay/project {:?}; download/verify {:?}",
         exported_at - published_at,
@@ -469,7 +686,7 @@ fn compressed_page_facts_are_small_and_legacy_resources_still_replay() {
     capture_all(&a, &mut ea);
     for (_, _, payload) in ea.pending(0).unwrap() {
         let mut value: Value = serde_json::from_str(&payload).unwrap();
-        if value["table"] == "published_chunks" {
+        if value["table"] == "published_page_chunks" {
             assert!(
                 payload.len() < text.len() / 10,
                 "The durable journal must store compressed content"

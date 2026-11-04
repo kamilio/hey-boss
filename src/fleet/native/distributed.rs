@@ -148,7 +148,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             tx.commit()?;
         }
         // Additive protocol data needs capture on already-enrolled replicas too.
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_published_pages_INSERT')", [], |r|r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_published_page_chunks_INSERT')", [], |r|r.get::<_,bool>(0))? {
             let tx=db.unchecked_transaction()?;
             capture::install(&tx)?;
             tx.commit()?;
@@ -160,6 +160,9 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         capture::upgrade_ordering(db)?;
         capture::retire_mindmaps(db)?;
         crate::issues::worker_retry::migrate(db)?;
+        if db.query_row("SELECT clock<(SELECT clock FROM published_storage WHERE id=1) FROM distributed_meta WHERE id=1",[],|r|r.get::<_,bool>(0))? {
+            db.execute("UPDATE distributed_meta SET clock=max(clock,(SELECT clock FROM published_storage WHERE id=1))",[])?;
+        }
         return Ok(());
     }
     let tx = db.unchecked_transaction()?;
@@ -175,6 +178,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             "Replica identity changed; enroll restored data as a new replica",
         ));
     }
+    tx.execute("UPDATE distributed_meta SET clock=max(clock,(SELECT clock FROM published_storage WHERE id=1))",[])?;
     capture::install(&tx)?;
     resources::initialize(&tx)?;
     activation::protect_role(&tx)?;
@@ -232,7 +236,10 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
             break;
         }
         bytes += payload.len();
-        engine.put(&payload)?;
+        let id = engine.put(&payload)?;
+        if fact.table.starts_with("published_") {
+            crate::pages::index_record(&tx, &id, &serde_json::to_value(&fact)?)?;
+        }
         tx.execute(
             "UPDATE distributed_meta SET exported=?1 WHERE id=1",
             [fact.clock],
@@ -254,18 +261,21 @@ pub(super) fn baseline(
     let tables: Vec<_> = capture::TABLES
         .iter()
         .filter(|table| {
-            controller
-                || matches!(
-                    **table,
-                    "worker_runs"
-                        | "scheduled_job_runs"
-                        | "scheduled_job_logs"
-                        | "worker_allocations"
-                        | "dictation_vocabulary"
-                        | "published_chunks"
-                        | "published_deployments"
-                        | "published_pages"
-                )
+            !matches!(**table, "published_chunks" | "published_deployments")
+                && (controller
+                    || matches!(
+                        **table,
+                        "worker_runs"
+                            | "scheduled_job_runs"
+                            | "scheduled_job_logs"
+                            | "worker_allocations"
+                            | "dictation_vocabulary"
+                            | "published_chunks"
+                            | "published_deployments"
+                            | "published_pages"
+                            | "published_publications"
+                            | "published_page_chunks"
+                    ))
         })
         .copied()
         .collect();
@@ -394,13 +404,29 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
     {
         return Ok(0);
     }
+    let page_facts = facts
+        .iter()
+        .any(|(_, _, p)| p.contains("\"table\":\"published_"));
+    let _page_lock = if page_facts {
+        Some(crate::pages::lock(std::path::Path::new(
+            db.path().unwrap(),
+        ))?)
+    } else {
+        None
+    };
     // Published chunks are immutable and hash-verified. Flush their files before
     // acquiring the application writer; interrupted receives can safely replay.
     for (_, _, payload) in &facts {
         if let Some(fact) = archives::revision(payload)? {
             resources::validate_page(&fact)?;
-            if fact.table == "published_chunks" {
-                if let Some(resource) = &fact.resource { resources::receive(db, resource)?; }
+            if matches!(
+                fact.table.as_str(),
+                "published_chunks" | "published_page_chunks"
+            ) && !resources::retired(db, &fact)?
+            {
+                if let Some(resource) = &fact.resource {
+                    resources::receive(db, resource)?;
+                }
             }
             if let Some(archive) = &fact.archive {
                 archives::receive_or_retain(db, engine, archive)?;
@@ -408,16 +434,26 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
         }
     }
     let tx = db.unchecked_transaction()?;
-    for (position, _, payload) in &facts {
+    for (position, id, payload) in &facts {
         if let Some(fact) = archives::revision(payload)? {
+            if fact.table.starts_with("published_") {
+                crate::pages::index_record(&tx, id, &serde_json::to_value(&fact)?)?;
+            }
             if let Some(archive) = &fact.archive {
                 archives::remember(&tx, archive)?;
             }
-            if fact.table != "published_chunks" {
-                if let Some(resource) = &fact.resource { resources::receive(&tx, resource)?; }
+            if !matches!(
+                fact.table.as_str(),
+                "published_chunks" | "published_page_chunks"
+            ) {
+                if let Some(resource) = &fact.resource {
+                    resources::receive(&tx, resource)?;
+                }
             }
-            projection::reduce(&tx, &fact)?;
-            materialize::discover_page(&tx, &fact)?;
+            if !resources::retired(&tx, &fact)? {
+                projection::reduce(&tx, &fact)?;
+                materialize::discover_page(&tx, &fact)?;
+            }
             if fact.table == "distributed_members" {
                 let key = projection::key(
                     &tx,

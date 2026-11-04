@@ -82,8 +82,8 @@ fn file(app: &App, url: &str) -> Result<pages::Content> {
     // Check the current name before cache validation, including pinned old deployments.
     let db = super::super::Store::open(&database)?.into_database();
     if !db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM published_pages WHERE name=?1 AND deleted=0)",
-        [name],
+        "SELECT EXISTS(SELECT 1 FROM published_pages p WHERE name=?1 AND deleted=0 AND (deployment=?2 OR EXISTS(SELECT 1 FROM published_owners o WHERE o.name=p.name AND o.deployment=?2 AND NOT EXISTS(SELECT 1 FROM published_owners birth JOIN published_deletions d ON d.name=birth.name WHERE birth.generation=o.generation AND (birth.clock,birth.origin)<=(d.clock,d.origin)))))",
+        [name, revision],
         |r| r.get::<_, bool>(0),
     )? {
         return Err(Error::new("not_found", "Published page not found"));

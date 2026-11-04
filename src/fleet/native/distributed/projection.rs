@@ -63,7 +63,9 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         | "worker_allocations"
         | "published_chunks"
         | "published_deployments"
-        | "published_pages" => "@row",
+        | "published_pages"
+        | "published_publications"
+        | "published_page_chunks" => "@row",
         _ => column,
     }
 }
@@ -145,6 +147,9 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
                 ));
             }
         }
+    }
+    if fact.table == "published_pages" {
+        crate::pages::remember(db, fact.after.as_ref().unwrap(), fact.clock, &fact.origin)?;
     }
     let columns = capture::columns(db, &fact.table)?;
     for row in [&fact.before, &fact.after].into_iter().flatten() {

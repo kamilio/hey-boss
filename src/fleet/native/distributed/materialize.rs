@@ -136,6 +136,25 @@ pub(super) fn write(
         )?;
         return Ok(());
     };
+    if table == "published_publications" {
+        if crate::pages::retired(db, row["id"].as_str().unwrap())? {
+            return Ok(());
+        }
+        let text = row["manifest"].as_str().unwrap();
+        db.execute(
+            "INSERT OR IGNORE INTO published_deployments VALUES(?1,?2)",
+            params![hey_boss_sync::digest(text.as_bytes()), text],
+        )?;
+    }
+    if table == "published_page_chunks" {
+        if crate::pages::retired(db, row["publication"].as_str().unwrap())? {
+            return Ok(());
+        }
+        db.execute(
+            "INSERT OR IGNORE INTO published_chunks VALUES(?1,?2)",
+            params![row["hash"].as_str(), row["size"].as_u64()],
+        )?;
+    }
     if table == "worker_runs" {
         db.execute("INSERT INTO distributed_attempts VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET state=excluded.state,finished_at=excluded.finished_at,summary=excluded.summary,payload=excluded.payload",
             params![row["id"].as_str(),row["machine"].as_str(),row["project_id"].as_str(),row["issue_number"].as_i64(),row["state"].as_str(),row["started_at"].as_i64(),row["finished_at"].as_i64(),row["summary"].as_str(),row.to_string()])?;
@@ -153,6 +172,14 @@ pub(super) fn write(
     if table == "scheduled_job_runs" {
         db.execute("INSERT INTO distributed_job_attempts(id,project_id,job_id,created_at,scheduled_at,state,payload) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,payload=excluded.payload",params![row["id"].as_str(),row["project_id"].as_str(),row["job_id"].as_str(),row["created_at"].as_i64(),row["scheduled_at"].as_i64(),row["state"].as_str(),row.to_string()])?;
         return Ok(());
+    }
+    if table == "published_pages" {
+        if crate::pages::retired(db, &crate::pages::generation(&row))? {
+            row["deleted"] = json!(1);
+        }
+        if row["generation"].is_null() {
+            row["generation"] = json!("");
+        }
     }
     if table == "published_pages" && row["deleted"] == 1 {
         db.execute(

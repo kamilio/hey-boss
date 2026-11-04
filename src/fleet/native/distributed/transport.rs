@@ -24,6 +24,7 @@ fn prepare(
     install(db, &ctx.node)?;
     archives::prepare(db, engine)?;
     let mut progressed = engine.compress_history()?;
+    progressed |= crate::pages::index_history(db, engine)?;
     for _ in 0..8 {
         if export(db, engine)? == 0 {
             break;
@@ -49,6 +50,11 @@ fn prepare(
         }
         progressed = true;
     }
+    if db.query_row("SELECT projected=?1 AND exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) FROM distributed_meta WHERE id=1",[engine.head()?],|r|r.get::<_,bool>(0))? {
+        let _lock = crate::pages::lock(&ctx.path)?;
+        progressed |= crate::pages::migrate_content(db)? > 0;
+    }
+    progressed |= crate::pages::collect(db, Some(engine))? > 0;
     // The immutable journal is durable before exported advances. Keep only a
     // bounded application outbox rather than retaining a second full history.
     if db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1))", [], |r| r.get::<_, bool>(0))? {
@@ -924,7 +930,7 @@ mod tests {
                 .unwrap(),
             "a".repeat(32)
         );
-        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs','scheduled_job_logs','worker_allocations','dictation_vocabulary','published_chunks','published_deployments','published_pages')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs','scheduled_job_logs','worker_allocations','dictation_vocabulary','published_chunks','published_deployments','published_pages','published_publications','published_page_chunks')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(
             db.query_row("SELECT ready FROM distributed_members", [], |r| r
                 .get::<_, i64>(0))

@@ -181,10 +181,61 @@ impl Engine {
     pub fn payload(&self, id: &str) -> Result<Option<String>> {
         Ok(self
             .db
-            .query_row("SELECT payload FROM records WHERE id=?1", [id], |r| {
-                compression::payload(r, 0)
-            })
+            .query_row(
+                "SELECT payload FROM records WHERE id=?1 AND payload<>''",
+                [id],
+                |r| compression::payload(r, 0),
+            )
             .optional()?)
+    }
+
+    /// Reclaim a payload while retaining its identity and delivery position.
+    /// Empty payloads are permanent tombstones, including on stale replay.
+    /// The application must first durably retire every owner of these facts.
+    pub fn prune(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in ids {
+            tx.execute(
+                "UPDATE records SET payload='' WHERE id=?1 AND payload<>''",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Scan a bounded range by its first 512 decoded bytes, without inflating
+    /// unrelated large resources. Used to index preexisting application data.
+    pub fn pending_header(
+        &self,
+        after: i64,
+        needle: &str,
+    ) -> Result<(i64, Vec<(i64, String, String)>)> {
+        let through = self.head()?.min(after + 4096);
+        let mut statement = self.db.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 AND d.position<=?2 AND payload_header_contains(r.payload,?3) ORDER BY d.position LIMIT 128")?;
+        let mut result = Vec::new();
+        let mut bytes = 0;
+        for row in statement.query_map(params![after, through, needle], |r| {
+            Ok((r.get(0)?, r.get(1)?, compression::payload(r, 2)?))
+        })? {
+            let row: (i64, String, String) = row?;
+            if !result.is_empty() && bytes + row.2.len() > PAGE_BYTES {
+                return Ok((
+                    result.last().map(|r: &(i64, String, String)| r.0).unwrap(),
+                    result,
+                ));
+            }
+            bytes += row.2.len();
+            result.push(row);
+        }
+        let through = if result.len() == 128 {
+            result.last().unwrap().0
+        } else {
+            through
+        };
+        Ok((through, result))
     }
 
     pub fn head(&self) -> Result<i64> {
@@ -300,9 +351,10 @@ impl Engine {
                 || record.version < 1
                 || record.sequence < 0
                 || record.timestamp.parse::<u64>().is_err()
-                || record.payload.is_empty()
                 || record.payload.len() > MAX_PAYLOAD
-                || record.id != digest(record.payload.as_bytes())
+                || record.id.len() != 64
+                || !record.id.bytes().all(|b| b.is_ascii_hexdigit())
+                || (!record.payload.is_empty() && record.id != digest(record.payload.as_bytes()))
             {
                 return Err(invalid("Invalid or corrupt replication record"));
             }
@@ -329,6 +381,13 @@ impl Engine {
         {
             let mut insert = tx.prepare("INSERT INTO crsql_changes(\"table\",pk,cid,val,col_version,db_version,site_id,cl,seq,ts) VALUES('records',crsql_pack_columns(?1),'payload',?2,1,?3,?4,1,?5,?6)")?;
             for record in &batch.records {
+                if tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM records WHERE id=?1 AND payload='')",
+                    [&record.id],
+                    |r| r.get::<_, bool>(0),
+                )? {
+                    continue;
+                }
                 insert.execute(params![
                     record.id,
                     compression::stored(&record.payload)?,
@@ -337,6 +396,9 @@ impl Engine {
                     record.sequence,
                     record.timestamp
                 ])?;
+                if record.payload.is_empty() {
+                    tx.execute("UPDATE records SET payload='' WHERE id=?1", [&record.id])?;
+                }
             }
         }
         tx.execute("INSERT INTO receipts VALUES(?1,?2) ON CONFLICT(replica) DO UPDATE SET position=max(position,excluded.position)", params![batch.replica,batch.through])?;
