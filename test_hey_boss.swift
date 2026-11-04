@@ -4483,6 +4483,15 @@ func auditConversation(_ root: String) {
         ui.window.makeFirstResponder(ui.input)
         let composer = ui.input.currentEditor() as! NSTextView
         let lineHeight = ui.input.bounds.height
+        let draft = String(repeating: "draft ", count: 18)
+        composer.insertText(draft, replacementRange: NSRange(location: NSNotFound, length: 0))
+        ui.window.setContentSize(NSSize(width: 410, height: 490))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        let narrowHeight = ui.input.bounds.height
+        ui.window.setContentSize(NSSize(width: 860, height: 610))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        precondition(narrowHeight > ui.input.bounds.height && narrowHeight > lineHeight, "A draft must wrap to fit the composer and shrink again when widened")
+        composer.selectAll(nil); composer.deleteBackward(nil)
         composer.insertText("First line", replacementRange: NSRange(location: NSNotFound, length: 0))
         func pressReturn(_ flags: NSEvent.ModifierFlags) {
             ui.window.sendEvent(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!)
