@@ -177,7 +177,8 @@ pub fn stream(
             output.write_all(&2u16.to_le_bytes())?;
             output.flush()?;
         }
-        if !turn.active {
+        // A follow-up can begin during the previous chat turn's final pause.
+        if conversation || !turn.active {
             if history.len() == 20 {
                 history.pop_front();
             }
