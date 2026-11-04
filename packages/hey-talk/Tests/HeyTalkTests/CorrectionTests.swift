@@ -61,6 +61,20 @@ final class CorrectionTests: XCTestCase {
         }
     }
 
+    func testQuotaWarmupNeverSendsDictationOrRunsInference() {
+        let correction = client()
+        let checked = expectation(description: "quota checked")
+        CorrectionProtocol.handle = { stub in
+            XCTAssertEqual(stub.request.httpMethod, "GET")
+            XCTAssertEqual(stub.request.url?.absoluteString, "http://127.0.0.1:8080/codex/usage")
+            XCTAssertNil(stub.request.httpBody)
+            stub.respond(status: 503, body: "")
+            checked.fulfill()
+        }
+        correction.warmQuota()
+        wait(for: [checked], timeout: 2)
+    }
+
     func testHTTPFailureAndTimeoutDoNotReturnReplacementText() {
         let correction = client()
         for status in [429, 500, 0] {
