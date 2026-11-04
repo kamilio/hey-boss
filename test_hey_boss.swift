@@ -4586,6 +4586,7 @@ func auditConversation(_ root: String) {
         return result
     }
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
+    precondition(ui.skipReading.isHidden, "Keep listening controls separate from an unfinished model turn")
     precondition(!ui.send.isEnabled, "Keep the current model turn together while new words are still arriving")
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
@@ -4625,11 +4626,13 @@ func auditConversation(_ root: String) {
     }
     precondition(ui.phase == .listening && ui.audio === audio && !ui.contextChip.isHidden)
     feed("first")
-    wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
+    wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying && !ui.skipReading.isHidden }
     precondition(ui.rows[2].stringValue.lowercased().hasPrefix("so") && ui.rows[2].stringValue.localizedCaseInsensitiveContains("fruit"), "A thinking pause after So must not cut off the question")
     ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
     precondition(ui.phase == .speaking && ui.recording == nil)
-    wait("listen again") { ui.phase == .listening }
+    precondition(ui.skipReading.visibleRect.width > 0)
+    ui.skipReading.performClick(nil)
+    precondition(ui.phase == .listening && ui.skipReading.isHidden && ui.audio === audio && !audio.player.isPlaying)
     feed("second", finishManually: true)
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
