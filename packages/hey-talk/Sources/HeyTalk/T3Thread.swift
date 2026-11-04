@@ -84,31 +84,31 @@ extension FocusedInput {
     }
 
     @MainActor
-    func openNewThread(project: String?, isCurrent: () -> Bool) async -> Bool {
-        guard canUseThreadActions, isCurrent(), isFocused(), let area = webArea, let window else { return false }
+    func openNewThread(project: String?, isCurrent: () -> Bool) async -> FocusedInput? {
+        guard canUseThreadActions, isCurrent(), isFocused(), let area = webArea, let window else { return nil }
         func press(_ item: AXUIElement) -> Bool {
             AXUIElementPerformAction(item, "AXPress" as CFString) == .success
         }
-        func open(_ button: AXUIElement, in name: String) async -> Bool {
-            guard press(button) else { return false }
+        func open(_ button: AXUIElement, in name: String) async -> FocusedInput? {
+            guard press(button) else { return nil }
             for _ in 0..<30 {
                 try? await Task.sleep(nanoseconds: 40_000_000)
-                guard isCurrent(), app.isActive else { return false }
+                guard isCurrent(), app.isActive else { return nil }
                 if let draft = Self.read(app: app), let active = draft.window, CFEqual(window, active),
                    draft.document?.hasPrefix("t3code://app/#/draft/") == true,
-                   let selected = draft.projectButton?.name, Self.sameProject(selected, name) { return true }
+                   let selected = draft.projectButton?.name, Self.sameProject(selected, name) { return draft }
             }
-            return false
+            return nil
         }
         if let current = projectButton, project.map({ Self.sameProject(current.name, $0) }) ?? true {
-            guard isCurrent(), isFocused() else { return false }
+            guard isCurrent(), isFocused() else { return nil }
             return await open(current.button, in: current.name)
         }
-        guard let project else { return false }
+        guard let project else { return nil }
 
         // Open the command palette. The generic New thread button can silently
         // choose the current project when the sidebar has a project filter.
-        guard isCurrent(), isFocused(), Paste.post(40, flags: .maskCommand, to: app.processIdentifier) else { return false }
+        guard isCurrent(), isFocused(), Paste.post(40, flags: .maskCommand, to: app.processIdentifier) else { return nil }
         let application = AXUIElementCreateApplication(app.processIdentifier)
         func focusedPicker() -> AXUIElement? {
             guard isCurrent(), app.isActive, let activeWindow = SpeechAX.element(application, "AXFocusedWindow"), CFEqual(window, activeWindow),
@@ -125,11 +125,11 @@ extension FocusedInput {
         var openedProjects = false
         for _ in 0..<30 {
             try? await Task.sleep(nanoseconds: 40_000_000)
-            guard isCurrent(), app.isActive else { return false }
+            guard isCurrent(), app.isActive else { return nil }
             guard let picker = focusedPicker() else { continue }
             if !openedProjects {
                 let actions = search(picker, "AXAnyTypeSearchKey", text: "New thread in...").filter { SpeechAX.string($0, "AXValue") == "New thread in..." }
-                guard actions.count == 1, let active = focusedPicker(), CFEqual(picker, active), press(actions[0]) else { return false }
+                guard actions.count == 1, let active = focusedPicker(), CFEqual(picker, active), press(actions[0]) else { return nil }
                 openedProjects = true
                 continue
             }
@@ -138,7 +138,7 @@ extension FocusedInput {
             let headings = search(picker, "AXAnyTypeSearchKey", text: "Projects").filter { SpeechAX.string($0, "AXValue") == "Projects" }
             guard headings.count == 1, let header = SpeechAX.element(headings[0], "AXParent"),
                   let group = SpeechAX.element(header, "AXParent"),
-                  let items = SpeechAX.value(group, "AXChildren") as? [AXUIElement] else { return false }
+                  let items = SpeechAX.value(group, "AXChildren") as? [AXUIElement] else { return nil }
             let rows = items.compactMap { (item: AXUIElement) -> AXUIElement? in
                 guard let row = (SpeechAX.value(item, "AXChildren") as? [AXUIElement])?.first,
                       let name = (SpeechAX.value(row, "AXChildren") as? [AXUIElement])?.first,
@@ -146,10 +146,10 @@ extension FocusedInput {
                       Self.sameProject(SpeechAX.string(name, "AXValue"), project) else { return nil }
                 return row
             }
-            guard let active = focusedPicker(), CFEqual(active, picker), rows.count == 1 else { return false }
+            guard let active = focusedPicker(), CFEqual(active, picker), rows.count == 1 else { return nil }
             return await open(rows[0], in: project)
         }
-        return false
+        return nil
     }
 
     private static func sameProject(_ name: String, _ spoken: String) -> Bool {

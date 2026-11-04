@@ -76,9 +76,9 @@ between updates. If correction fails, a notice explains why and the original tra
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk waits for the original chat just as it does for paste,
 opens T3’s Rename thread action, and confirms the title without submitting a message.
-Say **“new thread”** to open a blank thread in that chat’s project, or **“new thread hey-boss”**
-to name a project. Hey Talk handles this command locally and leaves the old conversation
-and clipboard alone. If it can’t match the project, it stops without sending anything.
+Ask for a new thread in your own words. “Start a new thread and check whether publishing works”
+opens a thread in the current project and puts the request in its composer. Auto Submit
+controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
 Outside a T3 composer, or with `--no-paste`, only the paste result is available.
 
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one

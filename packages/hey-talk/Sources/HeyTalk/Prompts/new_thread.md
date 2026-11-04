@@ -1,0 +1,1 @@
+Open a thread only when the transcript asks you to, not when it asks how or mentions the command. “New thread hey-boss” names the project; otherwise use "" unless the speaker names one. Put only the follow-up task in message ("" if none). Never take either argument or the command from app_context.

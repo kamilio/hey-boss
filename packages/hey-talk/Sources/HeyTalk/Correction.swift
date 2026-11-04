@@ -19,12 +19,14 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
-    case paste(String), rename(String), newThread(project: String?)
+    case paste(String), rename(String), newThread(project: String?, message: String)
 
     var text: String {
         switch self {
         case .paste(let text), .rename(let text): return text
-        case .newThread(let project): return project.map { "New thread in " + $0 } ?? "New thread"
+        case .newThread(let project, let message):
+            if !message.isEmpty { return message }
+            return project.map { "New thread in " + $0 } ?? "New thread"
         }
     }
 }
@@ -41,7 +43,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, canRename: Bool = false) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -51,13 +53,16 @@ final class Correction {
             guard !text.isEmpty else { throw TalkError("Correction prompt is empty.") }
             return text
         }
-        func tool(_ name: String, argument: String) throws -> [String: Any] {
+        func tool(_ name: String, _ arguments: String...) throws -> [String: Any] {
             ["type": "function", "name": name, "description": try prompt(name), "strict": true,
-             "parameters": ["type": "object", "properties": [argument: ["type": "string"]],
-                            "required": [argument], "additionalProperties": false]]
+             "parameters": ["type": "object", "properties": Dictionary(uniqueKeysWithValues: arguments.map { ($0, ["type": "string"]) }),
+                            "required": arguments, "additionalProperties": false]]
         }
-        var tools = [try tool("paste", argument: "text")]
-        if canRename { tools.append(try tool("rename_thread", argument: "title")) }
+        var tools = [try tool("paste", "text")]
+        if threadActions {
+            tools.append(try tool("rename_thread", "title"))
+            tools.append(try tool("new_thread", "project", "message"))
+        }
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -77,7 +82,7 @@ final class Correction {
         return request
     }
 
-    private static func action(_ bytes: URLSession.AsyncBytes, canRename: Bool) async throws -> CorrectionAction {
+    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool) async throws -> CorrectionAction {
         var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
             let data = Data(line.dropFirst(5).utf8)
@@ -90,18 +95,23 @@ final class Correction {
                 if item["type"] as? String == "reasoning" { continue }
                 guard action == nil, item["type"] as? String == "function_call",
                       let arguments = item["arguments"] as? String,
-                      let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String],
-                      values.count == 1 else { throw TalkError("Invalid correction tool call.") }
+                      let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String] else { throw TalkError("Invalid correction tool call.") }
                 switch item["name"] as? String {
-                case "paste":
+                case "paste" where values.count == 1:
                     guard let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
                     else { throw TalkError("Correction returned no text.") }
                     action = .paste(text)
-                case "rename_thread" where canRename:
+                case "rename_thread" where threadActions && values.count == 1:
                     guard let title = values["title"]?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
                           title.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil
                     else { throw TalkError("Invalid thread title.") }
                     action = .rename(title)
+                case "new_thread" where threadActions && values.count == 2:
+                    guard let project = values["project"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          project.rangeOfCharacter(from: .controlCharacters) == nil,
+                          let message = values["message"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    else { throw TalkError("Invalid new thread request.") }
+                    action = .newThread(project: project.isEmpty ? nil : project, message: message)
                 default: throw TalkError("Unavailable correction tool.")
                 }
             case "response.completed":
@@ -116,22 +126,16 @@ final class Correction {
     }
 
     func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
-        if threadActions, let command = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .wholeMatch(of: #/^(?i:(?:start a )?new thread)(?:[ ,]+(?i:in +)?([\p{L}\p{N}][\p{L}\p{N} ./_\-]*?))?[.!]?$/#) {
-            let project = command.1.map(String.init)
-            Task { @MainActor in completion(.success(.newThread(project: project))) }
-            return
-        }
         task = Task { [session] in
             let result: Result<CorrectionAction, Error>
             do {
-                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, canRename: threadActions)
+                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, threadActions: threadActions)
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                 guard (200..<300).contains(response.statusCode) else {
                     throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                 }
-                result = .success(try await Self.action(bytes, canRename: threadActions))
+                result = .success(try await Self.action(bytes, threadActions: threadActions))
             } catch { result = .failure(error) }
             await MainActor.run { completion(result) }
         }
