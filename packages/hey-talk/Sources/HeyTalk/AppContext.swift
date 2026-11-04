@@ -24,7 +24,20 @@ enum AppContext {
         guard let raw = value(app, "AXFocusedWindow"), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
         let window = raw as! AXUIElement
         guard value(window, "AXMinimized") as? Bool != true, let viewport = frame(window), !viewport.isEmpty else { return nil }
-        let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        let running = NSRunningApplication(processIdentifier: pid)
+        if BrowserPage.isBrowser(running) {
+            guard let page = BrowserPage.page(in: window, deadline: deadline),
+                  let host = BrowserPage.host(page.url), let scroll = SpeechAX.element(page.area, "AXParent"),
+                  let bounds = frame(scroll) else { return nil }
+            let header = "## Website\n" + host
+            let text = visibleText(in: page.area, viewport: viewport.intersection(bounds), deadline: deadline, website: true) { element, name in
+                if name == "AXFrame" { return frame(element) }
+                if name == "AXVisibleText" { return nil }
+                return value(element, name)
+            }
+            return String((header + (text.map { "\n\n" + $0 } ?? "")).prefix(8000))
+        }
+        let bundle = running?.bundleIdentifier
         let isCmux = bundle == "com.cmuxterm.app"
         let conversationOnly = bundle == "com.t3tools.t3code" || bundle == "com.tinyspeck.slackmacgap"
         return visibleText(in: window, viewport: viewport, deadline: deadline, conversationOnly: conversationOnly) { element, name in
@@ -35,7 +48,7 @@ enum AppContext {
         }
     }
 
-    static func visibleText<Element>(in root: Element, viewport: CGRect, deadline: TimeInterval, conversationOnly: Bool = false,
+    static func visibleText<Element>(in root: Element, viewport: CGRect, deadline: TimeInterval, conversationOnly: Bool = false, website: Bool = false,
                                      value: (Element, String) -> Any?) -> String? {
         var sections: [(title: String, text: String)] = [], nodes = 0
         func append(_ text: String, path: [String]) {
@@ -49,7 +62,7 @@ enum AppContext {
             guard depth < 40, nodes < 1500, ProcessInfo.processInfo.systemUptime < deadline else { return nil }
             nodes += 1
             let role = value(element, "AXRole") as? String ?? ""
-            if role == "AXHeading" {
+            if role == "AXHeading" && !website {
                 // Speaker headings may be hidden, screen-reader-only labels.
                 // They label visible sibling text; their contents aren't captured.
                 let children = value(element, "AXChildren") as? [Element] ?? []

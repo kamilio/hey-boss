@@ -29,6 +29,7 @@ enum CLI {
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
     hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
+    hey-talk enter-exceptions sites [add|remove HOST]  Websites that never receive Enter
     hey-talk vocabulary [add|remove WORD…]     Shared recognition hints; quote phrases
     hey-talk overlay show|hide                  Control the floating recording pill
     hey-talk permissions microphone|accessibility
@@ -183,7 +184,7 @@ enum CLI {
                 fputs("Using the first 256 hints. Remove \(total - words.count) terms to include the whole list.\n", stderr)
             }
         }
-        else if let ids = response["enter_exceptions"] as? [String], response.count == 2 {
+        else if let ids = (response["enter_exception_sites"] ?? response["enter_exceptions"]) as? [String], response.count == 2 {
             print(ids.isEmpty ? "No Enter exceptions." : ids.joined(separator: "\n"))
         }
         else if let entries = response["entries"] as? [[String: Any]] {
