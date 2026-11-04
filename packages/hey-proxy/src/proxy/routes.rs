@@ -1,4 +1,4 @@
-//! Ordered, quota-gated provider routes, independent of recommendation policy.
+//! Ordered provider routes, independent of recommendation policy.
 use super::*;
 use crate::config::routes::{BillingMode, ResolvedLeg};
 mod diagnostic;
@@ -114,26 +114,14 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
                     }
                 };
             selected.fallback_attempt = true;
-            if leg.billing_mode == BillingMode::IncludedSubscription {
-                let (availability, reading) = quota::check(&selected, &leg.upstream_model).await;
+            if leg.billing_mode == BillingMode::IncludedSubscription
+                && quota::cooling_down(&selected, &leg.upstream_model).await
+            {
                 if let Some(report) = &mut report {
-                    report.quota(&leg, &availability, reading.as_ref());
+                    report.cooldown(&leg.provider);
                 }
-                match availability {
-                    quota::Availability::Included => {}
-                    quota::Availability::Exhausted => {
-                        diagnostic(&proxy, &leg, index, "included_exhausted");
-                        continue;
-                    }
-                    quota::Availability::Unavailable => {
-                        return diagnostic::failure(
-                            report.as_ref(),
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            "route_quota_unavailable",
-                            "Fresh account/model-specific included quota is unavailable; no paid leg was selected",
-                        );
-                    }
-                }
+                diagnostic(&proxy, &leg, index, "included_exhausted");
+                continue;
             }
             if let Some(report) = &report {
                 return report.reply(Some(&leg), None);
