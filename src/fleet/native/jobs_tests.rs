@@ -1534,3 +1534,103 @@ fn exec_scheduler_reserves_capacity_and_skips_full_workers() {
         1
     );
 }
+
+#[test]
+fn peer_schedules_explicit_commands_remotely_but_keeps_scheduled_jobs_local() {
+    let mut f = Fixture::new();
+    let ordinary = f.run("ordinary");
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_job_owners SET node=NULL WHERE run_id=?1",
+            [&ordinary.run.id],
+        )
+        .unwrap();
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE scheduled_job_runs SET worker_id=NULL WHERE id=?1",
+            [&ordinary.run.id],
+        )
+        .unwrap();
+    let command = f.op(serde_json::from_value(json!({"command":"submit","id":"remote-command","execution":{"program":"/bin/true","args":[]}})).unwrap());
+    let remote = json!({"node":"remote","state":"connected","heartbeat":super::super::context::now(),"jobs":capability(&f.ctx).unwrap()});
+    f.ctx
+        .db()
+        .unwrap()
+        .execute("UPDATE fleet_meta SET role='peer'", [])
+        .unwrap();
+    schedule(&f.ctx, &[remote]).unwrap();
+    assert!(f.store.job_owner(&ordinary.run.id).unwrap().is_none());
+    assert_eq!(
+        f.store
+            .job_owner(command["run"]["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .0,
+        "remote"
+    );
+}
+
+#[test]
+fn exec_cancellation_returns_terminal_status_and_can_be_repeated() {
+    let mut f = Fixture::new();
+    let submitted = f.op(serde_json::from_value(json!({"command":"submit","id":"cancel-response","execution":{"program":"/bin/true","args":[]}})).unwrap());
+    for _ in 0..2 {
+        let cancelled = f.op(Operation::CancelExecution {
+            run_id: submitted["run"]["id"].as_str().unwrap().into(),
+        });
+        assert_eq!(cancelled["run"]["state"], "cancelled");
+    }
+}
+
+#[test]
+fn exec_file_reads_use_the_submitting_owner_after_peer_replication() {
+    let mut f = Fixture::new();
+    let d = f.run("file-owner");
+    let input = f.root.join("input");
+    fs::write(&input, "input bytes").unwrap();
+    let blob = crate::jobs::command::upload(&input, |op| Ok(f.op(op))).unwrap();
+    let read = Operation::FileGet { blob, offset: 0 };
+    let local = command::call(&f.ctx, &d, read.clone()).unwrap();
+    assert_eq!(
+        local["ok"], true,
+        "File replies must pass the authority protocol"
+    );
+    assert_eq!(local["data"], "aW5wdXQgYnl0ZXM=");
+    f.ctx
+        .db()
+        .unwrap()
+        .execute(
+            "DELETE FROM scheduled_job_owners WHERE run_id=?1",
+            [&d.run.id],
+        )
+        .unwrap();
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let state = std::env::temp_dir().join(format!(
+        "relay-{}",
+        &super::super::context::id().unwrap()[..8]
+    ));
+    fs::create_dir(&state).unwrap();
+    f.ctx.state = state.clone();
+    let relay = super::super::authority::Relay::start(&f.ctx, output.clone()).unwrap();
+    relay.configure(
+        &json!({"capabilities":{"authority_rpc":true,"scheduled_jobs":true,"exec_v1":true}}),
+    );
+    let ctx = f.ctx.clone();
+    let client = std::thread::spawn(move || command::call(&ctx, &d, read));
+    wait(|| !output.lock().unwrap().is_empty() || client.is_finished());
+    assert!(
+        !output.lock().unwrap().is_empty(),
+        "Remote execution must use its owner's file relay"
+    );
+    let envelope: Value = serde_json::from_slice(&output.lock().unwrap()).unwrap();
+    assert_eq!(envelope["request"]["kind"], "resource");
+    assert!(envelope["request"]["request"]["request_id"].is_null());
+    relay.receive(json!({"id":envelope["id"],"result":local}));
+    assert_eq!(client.join().unwrap().unwrap()["data"], "aW5wdXQgYnl0ZXM=");
+    drop(relay);
+    fs::remove_dir_all(state).unwrap();
+}

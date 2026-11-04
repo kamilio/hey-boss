@@ -622,6 +622,11 @@ pub(super) fn acknowledge(ctx: &Context, report: &Report) -> Result<()> {
 
 pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
     let mut store = Store::open(&ctx.path)?;
+    let peer = ctx
+        .db()?
+        .query_row("SELECT role='peer' FROM fleet_meta WHERE id=1", [], |r| {
+            r.get::<_, bool>(0)
+        })?;
     for report in reports(ctx)? {
         if store.accept_job_report(&ctx.node, &report)? {
             acknowledge(ctx, &report)?;
@@ -642,6 +647,7 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             } else {
                 machines
                     .iter()
+                    .filter(|m| !peer || m["node"] == ctx.node)
                     .filter_map(|m| m["node"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>()
             };
@@ -683,7 +689,13 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             w["capacity"].as_i64().unwrap_or(0)
                 > w["issue_active"].as_i64().unwrap_or(0) + occupied.get(id).copied().unwrap_or(0)
         };
-        let eligible = |m| connected(m) && eligible_workers(m, &run).any(|id| worker_fits(m, id));
+        // Scheduled definitions replicate and execute locally on each peer.
+        // Explicit commands retain one submitting owner and may use its fleet.
+        let eligible = |m: &Value| {
+            (!peer || run.snapshot.definition.execution.is_some() || m["node"] == ctx.node)
+                && connected(m)
+                && eligible_workers(m, &run).any(|id| worker_fits(m, id))
+        };
         let targets = &run.snapshot.definition.machines;
         let machine = if let Some(node) = &run.target_machine {
             machines.iter().find(|m| m["node"] == *node && eligible(*m))

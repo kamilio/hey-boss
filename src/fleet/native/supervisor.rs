@@ -1732,13 +1732,6 @@ impl Supervisor {
                     .cloned()
                     .collect::<Vec<_>>();
                 machines.insert(0,json!({"node":self.ctx.node,"state":"connected","heartbeat":now(),"jobs":capability}));
-                if self.ctx.db()?.query_row(
-                    "SELECT role='peer' FROM fleet_meta WHERE id=1",
-                    [],
-                    |r| r.get::<_, bool>(0),
-                )? {
-                    machines.truncate(1);
-                }
                 super::jobs::schedule(&self.ctx, &machines)?;
                 super::jobs::reconcile(&self.ctx)
             })();
