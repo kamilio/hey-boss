@@ -4541,6 +4541,23 @@ func auditConversation(_ root: String) {
         precondition(check(), "\(step): \(ui.status.stringValue)")
     }
     do {
+        let chat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("lost-mic/current.json"))
+        let mic = ReviewAudio(), reason = "Speech detector disconnected."
+        chat.connect(mic); chat.state(.thinking, "Thinking…")
+        chat.event(["TextDelta": ["text": "A moat"]])
+        chat.voiceFailed(reason)
+        precondition(mic.stopped && chat.audio == nil && chat.phase == .thinking && chat.rows.last?.stringValue == "A moat", "Losing the microphone must leave the written reply running")
+        chat.event(["TurnCompleted": ["status": "Completed", "output": "A moat protects a castle."]])
+        precondition(chat.phase == .idle && chat.rows.map(\.stringValue) == ["A moat protects a castle."])
+        let next = ReviewAudio(); chat.connect(next); chat.receive(.began)
+        chat.receive(.pcm(try! Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent("second.pcm"))))
+        chat.receive(.ended); chat.voiceFailed(reason)
+        precondition(next.stopped && chat.phase == .decoding)
+        wait("finish submitted dictation with the microphone off") { chat.phase == .idle }
+        precondition(chat.audio == nil && chat.rows.count == 3 && chat.rows[1].stringValue.localizedCaseInsensitiveContains("fruit"))
+        chat.window.close()
+    }
+    do {
         let preparing = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("preparing/current.json"))
         let voice = ReviewAudio(); preparing.connect(voice)
         preparing.state(.thinking, "Thinking…")

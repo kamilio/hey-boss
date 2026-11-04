@@ -7710,11 +7710,22 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         AVCaptureDevice.requestAccess(for: .audio) { [weak self, weak audio] granted in onMain {
             guard let self, let audio, self.audio === audio else { return }
             guard granted else { self.stop("Allow Hey Boss in Privacy & Security → Microphone."); return }
-            audio.failed = { [weak self] in self?.stop($0) }
+            audio.failed = { [weak self] in self?.voiceFailed($0) }
             do { try audio.start(cli: self.cli) { [weak self, weak audio] in
                 if let self, let audio, self.audio === audio { self.connect(audio) }
             } } catch { self.stop(error.localizedDescription) }
         } }
+    }
+    func voiceFailed(_ message: String) {
+        guard let audio else { return }
+        if phase == .decoding {
+            // The submitted recording is already in memory.
+            audio.stop(); state(.decoding, "Microphone off · Finishing transcription…")
+        } else if answering {
+            interruptPlayback(); audio.stop(); self.audio = nil
+            if !turnDone { publish(final: false) }
+            state(turnDone ? .idle : .thinking, turnDone ? message : "Microphone off · Reply continuing on screen…")
+        } else { stop(message) }
     }
     func connect(_ audio: ReviewAudio) {
         self.audio = audio
@@ -7759,6 +7770,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
             guard let self, let audio, self.audio === audio else { return }
             self.timeout?.invalidate(); self.decoding = nil
+            if audio.stopped { self.audio = nil }
             switch result {
             case .failure(let error):
                 let failure = error as NSError
@@ -7766,7 +7778,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.stop(error.localizedDescription)
             case .success(let text):
                 ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
-                if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
+                if text.isEmpty { self.state(audio.stopped ? .idle : .listening, audio.stopped ? "No speech recognized · Microphone off" : "Listening") }
+                else { self.respond(text) }
             }
         }
         do {
