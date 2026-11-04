@@ -1246,3 +1246,13 @@ See [proxy setup and usage SDK](packages/hey-proxy/README.md).
 Build and test with `cargo build --locked -p hey-proxy` and
 `cargo test --locked -p hey-proxy`. Proxy rollouts carry the workspace source and
 its single lockfile, and compile only `hey-proxy` on the destination architecture.
+
+## Private published pages
+
+Run `hey-boss publish ./report.html --name weekly-report` or publish a directory
+containing `index.html`. Files replicate across your private fleet and open under
+**Published Pages** in the top-right web menu, with a hey-boss header and sandboxed
+iframe. Publishing works offline; copies update when machines reconnect.
+Use `hey-boss pages download weekly-report --output ./weekly-report` to restore
+files, or `hey-boss pages delete weekly-report` to remove web access.
+See [publishing](docs/publishing.md) for limits, synchronization, and deletion semantics.

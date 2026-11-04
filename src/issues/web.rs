@@ -13,6 +13,8 @@ mod errors;
 mod lan;
 #[cfg(test)]
 mod listener_tests;
+#[path = "web/pages.rs"]
+mod pages;
 mod local_http;
 
 fn parse_query(url: &str) -> Result<std::collections::HashMap<String, String>> {
@@ -397,7 +399,7 @@ fn serve_requests(servers: &[Server], app: &Arc<App>, stop: &Arc<AtomicBool>) {
                             let app = Arc::clone(app);
                             let stop = Arc::clone(stop);
                             std::thread::spawn(move || {
-                                if request.method() != &Method::Get || !allowed(&request, &app) {
+                                if request.method() != &Method::Get || !allowed(&request, &app, false) {
                                     let _ = request.respond(Response::empty(403));
                                     return;
                                 }
@@ -490,7 +492,7 @@ fn validate_mobile_origin(origin: String) -> Result<String> {
     }
     Ok(origin)
 }
-fn allowed(request: &tiny_http::Request, app: &App) -> bool {
+fn allowed(request: &tiny_http::Request, app: &App, content: bool) -> bool {
     let Some(peer) = request.remote_addr() else {
         return false;
     };
@@ -512,8 +514,8 @@ fn allowed(request: &tiny_http::Request, app: &App) -> bool {
         return lan_allowed(
             peer.ip(),
             header(request, "host"),
-            header(request, "origin"),
-            header(request, "sec-fetch-site"),
+            if content { None } else { header(request, "origin") },
+            if content { None } else { header(request, "sec-fetch-site") },
             app,
             app.lan.network(),
         );
@@ -521,8 +523,8 @@ fn allowed(request: &tiny_http::Request, app: &App) -> bool {
 
     same_origin(
         header(request, "host"),
-        header(request, "origin"),
-        header(request, "sec-fetch-site"),
+        if content { None } else { header(request, "origin") },
+        if content { None } else { header(request, "sec-fetch-site") },
         &app.local_ports,
         app.mobile_origin.as_deref(),
     )
@@ -589,6 +591,7 @@ fn same_origin(
 }
 
 fn respond(mut request: tiny_http::Request, app: &App) {
+    if request.url().starts_with("/page-content/") { pages::respond(request, app); return; }
     let start = std::time::Instant::now();
     // Mermaid's sanitized SVG includes scoped styles. Only its document page
     // permits those styles; script execution remains restricted to local assets.
@@ -651,7 +654,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
     let _ = request.respond(response);
 }
 fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static str, Vec<u8>)> {
-    if !allowed(request, app) {
+    if !allowed(request, app, false) {
         return Err(Error::new(
             "forbidden",
             "This interface only accepts its configured same-origin requests",
@@ -673,6 +676,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         ));
     }
     if request.method() == &Method::Get {
+        if path == "/api/pages" { return json_response(pages::api(app, request.url())?); }
         if path == "/api/secrets" {
             let inventory = crate::secrets::open()
                 .and_then(|mut store| store.inventory())
@@ -759,6 +763,10 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/errors.js"),
             )),
             "/errors.css" => Some(("text/css; charset=utf-8", include_bytes!("web/errors.css"))),
+            "/pages" => Some(("text/html; charset=utf-8", include_bytes!("web/pages.html"))),
+            "/pages.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/pages.js"))),
+            "/pages.css" => Some(("text/css; charset=utf-8", include_bytes!("web/pages.css"))),
+            _ if path.starts_with("/pages/") => Some(("text/html; charset=utf-8", include_bytes!("web/page.html"))),
             "/secrets" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/secrets.html"),
@@ -953,10 +961,12 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/errors"
                     | "/skills"
                     | "/secrets"
+                    | "/pages"
                     | "/admin"
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
+                    .replace("<!--pages-current-->", if path == "/pages" { " aria-current=\"page\"" } else { "" })
                     .replace(
                         "<!--errors-current-->",
                         if path == "/errors" {
@@ -1113,6 +1123,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet/configuration",
             "/api/admin/preview",
             "/api/skills",
+            "/api/pages/delete",
         ]
         .contains(&path.as_str())
     {
@@ -1137,6 +1148,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
         }
+        if path == "/api/pages/delete" { return json_response(pages::delete(app, &bytes)?); }
         if path == "/api/errors" {
             return json_response(errors::act(&bytes, app)?);
         }
