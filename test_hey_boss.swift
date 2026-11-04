@@ -4487,6 +4487,18 @@ func auditConversation(_ root: String) {
         wait("long conversation") { longChat.phase == .idle }
         precondition(longChat.status.stringValue == "On-device chat" && longChat.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), longChat.status.stringValue)
         precondition(longChat.rows.first!.stringValue == old)
+        let before = longChat.model!.transcript
+        longChat.input.stringValue = old
+        longChat.sendTyped()
+        wait("oversized message") { longChat.phase == .idle }
+        precondition(longChat.input.stringValue == old && longChat.model?.transcript == before, "An oversized message must leave both the draft and the prior conversation intact")
+        longChat.selectDirectory(nil, capture: .init(source: "Notes", text: old))
+        longChat.input.stringValue = "Earlier notes"; longChat.sendTyped()
+        wait("oversized capture") { longChat.phase == .idle }
+        precondition(longChat.input.stringValue == "Earlier notes" && !longChat.contextChip.isHidden && longChat.contextChip.title == "Notes")
+        longChat.sendTyped(); longChat.input.stringValue = "Next draft"
+        wait("keep newer draft") { longChat.phase == .idle }
+        precondition(longChat.input.stringValue == "Next draft")
     }
     // Hold back completion: a real Supertonic word must light up before
     // the second paragraph or the final Codex message has arrived.
