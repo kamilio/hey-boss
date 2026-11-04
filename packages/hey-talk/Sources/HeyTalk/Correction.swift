@@ -38,24 +38,6 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    private static func proxyRequest(_ path: String) throws -> URLRequest {
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080" + path)!, timeoutInterval: 8)
-        let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
-        if FileManager.default.fileExists(atPath: access.path) {
-            let keys = try JSONSerialization.jsonObject(with: Data(contentsOf: access)) as? [String: Any]
-            guard let key = keys?["local"] as? String, !key.isEmpty else { throw TalkError("Hey Proxy’s local access key is invalid.") }
-            request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
-        }
-        return request
-    }
-
-    func warmQuota() {
-        Task { [session] in
-            guard let request = try? Self.proxyRequest("/codex/usage") else { return }
-            _ = try? await session.data(for: request)
-        }
-    }
-
     static func request(text: String, vocabulary: [String], appContext: String? = nil, canRename: Bool = false) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
@@ -73,9 +55,15 @@ final class Correction {
         }
         var tools = [try tool("paste", argument: "text")]
         if canRename { tools.append(try tool("rename_thread", argument: "title")) }
-        var request = try proxyRequest("/v1/responses")
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
+        if FileManager.default.fileExists(atPath: access.path) {
+            let keys = try JSONSerialization.jsonObject(with: Data(contentsOf: access)) as? [String: Any]
+            guard let key = keys?["local"] as? String, !key.isEmpty else { throw TalkError("Hey Proxy’s local access key is invalid.") }
+            request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        }
         var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
         if let appContext { values["app_context"] = appContext }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
