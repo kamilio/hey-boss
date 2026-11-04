@@ -4837,6 +4837,13 @@ func auditWorkspaceChat(_ root: String) {
     ui.window.setContentSize(NSSize(width: 415, height: 435)); ui.window.appearance = NSAppearance(named: .darkAqua); snapshot("compact")
     precondition(ui.historyList.visibleRect.isEmpty && ui.input.bounds.width > 150)
     precondition(ui.rows.allSatisfy { $0.bounds.width > 0 && $0.alignmentRect(forFrame: $0.frame).width <= ui.scroll.bounds.width + 0.5 })
+    let finishedHelper = ui.process!, recording = ReviewAudio()
+    ui.connect(recording); ui.receive(.began)
+    finishedHelper.terminate()
+    let expiry = Date().addingTimeInterval(5)
+    while ui.process === finishedHelper && Date() < expiry { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+    precondition(ui.process == nil && ui.phase == .recording && ui.audio === recording, "An idle helper exiting must not discard the next recording")
+    ui.stop("Ready")
     ui.input.stringValue = "Hello"; ui.sendTyped()
     ui.event(["TextDelta": ["text": "A partial reply"]]); ui.toggle()
     precondition(ui.phase == .idle && ui.process == nil)
