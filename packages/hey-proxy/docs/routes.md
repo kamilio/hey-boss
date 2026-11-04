@@ -2,7 +2,7 @@
 
 Top-level routes select named providers in order for inference, independently of worker recommendations. `resolve-route` inspects the same immutable plan without sending requests. Unmatched models retain legacy routing.
 
-Use `"model":"*", "api_shape":"responses"` for a default Responses route, preserving the requested model. Defaults require an API shape so they cannot capture another provider's API. Exact routes, legacy aliases, and explicit provider prefixes take precedence. A default Codex subscription leg can coexist with a `gpt-6-astra → ultima-alpha` alias using its Alpha API key. Omit paid legs to keep API credentials available without automatic paid fallback.
+Use `"model":"*", "api_shape":"responses"` for a default Responses route, preserving the requested model. Defaults require an API shape so they cannot capture another provider's API. Exact routes, legacy aliases, and non-OpenAI provider prefixes take precedence. `openai/gpt-6-astra` uses the default route with upstream model `gpt-6-astra`, bypassing rules for the bare name; rules explicitly matching the prefixed name still win. A default Codex subscription leg can coexist with a `gpt-6-astra → ultima-alpha` alias using its Alpha API key. Omit paid legs to keep API credentials available without automatic paid fallback.
 
 The existing [`accounts`](named-accounts.md) map names provider instances. Top-level `routes` matches the original logical model exactly and lists provider legs in attempt order. It is independent of worker settings. [`routes.config.json`](../examples/routes.config.json) is a complete synthetic example:
 

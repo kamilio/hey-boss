@@ -90,7 +90,12 @@ impl Route {
             .accounts
             .get(&leg.provider)
             .context("Unknown route provider")?;
-        let model = leg.model.as_deref().unwrap_or(source_model);
+        let requested = if self.model == "*" {
+            source_model.strip_prefix("openai/").unwrap_or(source_model)
+        } else {
+            source_model
+        };
+        let model = leg.model.as_deref().unwrap_or(requested);
         let rewrite = leg
             .override_name
             .as_ref()
@@ -148,9 +153,11 @@ impl Config {
             .iter()
             .position(|route| route.model == model && matches_shape(route))
             .or_else(|| {
-                // A default never overrides deliberate legacy aliases or explicit
-                // provider prefixes. Exact routes always win, independent of order.
-                if self.alias_for(model, path).is_some() || model.contains('/') {
+                // OpenAI-prefixed models still use the default provider. Match
+                // explicit rules before stripping the prefix to bypass bare aliases.
+                if self.alias_for(model, path).is_some()
+                    || model.strip_prefix("openai/").unwrap_or(model).contains('/')
+                {
                     return None;
                 }
                 self.routes

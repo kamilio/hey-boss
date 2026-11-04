@@ -4,7 +4,7 @@ See [ordered provider routes](routes.md) for the staged top-level routing contra
 
 The default file is `~/.hey-boss/proxy/config.yaml`. Use `--config PATH` for another existing file. First run and `--init` create the default file with private permissions on Unix; a missing `--config` file is an error. `--init` validates an existing config without changing it; starting the proxy also encrypts literal credentials as described below.
 
-OpenAI is the default provider for unprefixed model names on `/v1/responses`. Prefix a model with `gemini/` to use Gemini conversion. `openai/` is an optional explicit prefix. Gemini's native endpoints use the configured Gemini provider directly.
+On `/v1/responses`, unmatched models use the configured default route, or the OpenAI API provider if no default route exists. The optional `openai/` prefix bypasses rules for the bare model name while retaining the default route (including a Codex subscription); the prefix is removed before forwarding. Prefix a model with `gemini/` to use Gemini conversion. Gemini's native endpoints use the configured Gemini provider directly.
 
 ## More than one OpenAI credential
 
