@@ -7344,7 +7344,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func show() {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
-        if let row = rows.last { reveal(row) }
+        if !rows.isEmpty { revealLatest() }
     }
     func openWithContext(source: String?, text: String?) {
         show()
@@ -7587,6 +7587,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func append(_ text: String, from speaker: String, capture: Capture? = nil) {
         let mine = speaker == "You"
+        let follow = mine || atEndOfChat
         let row = NSView(), card = NSBox()
         card.boxType = .custom; card.cornerRadius = 12; card.borderWidth = 0
         card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
@@ -7623,12 +7624,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 preview.trailingAnchor.constraint(equalTo: label.trailingAnchor), preview.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -9)
             ])
         } else { label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: mine ? -9 : 0).isActive = true }
-        reveal(row)
+        if follow { revealLatest() }
     }
-    func reveal(_ row: NSView) {
+    private var atEndOfChat: Bool { turns.bounds.maxY <= scroll.documentVisibleRect.maxY + 2 }
+    private func revealLatest() {
         welcome.isHidden = true
         guard window.isVisible else { return }
-        window.contentView?.layoutSubtreeIfNeeded(); row.scrollToVisible(row.bounds)
+        window.contentView?.layoutSubtreeIfNeeded()
+        turns.scrollToVisible(NSRect(x: 0, y: max(0, turns.bounds.maxY - 1), width: 1, height: 1))
     }
     func respond(_ text: String) {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
@@ -7708,6 +7711,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             text = raw.substring(to: boundary.range.location)
         }
         guard !text.isEmpty, text != published else { return }
+        let follow = atEndOfChat
         if messageLabel == nil {
             append("", from: directory == nil ? "Hey Boss" : "Codex"); messageLabel = rows.last
         }
@@ -7730,7 +7734,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 speech.append((label, span, visible.substring(with: span))); offset = NSMaxRange(span)
             }
         }
-        reveal(label); playNext()
+        if follow { revealLatest() }
+        playNext()
     }
     private func finishMessage(_ text: String) {
         stream = text; publish(final: true); lastMessage = text
@@ -7807,6 +7812,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if let text = data["text"] as? String { finishMessage(text) }
         case "ToolStarted", "ToolCompleted":
             guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
+            let follow = atEndOfChat
             let button = tools[id] ?? NSButton()
             let files = (item["changes"] as? [[String:Any]])?.compactMap { $0["path"] as? String }.joined(separator: ", ")
             let title = item["command"] as? String ?? files ?? item["tool"] as? String ?? "Tool call"
@@ -7819,7 +7825,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if tools[id] == nil { tools[id] = button; turns.addArrangedSubview(button); button.widthAnchor.constraint(lessThanOrEqualTo: turns.widthAnchor).isActive = true }
             let result = item["aggregatedOutput"] as? String ?? (item["result"] ?? item["changes"]).map { String(describing: $0) } ?? ""
             details[button] = title + (result.isEmpty ? "" : "\n\n" + String(result.prefix(10000)))
-            reveal(button); if phase != .speaking { state(.thinking, done ? "Thinking…" : "Using tools…") }
+            if follow { revealLatest() }
+            if phase != .speaking { state(.thinking, done ? "Thinking…" : "Using tools…") }
         case "Approval":
             guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { stop("Incomplete approval request."); return }
             approvals.append((id,params)); presentApproval()
