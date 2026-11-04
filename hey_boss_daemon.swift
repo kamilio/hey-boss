@@ -7372,7 +7372,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
     struct Capture: Codable { let source: String; let text: String? }
-    private struct Message: Codable { var text: String; let speaker: String; var capture: Capture? }
+    private struct Message: Codable {
+        var text: String
+        let speaker: String
+        var capture: Capture?
+        var content: String {
+            guard let capture, let snapshot = capture.text else { return text }
+            let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
+            return quote + "\n\n" + text
+        }
+    }
     let contextChip = NSButton()
     private var pendingCapture: Capture? { didSet {
         contextChip.isHidden = pendingCapture == nil
@@ -7386,7 +7395,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var draftText: String?
         let directory: URL?
         let thread: String?
-        let transcript: Transcript?
     }
     private let saveURL: URL
     private var messages: [Message] = []
@@ -7402,7 +7410,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let recognizer = SFSpeechRecognizer()
     var phase: Phase = .idle
     var audio: ReviewAudio?
-    var model: LanguageModelSession?
+    private let session = URLSession(configuration: {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        return config
+    }())
     var recording: Data?
     private var playbackOverlap: Data?
     private var bytesBeforeListening = 0
@@ -7411,7 +7423,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var reply: Task<Void, Never>?
     private let instructions = Bundle.main.url(forResource: "conversation", withExtension: "md")
         .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
-    private var localTurn: (prior: Transcript, question: String)?
     private var stream = "", published = "", lastMessage: String?
     private var messageLabel: ConversationText?
     private let openingSentence = NLTokenizer(unit: .sentence)
@@ -7477,7 +7488,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
-        refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center(); restore()
+        refreshScope(); state(.idle, "GPT-6.1 Sol"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -7583,7 +7594,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func rememberTurn() {
         guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
         let chat = Chat(id: library.selected, title: String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
-                        workspace: directory?.lastPathComponent ?? "On this Mac", updated: Date())
+                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date())
         library.chats.removeAll { $0.id == chat.id }; library.chats.insert(chat, at: 0); refreshHistory()
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -7603,13 +7614,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func refreshScope() {
         let menu = NSMenu()
         menu.addItem(withTitle: "Conversation settings", action: nil, keyEquivalent: "")
-        menu.addItem(withTitle: directory?.lastPathComponent ?? "On this Mac", action: nil, keyEquivalent: "").state = .on
+        menu.addItem(withTitle: directory?.lastPathComponent ?? "GPT-6.1 Sol", action: nil, keyEquivalent: "").state = .on
         menu.addItem(.separator())
-        menu.addItem(withTitle: "New Conversation on This Mac", action: #selector(newLocal), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "New Conversation with Sol", action: #selector(newLocal), keyEquivalent: "").target = self
         menu.addItem(withTitle: "New Conversation in Folder…", action: #selector(chooseFolder), keyEquivalent: "").target = self
         settings.menu = menu
         headline.stringValue = directory == nil ? "Start a conversation" : "Work with Codex"
-        hint.stringValue = directory == nil ? "Type a message or turn on voice." : "Run commands, edit files, and use tools\nwith your configured Codex account."
+        hint.stringValue = directory == nil ? "Talk with GPT-6.1 Sol. Type a message or turn on voice." : "Run commands, edit files, and use tools\nwith your configured Codex account."
         input.placeholderString = directory == nil ? "Message Hey Boss…" : "Message Codex…"
     }
     @objc func newConversation() { selectDirectory(directory) }
@@ -7625,9 +7636,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         stop("Ready")
         if !messages.isEmpty && !save() { return false }
         if let sheet = window.attachedSheet { window.endSheet(sheet) }
-        library.selected = UUID(); refreshHistory(); restoreError = nil; model = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
+        library.selected = UUID(); refreshHistory(); restoreError = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
         pendingCapture = capture
-        state(.idle, url == nil ? "On-device chat" : "Codex workspace"); window.makeFirstResponder(input)
+        state(.idle, url == nil ? "GPT-6.1 Sol" : "Codex workspace"); window.makeFirstResponder(input)
         return save()
     }
     func clearTurns() {
@@ -7655,14 +7666,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func modelReady() -> Bool {
         if let restoreError { state(.idle, restoreError); return false }
-        if directory != nil || model != nil { return true }
-        switch SystemLanguageModel.default.availability {
-        case .available: return true
-        case .unavailable(.appleIntelligenceNotEnabled): state(.idle, "Turn on Apple Intelligence in System Settings.")
-        case .unavailable(.modelNotReady): state(.idle, "The local model is downloading.")
-        default: state(.idle, "Apple Intelligence is unavailable on this Mac.")
-        }
-        return false
+        return true
     }
     private var answering: Bool { phase == .thinking || phase == .speaking }
     private var folderTurnAccepted = false
@@ -7866,13 +7870,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
         turnDone = false; lastMessage = nil; folderTurnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
-        var question = text
-        if let capture, let snapshot = capture.text {
-            // Preserve the boundary between quoted window content and the user's request.
-            let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
-            question = quote + "\n\n" + text
-        }
         append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
+        let question = messages.last!.content
         if let directory {
             save()
             let payload = process == nil && thread == nil ? instructions + "\n\n" + question : question
@@ -7886,116 +7885,79 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             } else { sendWorkspace(payload, in: directory) }
             return
         }
-        if model == nil { model = LanguageModelSession(instructions: instructions) }
-        guard let model else { return }
-        let prior = model.transcript
-        localTurn = (prior, question)
-        save(transcript: transcript(prior, adding: question))
+        save()
         reply = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                var session = model
-                if #available(macOS 26.4, *) {
-                    guard let fitting = try await Self.sessionWithRoom(for: question, in: model) else {
-                        guard !Task.isCancelled, let self else { return }
-                        self.contextLimit(text, capture: capture, question: question, prior: prior)
-                        return
+                try Task.checkCancellation()
+                let (bytes, response) = try await session.bytes(for: conversationRequest())
+                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+                    throw StorageError(description: "Sol is unavailable: the local proxy returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0).")
+                }
+                for try await line in bytes.lines where line.hasPrefix("data:") {
+                    try Task.checkCancellation()
+                    let data = Data(line.dropFirst(5).utf8)
+                    guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                        throw StorageError(description: "Unreadable response from Sol.")
                     }
-                    session = fitting
+                    if try responseEvent(event) { return }
                 }
-                guard !Task.isCancelled else { return }
-                self?.model = session
-                self?.localTurn = (session.transcript, question)
-                for try await part in session.streamResponse(to: question) {
-                    guard !Task.isCancelled, let self else { return }
-                    self.stream = part.content; self.publish(final: false)
-                }
-                guard !Task.isCancelled, let self else { return }
-                self.reply = nil; self.finishTurn(self.stream)
-            } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
-                guard !Task.isCancelled else { return }
-                self?.contextLimit(text, capture: capture, question: question, prior: prior)
-            } catch LanguageModelSession.GenerationError.guardrailViolation, LanguageModelSession.GenerationError.refusal {
-                guard !Task.isCancelled, let self else { return }
-                self.reply = nil; self.interruptPlayback()
-                self.messageLabel?.stringValue = ""; self.published = ""
-                self.finishTurn("The on-device model declined to answer this message.")
-            } catch LanguageModelSession.GenerationError.unsupportedLanguageOrLocale {
-                guard !Task.isCancelled, let self else { return }
-                self.reply = nil
-                if self.stream.isEmpty { self.model = LanguageModelSession(transcript: prior) }
-                else { self.finishMessage(self.stream) }
-                if self.input.stringValue.isEmpty { self.input.stringValue = text; self.pendingCapture = capture }
-                self.finishTurn("The on-device model reported an unsupported language. You can edit the message and try again.")
+                throw StorageError(description: "Sol disconnected before finishing this reply.")
             } catch {
                 guard !Task.isCancelled else { return }
-                self?.generationFailed(error, text: text, capture: capture, question: question, prior: prior)
+                generationFailed(error)
             }
         }
     }
-    func generationFailed(_ error: Error, text: String, capture: Capture?, question: String, prior: Transcript) {
-        stream = published
-        let notice = (error as? LocalizedError)?.errorDescription ?? "The on-device model couldn’t finish this reply. Try again later."
-        finishFailedTurn(notice, text: text, capture: capture, question: question, prior: prior)
+    func conversationRequest() throws -> URLRequest {
+        guard let instructions, !instructions.isEmpty else { throw StorageError(description: "The conversation prompt is missing. Reinstall Hey Boss.") }
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 120)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
+        if FileManager.default.fileExists(atPath: access.path) {
+            let keys = try JSONSerialization.jsonObject(with: Data(contentsOf: access)) as? [String: Any]
+            guard let key = keys?["local"] as? String, !key.isEmpty else { throw StorageError(description: "Hey Proxy’s local access key is invalid.") }
+            request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "gpt-6.1-sol", "stream": true, "store": false,
+            "instructions": instructions,
+            "input": messages.filter { $0.speaker != "Conversation" }.map {
+                ["role": $0.speaker == "You" ? "user" : "assistant", "content": $0.content]
+            }
+        ])
+        return request
     }
-    private func contextLimit(_ text: String, capture: Capture?, question: String, prior: Transcript) {
-        let notice = !stream.isEmpty ? "Reply cut short: on-device chat ran out of room." :
-            capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection."
-        finishFailedTurn(notice, text: text, capture: capture, question: question, prior: prior)
+    func responseEvent(_ event: [String: Any]) throws -> Bool {
+        switch event["type"] as? String {
+        case "response.output_text.delta", "response.refusal.delta":
+            guard let delta = event["delta"] as? String else { throw StorageError(description: "Unreadable text from Sol.") }
+            stream += delta; publish(final: false)
+        case "response.completed":
+            guard !stream.isEmpty else { throw StorageError(description: "Sol returned no reply.") }
+            reply = nil; finishTurn(stream); return true
+        case "error", "response.failed", "response.incomplete":
+            let response = event["response"] as? [String: Any]
+            let error = (response?["error"] ?? event["error"]) as? [String: Any]
+            throw StorageError(description: error?["message"] as? String ?? event["message"] as? String ?? "Sol couldn’t finish this reply. Try again.")
+        default: break
+        }
+        return false
     }
-    private func finishFailedTurn(_ notice: String, text: String, capture: Capture?, question: String, prior: Transcript) {
+    func generationFailed(_ error: Error) {
         reply = nil
-        if stream.isEmpty {
-            model = LanguageModelSession(transcript: prior)
-            if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
-        } else {
-            let partial = stream
-            model = LanguageModelSession(transcript: transcript(prior, adding: question, reply: partial))
-            finishMessage(partial)
+        if !stream.isEmpty { finishMessage(stream) }
+        else if input.stringValue.isEmpty, let last = messages.last, last.speaker == "You" {
+            input.stringValue = last.text; pendingCapture = last.capture
         }
-        finishTurn(notice)
-    }
-    private func transcript(_ prior: Transcript, adding question: String, reply: String = "") -> Transcript {
-        var entries = Array(prior)
-        entries.append(.prompt(.init(segments: [.text(.init(content: question))])))
-        if !reply.isEmpty { entries.append(.response(.init(assetIDs: [], segments: [.text(.init(content: reply))]))) }
-        return Transcript(entries: entries)
-    }
-    @available(macOS 26.4, *)
-    private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession? {
-        let transcript = session.transcript
-        let turns = transcript.indices.filter { if case .prompt = transcript[$0] { return true }; return false }
-        let model = SystemLanguageModel.default
-        let incoming = Transcript.Entry.prompt(.init(segments: [.text(.init(content: question))]))
-        let budget = model.contextSize * 3 / 4 // Leave room for the reply.
-        let count = try await model.tokenCount(for: Array(transcript) + [incoming])
-        if count <= budget { return session }
-        guard let first = turns.first else { return count < model.contextSize ? session : nil }
-        func remaining(_ skip: Int) -> [Transcript.Entry] {
-            let from = skip == turns.count ? transcript.endIndex : turns[skip]
-            return Array(transcript[..<first]) + transcript[from...]
-        }
-        var low = 1, high = turns.count
-        while low < high {
-            try Task.checkCancellation()
-            let mid = (low + high) / 2
-            if try await model.tokenCount(for: remaining(mid) + [incoming]) <= budget { high = mid }
-            else { low = mid + 1 }
-        }
-        let entries = remaining(low)
-        if low == turns.count {
-            guard try await model.tokenCount(for: entries + [incoming]) < model.contextSize else { return nil }
-            // A question stopped before its size check may not fit even on its own.
-            if turns.count > 1, case .prompt = transcript.last {
-                let earlier = Transcript(entries: transcript.dropLast())
-                return try await sessionWithRoom(for: question, in: LanguageModelSession(transcript: earlier))
-            }
-        }
-        return LanguageModelSession(transcript: Transcript(entries: entries))
+        append(error.localizedDescription, from: "Conversation")
+        turnDone = true; updateComposerActions(); save(); playNext()
     }
     private static let repeatedDigit = try! NSRegularExpression(pattern: #"([0-9])\1{63,}"#)
     // An opening sentence of plain prose can play before the paragraph ends.
     // Wait for a paragraph boundary when the opening contains Markdown.
-    private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
+    private static let paragraphBreak = try! NSRegularExpression(pattern: #"\r?\n[ \t]*\r?\n"#)
     private func publish(final: Bool) {
         if !final, messageLabel != nil, audio == nil || (reading && !speech.isEmpty) {
             let delay = lastTextUpdate + 0.1 - ProcessInfo.processInfo.systemUptime
@@ -8101,7 +8063,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
-        dismissApprovals(); localTurn = nil; turnDone = true; updateComposerActions(); save(); playNext()
+        dismissApprovals(); turnDone = true; updateComposerActions(); save(); playNext()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -8128,7 +8090,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.highlight(part.label, nil); self.reading = false; self.playNext()
             })
         } else if turnDone {
-            state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "On-device chat" : "Codex workspace")
+            state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
         } else if phase == .speaking { state(.thinking, "Waiting for reply…") }
     }
     private func sendWorkspace(_ payload: String, in folder: URL) {
@@ -8187,7 +8149,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             folderTurnAccepted = thread != nil && data["accepted"] as? Bool == true
             updateComposerActions(); save(unfinishedWorkspace: folderTurnAccepted)
         case "TextDelta":
-            if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.contains("\n") { publish(final: false) } }
+            if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.rangeOfCharacter(from: .newlines) != nil { publish(final: false) } }
         case "Message":
             if let text = data["text"] as? String {
                 finishMessage(text)
@@ -8280,12 +8242,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
-        if let localTurn { model = LanguageModelSession(transcript: transcript(localTurn.prior, adding: localTurn.question, reply: published)) }
         let unfinishedWorkspace = directory != nil && answering && !turnDone && (folderTurnAccepted || lastMessage?.isEmpty == false)
         let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
-        if localTurn != nil || notice != nil { save() }
-        localTurn = nil
+        save()
         textFlush?.invalidate(); textFlush = nil
         if let (field, _) = lit { highlight(field, nil) }
         speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
@@ -8309,25 +8269,25 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
     }
-    @discardableResult private func save(transcript: Transcript? = nil, unfinishedWorkspace: Bool = false) -> Bool {
+    @discardableResult private func save(unfinishedWorkspace: Bool = false) -> Bool {
         guard restoreError == nil else { return false }
         do {
             try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: transcript ?? model?.transcript)
+                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
         } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
     }
     private func apply(_ saved: Saved) {
-        directory = saved.directory; thread = saved.thread; model = saved.transcript.map { LanguageModelSession(transcript: $0) }
+        directory = saved.directory; thread = saved.thread
         pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
         for message in saved.messages { append(message.text, from: message.speaker, capture: message.capture) }
         refreshScope()
-        state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "On-device chat" : "Codex workspace")
+        state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
     }
     private func restore() {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
@@ -8339,7 +8299,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     apply(try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(library.selected))))
                 } else {
                     pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
-                    refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+                    refreshScope(); state(.idle, directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
                 }
             } else {
                 // Preserve the single conversation saved by earlier versions.
