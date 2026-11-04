@@ -7042,12 +7042,14 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     private var paused = false
     func pause() { paused = true; if player.engine != nil { player.pause() } }
     func resume() { paused = false; if engine.isRunning { player.play() } }
+    func stopPlayback() {
+        passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
+        timer?.invalidate(); synth.stopSpeaking(at: .immediate)
+        if player.engine != nil { player.stop() }
+    }
     func stop() {
         guard !stopped else { return }; stopped = true
-        passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
-        readerVoice?.stop(); readerVoice = nil
-        micWatch?.invalidate(); timer?.invalidate(); synth.stopSpeaking(at: .immediate)
-        if player.engine != nil { player.stop() }
+        stopPlayback(); readerVoice?.stop(); readerVoice = nil; micWatch?.invalidate()
         engine.stop()
         removeTaps()
         try? input.fileHandleForWriting.close()
@@ -7539,7 +7541,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         meter.toolTip = meter.isEnabled ? voiceAction + " (Hyper+R)" : message
         meter.setAccessibilityLabel(meter.isEnabled ? voiceAction : message)
         meter.setAccessibilityValue(message)
-        send.isEnabled = next == .idle || next == .listening
+        send.isEnabled = acceptsTypedMessage
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
     func modelReady() -> Bool {
@@ -7553,10 +7555,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         return false
     }
+    private var acceptsTypedMessage: Bool {
+        phase == .idle || phase == .listening || (turnDone && (phase == .speaking || phase == .thinking))
+    }
     @objc func sendTyped() {
-        guard phase == .idle || phase == .listening else { return }
+        guard acceptsTypedMessage else { return }
         let text = input.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, modelReady() else { return }
+        if reading {
+            audio?.stopPlayback()
+            if let (field, _) = lit { highlight(field, nil) }
+            speech.removeAll(); reading = false
+        }
         input.stringValue = ""; respond(text)
     }
     func controlTextDidChange(_ notification: Notification) {
@@ -7870,7 +7880,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
-        turnDone = true; save(); playNext()
+        turnDone = true; send.isEnabled = acceptsTypedMessage; save(); playNext()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
