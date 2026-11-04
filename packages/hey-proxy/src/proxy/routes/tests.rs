@@ -803,6 +803,34 @@ async fn codex_missing_content_type_remains_sse_and_nonstreaming_collects_termin
 }
 
 #[tokio::test]
+async fn codex_nonstreaming_keeps_completed_items_in_output_order() {
+    let message = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Test one, two, three."}]});
+    let call = json!({"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"});
+    let expected = json!([message, call]);
+    for (status, output) in [("completed", json!([])), ("incomplete", expected.clone())] {
+        let f = Fixture::new().await;
+        let events = [
+            json!({"type":"response.output_item.done","output_index":1,"item":call}),
+            json!({"type":"response.output_item.done","output_index":0,"item":message}),
+            json!({"type":format!("response.{status}"),"response":{"status":status,"output":output}}),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        *f.failure.lock().unwrap() = Some((200, "text/event-stream".into(), body));
+        let response = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"status":status,"output":expected})
+        );
+    }
+}
+
+#[tokio::test]
 async fn astra_routes_directly_without_quota_or_recommender_and_scopes_override() {
     let f = Fixture::new().await;
     let response = f

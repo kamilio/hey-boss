@@ -95,6 +95,7 @@ pub(in crate::proxy) async fn forward(proxy: Arc<Proxy>, request: Request) -> Re
     let (response, exhausted) = super::super::routes::inspect::response(response).await;
     let mut stream = response.into_body().into_data_stream();
     let mut decoder = sse::SseDecoder::default();
+    let mut items = std::collections::BTreeMap::new();
     while let Some(chunk) = stream.next().await {
         let events = match chunk.ok().and_then(|c| decoder.feed(&c, false).ok()) {
             Some(events) => events,
@@ -105,12 +106,25 @@ pub(in crate::proxy) async fn forward(proxy: Arc<Proxy>, request: Request) -> Re
                 );
             }
         };
-        for event in events {
+        for mut event in events {
             match event["type"].as_str() {
+                Some("response.output_item.done") => {
+                    if let Some(index) = event["output_index"].as_u64()
+                        && event["item"].is_object()
+                    {
+                        items.insert(index, event["item"].take());
+                    }
+                }
                 Some("response.completed" | "response.incomplete")
                     if event["response"].is_object() =>
                 {
-                    return axum::Json(event["response"].clone()).into_response();
+                    let mut response = event["response"].take();
+                    // Codex may send the items only in output_item.done events.
+                    if !items.is_empty() && response["output"].as_array().is_none_or(Vec::is_empty)
+                    {
+                        response["output"] = Value::Array(items.into_values().collect());
+                    }
+                    return axum::Json(response).into_response();
                 }
                 Some("response.failed" | "error") if exhausted => {
                     let error = event
