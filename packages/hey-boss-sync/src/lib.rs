@@ -5,6 +5,7 @@
 //! Peers acknowledge this log, not cr-sqlite's sparse, per-origin db_version.
 //! Relays forward facts from every origin without treating the highest version
 //! received as proof that all earlier changes were received.
+pub mod compression;
 mod extension;
 pub mod session;
 #[cfg(test)]
@@ -18,7 +19,7 @@ use std::{io, path::Path, time::Duration};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const MAX_PAYLOAD: usize = 32 * 1024 * 1024;
-const PAGE_BYTES: usize = 2 * 1024 * 1024;
+pub const PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
     io::Error::new(io::ErrorKind::InvalidData, message).into()
@@ -80,6 +81,7 @@ impl Engine {
         let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(10))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        compression::register(&db)?;
         // Extension initialization and CRR registration read before writing.
         // Reserve the writer first, so a concurrent opener or ingest cannot
         // invalidate that read snapshot and cause SQLITE_BUSY_SNAPSHOT.
@@ -89,6 +91,8 @@ impl Engine {
             CREATE TABLE IF NOT EXISTS delivery(position INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS receipts(replica TEXT PRIMARY KEY,position INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS sent(replica TEXT PRIMARY KEY,position INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS storage_compression(id INTEGER PRIMARY KEY CHECK(id=1),position INTEGER NOT NULL);
+            INSERT OR IGNORE INTO storage_compression VALUES(1,0);
             CREATE TRIGGER IF NOT EXISTS record_delivery AFTER INSERT ON records BEGIN
                 INSERT OR IGNORE INTO delivery(id) VALUES(NEW.id);
             END;")?;
@@ -102,6 +106,61 @@ impl Engine {
         &self.id
     }
 
+    /// Compress retained facts in bounded transactions without changing their
+    /// logical hashes, delivery positions, or acknowledged receipts.
+    pub fn compress_history(&mut self) -> Result<bool> {
+        let after: i64 = self.db.query_row(
+            "SELECT position FROM storage_compression WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let head = self.head()?;
+        if after >= head {
+            return Ok(false);
+        }
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut updates = Vec::new();
+        let mut through = head;
+        let mut size = 0;
+        {
+            let mut statement = tx.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 AND d.position<=?2 AND typeof(r.payload)='text' AND length(r.payload)>=1024 ORDER BY d.position LIMIT 128")?;
+            for row in statement.query_map(params![after, head], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })? {
+                let (position, id, payload) = row?;
+                if size > 0 && size + payload.len() > PAGE_BYTES {
+                    break;
+                }
+                if digest(payload.as_bytes()) != id {
+                    return Err(invalid("Retained fact failed its integrity check"));
+                }
+                size += payload.len();
+                through = position;
+                if let rusqlite::types::Value::Blob(bytes) = compression::stored(&payload)? {
+                    updates.push((id, bytes));
+                }
+            }
+        }
+        for (id, bytes) in updates {
+            tx.execute(
+                "UPDATE records SET payload=?2 WHERE id=?1",
+                params![id, bytes],
+            )?;
+        }
+        tx.execute(
+            "UPDATE storage_compression SET position=?1 WHERE id=1",
+            [through],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Returns after the fact is durably saved locally. No network dependency.
     pub fn put(&mut self, payload: &str) -> Result<String> {
         if payload.is_empty() || payload.len() > MAX_PAYLOAD {
@@ -113,7 +172,7 @@ impl Engine {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT OR IGNORE INTO records(id,payload) VALUES(?1,?2)",
-            params![id, payload],
+            params![id, compression::stored(payload)?],
         )?;
         tx.commit()?;
         Ok(id)
@@ -123,7 +182,7 @@ impl Engine {
         Ok(self
             .db
             .query_row("SELECT payload FROM records WHERE id=?1", [id], |r| {
-                r.get(0)
+                compression::payload(r, 0)
             })
             .optional()?)
     }
@@ -194,7 +253,7 @@ impl Engine {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
+                    compression::payload(r, 2)?,
                 ))
             })? {
                 let (position, id, payload) = row?;
@@ -272,7 +331,7 @@ impl Engine {
             for record in &batch.records {
                 insert.execute(params![
                     record.id,
-                    record.payload,
+                    compression::stored(&record.payload)?,
                     record.version,
                     record.site,
                     record.sequence,
@@ -291,7 +350,7 @@ impl Engine {
         let mut result = Vec::new();
         let mut bytes = 0;
         for row in statement.query_map([after], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+            Ok((r.get(0)?, r.get(1)?, compression::payload(r, 2)?))
         })? {
             let row = row?;
             if !result.is_empty() && bytes + row.2.len() > PAGE_BYTES {
@@ -311,13 +370,12 @@ impl Engine {
         prefix: &str,
     ) -> Result<(i64, Vec<(i64, String, String)>)> {
         let head = self.head()?;
-        let mut statement=self.db.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 AND d.position<=?2 AND substr(r.payload,1,?3)=?4 ORDER BY d.position LIMIT 128")?;
+        let mut statement=self.db.prepare("SELECT d.position,r.id,r.payload FROM delivery d JOIN records r ON r.id=d.id WHERE d.position>?1 AND d.position<=?2 AND payload_starts_with(r.payload,?3) ORDER BY d.position LIMIT 128")?;
         let mut result = Vec::new();
         let mut bytes = 0;
-        for row in statement.query_map(
-            params![after, head, prefix.chars().count() as i64, prefix],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)),
-        )? {
+        for row in statement.query_map(params![after, head, prefix], |r| {
+            Ok((r.get(0)?, r.get(1)?, compression::payload(r, 2)?))
+        })? {
             let row = row?;
             if !result.is_empty() && bytes + row.2.len() > PAGE_BYTES {
                 let through: &(i64, String, String) = result.last().unwrap();

@@ -35,6 +35,14 @@ CRDT capture/replication tables. File bytes use the existing hashed-resource
 transfer path, with bounded records. They are durably stored before their rows
 are exposed. There is no second sync service or cloud dependency.
 
+Page metadata travels before content, so new pages appear as syncing while
+their files arrive. Protocol frames and new page resources are gzip-compressed;
+chunk files are compressed on disk too. Legacy disk chunks convert when read,
+without changing their hashes. Retained journal payloads also compress in bounded
+background transactions; logical facts, delivery positions, and receipts stay
+unchanged. Decoded sizes are bounded and content hashes verify original bytes.
+Protocol version 4 requires upgrading every peer before synchronization resumes.
+
 Unchanged chunks produce no new rows or transfer records. An identical republish
 is a no-op. Every enrolled machine receives the complete content, including
 through another peer. Concurrent named updates use the existing deterministic

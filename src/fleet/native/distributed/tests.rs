@@ -1057,7 +1057,7 @@ fn baseline_bounds_large_documents_without_skipping_rows() {
     let f = Fixture::new();
     let db = f.db();
     seed(&db);
-    let body = "x".repeat(1_500_000);
+    let body = "x".repeat(hey_boss_sync::PAGE_BYTES * 3 / 4);
     db.execute("UPDATE issues SET body=?1", [&body]).unwrap();
     for number in 2..=3 {
         db.execute("INSERT INTO issues(project_id,number,title,body,state,created_by,created_at,updated_at,version,labels) VALUES('p',?1,'Large document',?2,'open','human:test',1,1,1,'[]')", rusqlite::params![number, body]).unwrap();

@@ -134,6 +134,14 @@ pub(super) fn capture(db: &Connection, fact: &Revision) -> Result<Option<Resourc
             "Resource content does not match its digest",
         ));
     }
+    let (kind, bytes) = if kind == "published_chunk" {
+        (
+            "published_chunk_gzip",
+            hey_boss_sync::compression::encode(&bytes)?,
+        )
+    } else {
+        (kind, bytes)
+    };
     Ok(Some(Resource {
         kind: kind.into(),
         id,
@@ -146,13 +154,13 @@ pub(super) fn receive(db: &Connection, resource: &Resource) -> Result<()> {
     if !valid_digest(&resource.digest) || resource.bytes.len() > 14 * 1024 * 1024 {
         return Err(replica::invalid("Invalid replication resource"));
     }
-    let bytes = STANDARD.decode(&resource.bytes)?;
+    let bytes = resource_bytes(resource)?;
     if hey_boss_sync::digest(&bytes) != resource.digest {
         return Err(replica::invalid("Corrupt replication resource"));
     }
     let path = database_path(db)?;
     match resource.kind.as_str() {
-        "published_chunk" => {
+        "published_chunk" | "published_chunk_gzip" => {
             if resource.id != resource.digest {
                 return Err(replica::invalid("Invalid published chunk identity"));
             }
@@ -184,6 +192,15 @@ pub(super) fn receive(db: &Connection, resource: &Resource) -> Result<()> {
         _ => return Err(replica::invalid("Unsupported replicated resource")),
     }
     Ok(())
+}
+
+fn resource_bytes(resource: &Resource) -> Result<Vec<u8>> {
+    let bytes = STANDARD.decode(&resource.bytes)?;
+    if resource.kind == "published_chunk_gzip" {
+        hey_boss_sync::compression::decode(&bytes, crate::pages::CHUNK_SIZE)
+    } else {
+        Ok(bytes)
+    }
 }
 
 fn publish(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -239,15 +256,16 @@ pub(super) fn validate_page(fact: &Revision) -> Result<()> {
                 .as_ref()
                 .ok_or_else(|| replica::invalid("Missing published chunk"))?;
             if !crate::pages::valid_hash(hash)
-                || resource.kind != "published_chunk"
+                || !matches!(
+                    resource.kind.as_str(),
+                    "published_chunk" | "published_chunk_gzip"
+                )
                 || resource.id != hash
                 || resource.digest != hash
                 || row["size"].as_u64().is_none_or(|size| {
                     size == 0
                         || size > crate::pages::CHUNK_SIZE as u64
-                        || STANDARD
-                            .decode(&resource.bytes)
-                            .map_or(true, |b| b.len() as u64 != size)
+                        || resource_bytes(resource).map_or(true, |b| b.len() as u64 != size)
                 })
             {
                 return Err(replica::invalid("Invalid published chunk record"));

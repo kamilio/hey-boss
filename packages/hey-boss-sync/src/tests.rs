@@ -223,3 +223,108 @@ fn tagged_projection_skips_unrelated_payloads_without_skipping_matching_pages() 
     let (_, rows) = engine.pending_prefix(cursor, "tag:").unwrap();
     assert_eq!(rows.len(), 1);
 }
+
+#[test]
+fn wire_compresses_repetitive_facts_and_accepts_legacy_frames() {
+    let value = "repeated HTML and source inventory\n".repeat(32_000);
+    let mut frame = Vec::new();
+    super::wire::send(&mut frame, &value).unwrap();
+    assert!(frame.len() < value.len() / 10);
+    assert_eq!(
+        super::wire::receive::<String>(&mut frame.as_slice()).unwrap(),
+        Some(value.clone())
+    );
+    let plain = serde_json::to_vec(&value).unwrap();
+    let mut legacy = (plain.len() as u32).to_be_bytes().to_vec();
+    legacy.extend(plain);
+    assert_eq!(
+        super::wire::receive::<String>(&mut legacy.as_slice()).unwrap(),
+        Some(value)
+    );
+}
+
+#[test]
+fn retained_history_compresses_without_changing_identity_receipts_or_tagged_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("a.db");
+    let mut a = super::Engine::open(&path).unwrap();
+    let mut b = super::Engine::open(&root.path().join("b.db")).unwrap();
+    let payload = format!("tag:{}", "large retained text ".repeat(80_000));
+    let id = super::digest(payload.as_bytes());
+    // Simulate the original TEXT representation, before compression existed.
+    a.db.execute(
+        "INSERT INTO records VALUES(?1,?2)",
+        rusqlite::params![id, payload],
+    )
+    .unwrap();
+    b.ingest(&a.batch(0).unwrap()).unwrap();
+    a.acknowledge(b.id(), 1).unwrap();
+    assert!(a.compress_history().unwrap());
+    drop(a);
+    let mut a = super::Engine::open(&path).unwrap();
+    while a.compress_history().unwrap() {}
+    let (kind, length): (String, i64) =
+        a.db.query_row(
+            "SELECT typeof(payload),length(payload) FROM records WHERE id=?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "blob");
+    assert!(length < payload.len() as i64 / 10);
+    assert_eq!(a.head().unwrap(), 1);
+    assert_eq!(a.sent(b.id()).unwrap(), 1);
+    assert_eq!(a.payload(&id).unwrap().unwrap(), payload);
+    assert_eq!(a.pending(0).unwrap()[0].2, payload);
+    assert_eq!(a.pending_prefix(0, "tag:").unwrap().1[0].2, payload);
+    assert!(a.pending_prefix(0, "unrelated:").unwrap().1.is_empty());
+    b.ingest(&a.batch(0).unwrap()).unwrap();
+    assert_eq!(b.head().unwrap(), 1);
+    assert_eq!(b.payload(&id).unwrap().unwrap(), payload);
+    // A fresh relay must read the original fact, not its storage encoding.
+    let mut c = super::Engine::open(&root.path().join("c.db")).unwrap();
+    c.ingest(&a.batch(0).unwrap()).unwrap();
+    assert_eq!(c.payload(&id).unwrap().unwrap(), payload);
+}
+
+#[test]
+fn history_compression_resumes_between_bounded_transactions() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("sync.db");
+    let mut engine = super::Engine::open(&path).unwrap();
+    let tx = engine.db.transaction().unwrap();
+    for n in 0..6 {
+        let payload = format!("{n}{}", "x".repeat(super::PAGE_BYTES / 4));
+        tx.execute(
+            "INSERT INTO records VALUES(?1,?2)",
+            rusqlite::params![super::digest(payload.as_bytes()), payload],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    engine.compress_history().unwrap();
+    assert_eq!(
+        engine
+            .db
+            .query_row("SELECT position FROM storage_compression", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    drop(engine);
+    let mut engine = super::Engine::open(&path).unwrap();
+    while engine.compress_history().unwrap() {}
+    assert_eq!(engine.head().unwrap(), 6);
+    assert_eq!(
+        engine
+            .db
+            .query_row(
+                "SELECT count(*) FROM records WHERE typeof(payload)='blob'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        6
+    );
+    assert_eq!(engine.pending(0).unwrap().len(), 3);
+}

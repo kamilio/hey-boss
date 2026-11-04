@@ -155,7 +155,10 @@ pub(super) fn write(
         return Ok(());
     }
     if table == "published_pages" && row["deleted"] == 1 {
-        db.execute("DELETE FROM published_live WHERE name=?1", [row["name"].as_str()])?;
+        db.execute(
+            "DELETE FROM published_live WHERE name=?1",
+            [row["name"].as_str()],
+        )?;
     }
     if table == "scheduled_jobs" {
         let snapshot: crate::jobs::Snapshot = serde_json::from_str(
@@ -301,6 +304,40 @@ pub(super) fn apply(db: &Connection) -> Result<usize> {
     let count = apply_page(db, &mut DependencyGraphs::new(), capture::TABLES)?;
     crate::issues::allocations::reconcile(db, &crate::issues::allocations::Clock::read()?)?;
     Ok(count)
+}
+
+// Discover new pages and immutable data without waiting for the journal tail.
+// Existing names (including tombstones) still use the full projection barrier:
+// an older remote fact must not overwrite a local publish awaiting reduction.
+pub(super) fn discover_page(db: &Connection, fact: &Revision) -> Result<()> {
+    if !fact.table.starts_with("published_")
+        || !db.query_row(
+            "SELECT active=1 FROM distributed_meta WHERE id=1",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Ok(());
+    }
+    let key = projection::key(db, &fact.table, fact.after.as_ref().unwrap())?;
+    let (predicate, values) = where_key(&key)?;
+    if replica::rows(
+        db,
+        &format!("SELECT 1 FROM {} WHERE {predicate}", fact.table),
+        &values,
+    )?
+    .is_empty()
+    {
+        db.execute("UPDATE fleet_meta SET syncing=2 WHERE id=1", [])?;
+        write(
+            db,
+            &fact.table,
+            &key,
+            projection::row(db, &fact.table, &key)?,
+        )?;
+        db.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
+    }
+    Ok(())
 }
 
 type DependencyGraphs =

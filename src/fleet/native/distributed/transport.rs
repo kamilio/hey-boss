@@ -20,13 +20,15 @@ fn prepare(
     db: &Connection,
     engine: &mut hey_boss_sync::Engine,
     controller: bool,
-) -> Result<()> {
+) -> Result<bool> {
     install(db, &ctx.node)?;
     archives::prepare(db, engine)?;
+    let mut progressed = engine.compress_history()?;
     for _ in 0..8 {
         if export(db, engine)? == 0 {
             break;
         }
+        progressed = true;
     }
     if baseline(db, engine, controller)?
         && controller
@@ -45,13 +47,14 @@ fn prepare(
         if import(db, engine)? == 0 {
             break;
         }
+        progressed = true;
     }
     // The immutable journal is durable before exported advances. Keep only a
     // bounded application outbox rather than retaining a second full history.
     if db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1))", [], |r| r.get::<_, bool>(0))? {
         db.execute("DELETE FROM distributed_outbox WHERE clock IN (SELECT clock FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1) ORDER BY clock LIMIT 1000)", [])?;
     }
-    Ok(())
+    Ok(progressed)
 }
 
 // Application preparation is serialized locally. Network I/O never holds this
@@ -67,7 +70,7 @@ fn prepared(
     };
     crate::issues::allocations::maintain(db)?;
     let result =
-        prepare(ctx, db, journal, controller).and_then(|()| health::prepared(ctx, db, journal));
+        prepare(ctx, db, journal, controller).and_then(|_| health::prepared(ctx, db, journal));
     if let Err(error) = &result {
         health::failed(ctx, &error.to_string());
     }
@@ -129,7 +132,8 @@ impl Application {
                 let db = open(&ctx)?;
                 let mut journal = engine(&ctx)?;
                 while !cancelled(&ctx, &stopping) {
-                    let result = (|| -> Result<()> {
+                    let result = (|| -> Result<bool> {
+                        let mut progressed = false;
                         let received = shared.lock().unwrap().incoming.take();
                         if let Some(received) = received {
                             crate::issues::allocations::receive_presence(
@@ -150,7 +154,7 @@ impl Application {
                         });
                         if let Some(_lock) = ctx.lock("distributed-sync.lock", false)? {
                             crate::issues::allocations::maintain(&db)?;
-                            prepare(&ctx, &db, &mut journal, controller)?;
+                            progressed = prepare(&ctx, &db, &mut journal, controller)?;
                             health::prepared(&ctx, &db, &journal)?;
                             // Timestamp before the query so query latency never
                             // grants extra lifetime to a cached pulse.
@@ -162,8 +166,13 @@ impl Application {
                                 age: Duration::ZERO,
                             });
                         }
-                        Ok(())
+                        Ok(progressed)
                     })();
+                    // Release the application lock between bounded batches,
+                    // but do not add a two-second pause to every bulk transfer.
+                    if matches!(result, Ok(true)) {
+                        continue;
+                    }
                     if let Err(error) = result {
                         if !super::super::companion::database_busy(error.as_ref()) {
                             return Err(error);
@@ -386,7 +395,6 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
     errors.set_nonblocking(true)?;
     let mut child = command
         .args([
-            "-C",
             "-T",
             "-o",
             "BatchMode=yes",
