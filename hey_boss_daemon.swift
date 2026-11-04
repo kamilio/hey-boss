@@ -7664,15 +7664,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         return false
     }
-    private var acceptsTypedMessage: Bool {
-        phase == .idle || phase == .listening || (turnDone && (phase == .speaking || phase == .thinking))
-    }
+    private var readingFinishedReply: Bool { turnDone && (phase == .thinking || phase == .speaking) }
+    private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || readingFinishedReply }
     private func updateComposerActions() {
         send.isEnabled = acceptsTypedMessage
-        skipReading.isHidden = phase != .speaking || !turnDone
+        skipReading.isHidden = audio == nil || !readingFinishedReply
     }
     @objc private func skipToListening() {
-        guard phase == .speaking, turnDone, audio != nil else { return }
+        guard audio != nil, readingFinishedReply else { return }
         interruptPlayback(); state(.listening, "Listening")
     }
     @objc func sendTyped() {
