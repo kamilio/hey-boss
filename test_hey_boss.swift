@@ -4533,6 +4533,7 @@ func auditConversation(_ root: String) {
         return result
     }
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
+    precondition(!ui.send.isEnabled, "Keep the current model turn together while new words are still arriving")
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
     precondition(ui.rows.last!.stringValue.contains("The early words"))
@@ -4543,6 +4544,7 @@ func auditConversation(_ root: String) {
     wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
     ui.event(["TurnCompleted": ["status": "Completed", "output": full]])
+    precondition(ui.send.isEnabled, "A typed follow-up can skip the remaining playback once the answer is complete")
     wait("second paragraph highlight") { highlighted() == "Another" }
     wait("distinct text after repeated bullets") { highlighted() == "Last" }
     wait("all streamed speech drained") { ui.phase == .listening }
