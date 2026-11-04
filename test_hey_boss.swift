@@ -4550,6 +4550,23 @@ func auditConversation(_ root: String) {
         precondition(preparing.phase == .listening && preparing.audio === voice && preparing.rows.last?.stringValue.contains("pineapple") == true)
         preparing.window.close()
     }
+    do {
+        let url = saved.deletingLastPathComponent().appendingPathComponent("failed/current.json")
+        let chat = VoiceConversation(cli: cli, saveURL: url), voice = ReviewAudio()
+        let capture = VoiceConversation.Capture(source: "Test Editor", text: captured)
+        chat.selectDirectory(nil, capture: capture); chat.connect(voice); chat.respond("Hello")
+        let prior = chat.model!.transcript
+        chat.reply!.cancel()
+        chat.generationFailed(NSError(domain: "FoundationModels.LanguageModelSession.GenerationError", code: -1),
+                              text: "Hello", capture: capture, question: "Hello", prior: prior)
+        precondition(chat.rows.last!.stringValue.contains("couldn’t finish") && chat.audio === voice)
+        chat.skipReading.performClick(nil)
+        precondition(chat.phase == .listening && !voice.stopped)
+        chat.window.close()
+        let reopened = VoiceConversation(cli: cli, saveURL: url)
+        precondition(reopened.input.stringValue == "Hello" && !reopened.contextChip.isHidden && reopened.model?.transcript == prior)
+        precondition(reopened.rows.map(\.stringValue) == chat.rows.map(\.stringValue))
+    }
     if #available(macOS 26.4, *) {
         let longChat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("long/current.json"))
         let old = String(repeating: " Old material.", count: 6000)

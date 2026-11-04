@@ -7902,22 +7902,32 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if self.input.stringValue.isEmpty { self.input.stringValue = text; self.pendingCapture = capture }
                 self.finishTurn("The on-device model reported an unsupported language. You can edit the message and try again.")
             } catch {
-                guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
+                guard !Task.isCancelled else { return }
+                self?.generationFailed(error, text: text, capture: capture, question: question, prior: prior)
             }
         }
     }
+    func generationFailed(_ error: Error, text: String, capture: Capture?, question: String, prior: Transcript) {
+        stream = published
+        let notice = (error as? LocalizedError)?.errorDescription ?? "The on-device model couldn’t finish this reply. Try again later."
+        finishFailedTurn(notice, text: text, capture: capture, question: question, prior: prior)
+    }
     private func contextLimit(_ text: String, capture: Capture?, question: String, prior: Transcript) {
+        let notice = !stream.isEmpty ? "Reply cut short: on-device chat ran out of room." :
+            capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection."
+        finishFailedTurn(notice, text: text, capture: capture, question: question, prior: prior)
+    }
+    private func finishFailedTurn(_ notice: String, text: String, capture: Capture?, question: String, prior: Transcript) {
         reply = nil
         if stream.isEmpty {
             model = LanguageModelSession(transcript: prior)
             if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
-            finishTurn(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
         } else {
             let partial = stream
             model = LanguageModelSession(transcript: transcript(prior, adding: question, reply: partial))
             finishMessage(partial)
-            finishTurn("Reply cut short: on-device chat ran out of room.")
         }
+        finishTurn(notice)
     }
     private func transcript(_ prior: Transcript, adding question: String, reply: String = "") -> Transcript {
         var entries = Array(prior)
