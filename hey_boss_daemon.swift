@@ -7394,6 +7394,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var restoreError: String?
     var directory: URL?
     var process: Process?
+    private var closingWorkspace: (thread: String, finished: Task<Void, Never>)?
     var writer: FileHandle?
     var approvals: [(String, [String: Any])] = []
     var approvalSheet: NSAlert?
@@ -7861,18 +7862,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
         if let directory {
             save()
-            do {
-                let first = process == nil
-                if first { try startCodex(directory) }
-                try write(["turn": first && thread == nil ? instructions + "\n\n" + question : question])
-            } catch {
-                guard process == nil else { workspaceFailed(error.localizedDescription); return }
-                // Launch failed before Codex could receive the question.
-                if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
-                let notice = "Couldn’t start Codex: " + error.localizedDescription
-                append(notice, from: "Conversation"); save()
-                state(audio == nil ? .idle : .listening, notice)
-            }
+            let payload = process == nil && thread == nil ? instructions + "\n\n" + question : question
+            if process == nil, let closingWorkspace, closingWorkspace.thread == thread {
+                reply = Task { @MainActor [weak self] in
+                    await closingWorkspace.finished.value
+                    guard !Task.isCancelled, let self else { return }
+                    self.closingWorkspace = nil; self.reply = nil
+                    self.sendWorkspace(payload, in: directory)
+                }
+            } else { sendWorkspace(payload, in: directory) }
             return
         }
         if model == nil { model = LanguageModelSession(instructions: instructions) }
@@ -8097,6 +8095,21 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "On-device chat" : "Codex workspace")
         } else if phase == .speaking { state(.thinking, "Waiting for reply…") }
     }
+    private func sendWorkspace(_ payload: String, in folder: URL) {
+        do {
+            if process == nil { try startCodex(folder) }
+            try write(["turn": payload])
+        } catch {
+            guard process == nil else { workspaceFailed(error.localizedDescription); return }
+            // Launch failed before Codex could receive the question.
+            if input.stringValue.isEmpty, let last = messages.last, last.speaker == "You" {
+                input.stringValue = last.text; pendingCapture = last.capture
+            }
+            let notice = "Couldn’t start Codex: " + error.localizedDescription
+            append(notice, from: "Conversation"); save()
+            state(audio == nil ? .idle : .listening, notice)
+        }
+    }
     func startCodex(_ folder: URL) throws {
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = URL(fileURLWithPath: cli); child.arguments = ["workspace-chat"] + (thread.map { ["--resume", $0] } ?? []); child.currentDirectoryURL = folder
@@ -8202,10 +8215,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.workspaceFailed(error.localizedDescription) }
         }
     }
+    private func closeWorkspace() {
+        if let process, let thread, process.isRunning {
+            // A resumed Codex thread has one writer until its previous helper exits.
+            closingWorkspace = (thread, Task.detached { process.waitUntilExit() })
+        }
+        process = nil; try? writer?.close(); writer = nil
+    }
     private func workspaceFailed(_ message: String) {
         if turnDone {
             // The helper is idle; the next message can resume its thread.
-            process = nil; try? writer?.close(); writer = nil
+            closeWorkspace()
             return
         }
         interruptPlayback()
@@ -8223,7 +8243,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
-        process = nil; try? writer?.close(); writer = nil
+        closeWorkspace()
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
     }

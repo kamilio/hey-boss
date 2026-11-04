@@ -4856,6 +4856,16 @@ func auditWorkspaceChat(_ root: String) {
     precondition(ui.phase == .listening && ui.audio === activeMic && ui.process == nil, "A lost reply must not end the conversation")
     let failed = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
     precondition(failed.rows.suffix(2).map(\.stringValue) == [value, lost] && failed.input.stringValue == history[0])
+    // A helper can still hold the thread briefly after its input closes.
+    let retiring = Process(), pipe = Pipe()
+    retiring.executableURL = URL(fileURLWithPath: "/bin/sh"); retiring.arguments = ["-c", "cat >/dev/null; sleep 0.4"]
+    retiring.standardInput = pipe; try! retiring.run()
+    ui.process = retiring; ui.writer = pipe.fileHandleForWriting; ui.stop("Ready")
+    ui.sendTyped()
+    precondition(retiring.isRunning && ui.phase == .thinking && ui.process == nil, "Wait for the previous writer before resuming this thread")
+    let queued = ui.rows.map(\.stringValue)
+    ui.stop("Ready"); retiring.waitUntilExit(); RunLoop.current.run(until: Date().addingTimeInterval(0.08))
+    precondition(ui.process == nil && ui.rows.map(\.stringValue) == queued, "A cancelled message must not be sent after the old helper exits")
     ui.selectDirectory(nil)
     precondition(ui.rows.isEmpty && ui.process == nil && ui.directory == nil && ui.audio == nil)
     let end = Date().addingTimeInterval(6)
