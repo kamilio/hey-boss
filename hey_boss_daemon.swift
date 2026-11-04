@@ -7562,12 +7562,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard acceptsTypedMessage else { return }
         let text = input.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, modelReady() else { return }
-        if reading {
-            audio?.stopPlayback()
-            if let (field, _) = lit { highlight(field, nil) }
-            speech.removeAll(); reading = false
-        }
+        interruptPlayback()
         input.stringValue = ""; respond(text)
+    }
+    private func interruptPlayback() {
+        guard reading else { return }
+        audio?.stopPlayback()
+        if let (field, _) = lit { highlight(field, nil) }
+        speech.removeAll(); reading = false
     }
     func controlTextDidChange(_ notification: Notification) {
         if (input.currentEditor() as? NSTextView)?.hasMarkedText() == true { return }
@@ -7747,6 +7749,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
                 guard !Task.isCancelled else { return }
                 self?.contextLimit(text, capture: capture, question: question, prior: prior)
+            } catch LanguageModelSession.GenerationError.guardrailViolation, LanguageModelSession.GenerationError.refusal {
+                guard !Task.isCancelled, let self else { return }
+                self.reply = nil; self.interruptPlayback()
+                self.messageLabel?.stringValue = ""; self.published = ""
+                self.finishTurn("The on-device model declined to answer this message.")
             } catch {
                 guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
