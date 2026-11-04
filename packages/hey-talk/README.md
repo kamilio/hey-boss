@@ -73,6 +73,11 @@ The proxy's configured routing, model rewrites, and authentication remain author
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. If it fails or exceeds eight seconds, the original
 transcript is kept with a brief notice. Escape discards pending correction too.
+Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
+to change the title. Hey Talk waits for the original chat just as it does for paste,
+opens T3’s Rename thread action, and confirms the title without submitting a message.
+Outside a T3 composer, or with `--no-paste`, only the paste result is available.
+
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one
 background snapshot after the microphone is ready and uses it for correction even
 if you change tabs before stopping. Recording never waits for context capture.
@@ -362,6 +367,8 @@ These are local measurements, not latency guarantees.
 swift test
 ./test-signing.sh
 ./test-enter-exceptions.sh
+HEY_TALK_EVAL=1 swift test --filter CorrectionEvalTests # Live Luna, requires the saved mini/context evals under output/
+HEY_TALK_T3_TEST=1 swift test --filter T3RenameTests # Focus a T3 composer; confirms its existing title
 ./test-context.sh # Installed app: change visible text during microphone dictation
 ./test-login.sh # Installed app: login startup and explicit quit, while idle
 swift test --sanitize=thread

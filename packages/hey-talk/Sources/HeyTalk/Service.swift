@@ -720,26 +720,29 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
                 guard useCorrection else {
-                    self.finish(text, originalText: text, appContext: nil, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
+                    self.finish(.paste(text), originalText: text, appContext: nil, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
                     return
                 }
                 let started = ProcessInfo.processInfo.systemUptime
-                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext) { result in
+                let field = self.autoTarget ?? self.startingInput
+                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext,
+                                        canRename: self.paste && field?.canRenameThread == true) { result in
                     guard self.session.generation == id, self.session.phase == .processing else { return }
                     var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
                                              "context_ms": context?.milliseconds ?? 0, "context_characters": appContext?.count ?? 0]
-                    let corrected: String
+                    let corrected: CorrectionAction
                     switch result {
                     case .success(let value): corrected = value; info["status"] = "applied"
                     case .failure(let error):
-                        corrected = text; info["status"] = "fallback"; info["error"] = error.localizedDescription
+                        corrected = .paste(text); info["status"] = "fallback"; info["error"] = error.localizedDescription
                     }
                     self.finish(corrected, originalText: text, appContext: appContext, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
                 }
             }
         } }
     }
-    private func finish(_ text: String, originalText: String, appContext: String?, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
+    private func finish(_ action: CorrectionAction, originalText: String, appContext: String?, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
+        let text = action.text
         guard self.session.finish(id, text: text) else { return }
         if self.autoTarget == nil { self.hotkey?.reset() }
         self.overlay?.finishProcessing()
@@ -784,7 +787,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     return !browser || (host != nil && BrowserPage.host(in: target) == host)
                 }
                 let needsField = t3 || self.returnToField
-                Paste.deliver(text, target: target, shouldPressEnter: submit, returnToField: self.returnToField ? originalField : nil,
+                Paste.deliver(action, target: target, originalField: originalField, shouldPressEnter: submit, returnToField: self.returnToField ? originalField : nil,
                               targetStillFocused: {
                                   originalField?.isFocused() ?? !needsField
                               }, onWait: (!needsField || originalField != nil) ? { timer in
