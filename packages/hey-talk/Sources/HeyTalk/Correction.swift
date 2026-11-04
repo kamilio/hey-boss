@@ -19,10 +19,13 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
-    case paste(String), rename(String)
+    case paste(String), rename(String), newThread(project: String?)
 
     var text: String {
-        switch self { case .paste(let text), .rename(let text): return text }
+        switch self {
+        case .paste(let text), .rename(let text): return text
+        case .newThread(let project): return project.map { "New thread in " + $0 } ?? "New thread"
+        }
     }
 }
 
@@ -112,17 +115,23 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, canRename: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
+        if threadActions, let command = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .wholeMatch(of: #/^(?i:(?:start a )?new thread)(?:[ ,]+(?i:in +)?([\p{L}\p{N}][\p{L}\p{N} ./_\-]*?))?[.!]?$/#) {
+            let project = command.1.map(String.init)
+            Task { @MainActor in completion(.success(.newThread(project: project))) }
+            return
+        }
         task = Task { [session] in
             let result: Result<CorrectionAction, Error>
             do {
-                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, canRename: canRename)
+                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, canRename: threadActions)
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                 guard (200..<300).contains(response.statusCode) else {
                     throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                 }
-                result = .success(try await Self.action(bytes, canRename: canRename))
+                result = .success(try await Self.action(bytes, canRename: threadActions))
             } catch { result = .failure(error) }
             await MainActor.run { completion(result) }
         }

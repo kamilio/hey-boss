@@ -70,7 +70,7 @@ final class Hotkey {
 
 enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
-    case renameUnavailable = "rename_unavailable"
+    case renameUnavailable = "rename_unavailable", newThreadUnavailable = "new_thread_unavailable"
     case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
 
@@ -86,6 +86,7 @@ enum PasteBlockReason: String {
         let app = name.isEmpty ? "the original app" : name
         if pasted { return "Pasted in \(app). Press Enter there." }
         switch self {
+        case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
         case .renameUnavailable: return "Couldn’t finish renaming the thread. Open History for the title."
         case .accessibility: return "Text copied. Allow automatic paste."
         case .targetClosed: return "Reopen \(app). Press ⌘V."
@@ -116,6 +117,16 @@ enum Paste {
                 ?? (targetStillFocused() ? nil : onWait == nil ? .unidentifiedField : .focusChanged)
         }
         func paste() {
+            if case .newThread(let project) = action {
+                Task { @MainActor in
+                    guard isCurrent(), check() == nil, let field = originalField,
+                          await field.openNewThread(project: project, isCurrent: isCurrent) else {
+                        completion("history", .newThreadUnavailable); return
+                    }
+                    completion("new_thread", nil)
+                }
+                return
+            }
             let board = NSPasteboard.general
             board.clearContents()
             guard board.setString(action.text, forType: .string) else { completion("history", .clipboardUnavailable); return }
@@ -124,14 +135,13 @@ enum Paste {
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
             }
-            switch action {
-            case .paste:
+            if case .paste = action {
                 send(shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: keypress,
                      afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
                     if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
                     else { completion(delivery, reason) }
                 }
-            case .rename(let title):
+            } else if case .rename(let title) = action {
                 guard isCurrent() else { completion("history", nil); return }
                 if let reason = check() {
                     if reason == .focusChanged, let onWait { retry(onWait) }

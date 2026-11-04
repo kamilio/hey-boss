@@ -727,7 +727,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 let started = ProcessInfo.processInfo.systemUptime
                 let field = self.autoTarget ?? self.startingInput
                 self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext,
-                                        canRename: self.paste && field?.canRenameThread == true) { result in
+                                        threadActions: self.paste && field?.canUseThreadActions == true) { result in
                     guard self.session.generation == id, self.session.phase == .processing else { return }
                     var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
                                              "context_ms": context?.milliseconds ?? 0, "context_characters": appContext?.count ?? 0]

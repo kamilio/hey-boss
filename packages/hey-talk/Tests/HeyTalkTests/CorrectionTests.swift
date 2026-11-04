@@ -49,7 +49,7 @@ final class CorrectionTests: XCTestCase {
             let correction = client()
             CorrectionProtocol.handle = { $0.respond(status: 200, body: body) }
             let done = expectation(description: "rename")
-            correction.correct("rename this thread to Release notes", vocabulary: [], canRename: allowed) { result in
+            correction.correct("rename this thread to Release notes", vocabulary: [], threadActions: allowed) { result in
                 XCTAssertEqual(try? result.get(), succeeds ? .rename("Release notes") : nil)
                 done.fulfill()
             }
@@ -58,6 +58,34 @@ final class CorrectionTests: XCTestCase {
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
                            allowed ? ["paste", "rename_thread"] : ["paste"])
+        }
+    }
+
+    func testSpokenNewThreadUsesTheTranscriptWithoutAProxyRequest() {
+        for (speech, project) in [("New thread.", nil), (" Start a new thread! ", nil),
+                                  ("New thread hey-boss.", "hey-boss"), ("New thread in Hey Boss", "Hey Boss"),
+                                  ("new thread, poe-internal/poe2", "poe-internal/poe2")] {
+            let correction = client()
+            CorrectionProtocol.handle = { _ in XCTFail("Should not need the proxy") }
+            let done = expectation(description: speech)
+            correction.correct(speech, vocabulary: [], appContext: "New thread in another project", threadActions: true) { result in
+                XCTAssertEqual(try? result.get(), .newThread(project: project)); done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+        }
+    }
+
+    func testNewThreadMentionsAndIneligibleTargetsStillUseCorrection() {
+        for (speech, enabled) in [("New thread hey-boss.", false), ("How do I start a new thread?", true),
+                                  ("Don’t start a new thread.", true), ("New thread?", true)] {
+            let correction = client()
+            CorrectionProtocol.handle = { stub in stub.respond(status: 503, body: "") }
+            let done = expectation(description: speech)
+            correction.correct(speech, vocabulary: [], appContext: "New thread.", threadActions: enabled) { result in
+                guard case .failure = result else { XCTFail("Unexpected local command"); done.fulfill(); return }
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
         }
     }
 
