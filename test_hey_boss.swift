@@ -4631,6 +4631,8 @@ func auditConversation(_ root: String) {
     ui.connect(fresh)
     ui.respond("Hello")
     precondition(ui.phase == .thinking)
+    let interrupted = VoiceConversation(cli: cli, saveURL: saved)
+    precondition(interrupted.rows.map(\.stringValue) == ["Hello"], "A submitted message must survive quitting before the model answers")
     ui.input.stringValue = "Follow-up draft"
     ui.window.sendEvent(escape)
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))

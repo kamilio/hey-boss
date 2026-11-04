@@ -7671,7 +7671,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
             question = quote + "\n\n" + text
         }
-        append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
+        append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…"); save()
         if let directory {
             do {
                 let first = process == nil
@@ -7990,7 +7990,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         directory = saved.directory; thread = saved.thread; model = saved.transcript.map { LanguageModelSession(transcript: $0) }
         pendingCapture = saved.pendingCapture
         for message in saved.messages { append(message.text, from: message.speaker, capture: message.capture) }
-        refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+        refreshScope()
+        state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "On-device chat" : "Codex workspace")
     }
     private func restore() {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
