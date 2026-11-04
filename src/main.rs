@@ -230,9 +230,7 @@ enum Command {
     /// Disk-backed files for issues and artifacts; SSH-aware downloads.
     #[command(visible_alias = "attachments")]
     Attachment(attachment_cli::Options),
-    /// Publish a private HTML page or static site across your fleet; never public.
-    Publish(publish_cli::Publish),
-    /// List, download, and delete private published pages.
+    /// Publish, list, download, and delete private pages.
     Pages(publish_cli::Options),
     /// Global profile settings shared across all projects.
     Settings(issue_cli::GlobalOptions),
@@ -553,14 +551,6 @@ fn run() -> std::io::Result<()> {
                 } else {
                     eprintln!("hey-boss worker: {error}");
                 }
-                std::process::exit(error.exit_code());
-            }
-            return Ok(());
-        }
-        Command::Publish(options) => {
-            if let Err(error) = publish_cli::publish(options) {
-                if options.json { println!("{}", serde_json::json!({"ok":false,"error":error})); }
-                else { eprintln!("hey-boss publish: {error}"); }
                 std::process::exit(error.exit_code());
             }
             return Ok(());
@@ -945,6 +935,26 @@ fn print_response(result: hey_boss::Response, json: bool) -> std::io::Result<()>
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn pages_publish_accepts_global_json_and_explains_privacy() {
+        for args in [
+            vec!["pages", "publish", "site", "--name", "report", "--json"],
+            vec!["pages", "--json", "publish", "site", "--name", "report"],
+        ] {
+            let cli = Cli::try_parse_from(std::iter::once("hey-boss").chain(args)).unwrap();
+            assert!(matches!(cli.command, Command::Pages(options) if options.json));
+        }
+        let help = Cli::try_parse_from(["hey-boss", "pages", "publish", "--help"])
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            help.contains("private") && help.contains("never public"),
+            "{help}"
+        );
+        assert!(help.contains("Works offline"), "{help}");
+    }
 
     #[test]
     fn agent_commands_are_grouped_and_legacy_names_still_parse() {

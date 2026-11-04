@@ -1,8 +1,8 @@
 # Private published pages
 
 ```sh
-hey-boss publish ./report.html --name weekly-report
-hey-boss publish ./dist --name dashboard --json
+hey-boss pages publish ./report.html --name weekly-report
+hey-boss pages publish ./dist --name dashboard --json
 hey-boss pages list
 hey-boss pages download dashboard --output ./dashboard
 hey-boss pages delete dashboard

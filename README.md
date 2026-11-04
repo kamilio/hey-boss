@@ -1249,7 +1249,7 @@ its single lockfile, and compile only `hey-proxy` on the destination architectur
 
 ## Private published pages
 
-Run `hey-boss publish ./report.html --name weekly-report` or publish a directory
+Run `hey-boss pages publish ./report.html --name weekly-report` or publish a directory
 containing `index.html`. Files replicate across your private fleet and open under
 **Published Pages** in the top-right web menu, with a hey-boss header and sandboxed
 iframe. Publishing works offline; copies update when machines reconnect.
