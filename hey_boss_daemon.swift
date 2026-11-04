@@ -7359,7 +7359,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var refreshingHistory = false
     let status = NSTextField(wrappingLabelWithString: "")
     let meter = ConversationMeter()
-    let skipReading = NSButton()
+    let listenNext = NSButton()
     let welcome = NSStackView()
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
@@ -7452,10 +7452,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         send.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send message")?.withSymbolConfiguration(.init(pointSize: 23, weight: .medium))
         send.contentTintColor = .controlAccentColor; send.target = self; send.action = #selector(sendTyped); send.toolTip = "Send message"
         status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
-        skipReading.title = "Skip reading"; skipReading.bezelStyle = .accessoryBarAction; skipReading.controlSize = .small
-        skipReading.toolTip = "Stop reading this answer and listen for your next message"
-        skipReading.target = self; skipReading.action = #selector(skipToListening)
-        let voiceStatus = NSStackView(views: [status, skipReading])
+        listenNext.bezelStyle = .accessoryBarAction; listenNext.controlSize = .small
+        listenNext.target = self; listenNext.action = #selector(listenForNextTurn)
+        let voiceStatus = NSStackView(views: [status, listenNext])
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
         for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
@@ -7664,15 +7663,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         return false
     }
-    private var readingFinishedReply: Bool { turnDone && (phase == .thinking || phase == .speaking) }
-    private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || readingFinishedReply }
+    private var answering: Bool { phase == .thinking || phase == .speaking }
+    private var folderTurnAccepted = false
+    private var canListenNext: Bool {
+        audio != nil && answering && (turnDone || directory == nil || folderTurnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
+    }
+    private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
     private func updateComposerActions() {
         send.isEnabled = acceptsTypedMessage
-        skipReading.isHidden = audio == nil || !readingFinishedReply
+        listenNext.isHidden = !canListenNext
+        listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
+        listenNext.toolTip = turnDone ? "Stop reading this answer and listen for your next message" : "Stop this reply and listen for your next message"
     }
-    @objc private func skipToListening() {
-        guard audio != nil, readingFinishedReply else { return }
-        interruptPlayback(); state(.listening, "Listening")
+    @objc private func listenForNextTurn() {
+        guard canListenNext else { return }
+        interruptPlayback()
+        if !turnDone { cancelTurn() }
+        state(.listening, "Listening")
     }
     @objc func sendTyped() {
         guard acceptsTypedMessage else { return }
@@ -7843,7 +7850,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func respond(_ text: String) {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
-        turnDone = false; lastMessage = nil
+        turnDone = false; lastMessage = nil; folderTurnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
         var question = text
         if let capture, let snapshot = capture.text {
@@ -8117,7 +8124,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let id = data["id"] as? String ?? ""
         switch kind {
         case "Session":
-            thread = data["id"] as? String; save()
+            thread = data["id"] as? String
+            folderTurnAccepted = thread != nil && data["accepted"] as? Bool == true
+            updateComposerActions(); save()
         case "TextDelta":
             if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.contains("\n") { publish(final: false) } }
         case "Message":
@@ -8183,7 +8192,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.stop(error.localizedDescription) }
         }
     }
-    func stop(_ message: String) {
+    private func cancelTurn() {
         if let localTurn { model = LanguageModelSession(transcript: transcript(localTurn.prior, adding: localTurn.question, reply: published)) }
         if !published.isEmpty { append("Reply stopped before it finished.", from: "Conversation") }
         if localTurn != nil || !published.isEmpty { save() }
@@ -8193,10 +8202,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
-        decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
         process = nil; try? writer?.close(); writer = nil
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
+    }
+    func stop(_ message: String) {
+        cancelTurn()
+        decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
         state(.idle, message)
     }
     private func chatURL(_ id: UUID) -> URL { saveURL.deletingLastPathComponent().appendingPathComponent(id.uuidString + ".json") }

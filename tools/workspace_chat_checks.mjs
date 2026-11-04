@@ -18,8 +18,12 @@ rl.on('line', line=>{
  else if(q.method==='turn/start'){
    n++; const turnId='turn-'+n;
    send({id:q.id,result:{turn:{id:turnId}}});
-   send({method:'item/started',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',command:'pwd'}}});
-   send({id:'ask',method:'item/commandExecution/requestApproval',params:{threadId,turnId,command:'pwd'}});
+   setTimeout(()=>{
+     fs.writeFileSync('recorded',String(n));
+     if(n===1)send({method:'item/completed',params:{threadId,turnId,item:{id:'user-'+n,type:'userMessage'}}});
+     send({method:'item/started',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',command:'pwd'}}});
+     send({id:'ask',method:'item/commandExecution/requestApproval',params:{threadId,turnId,command:'pwd'}});
+   },150);
  } else if(q.id==='ask'){
    fs.appendFileSync('decisions',q.result.decision+'\\n');
    send({method:'item/completed',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',status:q.result.decision==='accept'?'completed':'declined'}}});
@@ -34,10 +38,14 @@ rl.on('line', line=>{
   const exit=new Promise(res=>child.on('close',res));
   const timeout=setTimeout(()=>child.kill(), 30000);
   const commands=o=>child.stdin.write(JSON.stringify(o)+'\n');
-  let turns=0, starts=0, ends=0, messages=0, streamed=0;
+  let turns=0, starts=0, ends=0, messages=0, streamed=0, recorded=0;
   commands({turn:'Hello'});
   for await(const line of createInterface({input:child.stdout})){
     const e=JSON.parse(line);
+    if(e.Session){
+      assert.equal(await readFile(join(dir,'recorded'),'utf8').catch(()=>''),String(++recorded),'Only announce a thread after the provider records the user message');
+      assert.equal(e.Session.id,'chat-fixture'); assert.equal(e.Session.accepted,true);
+    }
     if(e.ToolStarted){assert.equal(e.ToolStarted.input.command,'pwd'); starts++;}
     if(e.Approval)commands({decision:e.Approval.id,allow:turns===1});
     if(e.ToolCompleted){assert.equal(e.ToolCompleted.failed,turns===0); ends++;}
@@ -46,6 +54,6 @@ rl.on('line', line=>{
     if(e.TurnCompleted){assert.equal(e.TurnCompleted.output,'reply '+(++turns)); if(turns===1)commands({turn:'Hello'}); else child.stdin.end();}
   }
   clearTimeout(timeout);
-  assert.equal(await exit,0); assert.deepEqual([turns,starts,ends,streamed,messages],[2,2,2,2,2]); assert.equal(await readFile(join(dir,'decisions'),'utf8'),'decline\naccept\n');
+  assert.equal(await exit,0); assert.deepEqual([turns,starts,ends,streamed,messages,recorded],[2,2,2,2,2,2]); assert.equal(await readFile(join(dir,'decisions'),'utf8'),'decline\naccept\n');
   console.log('PASS workspace cwd, tool events, decline and allow, second turn, disconnect');
 } finally { await rm(dir,{recursive:true,force:true}); }

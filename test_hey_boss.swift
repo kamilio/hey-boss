@@ -4545,10 +4545,27 @@ func auditConversation(_ root: String) {
         let voice = ReviewAudio(); preparing.connect(voice)
         preparing.state(.thinking, "Thinking…")
         preparing.event(["TurnCompleted": ["status": "Completed", "output": captured]])
-        precondition(preparing.phase == .thinking && !preparing.skipReading.isHidden)
-        preparing.skipReading.performClick(nil)
+        precondition(preparing.phase == .thinking && !preparing.listenNext.isHidden)
+        preparing.listenNext.performClick(nil)
         precondition(preparing.phase == .listening && preparing.audio === voice && preparing.rows.last?.stringValue.contains("pineapple") == true)
+        preparing.respond("Hello"); preparing.input.stringValue = "Follow-up draft"
+        precondition(!preparing.listenNext.isHidden && preparing.listenNext.title == "Interrupt reply" && !preparing.send.isEnabled)
+        preparing.listenNext.performClick(nil)
+        precondition(preparing.phase == .listening && preparing.audio === voice && !voice.stopped && preparing.reply == nil)
+        precondition(preparing.input.stringValue == "Follow-up draft" && preparing.rows.last?.stringValue == "Hello")
         preparing.window.close()
+    }
+    do {
+        let chat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("accept/current.json"))
+        chat.selectDirectory(saved.deletingLastPathComponent())
+        let voice = ReviewAudio(); chat.connect(voice); chat.state(.thinking, "Thinking…")
+        chat.event(["Session": ["id": "folder-fixture"]])
+        precondition(chat.listenNext.isHidden, "A thread ID by itself can still refer to an empty conversation")
+        chat.event(["Session": ["id": "folder-fixture", "accepted": true]])
+        precondition(!chat.listenNext.isHidden && chat.listenNext.title == "Interrupt reply")
+        chat.listenNext.performClick(nil)
+        precondition(chat.phase == .listening && chat.audio === voice)
+        chat.window.close()
     }
     do {
         let url = saved.deletingLastPathComponent().appendingPathComponent("failed/current.json")
@@ -4560,7 +4577,7 @@ func auditConversation(_ root: String) {
         chat.generationFailed(NSError(domain: "FoundationModels.LanguageModelSession.GenerationError", code: -1),
                               text: "Hello", capture: capture, question: "Hello", prior: prior)
         precondition(chat.rows.last!.stringValue.contains("couldn’t finish") && chat.audio === voice)
-        chat.skipReading.performClick(nil)
+        chat.listenNext.performClick(nil)
         precondition(chat.phase == .listening && !voice.stopped)
         chat.window.close()
         let reopened = VoiceConversation(cli: cli, saveURL: url)
@@ -4627,7 +4644,7 @@ func auditConversation(_ root: String) {
         return result
     }
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
-    precondition(ui.skipReading.isHidden, "Keep listening controls separate from an unfinished model turn")
+    precondition(!ui.listenNext.isHidden && ui.listenNext.title == "Interrupt reply")
     precondition(!ui.send.isEnabled, "Keep the current model turn together while new words are still arriving")
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
@@ -4639,6 +4656,7 @@ func auditConversation(_ root: String) {
     wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
     ui.event(["TurnCompleted": ["status": "Completed", "output": full]])
+    precondition(ui.listenNext.title == "Skip reading")
     precondition(ui.send.isEnabled, "A typed follow-up can skip the remaining playback once the answer is complete")
     wait("second paragraph highlight") { highlighted() == "Another" }
     wait("distinct text after repeated bullets") { highlighted() == "Last" }
@@ -4667,13 +4685,13 @@ func auditConversation(_ root: String) {
     }
     precondition(ui.phase == .listening && ui.audio === audio && !ui.contextChip.isHidden)
     feed("first")
-    wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying && !ui.skipReading.isHidden }
+    wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying && !ui.listenNext.isHidden && ui.listenNext.title == "Skip reading" }
     precondition(ui.rows[2].stringValue.lowercased().hasPrefix("so") && ui.rows[2].stringValue.localizedCaseInsensitiveContains("fruit"), "A thinking pause after So must not cut off the question")
     ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
     precondition(ui.phase == .speaking && ui.recording == nil)
-    precondition(ui.skipReading.visibleRect.width > 0)
-    ui.skipReading.performClick(nil)
-    precondition(ui.phase == .listening && ui.skipReading.isHidden && ui.audio === audio && !audio.player.isPlaying)
+    precondition(ui.listenNext.visibleRect.width > 0)
+    ui.listenNext.performClick(nil)
+    precondition(ui.phase == .listening && ui.listenNext.isHidden && ui.audio === audio && !audio.player.isPlaying)
     feed("second", finishManually: true)
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
