@@ -31,6 +31,8 @@ pub(crate) struct Report {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<LogChunk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
 }
 
 impl Report {
@@ -45,6 +47,7 @@ impl Report {
             finished_at: None,
             reason: None,
             log: None,
+            result: None,
         }
     }
 }

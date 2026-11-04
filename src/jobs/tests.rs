@@ -4,6 +4,32 @@ const ORIGINAL: &str = include_str!("fixtures/original.md");
 const REVISED: &str = include_str!("fixtures/revised.md");
 
 #[test]
+fn exec_submission_preserves_model_and_is_idempotent() {
+    let mut f = Fixture::new();
+    let value = json!({"command":"submit","id":"exec-fixture","execution":{
+        "program":"agent-eval","args":["trial","--input","input.tar.gz","--output","result/"],
+        "harness":"claude","model":"claude-opus-5-5","effort":"high"
+    }});
+    let op: JobOperation = serde_json::from_value(value.clone()).unwrap();
+    let first = f.op(op, 1000).unwrap();
+    let again = f
+        .op(serde_json::from_value(value.clone()).unwrap(), 2000)
+        .unwrap();
+    assert_eq!(first["run"]["id"], again["run"]["id"]);
+    assert_eq!(
+        first["run"]["snapshot"]["definition"]["execution"]["model"],
+        "claude-opus-5-5"
+    );
+    assert!(f.store.due_jobs(H, 100).unwrap().is_empty());
+    let mut changed = value;
+    changed["execution"]["model"] = json!("other-model");
+    assert!(
+        f.op(serde_json::from_value(changed).unwrap(), 3000)
+            .is_err()
+    );
+}
+
+#[test]
 fn legacy_job_definitions_keep_fresh_threads_and_immutable_serialization() {
     let original = serde_json::to_value(definition()).unwrap();
     assert!(original.get("thread_mode").is_none());
@@ -65,6 +91,7 @@ fn definition() -> Definition {
         cron: "0 * * * *".into(),
         timezone: "UTC".into(),
         executable: None,
+        execution: None,
         harness: "codex".into(),
         model: "gpt-6-astra".into(),
         machines: Vec::new(),

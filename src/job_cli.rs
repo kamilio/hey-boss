@@ -63,6 +63,7 @@ impl Fields {
             cron: self.cron.clone(),
             timezone: self.timezone.clone(),
             executable: self.executable.clone(),
+            execution: None,
             harness: self.harness.map(|p| p.name()).unwrap_or_default().into(),
             model: self.model.clone(),
             thread_mode: self.thread_mode,

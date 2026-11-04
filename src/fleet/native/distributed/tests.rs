@@ -1202,6 +1202,7 @@ fn check_job_history_replication(script: bool) {
             cron: "0 * * * *".into(),
             timezone: "UTC".into(),
             executable: script.then(|| "maintenance".into()),
+            execution: None,
             harness: if script { "" } else { "codex" }.into(),
             model: if script { "" } else { "gpt-6-astra" }.into(),
             machines: Vec::new(),

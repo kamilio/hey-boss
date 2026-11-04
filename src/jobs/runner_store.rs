@@ -243,21 +243,24 @@ impl Store {
                 run = get_run(&tx, &run.id)?;
                 progress(&tx, &run, "running", None, started_at)?;
             }
+            if let Some(log) = &report.log {
+                if run.snapshot.definition.executable.is_none() {
+                    return Err(Error::invalid("Unexpected script log"));
+                }
+                tx.execute("INSERT INTO scheduled_job_logs(run_id,offset,output,next_offset) VALUES(?1,?2,?3,?4) ON CONFLICT(run_id,offset) DO UPDATE SET output=excluded.output,next_offset=excluded.next_offset WHERE length(excluded.output)>=length(scheduled_job_logs.output)",params![run.id,log.offset,log.output,log.next])?;
+                if log.next.is_some() {
+                    tx.commit()?;
+                    return Ok(true);
+                }
+            }
             if report.state != "running" {
                 let state = if stop_requested {
                     "cancelled"
                 } else {
                     report.state.as_str()
                 };
-                if let Some(log) = &report.log {
-                    if run.snapshot.definition.executable.is_none() {
-                        return Err(Error::invalid("Unexpected script log"));
-                    }
-                    tx.execute("INSERT INTO scheduled_job_logs(run_id,offset,output,next_offset) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![run.id,log.offset,log.output,log.next])?;
-                    if log.next.is_some() {
-                        tx.commit()?;
-                        return Ok(true);
-                    }
+                if let Some(result) = &report.result {
+                    tx.execute("INSERT INTO scheduled_exec_results(run_id,result) VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET result=excluded.result", params![run.id,serde_json::to_string(result)?])?;
                 }
                 complete(
                     &tx,

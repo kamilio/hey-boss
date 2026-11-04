@@ -75,6 +75,16 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS scheduled_job_logs(run_id TEXT NOT NULL,offset INTEGER NOT NULL,output TEXT NOT NULL,next_offset INTEGER,PRIMARY KEY(run_id,offset));")?;
         tx.commit()?;
     }
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_exec_results')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS scheduled_exec_results(run_id TEXT PRIMARY KEY, result TEXT NOT NULL);")?;
+    }
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_job_workers') WHERE name='readiness')", [], |r|r.get::<_,bool>(0))? {
+        db.execute_batch("ALTER TABLE local_job_workers ADD COLUMN readiness TEXT;")?;
+    }
     Ok(())
 }
 
@@ -420,6 +430,96 @@ impl Store {
         authority(&self.db)?;
         let project = request_project(&self.db, request)?;
         let root = self.job_root()?;
+        match operation {
+            JobOperation::FilePut { blob, offset, data } => {
+                return crate::jobs::command::put(&root, &project.id, blob, *offset, data);
+            }
+            JobOperation::FileGet { blob, offset } => {
+                return crate::jobs::command::get(&root, &project.id, blob, *offset);
+            }
+            JobOperation::Submit { id, execution } => {
+                if let Some(blob) = &execution.input {
+                    let path = crate::jobs::command::blob_path(&root, &project.id, blob)?;
+                    if !path.is_file() || std::fs::metadata(path)?.len() != blob.size {
+                        return Err(Error::invalid(
+                            "Upload the complete input before submission",
+                        ));
+                    }
+                }
+                let definition = crate::jobs::Definition {
+                    name: id.clone(),
+                    cron: String::new(),
+                    timezone: "UTC".into(),
+                    executable: Some(execution.program.clone()),
+                    execution: Some(execution.clone()),
+                    harness: String::new(),
+                    model: String::new(),
+                    thread_mode: Default::default(),
+                    machines: Vec::new(),
+                    all_machines: false,
+                    each_machine: false,
+                };
+                // Definition and run each have stable receipts. A crash between them is safe to retry.
+                let mut create = request.clone();
+                create.request_id = Some(format!(
+                    "{}-definition",
+                    request
+                        .request_id
+                        .as_deref()
+                        .ok_or_else(|| Error::invalid("Submission requires request_id"))?
+                ));
+                create.operation = Operation::Job {
+                    operation: JobOperation::Create {
+                        id: id.clone(),
+                        definition,
+                        markdown: String::new(),
+                        enabled: false,
+                    },
+                };
+                match get_job(&self.db, &project.id, id) {
+                    Ok(old) => {
+                        if old.snapshot.definition.execution.as_ref() != Some(execution) {
+                            return Err(Error::conflict(
+                                "Execution ID was already used with different content",
+                            ));
+                        }
+                    }
+                    Err(e) if e.code == "not_found" => {
+                        self.execute_job_at(&create, now)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+                let occurrence =
+                    self.manual_job(&project.id, id, request.request_id.as_deref().unwrap(), now)?;
+                return Ok(with_project(
+                    json!({"run":self.enqueue_job(&occurrence)?}),
+                    &project,
+                ));
+            }
+            JobOperation::Execution { run_id } | JobOperation::CancelExecution { run_id } => {
+                let run = observed_run(&self.db, run_id)?;
+                if run.snapshot.project_id != project.id
+                    || run.snapshot.definition.execution.is_none()
+                {
+                    return Err(Error::new(
+                        "not_found",
+                        "Execution not found in this project",
+                    ));
+                }
+                if matches!(operation, JobOperation::CancelExecution { .. }) {
+                    self.stop_scheduled_job(&project.id, &run.snapshot.job_id, run_id, now)?;
+                }
+                let mut request = request.clone();
+                request.operation = Operation::Job {
+                    operation: JobOperation::Run {
+                        id: run.snapshot.job_id,
+                        run_id: run_id.clone(),
+                    },
+                };
+                return self.execute_job_at(&request, now);
+            }
+            _ => {}
+        }
         if let JobOperation::RunNow { id } = operation {
             let key = request
                 .request_id
@@ -519,7 +619,16 @@ impl Store {
                             None => json!({"log":null,"reason":run.reason}),
                         }
                     } else {
-                        json!({"instructions":bundle(&root,&run.snapshot)?,"run":run})
+                        {
+                            let result: Option<String> = tx
+                                .query_row(
+                                    "SELECT result FROM scheduled_exec_results WHERE run_id=?1",
+                                    [run_id],
+                                    |r| r.get(0),
+                                )
+                                .optional()?;
+                            json!({"instructions":bundle(&root,&run.snapshot)?,"run":run,"result":result.map(|s|serde_json::from_str::<Value>(&s)).transpose()?})
+                        }
                     }
                 }
                 _ => unreachable!(),
@@ -586,6 +695,9 @@ impl Store {
             .cloned()
             .unwrap_or_else(|| old.as_ref().unwrap().snapshot.definition.clone());
         let enabled = enabled.unwrap_or_else(|| old.as_ref().unwrap().enabled);
+        if enabled && definition.execution.is_some() {
+            return Err(Error::invalid("One-shot commands cannot be scheduled"));
+        }
         let next_at = if enabled {
             Some(Schedule::parse(&definition.cron, &definition.timezone)?.next(now)?)
         } else {
