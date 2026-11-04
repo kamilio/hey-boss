@@ -7084,13 +7084,17 @@ struct ReviewTranscript {
     }
 }
 
-func recognizeTurn(_ samples: Data, format: AVAudioFormat, recognizer: SFSpeechRecognizer,
-                   completion: @escaping (Result<String, Error>) -> Void) throws -> SFSpeechRecognitionTask {
+func recordedBuffer(_ samples: Data, format: AVAudioFormat) throws -> AVAudioPCMBuffer {
     guard !samples.isEmpty, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count / 2)) else {
         throw StorageError(description: "Could not read the recorded audio.")
     }
     buffer.frameLength = buffer.frameCapacity
     samples.copyBytes(to: UnsafeMutableRawBufferPointer(start: buffer.int16ChannelData![0], count: samples.count))
+    return buffer
+}
+
+func recognizeTurn(_ buffer: AVAudioPCMBuffer, recognizer: SFSpeechRecognizer,
+                   completion: @escaping (Result<String, Error>) -> Void) -> SFSpeechRecognitionTask {
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
     request.append(buffer); request.endAudio()
@@ -7596,22 +7600,47 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let audio, let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
         ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
         recording = nil; state(.decoding, "Transcribing…")
-        do {
-            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
-            decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self, weak audio] result in
-                guard let self, let audio, self.audio === audio else { return }
-                self.timeout?.invalidate(); self.decoding = nil
-                switch result {
-                case .failure(let error):
-                    let failure = error as NSError
-                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcription failed \(failure.domain, privacy: .public) \(failure.code)")
-                    self.stop(error.localizedDescription)
-                case .success(let text):
-                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
-                    if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
-                }
+        let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
+            guard let self, let audio, self.audio === audio else { return }
+            self.timeout?.invalidate(); self.decoding = nil
+            switch result {
+            case .failure(let error):
+                let failure = error as NSError
+                ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcription failed \(failure.domain, privacy: .public) \(failure.code)")
+                self.stop(error.localizedDescription)
+            case .success(let text):
+                ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
+                if text.isEmpty { self.state(.listening, "Listening") } else { self.respond(text) }
             }
-        } catch { stop(error.localizedDescription) }
+        }
+        do {
+            let buffer = try recordedBuffer(samples, format: audio.format)
+            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
+            reply = Task { @MainActor [weak self] in
+                if SpeechTranscriber.isAvailable, let locale = await SpeechTranscriber.supportedLocale(equivalentTo: recognizer.locale),
+                   await SpeechTranscriber.installedLocales.contains(locale), !Task.isCancelled,
+                   let text = try? await Self.transcribe(buffer, locale: locale) {
+                    guard !Task.isCancelled else { return }
+                    self?.reply = nil; finish(.success(text)); return
+                }
+                guard !Task.isCancelled else { return }
+                self?.reply = nil
+                self?.decoding = recognizeTurn(buffer, recognizer: recognizer, completion: finish)
+            }
+        } catch { finish(.failure(error)) }
+    }
+    private static func transcribe(_ buffer: AVAudioPCMBuffer, locale: Locale) async throws -> String {
+        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let (input, producer) = AsyncStream<AnalyzerInput>.makeStream()
+        producer.yield(AnalyzerInput(buffer: buffer)); producer.finish()
+        return try await withTaskCancellationHandler {
+            try await analyzer.start(inputSequence: input)
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            var text = ""
+            for try await result in transcriber.results { text += String(result.text.characters) }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } onCancel: { Task { await analyzer.cancelAndFinishNow() } }
     }
     func append(_ text: String, from speaker: String, capture: Capture? = nil) {
         let mine = speaker == "You"
@@ -8145,7 +8174,7 @@ final class SpokenReview {
         watchdog = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.finish("Transcription timed out. Nothing was posted.") }
         do {
             guard let recognizer else { throw StorageError(description: "On-device dictation is unavailable.") }
-            decoding = try recognizeTurn(samples, format: audio.format, recognizer: recognizer) { [weak self] result in
+            decoding = recognizeTurn(try recordedBuffer(samples, format: audio.format), recognizer: recognizer) { [weak self] result in
                 guard let self, !self.audio.stopped, self.decoding != nil else { return }
                 self.watchdog?.invalidate(); self.decoding = nil
                 switch result {
