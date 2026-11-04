@@ -7851,8 +7851,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
             question = quote + "\n\n" + text
         }
-        append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…"); save()
+        append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
         if let directory {
+            save()
             do {
                 let first = process == nil
                 if first { try startCodex(directory) }
@@ -7864,6 +7865,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let model else { return }
         let prior = model.transcript
         localTurn = (prior, question)
+        save(transcript: transcript(prior, adding: question))
         reply = Task { @MainActor [weak self] in
             do {
                 var session = model
@@ -7912,16 +7914,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             finishTurn(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
         } else {
             let partial = stream
-            keepInterruptedTurn(partial, question: question, prior: prior)
+            model = LanguageModelSession(transcript: transcript(prior, adding: question, reply: partial))
             finishMessage(partial)
             finishTurn("Reply cut short: on-device chat ran out of room.")
         }
     }
-    private func keepInterruptedTurn(_ partial: String, question: String, prior: Transcript) {
+    private func transcript(_ prior: Transcript, adding question: String, reply: String = "") -> Transcript {
         var entries = Array(prior)
         entries.append(.prompt(.init(segments: [.text(.init(content: question))])))
-        if !partial.isEmpty { entries.append(.response(.init(assetIDs: [], segments: [.text(.init(content: partial))]))) }
-        model = LanguageModelSession(transcript: Transcript(entries: entries))
+        if !reply.isEmpty { entries.append(.response(.init(assetIDs: [], segments: [.text(.init(content: reply))]))) }
+        return Transcript(entries: entries)
     }
     @available(macOS 26.4, *)
     private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession? {
@@ -8172,7 +8174,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func stop(_ message: String) {
-        if let localTurn { keepInterruptedTurn(published, question: localTurn.question, prior: localTurn.prior) }
+        if let localTurn { model = LanguageModelSession(transcript: transcript(localTurn.prior, adding: localTurn.question, reply: published)) }
         if !published.isEmpty { append("Reply stopped before it finished.", from: "Conversation") }
         if localTurn != nil || !published.isEmpty { save() }
         localTurn = nil
@@ -8194,12 +8196,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
     }
-    @discardableResult private func save() -> Bool {
+    @discardableResult private func save(transcript: Transcript? = nil) -> Bool {
         guard restoreError == nil else { return false }
         do {
             try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if !messages.isEmpty {
-                let saved = Saved(messages: messages, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: model?.transcript)
+                let saved = Saved(messages: messages, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: transcript ?? model?.transcript)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true

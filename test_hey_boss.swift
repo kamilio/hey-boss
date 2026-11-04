@@ -4745,9 +4745,13 @@ func auditConversation(_ root: String) {
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))
     precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1 && ui.input.stringValue == "Follow-up draft")
     let reopened = VoiceConversation(cli: cli, saveURL: saved)
-    guard let transcript = reopened.model?.transcript, case .prompt(let question) = transcript.last,
-          case .text(let submitted) = question.segments.first else { preconditionFailure("Stopping before the first word must preserve the unanswered question") }
-    precondition(submitted.content == "Hello" && reopened.input.stringValue == "Follow-up draft")
+    for chat in [interrupted, reopened] {
+        guard case .prompt(let question) = chat.model?.transcript.last, case .text(let submitted) = question.segments.first else {
+            preconditionFailure("A submitted question must be available to the model after relaunch, including before the first reply")
+        }
+        precondition(submitted.content == "Hello")
+    }
+    precondition(reopened.input.stringValue == "Follow-up draft")
     print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
 }
 #endif
