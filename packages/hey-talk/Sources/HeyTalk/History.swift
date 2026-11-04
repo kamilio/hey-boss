@@ -22,6 +22,12 @@ final class DictationHistory: ObservableObject {
         return opened
     }
 
+    func saveRecording(_ samples: [Float]) {
+        queue.async {
+            do { try RecordingArchive.save(samples, in: self.directory.appendingPathComponent("recordings")) }
+            catch { NSLog("Hey Talk could not save the recording: %@", error.localizedDescription) }
+        }
+    }
     func save(_ entry: Dictation, completion: @escaping (Bool) -> Void) {
         queue.async {
             let result = Result { try self.database().append(entry) }
@@ -178,7 +184,7 @@ private struct HistoryView: View {
                 Text(DictationShortcut.hint).fontWeight(.medium)
                 Text("to start / stop")
                 Spacer()
-                Text("Saved before paste · Audio never saved")
+                Text("Last 5 microphone recordings kept locally")
             }.font(.system(size: 11)).foregroundStyle(.secondary)
                 .padding(.horizontal, 26).padding(.vertical, 17)
         }

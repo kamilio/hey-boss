@@ -698,6 +698,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let samples):
+                self.history.saveRecording(samples)
                 guard samples.count >= 2400 else {
                     if self.autoTarget != nil { self.noSpeechDetected(id: id) } else { self.cancel() }
                     return
