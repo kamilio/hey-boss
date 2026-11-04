@@ -1054,6 +1054,25 @@ func label(_ text: String, width: CGFloat, size: CGFloat, color: NSColor) -> NST
     return field
 }
 
+extension NSWindow {
+    // Floating panels can receive keyboard events while another app owns the menu bar.
+    func handleTextShortcut(_ event: NSEvent) -> Bool {
+        guard let text = firstResponder as? NSTextView else { return false }
+        let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        switch (flags, event.charactersIgnoringModifiers?.lowercased()) {
+        case (.command, "a"): text.selectAll(nil)
+        case (.command, "c") where text.delegate is NSSecureTextField, (.command, "x") where text.delegate is NSSecureTextField: return true
+        case (.command, "c"): text.copy(nil)
+        case (.command, "v") where text.isEditable: if !event.isARepeat { text.paste(nil) }
+        case (.command, "x") where text.isEditable: text.cut(nil)
+        case (.command, "z") where text.isEditable: text.undoManager?.undo()
+        case ([.command, .shift], "z") where text.isEditable: text.undoManager?.redo()
+        default: return false
+        }
+        return true
+    }
+}
+
 final class Panel: NSPanel, NSWindowDelegate {
     var dismissWindow: (() -> Void)?
     override func performClose(_ sender: Any?) {
@@ -1090,16 +1109,15 @@ final class Panel: NSPanel, NSWindowDelegate {
     }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection([.command, .shift, .control, .option])
+        if flags == .command && event.charactersIgnoringModifiers?.lowercased() == "w" { performClose(nil); return true }
+        if handleTextShortcut(event) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown && event.isARepeat && [36, 76].contains(event.keyCode) { return }
-        if event.type == .keyDown && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
-            if event.charactersIgnoringModifiers?.lowercased() == "w" { performClose(nil); return }
-            let selectors = ["a": "selectAll:", "c": "copy:", "v": "paste:", "x": "cut:", "z": "undo:"]
-            if let characters = event.charactersIgnoringModifiers, let selector = selectors[characters] {
-                firstResponder?.tryToPerform(Selector(selector), with: nil)
-                return
-            }
-        }
+        if event.type == .keyDown && event.modifierFlags.contains(.command) && performKeyEquivalent(with: event) { return }
         super.sendEvent(event)
     }
 }
@@ -1170,7 +1188,7 @@ class ActionButton: NSButton {
         }
         #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
-            controlSize = style == .quiet || style == .link ? .regular : .extraLarge
+            if style == .primary || style == .secondary { bezelStyle = .glass }
             borderShape = style == .link ? .roundedRectangle : style == .quiet && title.isEmpty ? .circle : .capsule
             tintProminence = style == .primary ? .primary : .none
         }
@@ -1287,6 +1305,8 @@ final class InfoButton: ActionButton {
             item.tag = index; item.target = self
             menu.addItem(item)
         }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Copy Text", action: #selector(copyText(_:)), keyEquivalent: "").target = self
         self.menu = menu
         invoke = { [weak self] in
             guard let self, let menu = self.menu else { return }
@@ -1294,6 +1314,11 @@ final class InfoButton: ActionButton {
         }
     }
     required init?(coder: NSCoder) { return nil }
+    @objc func copyText(_ sender: Any?) {
+        let parts = ([row.heading, row.question, row.description] + row.options).filter { !$0.isEmpty }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(parts.joined(separator: "\n\n"), forType: .string)
+    }
     @objc func selectAction(_ item: NSMenuItem) {
         if item.tag == 3 { showInfo(); return }
         openURL(item.tag == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL(steer: item.tag == 2) ?? notificationSenderURL(row)))
@@ -1909,6 +1934,7 @@ final class FloatingCommentEditor: NSPanel, NSWindowDelegate {
         let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
         if modifiers == .command && [36, 76].contains(event.keyCode) { sendComment(); return true }
         if event.keyCode == 53 { requestClose(); return true }
+        if handleTextShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
     override func sendEvent(_ event: NSEvent) {
@@ -2404,10 +2430,7 @@ final class Preview: NSWindow, NSWindowDelegate, NSTextViewDelegate {
             performClose(nil)
             return true
         }
-        if modifiers == .command && firstResponder === text {
-            if key == "a" { text.selectAll(nil); return true }
-            if key == "c" { text.copy(nil); return true }
-        }
+        if handleTextShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
     override func sendEvent(_ event: NSEvent) {
@@ -3079,7 +3102,7 @@ final class Interface {
                 if !inlineOptions {
                     button.bezelStyle = .flexiblePush
                     #if compiler(>=6.2)
-                    if #available(macOS 26.0, *) { button.borderShape = .roundedRectangle }
+                    if #available(macOS 26.0, *) { button.bezelStyle = .glass; button.borderShape = .roundedRectangle }
                     #endif
                     button.controlSize = .large
                     button.alignment = .left
@@ -3441,9 +3464,9 @@ final class GrowingTextInput: NSScrollView, NSTextViewDelegate {
     var isEnabled: Bool { get { text.isEditable } set { text.isEditable = newValue } }
     override init(frame: NSRect) {
         super.init(frame: frame)
-        borderType = .bezelBorder; hasVerticalScroller = true; autohidesScrollers = true
-        drawsBackground = true; backgroundColor = .textBackgroundColor
-        text.isRichText = false; text.importsGraphics = false; text.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        borderType = .noBorder; hasVerticalScroller = true; autohidesScrollers = true; scrollerStyle = .overlay
+        drawsBackground = false; text.drawsBackground = false
+        text.isRichText = false; text.importsGraphics = false; text.font = .systemFont(ofSize: 14)
         text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
         text.isAutomaticTextReplacementEnabled = false; text.isAutomaticSpellingCorrectionEnabled = false
         text.isContinuousSpellCheckingEnabled = false; text.isGrammarCheckingEnabled = false
@@ -3456,6 +3479,12 @@ final class GrowingTextInput: NSScrollView, NSTextViewDelegate {
         text.delegate = self; documentView = text; resizeEditor()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 12, yRadius: 12)
+        NSColor.labelColor.withAlphaComponent(0.055).setFill(); shape.fill()
+        NSColor.separatorColor.setStroke(); shape.stroke()
+    }
     func textDidChange(_ notification: Notification) { resizeEditor(); changed?() }
     func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
         if selector == #selector(NSResponder.insertNewline(_:)), NSApp.currentEvent?.modifierFlags.contains(.command) == true { submit?(); return true }
@@ -3508,7 +3537,7 @@ final class SecretEntry: NSObject, NSTextFieldDelegate {
         masked.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         masked.usesSingleLineMode = true; masked.cell?.isScrollable = true; masked.lineBreakMode = .byClipping
         masked.delegate = self; masked.setAccessibilityLabel(name)
-        revealed.text.setAccessibilityLabel(name)
+        revealed.text.font = masked.font; revealed.text.setAccessibilityLabel(name)
         revealed.text.allowsUndo = false
         toggle.target = self; toggle.action = #selector(toggleVisibility); toggle.isHidden = !secret
         view.addArrangedSubview(header); view.addArrangedSubview(masked); view.addArrangedSubview(revealed)
@@ -3653,17 +3682,14 @@ final class SecretPrompts {
 final class CopyableWindow: NSWindow {
     var copySelection: (() -> Bool)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        guard modifiers == .command else { return super.performKeyEquivalent(with: event) }
-        let key = event.charactersIgnoringModifiers?.lowercased()
-        if key == "w" { performClose(nil); return true }
-        if let text = firstResponder as? NSTextView {
-            if key == "c" { text.copy(nil); return true }
-            if key == "a" { text.selectAll(nil); return true }
-            if key == "v" && text.isEditable { text.paste(nil); return true }
-            if key == "x" && text.isEditable { text.cut(nil); return true }
+        if handleTextShortcut(event) { return true }
+        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "w": performClose(nil); return true
+            case "c" where copySelection?() == true: return true
+            default: break
+            }
         }
-        if key == "c", copySelection?() == true { return true }
         return super.performKeyEquivalent(with: event)
     }
     override func sendEvent(_ event: NSEvent) {
@@ -3891,17 +3917,7 @@ final class QuickIssuePanel: NSPanel {
         if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
            event.charactersIgnoringModifiers?.lowercased() == "v", !event.isARepeat,
            pasteImage?() == true { return true }
-        if event.modifierFlags.intersection([.command, .shift, .control, .option]) == .command,
-           let editor = firstResponder as? NSTextView {
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "a": editor.selectAll(nil); return true
-            case "c": editor.copy(nil); return true
-            case "v": if editor.isEditable, !event.isARepeat { editor.paste(nil) }; return true
-            case "x": if editor.isEditable { editor.cut(nil) }; return true
-            case "z": if editor.isEditable { editor.undoManager?.undo() }; return true
-            default: break
-            }
-        }
+        if handleTextShortcut(event) { return true }
         if event.modifierFlags.intersection([.command, .shift, .control, .option]) == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "b" {
             if (firstResponder as? NSTextView)?.hasMarkedText() != true, !event.isARepeat { toggleBottom?() }; return true
         }
@@ -6462,17 +6478,8 @@ final class ArtifactEditorWindow: NSWindow {
         if flags.contains(.command), !flags.contains(.option), !flags.contains(.control),
            let key = event.charactersIgnoringModifiers?.lowercased() {
             if command?(key, flags.contains(.shift)) == true { return true }
-            if let text = firstResponder as? NSTextView {
-                switch key {
-                case "a": text.selectAll(nil); return true
-                case "c": text.copy(nil); return true
-                case "v": text.paste(nil); return true
-                case "x" where !flags.contains(.shift): text.cut(nil); return true
-                case "z": if flags.contains(.shift) { text.undoManager?.redo() } else { text.undoManager?.undo() }; return true
-                default: break
-                }
-            }
         }
+        if handleTextShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -9675,7 +9682,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
         return true
     }
-    func windowDidBecomeKey(_ notification: Notification) {
+    func windowDidBecomeKey(_ notification: Notification) { Self.installMenu(for: self) }
+    static func installMenu(for editor: NativeArtifactEditor? = nil) {
         let bar = NSMenu()
         let appItem = NSMenuItem(); let appMenu = NSMenu(title: "Hey Boss")
         appMenu.addItem(withTitle: "Quit Hey Boss", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -9687,18 +9695,31 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             ("View", [("Toggle Focus", "f", true), ("Quick Switch…", "p", false), ("Toggle Reading View", "e", false)])
         ]
         for (title, commands) in groups {
+            if editor == nil && ["Format", "View"].contains(title) { continue }
             let parent = NSMenuItem(); let menu = NSMenu(title: title); parent.submenu = menu; bar.addItem(parent)
             for (label, key, shift) in commands {
-                let item = NSMenuItem(title: label, action: #selector(menuCommand(_:)), keyEquivalent: key)
+                let standard: Selector?
+                switch label {
+                case "Close": standard = #selector(NSWindow.performClose(_:))
+                case "Cut": standard = #selector(NSText.cut(_:))
+                case "Copy": standard = #selector(NSText.copy(_:))
+                case "Paste": standard = #selector(NSText.paste(_:))
+                case "Select All": standard = #selector(NSText.selectAll(_:))
+                case "Undo" where editor == nil: standard = Selector(("undo:"))
+                case "Redo" where editor == nil: standard = Selector(("redo:"))
+                default: standard = nil
+                }
+                if standard == nil && editor == nil { continue }
+                let item = NSMenuItem(title: label, action: standard ?? #selector(menuCommand(_:)), keyEquivalent: key)
                 item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]
-                item.target = self; menu.addItem(item)
+                if standard == nil { item.target = editor }; menu.addItem(item)
             }
         }
         let windowsItem = NSMenuItem(); let windowsMenu = NSMenu(title: "Window")
         windowsItem.submenu = windowsMenu; bar.addItem(windowsItem)
-        for (title, shift) in [("Next Window", false), ("Previous Window", true)] {
+        for (title, shift) in [("Next Window", false), ("Previous Window", true)] where editor != nil {
             let item = NSMenuItem(title: title, action: #selector(menuCommand(_:)), keyEquivalent: "`")
-            item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; item.target = self; windowsMenu.addItem(item)
+            item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; item.target = editor; windowsMenu.addItem(item)
         }
         windowsMenu.addItem(.separator())
         windowsMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -9708,18 +9729,12 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     @objc func menuCommand(_ sender: NSMenuItem) {
         let key = sender.keyEquivalent, shift = sender.keyEquivalentModifierMask.contains(.shift)
-        if command(key, shift: shift) { return }
-        guard let view = window.firstResponder as? NSTextView else { return }
-        switch key {
-        case "z": if shift { view.undoManager?.redo() } else { view.undoManager?.undo() }
-        case "x" where !shift: view.cut(nil)
-        case "c": view.copy(nil)
-        case "v": view.paste(nil)
-        case "a": view.selectAll(nil)
-        default: break
+        if !command(key, shift: shift), key == "z", let view = window.firstResponder as? NSTextView {
+            if shift { view.undoManager?.redo() } else { view.undoManager?.undo() }
         }
     }
     func windowDidResignKey(_ notification: Notification) {
+        Self.installMenu()
         session.flush()
     }
     func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor"); resizePreviewImages() }
@@ -9827,6 +9842,7 @@ struct Daemon {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         app.delegate = ArtifactEditors.shared
+        NativeArtifactEditor.installMenu()
         ArtifactEditors.shared.restoreDrafts()
         let ui = Interface(present: true)
         let overview = AgentsOverview()

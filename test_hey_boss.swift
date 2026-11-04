@@ -13,6 +13,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLIPBOARD"] == "1" { auditPromptClipboard(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SKILL_EDITOR"] { auditSkillEditor(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_IMAGES"] == "1" { auditImageNotifications(); return }
     if let state = ProcessInfo.processInfo.environment["HEY_BOSS_QUOTA_VISUAL"] { previewSubscriptionQuota(state); return }
@@ -132,6 +133,7 @@ func audit() {
         withExtendedLifetime(prompt) { app.run() }; return
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SYNC_ONLY"] == "1" { auditFleetSync(); return }
+    auditPromptClipboard()
     auditFleetSync()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
     auditSubscriptionQuota()
@@ -2627,6 +2629,72 @@ final class HealthAuditTextView: NSTextView {
     override func paste(_ sender: Any?) { insertText("pasted", replacementRange: selectedRange()) }
 }
 
+func auditPromptClipboard() {
+    let board = NSPasteboard.general
+    let saved = (board.pasteboardItems ?? []).map { item in
+        let copy = NSPasteboardItem()
+        for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+        return copy
+    }
+    defer { board.clearContents(); board.writeObjects(saved) }
+    let ui = Interface(present: true)
+    defer { ui.question.orderOut(nil) }
+    let row = Record(taskID: "clipboard", kind: "prompt", question: "Which change should ship?", project: "Clipboard", title: "Review", description: "Select a passage to reuse in your answer.", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: 0, presentedAt: nil, expiresAt: nil, status: "pending", result: nil, origin: nil)
+    ui.add(row)
+    let window = ui.question, editor = ui.field!.text
+    func press(_ key: String, _ code: UInt16) {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: code)!
+        precondition(window.performKeyEquivalent(with: event), "Prompt must handle Cmd-" + key)
+    }
+    let title = editor.enclosingScrollView!.superview!.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == row.question }!
+    title.selectText(nil)
+    press("a", 0); press("c", 8)
+    precondition(board.string(forType: .string) == row.question)
+    precondition(window.makeFirstResponder(editor))
+    press("v", 9)
+    precondition(editor.string == row.question)
+    press("a", 0); press("x", 7)
+    precondition(editor.string.isEmpty && board.string(forType: .string) == row.question)
+    press("v", 9)
+    precondition(editor.string == row.question && ui.current?.taskID == row.taskID)
+    let button = ui.field!.superview!.subviews.compactMap { $0 as? InfoButton }.first!
+    let copy = button.menu!.item(withTitle: "Copy Text")!
+    precondition(NSApp.sendAction(copy.action!, to: copy.target, from: copy))
+    precondition(board.string(forType: .string) == [row.heading, row.question, row.description].joined(separator: "\n\n"))
+
+    NativeArtifactEditor.installMenu()
+    let settings = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 250, height: 60), styleMask: [.titled], backing: .buffered, defer: false)
+    let field = NSTextField(string: "Field editor selection")
+    settings.contentView!.addSubview(field); field.sizeToFit()
+    NSApp.activate(ignoringOtherApps: true); settings.makeKeyAndOrderFront(nil); field.selectText(nil)
+    defer { settings.orderOut(nil) }
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    let edit = NSApp.mainMenu!.items.compactMap(\.submenu).first { $0.title == "Edit" }!
+    for (key, code) in [("c", 8), ("x", 7), ("v", 9)] {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: settings.windowNumber, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: UInt16(code))!
+        precondition(edit.performKeyEquivalent(with: event))
+        precondition(board.string(forType: .string) == "Field editor selection")
+        precondition(field.stringValue == (key == "x" ? "" : "Field editor selection"))
+    }
+    let request = try! JSONDecoder().decode(Request.self, from: Data(#"{"command":"secret","sync":true}"#.utf8))
+    let prompt = SecretPrompt(request: request, form: SecretForm(fields: ["KEY"], login: false, destination: "Test")) { _ in }
+    defer { prompt.cancel() }
+    prompt.show()
+    let entry = prompt.entries[0]
+    let protectedValue = "synthetic secret"
+    board.clearContents(); board.setString(protectedValue, forType: .string)
+    func secretKey(_ key: String, _ code: UInt16) {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: prompt.window.windowNumber, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: code)!
+        prompt.window.sendEvent(event)
+    }
+    secretKey("v", 9)
+    precondition(entry.value == protectedValue)
+    board.clearContents(); board.setString("keep clipboard", forType: .string)
+    secretKey("a", 0); secretKey("c", 8); secretKey("x", 7)
+    precondition(board.string(forType: .string) == "keep clipboard" && entry.value == protectedValue)
+    print("Passed: copy prompt text, paste, select all, cut and paste in the floating reply editor")
+}
+
 func auditSecretInput() {
     let long = String(repeating: "synthetic-key-", count: 2000)
     let editor = GrowingTextInput(frame: NSRect(x: 0, y: 0, width: 432, height: 64))
@@ -2683,6 +2751,8 @@ func auditSecretInput() {
     capture(prompt, "")
     prompt.window.appearance = NSAppearance(named: .darkAqua)
     capture(prompt, "dark")
+    // End interactive editing before replacing the entire field programmatically.
+    prompt.window.makeFirstResponder(nil)
     prompt.entries[1].masked.stringValue = String(repeating: "x", count: 65537)
     prompt.entries[1].updateCount(); precondition(!prompt.submit.isEnabled)
     capture(prompt, "invalid")
