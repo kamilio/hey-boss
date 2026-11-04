@@ -246,8 +246,11 @@ pub struct AgentSession {
 }
 impl AgentSession {
     pub fn launch(launch: Launch) -> io::Result<Self> {
+        Self::launch_with_codex_config(launch, None)
+    }
+    pub fn launch_with_codex_config(launch: Launch, config: Option<Value>) -> io::Result<Self> {
         let mut client = Self::connect(launch)?;
-        client.start_session()?;
+        client.start_session(config)?;
         Ok(client)
     }
     /// Persist process custody before initialization or any user instructions.
@@ -256,7 +259,7 @@ impl AgentSession {
         record: impl FnOnce(u32) -> io::Result<()>,
     ) -> io::Result<Self> {
         let mut client = Self::connect_recorded(launch, Some(Box::new(record)))?;
-        client.start_session()?;
+        client.start_session(None)?;
         Ok(client)
     }
     fn connect(launch: Launch) -> io::Result<Self> {

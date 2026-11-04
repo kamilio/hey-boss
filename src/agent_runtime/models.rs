@@ -56,7 +56,7 @@ pub(super) fn resolve(launch: &mut Launch) -> io::Result<()> {
     Ok(())
 }
 impl AgentSession {
-    pub(super) fn start_session(&mut self) -> io::Result<()> {
+    pub(super) fn start_session(&mut self, codex_config: Option<Value>) -> io::Result<()> {
         match self.provider {
             Provider::Codex => {
                 let (method, mut params) = match &self.expected_session {
@@ -65,6 +65,9 @@ impl AgentSession {
                 };
                 if let Some(model) = &self.model {
                     params["model"] = json!(model.id);
+                }
+                if let Some(config) = codex_config {
+                    params["config"] = config;
                 }
                 let result = self.rpc(method, self.codex_execution.thread(params, &Value::Null))?;
                 self.verify_model(&result["model"], &Value::Null)?;

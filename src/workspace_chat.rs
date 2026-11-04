@@ -21,7 +21,7 @@ pub fn run(resume: Option<String>) -> io::Result<()> {
             }
         }
     });
-    let mut session = AgentSession::launch(Launch {
+    let launch = Launch {
         provider: Provider::Codex,
         cwd: std::env::current_dir()?,
         binary: None,
@@ -35,7 +35,11 @@ pub fn run(resume: Option<String>) -> io::Result<()> {
         env: Default::default(),
         output_schema: None,
         codex_execution: Default::default(),
-    })?;
+    };
+    let mut session = AgentSession::launch_with_codex_config(
+        launch,
+        Some(serde_json::json!({"model_verbosity":"low"})),
+    )?;
     let mut out = io::stdout().lock();
     let mut active = false;
     let mut pending_session = None;

@@ -96,6 +96,8 @@ for (const interrupt of [false, true]) {
     stereo.writeInt16LE(Math.round(rendered(i - 1440) * 0.08 + near), i * 4);
     stereo.writeInt16LE(rendered(i), i * 4 + 2);
   }
-  assert.equal(readTurns(stereo, ['--duplex']).length, Number(interrupt));
+  for (const args of [['--duplex'], ['--duplex', '--conversation']]) {
+    assert.equal(readTurns(stereo, args).length, Number(interrupt));
+  }
 }
 console.log('PASS speaker echo alone stays silent; overlapping speech opens one comment');

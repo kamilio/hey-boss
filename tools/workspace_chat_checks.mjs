@@ -14,7 +14,10 @@ const rl=require('node:readline').createInterface({input:process.stdin}), fs=req
 const send=v=>console.log(JSON.stringify(v)); let n=0;
 rl.on('line', line=>{
  const q=JSON.parse(line), threadId='chat-fixture', turnId='turn-'+n;
- if(q.method==='thread/start')send({id:q.id,result:{thread:{id:threadId}}});
+ if(q.method==='thread/start'){
+   require('node:assert/strict').equal(q.params.config?.model_verbosity,'low');
+   send({id:q.id,result:{thread:{id:threadId}}});
+ }
  else if(q.method==='turn/start'){
    n++; const turnId='turn-'+n;
    send({id:q.id,result:{turn:{id:turnId}}});
