@@ -8149,11 +8149,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case "Session":
             thread = data["id"] as? String
             folderTurnAccepted = thread != nil && data["accepted"] as? Bool == true
-            updateComposerActions(); save()
+            updateComposerActions(); save(unfinishedWorkspace: folderTurnAccepted)
         case "TextDelta":
             if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.contains("\n") { publish(final: false) } }
         case "Message":
-            if let text = data["text"] as? String { finishMessage(text) }
+            if let text = data["text"] as? String {
+                finishMessage(text)
+                if !text.isEmpty { save(unfinishedWorkspace: true) }
+            }
         case "ToolStarted", "ToolCompleted":
             guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
             let follow = atEndOfChat
@@ -8260,12 +8263,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
     }
-    @discardableResult private func save(transcript: Transcript? = nil) -> Bool {
+    @discardableResult private func save(transcript: Transcript? = nil, unfinishedWorkspace: Bool = false) -> Bool {
         guard restoreError == nil else { return false }
         do {
             try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if !messages.isEmpty {
-                let saved = Saved(messages: messages, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: transcript ?? model?.transcript)
+                // Only a relaunch before the next checkpoint sees this notice.
+                let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
+                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: transcript ?? model?.transcript)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
