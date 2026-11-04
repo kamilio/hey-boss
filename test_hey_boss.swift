@@ -4437,6 +4437,25 @@ func auditConversation(_ root: String) {
     ui.event(["Message": ["text": "Reading position stays here."]])
     precondition(ui.scroll.documentVisibleRect.minY < 2, "Streaming must not pull you away from an earlier message")
     ui.clearTurns()
+    do {
+        let ui = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("composer/current.json"))
+        ui.window.orderBack(nil)
+        ui.window.makeFirstResponder(ui.input)
+        let composer = ui.input.currentEditor() as! NSTextView
+        let lineHeight = ui.input.bounds.height
+        composer.insertText("First line", replacementRange: NSRange(location: NSNotFound, length: 0))
+        func pressReturn(_ flags: NSEvent.ModifierFlags) {
+            ui.window.sendEvent(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: ui.window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!)
+        }
+        pressReturn(.shift)
+        composer.insertText("Second line", replacementRange: NSRange(location: NSNotFound, length: 0))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+        ui.window.contentView?.layoutSubtreeIfNeeded()
+        precondition(ui.rows.isEmpty && composer.string == "First line\nSecond line" && ui.input.bounds.height > lineHeight, "Shift-Return: rows=\(ui.rows.count), draft=\(composer.string.debugDescription), height=\(lineHeight) → \(ui.input.bounds.height)")
+        pressReturn([])
+        precondition(ui.rows.first?.stringValue == "First line\nSecond line")
+        ui.window.close()
+    }
     let captured = "## Grocery list\nThe fruit on this page is pineapple."
     ui.openWithContext(source: "Test Editor", text: captured)
     precondition(ui.phase == .starting)
