@@ -432,10 +432,16 @@ impl Store {
         let root = self.job_root()?;
         match operation {
             JobOperation::FilePut { blob, offset, data } => {
-                return crate::jobs::command::put(&root, &project.id, blob, *offset, data);
+                return Ok(with_project(
+                    crate::jobs::command::put(&root, &project.id, blob, *offset, data)?,
+                    &project,
+                ));
             }
             JobOperation::FileGet { blob, offset } => {
-                return crate::jobs::command::get(&root, &project.id, blob, *offset);
+                return Ok(with_project(
+                    crate::jobs::command::get(&root, &project.id, blob, *offset)?,
+                    &project,
+                ));
             }
             JobOperation::Submit { id, execution } => {
                 if let Some(blob) = &execution.input {
@@ -510,6 +516,7 @@ impl Store {
                     self.stop_scheduled_job(&project.id, &run.snapshot.job_id, run_id, now)?;
                 }
                 let mut request = request.clone();
+                request.request_id = None;
                 request.operation = Operation::Job {
                     operation: JobOperation::Run {
                         id: run.snapshot.job_id,

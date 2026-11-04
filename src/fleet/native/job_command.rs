@@ -3,7 +3,11 @@ use super::*;
 use crate::jobs::{Operation, command};
 use std::fs;
 
-fn call(ctx: &Context, d: &Dispatch, operation: Operation) -> crate::issues::Result<Value> {
+pub(super) fn call(
+    ctx: &Context,
+    d: &Dispatch,
+    operation: Operation,
+) -> crate::issues::Result<Value> {
     let project = &d.run.snapshot.project_id;
     let request = crate::issues::Request {
         version: 1,
@@ -16,11 +20,24 @@ fn call(ctx: &Context, d: &Dispatch, operation: Operation) -> crate::issues::Res
             ctx.actor()
                 .map_err(|e| crate::issues::Error::invalid(e.to_string()))?,
         ),
-        request_id: Some(format!("exec-file-{}", d.run.id)),
+        request_id: operation
+            .writes()
+            .then(|| format!("exec-file-{}", d.run.id)),
         operation: crate::issues::Operation::Job { operation },
     };
     loop {
-        match Store::open(&ctx.path)?.execute(&request) {
+        let mut store = Store::open(&ctx.path)?;
+        let result = if store.job_owner(&d.run.id)?.is_some() {
+            store.execute(&request)
+        } else {
+            // Replicated run summaries do not own the input/result bytes.
+            super::super::authority::call(
+                &ctx.state,
+                &ctx.path,
+                json!({"kind":"resource","request":request}),
+            )
+        };
+        match result {
             Ok(v) => return Ok(v),
             Err(e)
                 if ["fleet_unavailable", "fleet_error"].contains(&e.code.as_str())
