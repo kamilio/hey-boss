@@ -7775,7 +7775,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let (field, range) = lit, field === label { highlight(label, range) }
         if audio != nil {
             while let span = SpokenReview.passage(in: visible, from: offset) {
-                speech.append((label, span, visible.substring(with: span))); offset = NSMaxRange(span)
+                let item = visible.substring(with: span); offset = NSMaxRange(span)
+                // The local model can loop over one or two bullets hundreds
+                // of times. Keep the text intact and bound the spoken backlog.
+                if directory == nil, item.hasPrefix("•  "), speech.count >= 8 {
+                    let tail = speech.suffix(8), pair = tail.prefix(2).map(\.text)
+                    if pair.contains(item), pair.allSatisfy({ $0.hasPrefix("•  ") }),
+                       tail.enumerated().allSatisfy({ $0.element.label === label && $0.element.text == pair[$0.offset % 2] }) { continue }
+                }
+                speech.append((label, span, item))
             }
         }
         if follow { revealLatest() }
