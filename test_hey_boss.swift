@@ -4420,6 +4420,13 @@ func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
     let saved = URL(fileURLWithPath: root).appendingPathComponent("chat.json")
     let ui = VoiceConversation(cli: cli, saveURL: saved)
+    ui.state(.thinking, "Thinking…")
+    ui.event(["TextDelta": ["text": "A moat"]])
+    precondition(ui.rows.last?.stringValue == "A moat", "Show typed replies before a paragraph or turn ends")
+    ui.event(["TextDelta": ["text": " protects a castle."]])
+    ui.event(["TurnCompleted": ["status": "Completed", "output": "A moat protects a castle."]])
+    precondition(ui.rows.count == 1 && ui.rows[0].stringValue == "A moat protects a castle.")
+    ui.clearTurns()
     let captured = "## Grocery list\nThe fruit on this page is pineapple."
     ui.openWithContext(source: "Test Editor", text: captured)
     precondition(ui.phase == .starting)

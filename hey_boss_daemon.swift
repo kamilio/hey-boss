@@ -7286,6 +7286,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
     private var stream = "", published = "", lastMessage: String?
     private var messageLabel: NSTextField?
+    private var lastTextUpdate = ContinuousClock.now
     private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
     private var reading = false, turnDone = false
     private var lit: (NSTextField, NSRange)?
@@ -7668,7 +7669,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
     private func publish(final: Bool) {
         let text: String
-        if final { text = stream }
+        if final || audio == nil {
+            // Re-render at most ten times a second while tokens arrive. Always
+            // show the first fragment immediately and flush the final snapshot.
+            let now = ContinuousClock.now
+            guard final || messageLabel == nil || now - lastTextUpdate >= .milliseconds(100) else { return }
+            text = stream; lastTextUpdate = now
+        }
         else {
             let raw = stream as NSString, start = min(published.utf16.count, raw.length)
             let tail = NSRange(location: start, length: raw.length - start)
@@ -7771,7 +7778,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case "Session":
             thread = data["id"] as? String; save()
         case "TextDelta":
-            if let delta = data["text"] as? String { stream += delta; if delta.contains("\n") { publish(final: false) } }
+            if let delta = data["text"] as? String { stream += delta; if audio == nil || delta.contains("\n") { publish(final: false) } }
         case "Message":
             if let text = data["text"] as? String { finishMessage(text) }
         case "ToolStarted", "ToolCompleted":
