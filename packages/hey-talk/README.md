@@ -76,6 +76,9 @@ between updates. If correction fails, a notice explains why and the original tra
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk waits for the original chat just as it does for paste,
 opens T3’s Rename thread action, and confirms the title without submitting a message.
+Say **“new thread”** to open a blank thread in that chat’s project, or **“new thread hey-boss”**
+to name a project. Hey Talk handles this command locally and leaves the old conversation
+and clipboard alone. If it can’t match the project, it stops without sending anything.
 Outside a T3 composer, or with `--no-paste`, only the paste result is available.
 
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one
@@ -372,6 +375,7 @@ swift test
 ./test-signing.sh
 ./test-enter-exceptions.sh
 HEY_TALK_EVAL=1 swift test --filter CorrectionEvalTests # Live Luna, requires the saved mini/context evals under output/
+HEY_TALK_T3_NEW_TEST=1 swift test --filter T3NewThreadTests # Focus a T3 composer; set HEY_TALK_T3_PROJECT to test another project
 HEY_TALK_T3_TEST=1 swift test --filter T3RenameTests # Focus a T3 composer; confirms its existing title
 ./test-context.sh # Installed app: change visible text during microphone dictation
 ./test-login.sh # Installed app: login startup and explicit quit, while idle
