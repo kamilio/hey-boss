@@ -8118,7 +8118,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     }
                 }
             }
-            onMain { if let self, self.process === child { self.stop("Codex disconnected. Check your Codex sign-in and try again.") } }
+            onMain {
+                guard let self, self.process === child else { return }
+                if self.turnDone {
+                    // The helper is idle; the next message can resume its thread.
+                    self.process = nil; try? self.writer?.close(); self.writer = nil
+                } else { self.stop("Codex disconnected before finishing this turn.") }
+            }
         }
     }
     func write(_ command: [String:Any]) throws {
