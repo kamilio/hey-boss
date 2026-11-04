@@ -4537,7 +4537,8 @@ func auditConversation(_ root: String) {
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
     precondition(ui.rows.last!.stringValue.contains("The early words"))
     let repeatedList = String(repeating: "* Apples\n* Oranges\n", count: 12)
-    let full = first + "\n\nAnother paragraph\n\n" + repeatedList + "\nLast line."
+    let numbered = (1...21).map { "\($0). " + ["Pears", "Limes", "Plums"][($0-1)%3] }.joined(separator: "\n")
+    let full = first + "\n\nAnother paragraph\n\n" + repeatedList + numbered + "\nLast line."
     ui.event(["TextDelta": ["text": "\n\n"]])
     wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
@@ -4546,7 +4547,8 @@ func auditConversation(_ root: String) {
     wait("distinct text after repeated bullets") { highlighted() == "Last" }
     wait("all streamed speech drained") { ui.phase == .listening }
     precondition(highlighted() == nil && ui.rows.count == 2 && ui.rows.last!.stringValue.hasSuffix("Last line."))
-    precondition(ui.rows.last!.stringValue.components(separatedBy: "•  Apples").count == 13 && playedPassages < 18, "Keep every item visible without queuing every repeated bullet for speech")
+    let visible = ui.rows.last!.stringValue
+    precondition(visible.components(separatedBy: "•  Apples").count == 13 && visible.contains("21. Plums") && playedPassages < 25, "Keep the full list visible without repeatedly speaking the same items")
     audio.playbackStarted = playbackStarted
     let microphone = DispatchQueue(label: "conversation-audit.microphone")
     func feed(_ name: String, finishManually: Bool = false) {
