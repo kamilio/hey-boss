@@ -45,6 +45,27 @@ pub(crate) fn payload(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Resul
 pub(crate) fn register(db: &rusqlite::Connection) -> rusqlite::Result<()> {
     use rusqlite::{functions::FunctionFlags, types::ValueRef};
     db.create_scalar_function(
+        "payload_header_contains",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let needle = ctx.get::<String>(1)?;
+            let head = match ctx.get_raw(0) {
+                ValueRef::Text(bytes) => bytes[..bytes.len().min(512)].to_vec(),
+                ValueRef::Blob(bytes) => {
+                    let mut head = Vec::new();
+                    flate2::read::GzDecoder::new(bytes)
+                        .take(512)
+                        .read_to_end(&mut head)
+                        .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+                    head
+                }
+                _ => Vec::new(),
+            };
+            Ok(!needle.is_empty() && head.windows(needle.len()).any(|w| w == needle.as_bytes()))
+        },
+    )?;
+    db.create_scalar_function(
         "payload_starts_with",
         2,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,

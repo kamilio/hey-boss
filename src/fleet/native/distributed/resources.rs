@@ -16,6 +16,19 @@ pub(super) struct Resource {
     bytes: String,
 }
 
+pub(super) fn retired(db: &Connection, fact: &Revision) -> Result<bool> {
+    let row = fact.after.as_ref().unwrap_or(&Value::Null);
+    let id = match fact.table.as_str() {
+        "published_publications" => row["id"].as_str(),
+        "published_page_chunks" => row["publication"].as_str(),
+        _ => None,
+    };
+    Ok(id
+        .map(|id| crate::pages::retired(db, id))
+        .transpose()?
+        .unwrap_or(false))
+}
+
 fn database_path(db: &Connection) -> Result<&Path> {
     db.path()
         .map(Path::new)
@@ -82,7 +95,7 @@ pub(super) fn capture(db: &Connection, fact: &Revision) -> Result<Option<Resourc
     };
     let path = database_path(db)?;
     let (kind, id, sha, bytes) = match fact.table.as_str() {
-        "published_chunks" => {
+        "published_chunks" | "published_page_chunks" => {
             let hash = row["hash"]
                 .as_str()
                 .ok_or_else(|| replica::invalid("Missing published chunk hash"))?;
@@ -246,8 +259,17 @@ pub(super) fn validate_page(fact: &Revision) -> Result<()> {
         .after
         .as_ref()
         .ok_or_else(|| replica::invalid("Published history uses tombstones, not row deletion"))?;
+    if fact.table == "published_page_chunks"
+        && !row["publication"]
+            .as_str()
+            .is_some_and(crate::pages::valid_hash)
+        || fact.table == "published_publications"
+            && !row["id"].as_str().is_some_and(crate::pages::valid_hash)
+    {
+        return Err(replica::invalid("Invalid publication identity"));
+    }
     match fact.table.as_str() {
-        "published_chunks" => {
+        "published_chunks" | "published_page_chunks" => {
             let hash = row["hash"]
                 .as_str()
                 .ok_or_else(|| replica::invalid("Missing chunk hash"))?;
@@ -271,11 +293,13 @@ pub(super) fn validate_page(fact: &Revision) -> Result<()> {
                 return Err(replica::invalid("Invalid published chunk record"));
             }
         }
-        "published_deployments" => {
+        "published_deployments" | "published_publications" => {
             let manifest = row["manifest"]
                 .as_str()
                 .ok_or_else(|| replica::invalid("Missing deployment manifest"))?;
-            if row["id"] != hey_boss_sync::digest(manifest.as_bytes()) {
+            if fact.table == "published_deployments"
+                && row["id"] != hey_boss_sync::digest(manifest.as_bytes())
+            {
                 return Err(replica::invalid("Invalid deployment identity"));
             }
             crate::pages::validate_manifest(&serde_json::from_str(manifest)?)?;
@@ -288,6 +312,10 @@ pub(super) fn validate_page(fact: &Revision) -> Result<()> {
                 || !matches!(row["deleted"].as_i64(), Some(0 | 1))
                 || row["updated_at"].as_i64().is_none_or(|n| n < 0)
                 || row["machine"].as_str().is_none_or(|s| s.len() > 1024)
+                || row.get("generation").is_some_and(|g| {
+                    g.as_str()
+                        .is_none_or(|s| !s.is_empty() && !crate::pages::valid_hash(s))
+                })
             {
                 return Err(replica::invalid("Invalid published page record"));
             }

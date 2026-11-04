@@ -454,6 +454,7 @@ fn remember_pages(db: &Connection, manifest: &Manifest) -> Result<()> {
 }
 
 pub(super) fn revision(payload: &str) -> Result<Option<Revision>> {
+    if payload.is_empty() { return Ok(None); }
     let header: Value = serde_json::from_str(payload)?;
     if header["protocol"] == 1 {
         // Retained for recovery, but superseded by the version-two baseline.

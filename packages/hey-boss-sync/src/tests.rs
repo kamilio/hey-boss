@@ -328,3 +328,28 @@ fn history_compression_resumes_between_bounded_transactions() {
     );
     assert_eq!(engine.pending(0).unwrap().len(), 3);
 }
+#[test]
+fn pruned_payloads_keep_positions_and_cannot_return_from_stale_peers() {
+    let root = tempfile::tempdir().unwrap();
+    let mut a = super::Engine::open(&root.path().join("a.db")).unwrap();
+    let mut b = super::Engine::open(&root.path().join("b.db")).unwrap();
+    let mut c = super::Engine::open(&root.path().join("c.db")).unwrap();
+    let id = a.put(&"private bytes".repeat(10000)).unwrap();
+    a.put("keep this fact").unwrap();
+    let stale = a.batch(0).unwrap();
+    a.prune(std::slice::from_ref(&id)).unwrap();
+    assert_eq!(a.head().unwrap(), 2);
+    assert!(a.payload(&id).unwrap().is_none());
+    b.ingest(&a.batch(0).unwrap()).unwrap();
+    b.ingest(&stale).unwrap();
+    assert!(b.payload(&id).unwrap().is_none());
+    assert_eq!(b.pending(0).unwrap()[1].2, "keep this fact");
+    c.ingest(&stale).unwrap();
+    c.ingest(&b.batch(0).unwrap()).unwrap();
+    assert!(c.payload(&id).unwrap().is_none());
+    drop(b);
+    let mut b = super::Engine::open(&root.path().join("b.db")).unwrap();
+    b.ingest(&stale).unwrap();
+    assert!(b.payload(&id).unwrap().is_none());
+    assert_eq!(b.head().unwrap(), 2);
+}

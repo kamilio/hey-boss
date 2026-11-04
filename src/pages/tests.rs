@@ -182,3 +182,26 @@ fn concurrent_reads_can_migrate_the_same_legacy_chunk() {
     });
     assert!(!pages::root(&database).join(hash).exists());
 }
+#[test]
+fn deletion_reclaims_old_versions_but_preserves_shared_publications() {
+    let f = Fixture::new();
+    let database = f.0.join("issues.db");
+    let source = f.0.join("report.html");
+    fs::write(&source, "old content".repeat(20000)).unwrap();
+    let old = pages::publish(&database, &source, "report").unwrap();
+    fs::write(&source, "shared content".repeat(20000)).unwrap();
+    let page = pages::publish(&database, &source, "report").unwrap();
+    assert!(page.stored_size < page.size / 10);
+    pages::publish(&database, &source, "keep").unwrap();
+    pages::delete(&database, "report").unwrap();
+    assert!(pages::content(&database, &old.deployment, "index.html").is_err());
+    pages::download(&database, "keep", &f.0.join("kept")).unwrap();
+    assert_eq!(
+        fs::read(f.0.join("kept/index.html")).unwrap(),
+        fs::read(&source).unwrap()
+    );
+    pages::delete(&database, "keep").unwrap();
+    assert_eq!(fs::read_dir(pages::root(&database)).unwrap().count(), 0);
+    pages::publish(&database, &source, "report").unwrap();
+    pages::download(&database, "report", &f.0.join("republished")).unwrap();
+}

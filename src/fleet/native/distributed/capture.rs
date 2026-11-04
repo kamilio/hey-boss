@@ -25,6 +25,8 @@ pub(super) const TABLES: &[&str] = &[
     "artifact_links",
     "file_attachments",
     "published_pages",
+    "published_publications",
+    "published_page_chunks",
     "published_deployments",
     "published_chunks",
     "scheduled_jobs",
@@ -168,7 +170,21 @@ pub(super) fn install(db: &Connection) -> Result<()> {
     db.execute_batch("CREATE TRIGGER IF NOT EXISTS distributed_archive_cooled AFTER UPDATE OF archive_key ON issues
         WHEN NEW.archive_key IS NOT NULL AND NEW.archive_key IS NOT OLD.archive_key
         BEGIN UPDATE distributed_archive_history SET cursor_kind='',cursor_id='',complete=0 WHERE key=NEW.archive_key; END;")?;
+    for operation in ["INSERT", "UPDATE", "DELETE"] {
+        db.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS distributed_capture_published_pages_{operation}"
+        ))?;
+    }
     for table in TABLES {
+        // Legacy tables remain readable, but new resource facts belong to a publication.
+        if matches!(*table, "published_chunks" | "published_deployments") {
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                db.execute_batch(&format!(
+                    "DROP TRIGGER IF EXISTS distributed_capture_{table}_{operation}"
+                ))?;
+            }
+            continue;
+        }
         let columns = columns(db, table)?;
         if columns.is_empty() {
             return Err(replica::invalid(&format!(
@@ -228,7 +244,8 @@ pub(super) fn install(db: &Connection) -> Result<()> {
             } else {
                 ""
             };
-            let no_feedback = if *table == "distributed_members" {
+            let no_feedback = if *table == "distributed_members" || table.starts_with("published_")
+            {
                 " AND (SELECT syncing FROM fleet_meta WHERE id=1)=0"
             } else {
                 ""

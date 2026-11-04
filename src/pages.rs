@@ -1,4 +1,5 @@
-//! Private static sites. Immutable chunks and manifests use the fleet's CRDT log.
+//! Private static sites with publication-scoped, reclaimable fleet storage.
+mod storage;
 use crate::{
     database::Connection,
     issues::{Error, Result, Store},
@@ -13,6 +14,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+pub(crate) use storage::{
+    collect, generation, index_history, index_record, lock, migrate_content, remember, retired,
+};
 
 pub(crate) const CHUNK_SIZE: usize = 1024 * 1024;
 const SITE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -23,6 +27,10 @@ CREATE TABLE IF NOT EXISTS published_deployments(id TEXT PRIMARY KEY,manifest TE
 CREATE TABLE IF NOT EXISTS published_pages(name TEXT PRIMARY KEY,deployment TEXT NOT NULL,updated_at INTEGER NOT NULL,machine TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS published_live(name TEXT PRIMARY KEY,deployment TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS published_page_list ON published_pages(deleted,updated_at DESC,name);";
+
+pub(crate) fn migrate(db: &Connection) -> Result<()> {
+    storage::migrate(db)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +47,7 @@ pub struct Page {
     pub machine: String,
     pub files: usize,
     pub size: u64,
+    pub stored_size: u64,
     pub syncing: bool,
     pub path: String,
 }
@@ -152,8 +161,18 @@ pub(crate) fn read_chunk(database: &Path, hash: &str) -> Result<Vec<u8>> {
         ));
     }
     if !gzip {
-        // Upgrade legacy disk copies lazily; URLs and content hashes stay stable.
-        write_chunk(database, hash, &bytes)?;
+        // Migration must not restore a file concurrently removed by cleanup.
+        // Publishers/importers already hold this lock; their reads stay read-only.
+        let lease = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(database.with_extension("pages.lock"))?;
+        if lease.try_lock().is_ok() && root(database).join(hash).try_exists()? {
+            write_chunk(database, hash, &bytes)?;
+        }
     }
     Ok(bytes)
 }
@@ -203,6 +222,7 @@ pub(crate) fn write_chunk(database: &Path, hash: &str, bytes: &[u8]) -> Result<(
 pub fn publish(database: &Path, source: &Path, name: &str) -> Result<Page> {
     valid_name(name)?;
     let db = Store::open(database)?.into_database();
+    let _lock = lock(database)?;
     let metadata = fs::symlink_metadata(source)?;
     let mut files = Vec::new();
     fn collect(
@@ -309,8 +329,30 @@ pub fn publish(database: &Path, source: &Path, name: &str) -> Result<Page> {
         .as_millis() as i64;
     // All disk I/O is done before taking the application database writer.
     let tx = db.unchecked_transaction()?;
+    tx.execute("UPDATE published_storage SET clock=clock WHERE id=1", [])?;
+    let mut current: Option<(String,i64,bool,String,String)> = tx.query_row("SELECT deployment,updated_at,deleted,generation,machine FROM published_pages WHERE name=?1", [name], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    if let Some((id, at, deleted, generation, machine)) = &mut current {
+        let scope = storage::generation(
+            &serde_json::json!({"name":name,"deployment":id,"updated_at":at,"generation":generation,"machine":machine}),
+        );
+        *deleted |= retired(&tx, &scope)?;
+    }
+    if current
+        .as_ref()
+        .is_some_and(|(id, _, deleted, _, _)| id == &deployment && !deleted)
+    {
+        tx.commit()?;
+        return view_in(&db, name);
+    }
+    let generation = match &current {
+        Some((id, at, false, generation, machine)) => storage::generation(
+            &serde_json::json!({"name":name,"deployment":id,"updated_at":at,"generation":generation,"machine":machine}),
+        ),
+        _ => hey_boss_sync::digest(crate::issues::worker::random_id()?.as_bytes()),
+    };
+    let now = now.max(current.map_or(0, |(_, at, _, _, _)| at + 1));
     // Capture metadata first so peers can show the page while its bytes arrive.
-    tx.execute("INSERT INTO published_pages VALUES(?1,?2,?3,?4,0) ON CONFLICT(name) DO UPDATE SET deployment=excluded.deployment,updated_at=excluded.updated_at,machine=excluded.machine,deleted=0 WHERE published_pages.deployment<>excluded.deployment OR published_pages.deleted=1", params![name, deployment, now, crate::issues::identity::host()])?;
+    tx.execute("INSERT INTO published_pages(name,deployment,updated_at,machine,deleted,generation) VALUES(?1,?2,?3,?4,0,?5) ON CONFLICT(name) DO UPDATE SET deployment=excluded.deployment,updated_at=excluded.updated_at,machine=excluded.machine,deleted=0,generation=excluded.generation", params![name, deployment, now, crate::issues::identity::host(),generation])?;
     tx.execute(
         "INSERT OR IGNORE INTO published_deployments VALUES(?1,?2)",
         params![deployment, manifest],
@@ -319,6 +361,10 @@ pub fn publish(database: &Path, source: &Path, name: &str) -> Result<Page> {
         "INSERT OR IGNORE INTO published_chunks SELECT key,value FROM json_each(?1)",
         [serde_json::to_string(&chunks)?],
     )?;
+    let (clock, origin) = storage::stamp(&tx)?;
+    let row = serde_json::json!({"name":name,"deployment":deployment,"updated_at":now,"machine":crate::issues::identity::host(),"deleted":0,"generation":generation});
+    remember(&tx, &row, clock, &origin)?;
+    storage::capture_content(&tx, &row)?;
     tx.commit()?;
     view_in(&db, name)
 }
@@ -331,6 +377,13 @@ fn manifest(db: &Connection, id: &str) -> Result<Option<Arc<Manifest>>> {
         return Err(Error::invalid("Invalid deployment"));
     }
     let database = db.path().unwrap_or("");
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM published_deployments WHERE id=?1)",
+        [id],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(None);
+    }
     if let Some((_, _, manifest)) = MANIFESTS
         .lock()
         .unwrap()
@@ -414,6 +467,11 @@ pub(crate) fn view_in(db: &Connection, name: &str) -> Result<Page> {
         size: files
             .as_ref()
             .map_or(0, |m| m.values().map(|a| a.size).sum()),
+        stored_size: files
+            .as_ref()
+            .map(|m| storage::stored_size(db, name, m))
+            .transpose()?
+            .unwrap_or(0),
         syncing: !ready,
         path: format!("/pages/{name}"),
     })
@@ -430,11 +488,31 @@ pub fn delete(database: &Path, name: &str) -> Result<()> {
     valid_name(name)?;
     let db = Store::open(database)?.into_database();
     let tx = db.unchecked_transaction()?;
-    if tx.execute("UPDATE published_pages SET deleted=1 WHERE name=?1", [name])? == 0 {
-        return Err(Error::new("not_found", "Published page not found"));
+    if tx.execute(
+        "UPDATE published_pages SET deleted=1 WHERE name=?1 AND deleted=0",
+        [name],
+    )? == 0
+    {
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM published_pages WHERE name=?1)",
+            [name],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(Error::new("not_found", "Published page not found"));
+        }
+        tx.commit()?;
+        return Ok(());
     }
     tx.execute("DELETE FROM published_live WHERE name=?1", [name])?;
+    let (clock, origin) = storage::stamp(&tx)?;
+    remember(
+        &tx,
+        &serde_json::json!({"name":name,"deleted":1}),
+        clock,
+        &origin,
+    )?;
     tx.commit()?;
+    collect(&db, None)?;
     Ok(())
 }
 
