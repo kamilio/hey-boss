@@ -7724,11 +7724,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if final || audio == nil {
             // Re-render at most ten times a second while tokens arrive. Always
             // show the first fragment immediately and flush the final snapshot.
-            let now = ContinuousClock.now
-            guard final || messageLabel == nil || now - lastTextUpdate >= .milliseconds(100) else { return }
-            text = stream; lastTextUpdate = now
-        }
-        else {
+            guard final || messageLabel == nil || ContinuousClock.now - lastTextUpdate >= .milliseconds(100) else { return }
+            text = stream
+        } else {
             let raw = stream as NSString, start = min(published.utf16.count, raw.length)
             let tail = NSRange(location: start, length: raw.length - start)
             guard let boundary = Self.paragraphBreak.matches(in: stream, range: tail).last,
@@ -7760,6 +7758,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             }
         }
         if follow { revealLatest() }
+        // Long replies can take longer to lay out than the update interval.
+        // Let queued tokens catch up before painting another snapshot.
+        if audio == nil { lastTextUpdate = .now }
         playNext()
     }
     private func finishMessage(_ text: String) {
