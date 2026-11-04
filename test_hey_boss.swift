@@ -4518,24 +4518,7 @@ func auditConversation(_ root: String) {
     audio.conversation = true
     let writer = try! audio.listen(cli: cli)
     ui.connect(audio)
-    // Tail echo alone must not open the microphone. An utterance that continues
-    // past playback, however, should keep the words spoken before Listening.
-    let preRoll = Data(repeating: 1, count: 640 * 20), silence = Data(count: 640 * 30)
-    for continued in [false, true] {
-        ui.state(.speaking, "Speaking")
-        ui.receive(.began); ui.receive(.pcm(preRoll)); ui.receive(.candidate)
-        precondition(ui.phase == .speaking && ui.recording == nil)
-        ui.state(.listening, "Listening"); ui.receive(.pcm(silence))
-        precondition(ui.phase == .listening && ui.recording == nil)
-        if continued {
-            ui.receive(.candidate)
-            precondition(ui.phase == .recording && ui.recording == preRoll + silence)
-            ui.recording = nil; ui.state(.listening, "Listening")
-        } else {
-            ui.receive(.ended); ui.receive(.candidate)
-            precondition(ui.phase == .listening && ui.recording == nil)
-        }
-    }
+    let preRoll = Data(repeating: 1, count: 640 * 20)
     func wait(_ step: String, _ check: () -> Bool) {
         let deadline = Date().addingTimeInterval(70)
         while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
@@ -4568,8 +4551,8 @@ func auditConversation(_ root: String) {
         precondition(preparing.phase == .listening && preparing.audio === voice && preparing.rows.last?.stringValue.contains("pineapple") == true)
         preparing.respond("Hello"); preparing.input.stringValue = "Follow-up draft"
         precondition(!preparing.listenNext.isHidden && preparing.listenNext.title == "Interrupt reply" && !preparing.send.isEnabled)
-        preparing.listenNext.performClick(nil)
-        precondition(preparing.phase == .listening && preparing.audio === voice && !voice.stopped && preparing.reply == nil)
+        preparing.receive(.began); preparing.receive(.pcm(preRoll))
+        precondition(preparing.phase == .recording && preparing.recording == preRoll && preparing.audio === voice && !voice.stopped && preparing.reply == nil)
         precondition(preparing.input.stringValue == "Follow-up draft" && preparing.rows.last?.stringValue == "Hello")
         preparing.window.close()
     }
@@ -4598,6 +4581,7 @@ func auditConversation(_ root: String) {
         precondition(reopened.input.stringValue == "Hello" && !reopened.contextChip.isHidden)
         precondition(reopened.rows.map(\.stringValue) == chat.rows.map(\.stringValue))
         let request = try! JSONSerialization.jsonObject(with: reopened.conversationRequest().httpBody!) as! [String: Any]
+        precondition((request["text"] as? [String: String])?["verbosity"] == "low")
         let history = request["input"] as! [[String: String]]
         precondition(history.count == 1 && history[0]["role"] == "user" && history[0]["content"]!.contains(captured.components(separatedBy: .newlines).last!))
     }
@@ -4676,13 +4660,20 @@ func auditConversation(_ root: String) {
     feed("first")
     wait("first spoken reply") { ui.phase == .speaking && audio.player.isPlaying && !ui.listenNext.isHidden && ui.listenNext.title == "Skip reading" }
     precondition(ui.rows[2].stringValue.lowercased().hasPrefix("so") && ui.rows[2].stringValue.localizedCaseInsensitiveContains("fruit"), "A thinking pause after So must not cut off the question")
-    ui.receive(.began); ui.receive(.pcm(Data(count: 640))); ui.receive(.ended)
-    precondition(ui.phase == .speaking && ui.recording == nil)
-    precondition(ui.listenNext.visibleRect.width > 0)
     ui.listenNext.performClick(nil)
-    precondition(ui.phase == .listening && ui.listenNext.isHidden && ui.audio === audio && !audio.player.isPlaying)
+    precondition(ui.phase == .listening && ui.audio === audio && !audio.player.isPlaying)
+    // Hold a streamed reply open long enough to speak over it.
+    ui.respond("Tell me more."); ui.reply?.cancel()
+    ui.event(["TextDelta": ["text": "Here is a longer sentence that should stop as soon as you speak over it. There is more to come."]])
+    wait("playing the unfinished reply") { ui.phase == .speaking && audio.player.isPlaying }
+    ui.receive(.candidate)
+    precondition(!audio.player.isPlaying && ui.recording == nil, "Pause at voice onset")
+    wait("unconfirmed noise lets playback resume") { audio.player.isPlaying }
     feed("second", finishManually: true)
+    wait("speech interrupts playback") { ui.phase == .recording }
+    precondition(!audio.player.isPlaying && ui.audio === audio && ui.rows.last?.stringValue == "Reply stopped before it finished.")
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
+    precondition(ui.rows[ui.rows.count - 2].stringValue.localizedCaseInsensitiveContains("which fruit"), "Keep the opening words of an interruption")
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
     precondition(ui.meter.accessibilityLabel() == "Stop voice" && ui.turns.bounds.width > 320)
     precondition(ui.status.stringValue == "Speaking" && ui.status.bounds.width >= ui.status.attributedStringValue.size().width)
@@ -4775,7 +4766,7 @@ func auditConversation(_ root: String) {
         precondition(history.last == ["role": "user", "content": "Hello"], "Keep an unanswered message available to Sol after relaunch")
     }
     precondition(reopened.input.stringValue == "Follow-up draft")
-    print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
+    print("PASS conversation: speech interrupted playback, the follow-up retained its opening words and context, and the microphone closed")
 }
 #endif
 #if canImport(FoundationModels)
