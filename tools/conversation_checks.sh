@@ -1,5 +1,5 @@
 #!/bin/bash
-# Exercises the native window with two synthetic microphone turns and real on-device inference.
+# Exercises the native window with two synthetic microphone turns and real proxy inference.
 set -eu
 root=$(mktemp -d "$PWD/.conversation-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
