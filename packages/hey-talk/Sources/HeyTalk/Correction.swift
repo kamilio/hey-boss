@@ -19,13 +19,13 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
-    case paste(String), rename(String), newThread(project: String?, message: String)
+    case paste(String), rename(String), newThread(project: String?, text: String)
 
     var text: String {
         switch self {
         case .paste(let text), .rename(let text): return text
-        case .newThread(let project, let message):
-            if !message.isEmpty { return message }
+        case .newThread(let project, let text):
+            if !text.isEmpty { return text }
             return project.map { "New thread in " + $0 } ?? "New thread"
         }
     }
@@ -61,7 +61,7 @@ final class Correction {
         var tools = [try tool("paste", "text")]
         if threadActions {
             tools.append(try tool("rename_thread", "title"))
-            tools.append(try tool("new_thread", "project", "message"))
+            tools.append(try tool("new_thread", "project", "text"))
         }
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
@@ -109,9 +109,9 @@ final class Correction {
                 case "new_thread" where threadActions && values.count == 2:
                     guard let project = values["project"]?.trimmingCharacters(in: .whitespacesAndNewlines),
                           project.rangeOfCharacter(from: .controlCharacters) == nil,
-                          let message = values["message"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+                          let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines)
                     else { throw TalkError("Invalid new thread request.") }
-                    action = .newThread(project: project.isEmpty ? nil : project, message: message)
+                    action = .newThread(project: project.isEmpty ? nil : project, text: text)
                 default: throw TalkError("Unavailable correction tool.")
                 }
             case "response.completed":

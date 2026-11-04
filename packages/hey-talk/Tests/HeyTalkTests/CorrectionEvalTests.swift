@@ -12,15 +12,15 @@ final class CorrectionEvalTests: XCTestCase {
             }
         }
         let spoken = "So start a new thread. And then I want to check whether the thinking of publish sites or pages is working."
-        guard case .newThread(nil, let message) = try await run(spoken, context: "The unrelated project is Atlas.") else {
+        guard case .newThread(nil, let text) = try await run(spoken, context: "The unrelated project is Atlas.") else {
             return XCTFail("Expected a new thread in the current project")
         }
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("publish"))
-        XCTAssertTrue(message.localizedCaseInsensitiveContains("pages"))
-        XCTAssertFalse(message.localizedCaseInsensitiveContains("new thread"))
+        XCTAssertTrue(text.localizedCaseInsensitiveContains("publish"))
+        XCTAssertTrue(text.localizedCaseInsensitiveContains("pages"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("new thread"))
         for (speech, project) in [("New thread.", nil), ("New thread hey-boss.", "hey-boss")] {
             let action = try await run(speech, context: "We were discussing project Atlas.")
-            XCTAssertEqual(action, .newThread(project: project, message: ""))
+            XCTAssertEqual(action, .newThread(project: project, text: ""))
         }
         for speech in ["How do I start a new thread?", "Check the build."] {
             let action = try await run(speech, context: "Start a new thread in hey-boss.")
