@@ -577,6 +577,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 clearAutomatic()
                 paste = false; pressEnter = false; transcriptionSource = "file"; error = nil; pendingReply = reply
                 idleRelease?.cancel(); overlay?.update(.processing)
+                if correctionSettings.enabled { correction.warmQuota() }
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
                         let samples = try AudioCapture.readFile(file)
@@ -622,6 +623,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard self.session.generation == id, self.session.phase == .recording else { return }
             let start = ProcessInfo.processInfo.systemUptime
             self.inference.warm()
+            if self.correctionSettings.enabled { self.correction.warmQuota() }
             self.capture.start(uid: self.inputUID) { result in
                 guard self.session.generation == id, self.session.phase == .recording else { return }
                 switch result {

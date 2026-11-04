@@ -69,6 +69,7 @@ When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing
 Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, requesting priority service with reasoning disabled and storage off.
+Hey Talk starts the proxy’s Codex quota check during recording or file loading so an expired quota reading can refresh before correction. The check sends no transcript.
 The proxy's configured routing, model rewrites, and authentication remain authoritative.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. A response can stream for up to 30 seconds, with at most eight seconds
