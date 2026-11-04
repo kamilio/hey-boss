@@ -8234,7 +8234,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func cancelTurn(failure: String? = nil) {
         if let localTurn { model = LanguageModelSession(transcript: transcript(localTurn.prior, adding: localTurn.question, reply: published)) }
-        let notice = failure ?? (published.isEmpty ? nil : "Reply stopped before it finished.")
+        let unfinishedWorkspace = directory != nil && answering && !turnDone && (folderTurnAccepted || lastMessage?.isEmpty == false)
+        let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
         if localTurn != nil || notice != nil { save() }
         localTurn = nil

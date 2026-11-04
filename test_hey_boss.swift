@@ -4844,11 +4844,13 @@ func auditWorkspaceChat(_ root: String) {
     while ui.process === finishedHelper && Date() < expiry { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
     precondition(ui.process == nil && ui.phase == .recording && ui.audio === recording, "An idle helper exiting must not discard the next recording")
     ui.stop("Ready")
-    ui.input.stringValue = "Hello"; ui.sendTyped()
-    ui.event(["TextDelta": ["text": "A partial reply"]]); ui.toggle()
-    precondition(ui.phase == .idle && ui.process == nil)
-    let stopped = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
-    precondition(stopped.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Reply stopped before it finished."])
+    for kind in ["TextDelta", "Message"] {
+        ui.input.stringValue = "Hello"; ui.sendTyped()
+        ui.event([kind: ["text": "A partial reply"]]); ui.toggle()
+        precondition(ui.phase == .idle && ui.process == nil)
+        let stopped = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+        precondition(stopped.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Reply stopped before it finished."], "Keep the interruption after a progress message")
+    }
     let activeMic = ReviewAudio(), lost = "Agent disconnected before reporting completion"
     ui.connect(activeMic); ui.input.stringValue = value; ui.sendTyped()
     ui.event(["Message": ["text": value]]); ui.input.stringValue = history[0]
