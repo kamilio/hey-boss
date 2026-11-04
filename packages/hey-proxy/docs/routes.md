@@ -36,7 +36,7 @@ Validation rejects overlapping rules for a model, empty/duplicate legs, unknown 
 
 `Config::route_plan` retains the complete immutable config. `Plan::select` returns the selected provider config with all rewrite/fallback rules removed, plus separate source model, resolved upstream model, provider name, implementation, billing mode, reasoning effort and opaque config revision. The forwarding consumer supplies the resolved model/effort exactly once. Provider names identify configured connections; live subscription identity remains the pinned `account_ref` from the account API.
 
-Billing mode is derived from the selected account: `included_subscription` or `pay_per_token`. This records the routing policy category, not proof of available quota or permission for subscription overage. The forwarding consumer must gate included capacity; recommendations must independently exclude paid capacity. A paid-only route is valid even when nothing can be recommended.
+Billing mode is derived from the selected account: `included_subscription` or `pay_per_token`. This records the routing policy category, not proof of available quota or permission for subscription overage. Worker recommendations independently exclude paid capacity. A paid-only route is valid even when nothing can be recommended.
 
 A revision identifies one loaded snapshot, survives clones/selection, and changes on a new load. It is neither a credential fingerprint nor a cross-process content hash. Hot reload validates the whole file before publication; invalid edits retain the previous snapshot. In-flight plans retain their original account definitions and overrides across later attempts. No profile setup command is invoked by loading or resolving routes.
 
@@ -50,9 +50,7 @@ The diagnostic emits safe metadata and `forwarding: "active"`, never resolves cr
 
 ## Quota and transport
 
-Included legs require a fresh successful account/model-specific reading. Model limits and account limits both apply; subscription overage allowances never create included capacity. Exhausted subscriptions advance to the next configured leg, including an explicit paid API connection. Unknown scope, stale data, failed authentication, permissions, invalid requests and ambiguous outages stop routing with an explicit error. An ordinary rate-limit 429 is not quota exhaustion.
-
-Usage refreshes and cooldowns share the existing account-identity cache. A crossed reset requires a fresh reading. Typed upstream quota refusals suppress that account/model for 30 seconds, then require another successful reading. No quota refresh happens per streamed chunk. Routes do not call the recommendation endpoint.
+Inference and model probes do not fetch subscription usage or recommendations. The proxy tries the configured subscription directly; the provider enforces its limits and any overage settings. A typed quota refusal before output lets a replayable request try the next configured leg, which may be a paid connection. The proxy skips the refused account/model for 30 seconds, then can try it again. Ordinary rate limits, authentication errors and ambiguous outages do not trigger paid fallback.
 
 Codex subscriptions use the selected store's OAuth token and `ChatGPT-Account-Id` at `/backend-api/codex/responses`, supporting HTTP/SSE Responses and compact requests. Standard nonstreaming Responses are collected from the terminal SSE object. Stored/background requests are rejected explicitly. Claude subscriptions use native Messages; a configured OpenAI-compatible paid leg uses the existing Messages-to-Responses adapter. Unsupported shapes fail explicitly before changing billing. Configured automatic routes require HTTP/SSE; WebSocket requests receive 426 for HTTP downgrade.
 

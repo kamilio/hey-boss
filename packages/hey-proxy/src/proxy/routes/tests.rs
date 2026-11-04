@@ -6,9 +6,6 @@ struct Fixture {
     proxy: Arc<Proxy>,
     task: tokio::task::JoinHandle<()>,
     seen: Arc<Mutex<Vec<Value>>>,
-    used: Arc<AtomicUsize>,
-    work_used: Arc<AtomicUsize>,
-    usage_status: Arc<AtomicUsize>,
     usage_calls: Arc<AtomicUsize>,
     failure: Arc<Mutex<Option<(u16, String, String)>>>,
     response_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
@@ -21,40 +18,22 @@ impl Drop for Fixture {
 impl Fixture {
     async fn new() -> Self {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let used = Arc::new(AtomicUsize::new(0));
-        let work_used = Arc::new(AtomicUsize::new(0));
-        let usage_status = Arc::new(AtomicUsize::new(200));
         let usage_calls = Arc::new(AtomicUsize::new(0));
         let failure = Arc::new(Mutex::new(None::<(u16, String, String)>));
         let response_gate = Arc::new(Mutex::new(None::<Arc<tokio::sync::Notify>>));
         let gate = response_gate.clone();
-        let (s, u, c, f) = (
-            seen.clone(),
-            used.clone(),
-            usage_calls.clone(),
-            failure.clone(),
-        );
-        let (w, us) = (work_used.clone(), usage_status.clone());
+        let (s, c, f) = (seen.clone(), usage_calls.clone(), failure.clone());
         let app = Router::new().fallback(axum::routing::any(move |request: Request| {
             let gate = gate.clone();
-            let (s, u, c, f) = (s.clone(), u.clone(), c.clone(), f.clone());
-            let (w, us) = (w.clone(), us.clone());
+            let (s, c, f) = (s.clone(), c.clone(), f.clone());
             async move {
                 let path = request.uri().path().to_owned();
                 let auth = request.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
                 let account = request.headers().get("chatgpt-account-id").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
                 if path == "/api/oauth/profile" { return axum::Json(json!({"organization":{"uuid":"synthetic-claude-org"}})).into_response(); }
-                if path == "/api/oauth/usage" {
-                    c.fetch_add(1,Ordering::SeqCst);
-                    assert_eq!(auth,"Bearer sk-ant-oat01-synthetic-old");
-                    return axum::Json(json!({"five_hour":{"utilization":0},"seven_day_sonnet":{"utilization":u.load(Ordering::SeqCst)},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":0}})).into_response();
-                }
-                if path == "/backend-api/wham/usage" {
+                if matches!(path.as_str(), "/api/oauth/usage" | "/backend-api/wham/usage") {
                     c.fetch_add(1, Ordering::SeqCst);
-                    if us.load(Ordering::SeqCst) != 200 { return StatusCode::from_u16(us.load(Ordering::SeqCst) as u16).unwrap().into_response(); }
-                    assert_eq!(auth, format!("Bearer oauth-{account}"));
-                    let percent = if account == "personal" { u.load(Ordering::SeqCst) } else { w.load(Ordering::SeqCst) };
-                    return axum::Json(json!({"rate_limit":{"primary_window":{"used_percent":percent,"reset_at":crate::codex_auth::now()+3600}},"credits":{"has_credits":true,"balance":100}})).into_response();
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
                 }
                 let bytes = axum::body::to_bytes(request.into_body(), 1024*1024).await.unwrap();
                 let body: Value = serde_json::from_slice(&bytes).unwrap();
@@ -122,9 +101,6 @@ impl Fixture {
             proxy,
             task,
             seen,
-            used,
-            work_used,
-            usage_status,
             usage_calls,
             failure,
             response_gate,
@@ -143,6 +119,9 @@ impl Fixture {
                 .unwrap(),
         )
         .await
+    }
+    async fn cooldown(&self, provider: &str, model: &str) {
+        quota::exhausted(&self.proxy.select(provider).await.unwrap(), model).await;
     }
     fn claude(&mut self) {
         let mut config = (*self.proxy.config).clone();
@@ -245,11 +224,13 @@ async fn sonnet_uses_included_native_messages_then_explicit_paid_responses_adapt
     for exhausted in [false, true] {
         let mut f = Fixture::new().await;
         f.claude();
-        f.used
-            .store(if exhausted { 100 } else { 0 }, Ordering::SeqCst);
+        if exhausted {
+            f.cooldown("sonnet", "claude-sonnet-5-5").await;
+        }
         let response = super::super::forward_api(f.proxy.clone(),Request::builder().method("POST").uri("/v1/messages")
             .header(header::CONTENT_TYPE,"application/json")
             .body(Body::from(json!({"model":"claude-sonnet-5-5","messages":[{"role":"user","content":"synthetic"}],"max_tokens":16,"stream":false}).to_string())).unwrap()).await;
+        assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 65536)
             .await
@@ -287,83 +268,7 @@ async fn sonnet_uses_included_native_messages_then_explicit_paid_responses_adapt
 }
 
 #[tokio::test]
-async fn model_probe_selects_the_same_provider_and_quota_as_forwarding() {
-    for (used, work_used, provider) in
-        [(20, 0, "personal"), (100, 10, "work"), (100, 100, "ultima")]
-    {
-        let f = Fixture::new().await;
-        f.used.store(used, Ordering::SeqCst);
-        f.work_used.store(work_used, Ordering::SeqCst);
-        for stream in [false, true] {
-            let response = f.request(json!({"model":"gpt-6.1-sol","reasoning":{"effort":"medium"},"input":"hello-hey-proxy-model","stream":stream})).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["x-hey-proxy-probe"], "true");
-            let bytes = axum::body::to_bytes(response.into_body(), 100_000)
-                .await
-                .unwrap();
-            let text = String::from_utf8(bytes.to_vec()).unwrap();
-            assert!(text.contains(&format!("Using: {provider}")), "{text}");
-            assert!(text.contains("Configured provider order:"), "{text}");
-            assert!(
-                text.contains("personal: 5-hour quota: 80.0% remaining")
-                    || text.contains("personal: 5-hour quota: 0.0% remaining"),
-                "{text}"
-            );
-            assert!(text.contains("resets "), "{text}");
-            assert!(!text.contains("Quota was not checked"), "{text}");
-            assert!(
-                !text.contains("oauth-") && !text.contains("synthetic-paid-key"),
-                "{text}"
-            );
-        }
-        assert!(
-            f.seen.lock().unwrap().is_empty(),
-            "probe generated model traffic"
-        );
-        let calls = f.usage_calls.load(Ordering::SeqCst);
-        assert_eq!(calls, if provider == "personal" { 1 } else { 2 });
-        let actual = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
-        assert_eq!(actual.headers()["x-hey-proxy-provider"], provider);
-        assert_eq!(
-            f.usage_calls.load(Ordering::SeqCst),
-            calls,
-            "probe must reuse forwarding cache"
-        );
-    }
-}
-
-#[tokio::test]
-async fn model_probe_does_not_claim_paid_selection_when_quota_is_unknown_or_history_is_bound() {
-    for bound in [false, true] {
-        let f = Fixture::new().await;
-        let mut input = json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy-model"});
-        if bound {
-            f.used.store(100, Ordering::SeqCst);
-            input["previous_response_id"] = json!("bound-history");
-        } else {
-            f.usage_status.store(503, Ordering::SeqCst);
-        }
-        let response = f.request(input).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
-            .await
-            .unwrap();
-        let text = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(text.contains("Using: none"), "{text}");
-        assert!(
-            text.contains(if bound {
-                "history or tools prevent"
-            } else {
-                "quota is unavailable"
-            }),
-            "{text}"
-        );
-        assert!(f.seen.lock().unwrap().is_empty());
-    }
-}
-
-#[tokio::test]
-async fn model_probe_has_a_total_deadline_without_slowing_the_plain_probe() {
+async fn probes_do_not_wait_for_the_usage_cache() {
     let f = Fixture::new().await;
     let selected = f.proxy.select("personal").await.unwrap();
     let _guard = selected.binding.as_ref().unwrap().quota.codex.lock().await;
@@ -380,11 +285,8 @@ async fn model_probe_has_a_total_deadline_without_slowing_the_plain_probe() {
         .await
         .unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
-    assert!(
-        text.contains("Using: none") && text.contains("within 2s"),
-        "{text}"
-    );
-    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(text.contains("Using: personal"), "{text}");
+    assert!(start.elapsed() < Duration::from_secs(1));
     assert!(f.seen.lock().unwrap().is_empty());
     assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
 }
@@ -406,10 +308,7 @@ async fn native_messages_probe_reaches_real_selection_before_replying() {
         text.contains("Using: sonnet -> claude/claude-sonnet-5-5"),
         "{text}"
     );
-    assert!(
-        text.contains("Weekly Sonnet quota: 100.0% remaining"),
-        "{text}"
-    );
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
     assert!(f.seen.lock().unwrap().is_empty());
 }
 
@@ -438,14 +337,14 @@ async fn model_probe_honors_upstream_cooldowns_and_paid_model_overrides() {
         assert!(text.contains(expected) && text.contains(detail), "{text}");
     }
     assert!(f.seen.lock().unwrap().is_empty());
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn exhausted_subscriptions_use_paid_key_despite_available_overage() {
+async fn subscription_cooldowns_select_configured_paid_key() {
     let f = Fixture::new().await;
-    f.used.store(100, Ordering::SeqCst);
-    f.work_used.store(100, Ordering::SeqCst);
+    f.cooldown("personal", "gpt-6.1-sol").await;
+    f.cooldown("work", "gpt-6.1-sol").await;
     let response = f
         .request(json!({"model":"gpt-6.1-sol","input":[],"stream":true}))
         .await;
@@ -457,37 +356,6 @@ async fn exhausted_subscriptions_use_paid_key_despite_available_overage() {
     assert_eq!(seen[0]["account"], "");
     assert_eq!(seen[0]["body"]["model"], "gpt-6.1-sol");
     assert!(seen[0]["body"]["reasoning"].is_null());
-}
-
-#[tokio::test]
-async fn quota_refresh_is_shared_and_failures_never_select_paid() {
-    let f = Fixture::new().await;
-    let mut tasks = tokio::task::JoinSet::new();
-    for _ in 0..12 {
-        let proxy = f.proxy.clone();
-        tasks.spawn(async move {
-            let selected = proxy.select("personal").await.unwrap();
-            quota::availability(&selected, "gpt-6.1-sol").await
-        });
-    }
-    while let Some(result) = tasks.join_next().await {
-        assert_eq!(result.unwrap(), quota::Availability::Included);
-    }
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
-    for status in [401, 403, 429, 503] {
-        let f = Fixture::new().await;
-        f.usage_status.store(status, Ordering::SeqCst);
-        let response = f
-            .request(json!({"model":"gpt-6.1-sol","input":[],"stream":true}))
-            .await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(f.seen.lock().unwrap().len(), 0);
-        let response = f
-            .request(json!({"model":"gpt-6.1-sol","input":[],"stream":true}))
-            .await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(f.usage_calls.load(Ordering::SeqCst) <= 2);
-    }
 }
 
 #[tokio::test]
@@ -557,21 +425,21 @@ async fn stateful_and_signed_history_uses_first_provider_without_rewriting_histo
             assert_eq!(&sent["body"][key], value, "{key}");
         }
     }
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.seen.lock().unwrap().len(), 5);
 }
 
 #[tokio::test]
 async fn account_bound_history_never_skips_an_exhausted_first_provider() {
     let f = Fixture::new().await;
-    f.used.store(100, Ordering::SeqCst);
+    f.cooldown("personal", "gpt-6.1-sol").await;
     let response = f
         .request(json!({"model":"gpt-6.1-sol","input":[
         {"type":"compaction","encrypted_content":"synthetic"}
     ],"stream":true}))
         .await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
     assert!(f.seen.lock().unwrap().is_empty());
 }
 
@@ -634,36 +502,8 @@ async fn account_bound_history_never_replays_upstream_quota_refusal() {
             body
         );
         assert_eq!(f.seen.lock().unwrap().len(), 1);
-        assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
     }
-}
-
-#[tokio::test]
-async fn stale_cache_and_reset_require_a_new_successful_account_reading() {
-    let f = Fixture::new().await;
-    let selected = f.proxy.select("personal").await.unwrap();
-    f.used.store(100, Ordering::SeqCst);
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Exhausted
-    );
-    f.used.store(0, Ordering::SeqCst);
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Exhausted
-    );
-    let binding = selected.binding.as_ref().unwrap();
-    binding.quota.codex.lock().await.expire_before(u64::MAX);
-    f.usage_status.store(503, Ordering::SeqCst);
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Unavailable
-    );
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Unavailable
-    );
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -702,29 +542,9 @@ async fn stream_quota_refusals_advance_but_committed_output_never_replays() {
 }
 
 #[tokio::test]
-async fn fresh_reading_recovers_after_exhaustion_and_pin_bypasses_automatic_routes() {
+async fn pin_bypasses_automatic_routes() {
     let f = Fixture::new().await;
     let selected = f.proxy.select("personal").await.unwrap();
-    f.used.store(100, Ordering::SeqCst);
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Exhausted
-    );
-    selected
-        .binding
-        .as_ref()
-        .unwrap()
-        .quota
-        .codex
-        .lock()
-        .await
-        .expire_before(u64::MAX);
-    f.used.store(10, Ordering::SeqCst);
-    assert_eq!(
-        quota::availability(&selected, "gpt-6.1-sol").await,
-        quota::Availability::Included
-    );
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 2);
     let response = super::super::forward_api(
         Arc::new(selected),
         Request::builder()
@@ -740,7 +560,7 @@ async fn fresh_reading_recovers_after_exhaustion_and_pin_bypasses_automatic_rout
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(f.seen.lock().unwrap()[0]["auth"], "Bearer oauth-personal");
     assert_eq!(f.seen.lock().unwrap()[0]["body"]["model"], "gpt-6-astra");
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -795,7 +615,7 @@ async fn subscription_capacity_events_use_the_responses_retry_translation_withou
                 1,
                 "translation must not replay or switch providers"
             );
-            assert_eq!(f.usage_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
         }
     }
 }
@@ -856,12 +676,12 @@ async fn astra_routes_directly_without_quota_or_recommender_and_scopes_override(
 #[tokio::test]
 async fn sol_uses_exact_subscription_credentials_and_next_account_on_exhaustion() {
     let f = Fixture::new().await;
-    f.used.store(100, Ordering::SeqCst);
+    f.cooldown("personal", "gpt-6.1-sol").await;
     let response = f
         .request(json!({"model":"gpt-6.1-sol","input":[],"stream":true}))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
     let seen = f.seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0]["path"], "/backend-api/codex/responses");
@@ -873,10 +693,10 @@ async fn sol_uses_exact_subscription_credentials_and_next_account_on_exhaustion(
 
 #[tokio::test]
 async fn reasoning_history_switches_on_quota_and_preserves_messages_and_tool_pairs() {
-    for preflight_exhausted in [true, false] {
+    for cooling_down in [true, false] {
         let f = Fixture::new().await;
-        if preflight_exhausted {
-            f.used.store(100, Ordering::SeqCst);
+        if cooling_down {
+            f.cooldown("personal", "gpt-6.1-sol").await;
         } else {
             *f.failure.lock().unwrap() = Some((
                 429,
@@ -899,8 +719,8 @@ async fn reasoning_history_switches_on_quota_and_preserves_messages_and_tool_pai
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["x-hey-proxy-provider"], "work");
         let seen = f.seen.lock().unwrap();
-        assert_eq!(seen.len(), if preflight_exhausted { 1 } else { 2 });
-        if !preflight_exhausted {
+        assert_eq!(seen.len(), if cooling_down { 1 } else { 2 });
+        if !cooling_down {
             assert_eq!(seen[0]["body"]["input"], history);
         }
         let mut expected = history.as_array().unwrap().clone();
@@ -947,7 +767,7 @@ fn reasoning_cleanup_is_limited_to_history_and_preserves_compaction() {
 async fn native_thinking_can_fall_back_without_losing_tool_history() {
     let mut f = Fixture::new().await;
     f.claude();
-    f.used.store(100, Ordering::SeqCst);
+    f.cooldown("sonnet", "claude-sonnet-5-5").await;
     let response=super::super::forward_api(f.proxy.clone(),Request::builder().method("POST").uri("/v1/messages")
         .header(header::CONTENT_TYPE,"application/json")
         .body(Body::from(json!({"model":"claude-sonnet-5-5","max_tokens":16,"stream":false,
@@ -995,4 +815,22 @@ async fn switchable_stream_does_not_wait_seconds_for_generation() {
     gate.notify_one();
     assert!(stream.next().await.is_none());
     assert_eq!(f.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn inference_and_model_probe_skip_subscription_usage() {
+    let f = Fixture::new().await;
+    for stream in [false, true] {
+        let probe = f
+            .request(json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy-model","stream":stream}))
+            .await;
+        let body = axum::body::to_bytes(probe.into_body(), 100_000)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("Using: personal"));
+    }
+    assert!(f.seen.lock().unwrap().is_empty());
+    let actual = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
+    assert_eq!(actual.headers()["x-hey-proxy-provider"], "personal");
+    assert_eq!(f.usage_calls.load(Ordering::SeqCst), 0);
 }
