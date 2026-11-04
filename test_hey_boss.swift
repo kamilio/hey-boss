@@ -4872,7 +4872,14 @@ func auditWorkspaceChat(_ root: String) {
     let retiring = Process(), pipe = Pipe()
     retiring.executableURL = URL(fileURLWithPath: "/bin/sh"); retiring.arguments = ["-c", "cat >/dev/null; sleep 0.4"]
     retiring.standardInput = pipe; try! retiring.run()
+    ui.event(["Session": ["id": "retiring-first"]])
     ui.process = retiring; ui.writer = pipe.fileHandleForWriting; ui.stop("Ready")
+    // A quick visit to another chat can leave two writers retiring at once.
+    let other = Process(), otherPipe = Pipe()
+    other.executableURL = URL(fileURLWithPath: "/bin/cat"); other.standardInput = otherPipe
+    try! other.run(); ui.event(["Session": ["id": "retiring-second"]])
+    ui.process = other; ui.writer = otherPipe.fileHandleForWriting; ui.stop("Ready")
+    ui.event(["Session": ["id": "retiring-first"]])
     ui.sendTyped()
     precondition(retiring.isRunning && ui.phase == .thinking && ui.process == nil, "Wait for the previous writer before resuming this thread")
     let queued = ui.rows.map(\.stringValue)
