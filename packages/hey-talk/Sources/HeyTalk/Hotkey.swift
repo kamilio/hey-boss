@@ -117,13 +117,18 @@ enum Paste {
                 ?? (targetStillFocused() ? nil : onWait == nil ? .unidentifiedField : .focusChanged)
         }
         func paste() {
-            if case .newThread(let project) = action {
+            if case .newThread(let project, let message) = action {
                 Task { @MainActor in
                     guard isCurrent(), check() == nil, let field = originalField,
-                          await field.openNewThread(project: project, isCurrent: isCurrent) else {
+                          let draft = await field.openNewThread(project: project, isCurrent: isCurrent) else {
                         completion("history", .newThreadUnavailable); return
                     }
-                    completion("new_thread", nil)
+                    guard !message.isEmpty else { completion("new_thread", nil); return }
+                    guard isCurrent(), draft.isFocused(),
+                          SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    else { completion("history", .newThreadUnavailable); return }
+                    deliver(.paste(message), target: draft.app, originalField: draft, shouldPressEnter: shouldPressEnter,
+                            returnToField: nil, targetStillFocused: draft.isFocused, onWait: nil, isCurrent: isCurrent, completion: completion)
                 }
                 return
             }
