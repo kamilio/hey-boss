@@ -4485,11 +4485,14 @@ func auditConversation(_ root: String) {
         let response = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: old))]))
         let recent = Transcript.Entry.prompt(.init(segments: [.text(.init(content: captured))]))
         let ack = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "OK."))]))
-        longChat.model = LanguageModelSession(transcript: Transcript(entries: [prompt, response, recent, ack]))
+        let hello = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Hello"))]))
+        let greeting = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "Hello."))]))
+        longChat.model = LanguageModelSession(transcript: Transcript(entries: [prompt, response, recent, ack, hello, greeting]))
         longChat.append(old, from: "Hey Boss")
         longChat.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
         longChat.sendTyped()
         wait("long conversation") { longChat.phase == .idle }
+        precondition(longChat.model!.transcript.contains(recent), "Only the first exchange needs to be removed to make room")
         precondition(longChat.status.stringValue == "On-device chat" && longChat.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), longChat.status.stringValue)
         precondition(longChat.rows.first!.stringValue == old)
         let before = longChat.model!.transcript

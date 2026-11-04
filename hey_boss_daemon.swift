@@ -7732,20 +7732,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let model = SystemLanguageModel.default
         let incoming = Transcript.Entry.prompt(.init(segments: [.text(.init(content: question))]))
         let budget = model.contextSize * 3 / 4 // Leave room for the reply.
-        var entries = Array(transcript), skip = 0
-        while true {
-            let count = try await model.tokenCount(for: entries + [incoming])
-            if count <= budget { break }
-            guard let first = turns.first, skip < turns.count else {
-                if count >= model.contextSize { return nil }
-                break
-            }
-            try Task.checkCancellation()
-            skip += (turns.count - skip + 1) / 2
+        let count = try await model.tokenCount(for: Array(transcript) + [incoming])
+        if count <= budget { return session }
+        guard let first = turns.first else { return count < model.contextSize ? session : nil }
+        func remaining(_ skip: Int) -> [Transcript.Entry] {
             let from = skip == turns.count ? transcript.endIndex : turns[skip]
-            entries = Array(transcript[..<first]) + transcript[from...]
+            return Array(transcript[..<first]) + transcript[from...]
         }
-        return skip == 0 ? session : LanguageModelSession(transcript: Transcript(entries: entries))
+        var low = 1, high = turns.count
+        while low < high {
+            try Task.checkCancellation()
+            let mid = (low + high) / 2
+            if try await model.tokenCount(for: remaining(mid) + [incoming]) <= budget { high = mid }
+            else { low = mid + 1 }
+        }
+        let entries = remaining(low)
+        if low == turns.count, try await model.tokenCount(for: entries + [incoming]) >= model.contextSize { return nil }
+        return LanguageModelSession(transcript: Transcript(entries: entries))
     }
     // An opening sentence of plain prose can play before the paragraph ends.
     // Wait for a paragraph boundary when the opening contains Markdown.
