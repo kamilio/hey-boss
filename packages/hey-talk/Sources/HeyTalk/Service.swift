@@ -777,7 +777,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
                         self.overlay?.error(message, accessibilityAction: reason == .accessibility)
                     }
-                    if correctionInfo["status"] as? String == "fallback", saved, self.lastPasteBlock == nil { self.overlay?.error("AI unavailable. Original transcript kept.") }
+                    if let error = correctionInfo["error"] as? String, saved, self.lastPasteBlock == nil {
+                        self.overlay?.error("\(error) Original transcript kept.")
+                    }
                     if saved, delivery == "submitted", focusedInput != nil { self.restartAutomatic(id: id) }
                 }
             }
