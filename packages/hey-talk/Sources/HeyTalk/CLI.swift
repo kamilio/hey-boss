@@ -41,7 +41,7 @@ enum CLI {
     Press Hyper+R to start; press again to finish. Esc cancels.
     \(DictationShortcut.help).
     Commands start the app on demand. No login service or account is required.
-    Audio stays in memory. File transcription never modifies your clipboard.
+    The last five finished microphone recordings are kept locally as WAV files. File transcription never modifies your clipboard.
     """
 
     static func submitOption(_ arguments: [String]) throws -> Bool? {

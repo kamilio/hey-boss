@@ -295,7 +295,7 @@ reads the next page using the `next_before` cursor from JSON output.
 
 Completed microphone and file transcriptions are saved before any paste attempt
 in `~/Library/Application Support/hey-talk/history.sqlite3`, readable only by
-your user. Canceled work is never saved. If saving fails, the window keeps the
+your user. Canceling during capture discards the recording. If saving fails, the window keeps the
 text in memory and marks it **Unsaved** so you can copy it before quitting.
 
 Allow microphone access when macOS asks. For automatic paste, choose
@@ -341,7 +341,11 @@ with mode 0600. Hey Talk opens no network listener. Recognition runs locally;
 optional AI correction sends text through the local proxy as described above.
 An inference crash retries once without restarting the recording service.
 
-Audio is bounded to five minutes, held only in memory, and discarded on cancel.
+Microphone recordings are limited to five minutes. When you finish one, Hey Talk saves
+the untrimmed 16 kHz mono audio as a lossless WAV in
+`~/Library/Application Support/hey-talk/recordings/`, even if transcription fails.
+Only the latest five are kept; the highest numbered file is the newest. Canceling
+during capture and transcribing existing files leave this folder unchanged.
 The microphone connection stays open for five minutes after a recording stops
 or is cancelled, so repeated dictations can reuse the Bluetooth connection.
 Idle audio is discarded before metering, buffering, or transcription. The macOS
