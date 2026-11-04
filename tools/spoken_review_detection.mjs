@@ -17,12 +17,21 @@ function readTurns(input, args) {
   const result = spawnSync(cli, ['review-audio', ...args], {input, maxBuffer: 8 * 1024 * 1024});
   assert.equal(result.status, 0, String(result.stderr));
   const turns = [];
-  let turn, bookmarked = false;
+  let turn, bookmarked = false, continued = false;
   for (let i = 0; i < result.stdout.length;) {
     const count = result.stdout.readUInt16LE(i); i += 2;
-    if (count === 2) { bookmarked = true; continue; }
+    if (count === 2) {
+      if (turn) {
+        assert(args.includes('--conversation'), 'review comments only bookmark the initial onset');
+        continued = true;
+      } else bookmarked = true;
+      continue;
+    }
     if (count === 0) { assert(bookmarked && !turn); turn = []; bookmarked = false; continue; }
-    if (count === 1) { turns.push(Buffer.concat(turn)); turn = null; continue; }
+    if (count === 1) {
+      if (args.includes('--conversation')) assert(continued, 'sustained voice in the chat fixture must confirm continued speech');
+      turns.push(Buffer.concat(turn)); turn = null; continued = false; continue;
+    }
     assert(turn && count === 640 && result.stdout.length - i >= count);
     turn.push(result.stdout.subarray(i, i + count)); i += count;
   }
