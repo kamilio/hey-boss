@@ -7394,7 +7394,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var restoreError: String?
     var directory: URL?
     var process: Process?
-    private var closingWorkspace: (thread: String, finished: Task<Void, Never>)?
+    private var closingWorkspaces: [String: Task<Void, Never>] = [:]
     var writer: FileHandle?
     var approvals: [(String, [String: Any])] = []
     var approvalSheet: NSAlert?
@@ -7863,11 +7863,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let directory {
             save()
             let payload = process == nil && thread == nil ? instructions + "\n\n" + question : question
-            if process == nil, let closingWorkspace, closingWorkspace.thread == thread {
+            if process == nil, let thread, let closing = closingWorkspaces[thread] {
                 reply = Task { @MainActor [weak self] in
-                    await closingWorkspace.finished.value
+                    await closing.value
                     guard !Task.isCancelled, let self else { return }
-                    self.closingWorkspace = nil; self.reply = nil
+                    self.reply = nil
                     self.sendWorkspace(payload, in: directory)
                 }
             } else { sendWorkspace(payload, in: directory) }
@@ -8229,7 +8229,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func closeWorkspace() {
         if let process, let thread, process.isRunning {
             // A resumed Codex thread has one writer until its previous helper exits.
-            closingWorkspace = (thread, Task.detached { process.waitUntilExit() })
+            closingWorkspaces[thread] = Task { @MainActor [weak self] in
+                await Task.detached { process.waitUntilExit() }.value
+                self?.closingWorkspaces[thread] = nil
+            }
         }
         process = nil; try? writer?.close(); writer = nil
     }
