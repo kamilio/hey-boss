@@ -4540,6 +4540,16 @@ func auditConversation(_ root: String) {
         while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         precondition(check(), "\(step): \(ui.status.stringValue)")
     }
+    do {
+        let preparing = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("preparing/current.json"))
+        let voice = ReviewAudio(); preparing.connect(voice)
+        preparing.state(.thinking, "Thinking…")
+        preparing.event(["TurnCompleted": ["status": "Completed", "output": captured]])
+        precondition(preparing.phase == .thinking && !preparing.skipReading.isHidden)
+        preparing.skipReading.performClick(nil)
+        precondition(preparing.phase == .listening && preparing.audio === voice && preparing.rows.last?.stringValue.contains("pineapple") == true)
+        preparing.window.close()
+    }
     if #available(macOS 26.4, *) {
         let longChat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("long/current.json"))
         let old = String(repeating: " Old material.", count: 6000)
