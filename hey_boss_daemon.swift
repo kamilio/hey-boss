@@ -7284,6 +7284,26 @@ final class ConversationMeter: NSButton {
 }
 
 @available(macOS 26, *)
+final class ConversationComposer: NSTextField {
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        if bounds.width > 0, let cell {
+            // Editable fields otherwise report a single line even when the draft wraps.
+            size.height = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: bounds.width, height: .greatestFiniteMagnitude)).height
+        }
+        return size
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        let old = frame.size
+        super.setFrameSize(newSize)
+        if old.width != newSize.width { invalidateIntrinsicContentSize() }
+        if old != newSize, let editor = currentEditor() as? NSTextView, editor.selectedRange().length == 0 {
+            editor.scrollRangeToVisible(editor.selectedRange())
+        }
+    }
+}
+
+@available(macOS 26, *)
 final class ConversationText: NSTextField {
     private var paintingWord = false
     func paintWord(_ styled: NSAttributedString) {
@@ -7344,7 +7364,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
     let settings = NSMenuToolbarItem(itemIdentifier: .init("conversation-settings"))
-    let input = NSTextField()
+    let input = ConversationComposer()
     let send = NSButton()
     let scroll = NSScrollView()
     let turns = FlippedStack()
