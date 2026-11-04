@@ -7653,7 +7653,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let model else { return }
         reply = Task { @MainActor [weak self] in
             do {
-                for try await part in model.streamResponse(to: question) {
+                var session = model
+                if #available(macOS 26.4, *) {
+                    session = try await Self.sessionWithRoom(for: question, in: model)
+                }
+                guard !Task.isCancelled else { return }
+                self?.model = session
+                for try await part in session.streamResponse(to: question) {
                     guard !Task.isCancelled, let self else { return }
                     self.stream = part.content; self.publish(final: false)
                 }
@@ -7663,6 +7669,24 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
         }
+    }
+    @available(macOS 26.4, *)
+    private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession {
+        let transcript = session.transcript
+        let turns = transcript.indices.filter { if case .prompt = transcript[$0] { return true }; return false }
+        guard let first = turns.first else { return session }
+        let model = SystemLanguageModel.default
+        let incoming = Transcript.Entry.prompt(.init(segments: [.text(.init(content: question))]))
+        let budget = model.contextSize * 3 / 4 // Leave room for the reply.
+        var entries = Array(transcript), skip = 0
+        while try await model.tokenCount(for: entries + [incoming]) > budget {
+            try Task.checkCancellation()
+            skip += (turns.count - skip + 1) / 2
+            let from = skip == turns.count ? transcript.endIndex : turns[skip]
+            entries = Array(transcript[..<first]) + transcript[from...]
+            if skip == turns.count { break }
+        }
+        return skip == 0 ? session : LanguageModelSession(transcript: Transcript(entries: entries))
     }
     // Only completed paragraphs are stable enough to narrate. Keep unfinished
     // Markdown out of the audio queue, and measure offsets in the rendered text.
