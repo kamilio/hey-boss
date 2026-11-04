@@ -149,7 +149,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"utils_v1":true,"scheduled_jobs":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_matching":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"utils_v1":true,"scheduled_jobs":true,"exec_v1":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_move":true,"issue_matching":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -326,6 +326,12 @@ impl Relay {
                         && request["request"]["request"]["operation"]["action"] == "job"
                         && message["capabilities"]["scheduled_jobs"] != true {
                         return Err(unsupported("scheduled_jobs", &message["build"]).into());
+                    }
+                    if request["request"]["kind"]=="resource"
+                        && request["request"]["request"]["operation"]["action"]=="job"
+                        && matches!(request["request"]["request"]["operation"]["operation"]["command"].as_str(),Some("submit"|"file_put"|"file_get"|"execution"|"cancel_execution"))
+                        && message["capabilities"]["exec_v1"]!=true {
+                        return Err(unsupported("exec_v1", &message["build"]).into());
                     }
                     if !matches!(
                         request["request"]["kind"].as_str(),

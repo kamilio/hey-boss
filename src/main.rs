@@ -7,6 +7,7 @@ mod broker;
 mod cli_request;
 mod companion;
 mod error_cli;
+mod exec_cli;
 mod health_cli;
 mod issue_attachments;
 mod issue_cli;
@@ -220,6 +221,8 @@ enum Command {
     /// Durable cron job definitions, schedule previews and run history.
     #[command(visible_alias = "jobs")]
     Job(job_cli::Options),
+    /// Durable isolated commands on project workers, with input and output transfer.
+    Exec(exec_cli::Options),
     /// Persistent project Markdown artifacts, comments and resource links.
     #[command(visible_alias = "artifacts")]
     Artifact(artifact_cli::Options),
@@ -606,6 +609,17 @@ fn run() -> std::io::Result<()> {
                     println!("{}", serde_json::json!({"ok":false,"error":error}));
                 } else {
                     eprintln!("hey-boss issue: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Exec(options) => {
+            if let Err(error) = exec_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss exec: {error}");
                 }
                 std::process::exit(error.exit_code());
             }

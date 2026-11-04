@@ -1134,7 +1134,7 @@ pub(super) fn claim_instructions(
     Ok(worker::preview(&config, p, issue.clone()).0)
 }
 fn ready_workers(db: &Connection, worker_id: Option<&str>) -> Result<Vec<(String, String)>> {
-    let mut stmt=db.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start) AND (SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL)<json_extract(config,'$.concurrency') ORDER BY updated_at,id")?;
+    let mut stmt=db.prepare("SELECT id,config FROM issue_workers w WHERE (?1 IS NOT NULL AND id=?1 OR ?1 IS NULL AND kind='managed') AND json_extract(config,'$.enabled')=1 AND stop_requested=0 AND NOT EXISTS(SELECT 1 FROM issue_worker_runtime runtime WHERE runtime.worker_id=w.id AND runtime.owner_pid=w.owner_pid AND runtime.owner_start=w.owner_start) AND (SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL)+(SELECT count(*) FROM local_job_executions e WHERE json_extract(e.dispatch,'$.run.worker_id')=w.id AND json_type(e.dispatch,'$.run.snapshot.definition.execution')='object' AND e.owner_pid IS NOT NULL AND json_extract(e.report,'$.state') IN ('pending','running'))<json_extract(config,'$.concurrency') ORDER BY updated_at,id")?;
     Ok(stmt
         .query_map([worker_id], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))

@@ -32,7 +32,10 @@ pub(super) fn capability(ctx: &Context) -> Result<Value> {
         let projects = store.job_worker_projects(&id)?;
         if !projects.is_empty() {
             workers.push(
-                json!({"id":id,"scripts":scripts,"projects":projects.keys().collect::<Vec<_>>()}),
+                {
+                    let (capacity, active, readiness):(i64,i64,Option<String>)=db.query_row("SELECT json_extract(w.config,'$.concurrency'),(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),b.readiness FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id WHERE w.id=?1", [&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                    json!({"id":id,"scripts":scripts,"projects":projects.keys().collect::<Vec<_>>(),"exec_v1":true,"capacity":capacity,"issue_active":active,"readiness":readiness.and_then(|s|serde_json::from_str::<Value>(&s).ok())})
+                },
             );
         }
     }
@@ -179,6 +182,7 @@ pub(crate) struct WorkerJobs {
     ctx: Context,
     worker: String,
     handles: Vec<std::thread::JoinHandle<()>>,
+    checked: std::time::Instant,
 }
 impl WorkerJobs {
     pub(crate) fn new(
@@ -193,6 +197,7 @@ impl WorkerJobs {
             ctx,
             worker: worker.into(),
             handles: Vec::new(),
+            checked: std::time::Instant::now() - Duration::from_secs(60),
         })
     }
     pub(crate) fn idle(&mut self) -> bool {
@@ -209,6 +214,13 @@ impl WorkerJobs {
     }
     pub(crate) fn tick(&mut self) -> Result<()> {
         self.idle();
+        if self.checked.elapsed() >= Duration::from_secs(60) {
+            self.ctx.db()?.execute(
+                "UPDATE local_job_workers SET readiness=?2 WHERE worker_id=?1",
+                params![self.worker, crate::jobs::ready::inspect().to_string()],
+            )?;
+            self.checked = std::time::Instant::now();
+        }
         self.handles.extend(tick_worker(&self.ctx, &self.worker)?);
         Ok(())
     }
@@ -346,7 +358,22 @@ fn execute(ctx: &Context, d: &Dispatch) -> Result<()> {
     let owner = std::process::id();
     let start = crate::agents::process_identity(owner)
         .ok_or_else(|| replica::invalid("Cannot verify job service process identity"))?;
-    db.execute("UPDATE local_job_executions SET owner_pid=?3,owner_start=?4 WHERE run_id=?1 AND generation=?2",params![d.run.id,d.generation,owner,start])?;
+    {
+        let tx = crate::database::Transaction::new_unchecked(&db, TransactionBehavior::Immediate)?;
+        if d.run.snapshot.definition.execution.is_some() {
+            let worker = d
+                .run
+                .worker_id
+                .as_deref()
+                .ok_or_else(|| replica::invalid("Command has no worker"))?;
+            let (capacity, active):(i64,i64)=tx.query_row("SELECT json_extract(config,'$.concurrency'),(SELECT count(*) FROM worker_runs WHERE worker_id=?1 AND finished_at IS NULL)+(SELECT count(*) FROM local_job_executions WHERE json_extract(dispatch,'$.run.worker_id')=?1 AND json_type(dispatch,'$.run.snapshot.definition.execution')='object' AND owner_pid IS NOT NULL AND json_extract(report,'$.state') IN ('pending','running')) FROM issue_workers WHERE id=?1",[worker],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            if active >= capacity {
+                return Ok(());
+            }
+        }
+        tx.execute("UPDATE local_job_executions SET owner_pid=?3,owner_start=?4 WHERE run_id=?1 AND generation=?2",params![d.run.id,d.generation,owner,start])?;
+        tx.commit()?;
+    }
     let result = run_session(ctx, d, &mut report);
     match result {
         Ok((state, reason)) => finish(ctx, d, &mut report, &state, reason),
@@ -429,6 +456,9 @@ fn run_session(
                 "Assigned worker is paused, stopped, or no longer has this project checkout",
             )
         })?;
+    if d.run.snapshot.definition.execution.is_some() {
+        return command::run(ctx, d, report);
+    }
     if let Some(executable) = &d.run.snapshot.definition.executable {
         report.cwd = Some(config.cwd.clone());
         return script::run(ctx, d, report, &config.cwd, executable);
@@ -605,6 +635,14 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             store.expand_job_machines(&run.id, &nodes)?;
         }
     }
+    let mut occupied = std::collections::HashMap::<String, i64>::new();
+    for run in store.active_job_runs()? {
+        if run.snapshot.definition.execution.is_some()
+            && let Some(worker) = run.worker_id
+        {
+            *occupied.entry(worker).or_default() += 1;
+        }
+    }
     for run in store.active_job_runs()? {
         if run.snapshot.definition.fans_out() && run.parent_run_id.is_none() {
             continue;
@@ -619,7 +657,20 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             }
             continue;
         }
-        let eligible = |m| connected(m) && eligible_workers(m, &run).next().is_some();
+        let worker_fits = |m: &Value, id: &str| {
+            if run.snapshot.definition.execution.is_none() {
+                return true;
+            }
+            let Some(w) = m["jobs"]["workers"]
+                .as_array()
+                .and_then(|ws| ws.iter().find(|w| w["id"] == id))
+            else {
+                return false;
+            };
+            w["capacity"].as_i64().unwrap_or(0)
+                > w["issue_active"].as_i64().unwrap_or(0) + occupied.get(id).copied().unwrap_or(0)
+        };
+        let eligible = |m| connected(m) && eligible_workers(m, &run).any(|id| worker_fits(m, id));
         let targets = &run.snapshot.definition.machines;
         let machine = if let Some(node) = &run.target_machine {
             machines.iter().find(|m| m["node"] == *node && eligible(*m))
@@ -630,16 +681,22 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 .iter()
                 .find_map(|node| machines.iter().find(|m| m["node"] == *node && eligible(*m)))
         };
-        let candidate =
-            machine.and_then(|m| eligible_workers(m, &run).next().map(|worker| (m, worker)));
+        let candidate = machine.and_then(|m| {
+            eligible_workers(m, &run)
+                .find(|id| worker_fits(m, id))
+                .map(|worker| (m, worker))
+        });
         if let Some((machine, worker)) = candidate {
-            store.assign_job(
+            let assigned = store.assign_job(
                 &run.id,
                 machine["node"]
                     .as_str()
                     .ok_or_else(|| replica::invalid("Missing worker machine"))?,
                 worker,
             )?;
+            if assigned && run.snapshot.definition.execution.is_some() {
+                *occupied.entry(worker.to_owned()).or_default() += 1;
+            }
         } else {
             let reason = if let Some(node) = &run.target_machine {
                 format!(
@@ -680,13 +737,26 @@ fn eligible_workers<'a>(
         .into_iter()
         .flatten()
         .filter(move |w| {
-            (if run.snapshot.definition.executable.is_some() {
-                w["scripts"] == true
-            } else {
-                machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"] == true
-            }) && w["projects"]
-                .as_array()
-                .is_some_and(|p| p.iter().any(|p| p == &run.snapshot.project_id))
+            run.snapshot
+                .definition
+                .execution
+                .as_ref()
+                .is_none_or(|spec| {
+                    w["exec_v1"] == true
+                        && spec
+                            .harness
+                            .as_ref()
+                            .is_none_or(|h| w["readiness"]["harnesses"][h]["ready"] == true)
+                })
+                && (if run.snapshot.definition.executable.is_some() {
+                    w["scripts"] == true
+                } else {
+                    machine["jobs"]["runtimes"][&run.snapshot.definition.harness]["available"]
+                        == true
+                })
+                && w["projects"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|p| p == &run.snapshot.project_id))
         })
         .filter_map(|w| w["id"].as_str())
 }
@@ -716,6 +786,8 @@ fn job_workspace(config: &crate::issues::worker::ProjectConfig, run: &str) -> Re
     Ok(path)
 }
 
+#[path = "job_command.rs"]
+mod command;
 #[path = "job_script.rs"]
 mod script;
 

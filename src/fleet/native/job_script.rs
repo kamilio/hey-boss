@@ -83,21 +83,39 @@ pub(super) fn run(
         };
         program
     };
-    let mut child = Command::new("/bin/sh")
+    let spec = d.run.snapshot.definition.execution.as_ref();
+    let mut command = Command::new("/bin/sh");
+    command
         .args([
             "-c",
-            r#"IFS= read -r gate || exit 1; exec "$1""#,
+            r#"IFS= read -r gate || exit 1; exec "$@""#,
             "hey-boss-job",
         ])
         .arg(program)
+        .args(spec.map(|s| s.args.as_slice()).unwrap_or(&[]))
         .current_dir(cwd)
         .env("HEY_BOSS_JOB_RUN", &d.run.id)
         .env("HEY_BOSS_ISSUE_PROJECT", &d.run.snapshot.project_id)
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()?;
+        .stderr(log);
+    command
+        .env_remove("HEY_BOSS_EXEC_HARNESS")
+        .env_remove("HEY_BOSS_EXEC_MODEL")
+        .env_remove("HEY_BOSS_EXEC_EFFORT");
+    if let Some(spec) = spec {
+        if let Some(h) = &spec.harness {
+            command.env("HEY_BOSS_EXEC_HARNESS", h);
+        }
+        if let Some(m) = &spec.model {
+            command.env("HEY_BOSS_EXEC_MODEL", m);
+        }
+        if let Some(e) = &spec.effort {
+            command.env("HEY_BOSS_EXEC_EFFORT", e);
+        }
+    }
+    let mut child = command.spawn()?;
     let pid = child.id();
     // Do not reap before signalling: even if the leader exits, its children share this group.
     let result = (|| -> Result<bool> {
@@ -111,7 +129,13 @@ pub(super) fn run(
         report.state = "running".into();
         save(ctx, report)?;
         child.stdin.take().unwrap().write_all(b"start\n")?;
+        let mut published = std::time::Instant::now();
         loop {
+            if published.elapsed() >= Duration::from_secs(1) && spec.is_some() {
+                report.log = read_log(ctx, report, 0)?;
+                save(ctx, report)?;
+                published = std::time::Instant::now();
+            }
             if revoked(ctx, d)? || ctx.stopped() {
                 return Ok(false);
             }
@@ -121,10 +145,22 @@ pub(super) fn run(
             std::thread::sleep(Duration::from_millis(200));
         }
     })();
+    if !matches!(result, Ok(true)) && spec.is_some() {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < until && !crate::agent_process::exited(pid)? {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
     let status = child.wait()?;
+    if spec.is_some() {
+        report.result = Some(json!({"exit_code":status.code()}));
+    }
     for _ in 0..40 {
         if group_empty(pid)? {
             return Ok(if !result? {

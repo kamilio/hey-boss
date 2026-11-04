@@ -312,6 +312,7 @@ impl Fixture {
                 cron: "* * * * *".into(),
                 timezone: "UTC".into(),
                 executable: None,
+                execution: None,
                 harness: "codex".into(),
                 model: model.into(),
                 machines: Vec::new(),
@@ -478,6 +479,7 @@ fn worker_jobs_survive_fleet_shutdown_and_use_isolated_worktrees() {
         ctx: worker_ctx,
         worker: "pool".into(),
         handles: vec![],
+        checked: std::time::Instant::now(),
     };
     jobs.tick().unwrap();
     wait(|| f.report(&d).state == "running");
@@ -1055,6 +1057,7 @@ fn all_machines_fans_out_once_pins_offline_targets_and_stops_as_a_group() {
                     started_at: None,
                     finished_at: Some(now()),
                     log: None,
+                    result: None,
                     reason: None,
                 },
             )
@@ -1139,6 +1142,7 @@ fn all_machines_aggregates_independent_outcomes_and_preserves_execution_snapshot
                         started_at: Some(now()),
                         finished_at: Some(now() + 1),
                         log: None,
+                        result: None,
                         reason: None,
                     },
                 )
@@ -1332,6 +1336,7 @@ fn selected_machines_fan_out_only_to_selected_nodes_and_stop_together() {
                         started_at: None,
                         finished_at: Some(now()),
                         log: None,
+                        result: None,
                         reason: None,
                     },
                 )
@@ -1415,4 +1420,117 @@ fn script_runs_in_checkout_and_keeps_output_after_worker_stops() {
         next = page["next_log_offset"].as_u64();
     }
     assert!(text.ends_with(&"界".repeat(50000)));
+}
+
+#[test]
+fn exec_command_isolated_files_arguments_model_and_output_roundtrip() {
+    let mut f = Fixture::new();
+    let op:Operation=serde_json::from_value(json!({"command":"submit","id":"exec-roundtrip","execution":{
+        "program":"/bin/sh","args":["-c","printf '%s\\n' \"$HEY_BOSS_EXEC_HARNESS\" \"$HEY_BOSS_EXEC_MODEL\" \"$HEY_BOSS_EXEC_EFFORT\" \"$1\" > result/settings; printf 'command log\\n'","fixture","literal $(touch unwanted)"],
+        "harness":"claude","model":"exact-model","effort":"high"
+    }})).unwrap();
+    let id = f.op(op)["run"]["id"].as_str().unwrap().to_owned();
+    f.store.assign_job(&id, &f.ctx.node, "pool").unwrap();
+    let d = f
+        .store
+        .job_dispatches(&f.ctx.node)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.run.id == id)
+        .unwrap();
+    receive(&f.ctx, &d, "").unwrap();
+    execute(&f.ctx, &d).unwrap();
+    let report = f.report(&d);
+    assert_eq!(report.state, "succeeded", "{report:?}");
+    assert_ne!(report.cwd.as_deref(), f.root.to_str());
+    assert_eq!(report.result.as_ref().unwrap()["exit_code"], 0);
+    f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+    let result = f.op(Operation::Execution { run_id: id });
+    let blob: crate::jobs::command::Blob =
+        serde_json::from_value(result["result"]["output"].clone()).unwrap();
+    let archive = f.root.join("collected.tar.gz");
+    crate::jobs::command::download(&blob, &archive, |op| Ok(f.op(op))).unwrap();
+    let output = f.root.join("collected");
+    crate::jobs::command::unpack(&archive, &output).unwrap();
+    assert_eq!(
+        fs::read_to_string(output.join("settings")).unwrap(),
+        "claude\nexact-model\nhigh\nliteral $(touch unwanted)\n"
+    );
+    assert!(!f.root.join("unwanted").exists());
+}
+
+#[test]
+fn exec_cancellation_allows_saving_output_before_stopping() {
+    let mut f = Fixture::new();
+    let op:Operation=serde_json::from_value(json!({"command":"submit","id":"exec-cancel","execution":{
+        "program":"/bin/sh","args":["-c","trap 'printf saved > result/cancelled; exit 0' TERM; printf ready > result/ready; while :; do sleep 1; done"]
+    }})).unwrap();
+    let id = f.op(op)["run"]["id"].as_str().unwrap().to_owned();
+    f.store.assign_job(&id, &f.ctx.node, "pool").unwrap();
+    let d = f
+        .store
+        .job_dispatches(&f.ctx.node)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.run.id == id)
+        .unwrap();
+    receive(&f.ctx, &d, "").unwrap();
+    let ctx = f.ctx.clone();
+    let dispatch = d.clone();
+    let running = std::thread::spawn(move || execute(&ctx, &dispatch).unwrap());
+    wait(|| {
+        f.ctx
+            .state
+            .join("executions")
+            .join(&id)
+            .join("result/ready")
+            .is_file()
+    });
+    let mut revoked = d.clone();
+    revoked.revoke = true;
+    receive(&f.ctx, &revoked, "").unwrap();
+    running.join().unwrap();
+    let report = f.report(&d);
+    assert_eq!(report.state, "cancelled", "{report:?}");
+    assert_eq!(
+        fs::read_to_string(
+            f.ctx
+                .state
+                .join("executions")
+                .join(&id)
+                .join("result/cancelled")
+        )
+        .unwrap(),
+        "saved"
+    );
+    assert!(report.result.as_ref().unwrap()["output"].is_object());
+}
+
+#[test]
+fn exec_scheduler_reserves_capacity_and_skips_full_workers() {
+    let mut f = Fixture::new();
+    for id in ["exec-first", "exec-second"] {
+        f.op(serde_json::from_value(
+            json!({"command":"submit","id":id,"execution":{"program":"/bin/true","args":[]}}),
+        )
+        .unwrap());
+    }
+    schedule(&f.ctx, &f.machines()).unwrap();
+    let runs = f.store.active_job_runs().unwrap();
+    assert_eq!(runs.iter().filter(|r| r.worker_id.is_some()).count(), 1);
+    let d = f.store.job_dispatches(&f.ctx.node).unwrap().remove(0);
+    execute(&f.ctx, &d).unwrap();
+    f.store
+        .accept_job_report(&f.ctx.node, &f.report(&d))
+        .unwrap();
+    schedule(&f.ctx, &f.machines()).unwrap();
+    assert_eq!(
+        f.store
+            .active_job_runs()
+            .unwrap()
+            .iter()
+            .filter(|r| r.worker_id.is_some())
+            .count(),
+        1
+    );
 }

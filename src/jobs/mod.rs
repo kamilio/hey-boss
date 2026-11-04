@@ -1,8 +1,10 @@
 //! Durable schedules, immutable instructions and fenced execution.
 pub mod calendar;
+pub mod command;
 pub(crate) mod conversation;
 pub(crate) mod execution;
 pub(crate) mod files;
+pub mod ready;
 pub mod schedule;
 pub(crate) mod web;
 
@@ -32,6 +34,8 @@ pub struct Definition {
     pub harness: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<command::Spec>,
     /// Empty Codex model inherits the project's current execution settings.
     #[serde(default)]
     pub model: String,
@@ -91,7 +95,19 @@ impl Definition {
             ))
             .map_err(|_| Error::invalid("Job harness must be codex, claude, or pi"))?;
         }
-        schedule::Schedule::parse(&self.cron, &self.timezone)?;
+        if let Some(exec) = &self.execution {
+            exec.validate()?;
+            if self.executable.as_deref() != Some(exec.program.as_str())
+                || !self.cron.is_empty()
+                || self.fans_out()
+            {
+                return Err(Error::invalid(
+                    "One-shot commands cannot have a schedule or fanout",
+                ));
+            }
+        } else {
+            schedule::Schedule::parse(&self.cron, &self.timezone)?;
+        }
         Ok(())
     }
 }
@@ -111,6 +127,26 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    Submit {
+        id: String,
+        execution: command::Spec,
+    },
+    FilePut {
+        blob: command::Blob,
+        offset: u64,
+        data: String,
+    },
+    FileGet {
+        blob: command::Blob,
+        offset: u64,
+    },
+    Execution {
+        run_id: String,
+    },
+    CancelExecution {
+        run_id: String,
+    },
+
     Calendar {
         #[serde(flatten)]
         query: calendar::Query,
@@ -194,7 +230,10 @@ impl Operation {
     pub fn writes(&self) -> bool {
         matches!(
             self,
-            Self::Create { .. }
+            Self::Submit { .. }
+                | Self::FilePut { .. }
+                | Self::CancelExecution { .. }
+                | Self::Create { .. }
                 | Self::Edit { .. }
                 | Self::SetEnabled { .. }
                 | Self::Delete { .. }
@@ -204,6 +243,23 @@ impl Operation {
     }
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::Submit { id, execution } => {
+                validate_id(id)?;
+                execution.validate()?;
+            }
+            Self::FilePut { blob, data, offset } => {
+                blob.validate()?;
+                if data.len() > command::CHUNK.div_ceil(3) * 4 || *offset > blob.size {
+                    return Err(Error::invalid("Invalid file chunk"));
+                }
+            }
+            Self::FileGet { blob, offset } => {
+                blob.validate()?;
+                if *offset > blob.size {
+                    return Err(Error::invalid("Invalid file offset"));
+                }
+            }
+            Self::Execution { run_id } | Self::CancelExecution { run_id } => validate_id(run_id)?,
             Self::Calendar { query } => query.validate(false)?,
             Self::CalendarEntries { query } => query.validate(true)?,
             Self::Create {

@@ -100,3 +100,27 @@ The TUI keeps project tabs and a Shared tab for multi-project pools. Tab switche
 projects, `w` lists workers, `a` adds one, `d` removes the selected worker, `h`
 shows attempt history, and `q` closes the dashboard. `p` pauses pickup; `s` stops
 the selected worker immediately. Use `--help` for command options.
+
+## One-shot commands
+
+`exec` runs commands in separate execution directories. Project selection allocates workers; it does not select the command's checkout, harness, or model.
+
+```sh
+hey-boss exec check --project poe2 --harness claude --model claude-opus-5-5
+hey-boss exec submit --project poe2 --request-id benchmark-task-01 \
+  --harness claude --model claude-opus-5-5 --effort high \
+  --input ./trial-input.tar.gz \
+  -- agent-eval trial --input input.tar.gz --output result/
+hey-boss exec status --project poe2 EXECUTION_ID --json
+hey-boss exec logs --project poe2 EXECUTION_ID --follow
+hey-boss exec collect --project poe2 EXECUTION_ID --output ./results/task-01
+hey-boss exec cancel --project poe2 EXECUTION_ID
+```
+
+Retry an uncertain submission with the same request ID and identical arguments/input. A different command under that ID is rejected. Files transfer in verified chunks through the fleet connection; no S3 is required. The input is staged as `input.tar.gz`. Files written to `result/` are retained and collected into a new local directory. Outputs remain available after success, failure, and graceful cancellation.
+
+Commands receive `HEY_BOSS_EXEC_HARNESS`, `HEY_BOSS_EXEC_MODEL`, and `HEY_BOSS_EXEC_EFFORT`. These values are stored with the execution and never inherit project defaults. Commands that do not run an agent may omit harness/model together. Shell expansion is not applied to arguments.
+
+Readiness reports the installed harness, CLI login status, credential source, evaluator version, and worker capacity. Codex can use its CLI login, an API key from the worker environment, or verified proxy credential sources. Claude requires a confirmed CLI login; Gemini login checks are not yet supported. Authentication checks never return credential contents and do not test access to the requested model. A real trial is required to establish model access. Companions must advertise `exec_v1` before they can receive commands. One-shot commands reserve worker capacity alongside issue work; cron jobs keep their existing scheduling behavior.
+
+Cancellation gives the command process group 30 seconds to save output before forcing it to stop. Existing commands survive a client disconnect. The supervisor owns pending placement, so put it and the benchmark coordinator on a server for laptop-independent scheduling.
