@@ -73,9 +73,18 @@ for (const [gap, count] of [[300, 1], [500, 1], [1300, 2]]) {
 }
 console.log('PASS background noise, click, quiet speech, thinking pauses and separate comments');
 
+const other = readFileSync(process.argv[4]);
+// A new speaker starts just before the previous turn's silence timer expires.
+const first = Buffer.concat([silence(1000), voice, silence(3600)]);
+const [alone] = readTurns(first, ['--conversation']);
+const end = first.indexOf(alone) + alone.length + 640; // endpoint frame isn't emitted
+const pair = Buffer.concat([first.subarray(0, end - 60 * 32), other, silence(3400)]);
+const successive = readTurns(pair, ['--conversation']);
+assert.equal(successive.length, 2);
+assert(successive[1].includes(other), 'the next turn keeps the whole opening word');
+
 // The webcam hears a delayed, attenuated copy of the speakers. The second
 // fixture is a different speaker talking over that same playback.
-const other = readFileSync(process.argv[4]);
 for (const interrupt of [false, true]) {
   const seconds = 8, stereo = Buffer.alloc(seconds * 16000 * 4);
   function rendered(i) {
