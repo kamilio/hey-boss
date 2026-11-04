@@ -61,18 +61,16 @@ struct Turn {
 
 fn hello(engine: &Engine) -> Hello {
     Hello {
-        // Identity-bearing queue rotations require an upgraded projector. Fence
-        // older peers before either side sends or acknowledges durable facts.
-        // The immutable journal's payload format and history are unchanged.
-        protocol: 3,
+        // Compressed frames and page resources require upgraded readers.
+        protocol: 4,
         replica: engine.id().into(),
         presence: Vec::new(),
     }
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
-    if peer.protocol != 3 {
+    if peer.protocol != 4 {
         return Err(invalid(&format!(
-            "Incompatible sync protocol: local 3, peer {}. Queue ordering requires upgraded sync peers; run hey-boss upgrade on the supervisor and reconnect both peers",
+            "Incompatible sync protocol: local 4, peer {}. Compressed synchronization requires upgraded peers; run hey-boss upgrade on all machines",
             peer.protocol,
         )));
     }
@@ -223,7 +221,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut engine = Engine::open(&root.path().join("sync.db")).unwrap();
         engine.put("existing immutable history").unwrap();
-        for protocol in [1, 2] {
+        for protocol in [1, 2, 3] {
             let mut frame = Vec::new();
             wire::send(
                 &mut frame,
@@ -240,7 +238,7 @@ mod tests {
             });
             let error = result.err().unwrap().to_string();
             assert!(error.contains("upgrade"));
-            assert!(error.contains(&format!("local 3, peer {protocol}")));
+            assert!(error.contains(&format!("local 4, peer {protocol}")));
             assert!(output.is_empty());
             assert_eq!(engine.head().unwrap(), 1);
             assert_eq!(engine.received(&"a".repeat(32)).unwrap(), 0);

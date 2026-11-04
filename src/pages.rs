@@ -117,19 +117,43 @@ pub(crate) fn read_chunk(database: &Path, hash: &str) -> Result<Vec<u8>> {
     if !valid_hash(hash) {
         return Err(Error::invalid("Invalid content hash"));
     }
-    let file = OpenOptions::new()
+    let compressed = root(database).join(format!("{hash}.gz"));
+    let mut options = OpenOptions::new();
+    options
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(root(database).join(hash))?;
-    if !file.metadata()?.is_file() || file.metadata()?.len() > CHUNK_SIZE as u64 {
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let (file, gzip) = match options.open(&compressed) {
+        Ok(file) => (file, true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match options.open(root(database).join(hash)) {
+                Ok(file) => (file, false),
+                // A concurrent reader may have just migrated the legacy file.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    (options.open(&compressed)?, true)
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !file.metadata()?.is_file() || file.metadata()?.len() > (CHUNK_SIZE + 65536) as u64 {
         return Err(Error::invalid("Invalid content chunk"));
     }
     let mut bytes = Vec::new();
-    file.take(CHUNK_SIZE as u64 + 1).read_to_end(&mut bytes)?;
+    file.take((CHUNK_SIZE + 65536 + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if gzip {
+        bytes = hey_boss_sync::compression::decode(&bytes, CHUNK_SIZE)
+            .map_err(|e| Error::invalid(e.to_string()))?;
+    }
     if bytes.len() > CHUNK_SIZE || hey_boss_sync::digest(&bytes) != hash {
         return Err(Error::invalid(
             "Published content failed its integrity check",
         ));
+    }
+    if !gzip {
+        // Upgrade legacy disk copies lazily; URLs and content hashes stay stable.
+        write_chunk(database, hash, &bytes)?;
     }
     Ok(bytes)
 }
@@ -139,7 +163,7 @@ pub(crate) fn write_chunk(database: &Path, hash: &str, bytes: &[u8]) -> Result<(
     }
     let root = root(database);
     private_dir(&root)?;
-    let destination = root.join(hash);
+    let destination = root.join(format!("{hash}.gz"));
     if destination.try_exists()? {
         read_chunk(database, hash)?;
         return Ok(());
@@ -156,7 +180,9 @@ pub(crate) fn write_chunk(database: &Path, hash: &str, bytes: &[u8]) -> Result<(
         .create_new(true)
         .mode(0o600)
         .open(&stage.0)?;
-    file.write_all(bytes)?;
+    let compressed =
+        hey_boss_sync::compression::encode(bytes).map_err(|e| Error::invalid(e.to_string()))?;
+    file.write_all(&compressed)?;
     file.sync_all()?;
     match fs::hard_link(&stage.0, destination) {
         Ok(()) => (),
@@ -166,6 +192,11 @@ pub(crate) fn write_chunk(database: &Path, hash: &str, bytes: &[u8]) -> Result<(
         Err(e) => return Err(e.into()),
     }
     File::open(&root)?.sync_all()?;
+    match fs::remove_file(root.join(hash)) {
+        Ok(()) => File::open(&root)?.sync_all()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.into()),
+    }
     Ok(())
 }
 
@@ -278,15 +309,16 @@ pub fn publish(database: &Path, source: &Path, name: &str) -> Result<Page> {
         .as_millis() as i64;
     // All disk I/O is done before taking the application database writer.
     let tx = db.unchecked_transaction()?;
-    tx.execute(
-        "INSERT OR IGNORE INTO published_chunks SELECT key,value FROM json_each(?1)",
-        [serde_json::to_string(&chunks)?],
-    )?;
+    // Capture metadata first so peers can show the page while its bytes arrive.
+    tx.execute("INSERT INTO published_pages VALUES(?1,?2,?3,?4,0) ON CONFLICT(name) DO UPDATE SET deployment=excluded.deployment,updated_at=excluded.updated_at,machine=excluded.machine,deleted=0 WHERE published_pages.deployment<>excluded.deployment OR published_pages.deleted=1", params![name, deployment, now, crate::issues::identity::host()])?;
     tx.execute(
         "INSERT OR IGNORE INTO published_deployments VALUES(?1,?2)",
         params![deployment, manifest],
     )?;
-    tx.execute("INSERT INTO published_pages VALUES(?1,?2,?3,?4,0) ON CONFLICT(name) DO UPDATE SET deployment=excluded.deployment,updated_at=excluded.updated_at,machine=excluded.machine,deleted=0 WHERE published_pages.deployment<>excluded.deployment OR published_pages.deleted=1", params![name, deployment, now, crate::issues::identity::host()])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO published_chunks SELECT key,value FROM json_each(?1)",
+        [serde_json::to_string(&chunks)?],
+    )?;
     tx.commit()?;
     view_in(&db, name)
 }
@@ -370,7 +402,7 @@ pub(crate) fn view_in(db: &Connection, name: &str) -> Result<Page> {
                 let m = manifest(db, &id)?;
                 (id, m)
             }
-            None => (String::new(), None),
+            None => (String::new(), current),
         }
     };
     Ok(Page {

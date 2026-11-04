@@ -228,7 +228,7 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
         fact.resource = resources::capture(&tx, &fact)?;
         identity::normalize(&tx, &mut fact)?;
         let payload = serde_json::to_string(&fact)?;
-        if count > 0 && bytes + payload.len() > 2 * 1024 * 1024 {
+        if count > 0 && bytes + payload.len() > hey_boss_sync::PAGE_BYTES {
             break;
         }
         bytes += payload.len();
@@ -359,7 +359,7 @@ pub(super) fn baseline(
                 &hey_boss_sync::digest(fact.after.as_ref().unwrap().to_string().as_bytes())[..16]
             );
             let payload = serde_json::to_string(&fact)?;
-            if count > 0 && bytes + payload.len() > 2 * 1024 * 1024 {
+            if count > 0 && bytes + payload.len() > hey_boss_sync::PAGE_BYTES {
                 break;
             }
             engine.put(&payload)?;
@@ -417,6 +417,7 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
                 if let Some(resource) = &fact.resource { resources::receive(&tx, resource)?; }
             }
             projection::reduce(&tx, &fact)?;
+            materialize::discover_page(&tx, &fact)?;
             if fact.table == "distributed_members" {
                 let key = projection::key(
                     &tx,

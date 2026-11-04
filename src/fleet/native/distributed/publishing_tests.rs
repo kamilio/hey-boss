@@ -28,6 +28,47 @@ fn body(f: &Fixture) -> String {
         .unwrap();
     text
 }
+
+#[test]
+fn large_publication_is_visible_as_syncing_before_its_files_arrive() {
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    let source = fa.0.join("site");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("index.html"), "<h1>Large site</h1>").unwrap();
+    let mut state = 1u32;
+    let bytes: Vec<u8> = (0..pages::CHUNK_SIZE * 12)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    fs::write(source.join("large.bin"), bytes).unwrap();
+    let published = pages::publish(&fa.0.join("issues.db"), &source, "large-site").unwrap();
+    capture_all(&a, &mut ea);
+    let first = ea.batch(0).unwrap();
+    assert!(first.through < ea.head().unwrap());
+    eb.ingest(&first).unwrap();
+    // Network receipt can outrun application projection. Metadata must be
+    // visible even with the rest of the publication already in the journal.
+    transfer(&ea, &mut eb);
+    assert!(import(&b, &eb).unwrap() > 0);
+    let pending = pages::view(&fb.0.join("issues.db"), "large-site").unwrap();
+    assert!(pending.syncing);
+    assert_eq!(pending.size, published.size);
+    capture_all(&b, &mut eb);
+    assert!(
+        !pages::view(&fb.0.join("issues.db"), "large-site")
+            .unwrap()
+            .syncing
+    );
+}
 #[test]
 fn pages_publish_offline_replicate_through_a_peer_and_converge_after_concurrent_updates_and_deletion()
  {
@@ -268,7 +309,7 @@ fn missing_and_corrupt_chunks_do_not_advance_export_and_repair_can_resume() {
     let mut engine = hey_boss_sync::Engine::open(&f.0.join("sync.db")).unwrap();
     publish(&f, "Recoverable content");
     let hash = hey_boss_sync::digest(b"Recoverable content");
-    let path = pages::root(&f.0.join("issues.db")).join(hash);
+    let path = pages::root(&f.0.join("issues.db")).join(format!("{hash}.gz"));
     let saved = fs::read(&path).unwrap();
     fs::remove_file(&path).unwrap();
     let checkpoint: i64 = db
@@ -320,4 +361,126 @@ fn corrupted_incoming_page_resource_is_rejected_before_checkpoint_or_visibility(
         0
     );
     assert!(pages::view(&fb.0.join("issues.db"), "report").is_err());
+}
+
+#[test]
+#[ignore = "250 MiB durable transfer, restart, relay, and download stress test"]
+fn quarter_gib_publication_resumes_and_downloads_through_a_relay() {
+    use std::time::Instant;
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let fc = Fixture::new();
+    let a = peer(&fa, "a");
+    let mut b = peer(&fb, "b");
+    let c = peer(&fc, "c");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    let mut ec = hey_boss_sync::Engine::open(&fc.0.join("sync.db")).unwrap();
+    let source = fa.0.join("site");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("index.html"), "<h1>250 MiB</h1>").unwrap();
+    // Unique chunks: deduplication must not turn this into a tiny transfer.
+    for n in 0..250u32 {
+        let mut bytes = vec![0u8; pages::CHUNK_SIZE];
+        let mut state = n + 1;
+        for word in bytes.chunks_exact_mut(4) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            word.copy_from_slice(&state.to_le_bytes());
+        }
+        fs::write(source.join(format!("part-{n}.bin")), bytes).unwrap();
+    }
+    let started = Instant::now();
+    let published = pages::publish(&fa.0.join("issues.db"), &source, "large-site").unwrap();
+    let published_at = started.elapsed();
+    capture_all(&a, &mut ea);
+    let exported_at = started.elapsed();
+    let mut batches = 0;
+    loop {
+        let batch = ea.batch(eb.received(ea.id()).unwrap()).unwrap();
+        if batch.records.is_empty() {
+            break;
+        }
+        let mut wire = Vec::new();
+        hey_boss_sync::wire::send(&mut wire, &batch).unwrap();
+        let decoded = hey_boss_sync::wire::receive(&mut wire.as_slice())
+            .unwrap()
+            .unwrap();
+        eb.ingest(&decoded).unwrap();
+        if batches == 2 {
+            // Replay a durable batch after restarting both receiving stores.
+            drop(eb);
+            drop(b);
+            b = fb.db();
+            eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+            eb.ingest(&decoded).unwrap();
+        }
+        capture_all(&b, &mut eb);
+        batches += 1;
+    }
+    let received_at = started.elapsed();
+    assert_eq!(
+        pages::view(&fb.0.join("issues.db"), "large-site")
+            .unwrap()
+            .deployment,
+        published.deployment
+    );
+    // The publisher is gone. A peer must have every byte needed to relay.
+    drop(ea);
+    drop(a);
+    drop(fa);
+    transfer(&eb, &mut ec);
+    capture_all(&c, &mut ec);
+    let relayed_at = started.elapsed();
+    let output = fc.0.join("download");
+    pages::download(&fc.0.join("issues.db"), "large-site", &output).unwrap();
+    let manifest = pages::view(&fc.0.join("issues.db"), "large-site").unwrap();
+    assert_eq!(manifest.deployment, published.deployment);
+    assert_eq!(
+        manifest.size,
+        250 * pages::CHUNK_SIZE as u64 + b"<h1>250 MiB</h1>".len() as u64
+    );
+    assert_eq!(manifest.files, 251);
+    // Re-publishing the materialized directory verifies all paths and bytes.
+    let restored = pages::publish(&fc.0.join("issues.db"), &output, "restored").unwrap();
+    assert_eq!(restored.deployment, published.deployment);
+    eprintln!(
+        "250 MiB: publish {published_at:?}; export {:?}; wire/ingest/project {:?} ({batches} batches); relay/project {:?}; download/verify {:?}",
+        exported_at - published_at,
+        received_at - exported_at,
+        relayed_at - received_at,
+        started.elapsed() - relayed_at
+    );
+}
+
+#[test]
+fn compressed_page_facts_are_small_and_legacy_resources_still_replay() {
+    use base64::Engine;
+    use serde_json::json;
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    let text = "<p>Repeated inventory and source evidence</p>".repeat(12_000);
+    publish(&fa, &text);
+    capture_all(&a, &mut ea);
+    for (_, _, payload) in ea.pending(0).unwrap() {
+        let mut value: Value = serde_json::from_str(&payload).unwrap();
+        if value["table"] == "published_chunks" {
+            assert!(
+                payload.len() < text.len() / 10,
+                "The durable journal must store compressed content"
+            );
+            assert_eq!(value["resource"]["kind"], "published_chunk_gzip");
+            value["resource"]["kind"] = json!("published_chunk");
+            value["resource"]["bytes"] =
+                json!(base64::engine::general_purpose::STANDARD.encode(text.as_bytes()));
+        }
+        eb.put(&value.to_string()).unwrap();
+    }
+    capture_all(&b, &mut eb);
+    assert_eq!(body(&fb), text);
 }

@@ -146,3 +146,39 @@ fn concurrent_publishers_share_chunks_and_leave_complete_named_pages() {
         pages::download(&database, &page.name, &f.0.join(&page.name)).unwrap();
     }
 }
+
+#[test]
+fn chunks_are_compressed_on_disk_and_legacy_chunks_remain_readable() {
+    let f = Fixture::new();
+    let database = f.0.join("issues.db");
+    let bytes = b"<p>Repeated inventory and source evidence</p>".repeat(20_000);
+    let hash = hey_boss_sync::digest(&bytes);
+    pages::write_chunk(&database, &hash, &bytes).unwrap();
+    let compressed = pages::root(&database).join(format!("{hash}.gz"));
+    assert!(fs::metadata(&compressed).unwrap().len() < bytes.len() as u64 / 10);
+    assert_eq!(pages::read_chunk(&database, &hash).unwrap(), bytes);
+    fs::remove_file(compressed).unwrap();
+    fs::write(pages::root(&database).join(&hash), &bytes).unwrap();
+    assert_eq!(pages::read_chunk(&database, &hash).unwrap(), bytes);
+    assert!(!pages::root(&database).join(&hash).exists());
+}
+
+#[test]
+fn concurrent_reads_can_migrate_the_same_legacy_chunk() {
+    let f = Fixture::new();
+    let database = f.0.join("issues.db");
+    let bytes = vec![b'x'; pages::CHUNK_SIZE];
+    let hash = hey_boss_sync::digest(&bytes);
+    fs::create_dir(pages::root(&database)).unwrap();
+    fs::write(pages::root(&database).join(&hash), &bytes).unwrap();
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                start.wait();
+                assert_eq!(pages::read_chunk(&database, &hash).unwrap(), bytes);
+            });
+        }
+    });
+    assert!(!pages::root(&database).join(hash).exists());
+}
