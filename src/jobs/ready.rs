@@ -39,7 +39,7 @@ pub fn inspect() -> Value {
         .map(|v| v.1.trim().to_owned());
     // A gateway-backed Codex run does not use the CLI's own login. Check source
     // availability without exposing values; model authorization remains untested.
-    let proxy = output("hey-proxy", &["check-credentials", "--sources-only"]).is_some_and(|v| v.0);
+    let proxy = output("hey-proxy", &["check-credentials"]).is_some_and(|v| v.0);
     let mut harnesses = serde_json::Map::new();
     for harness in ["codex", "claude", "gemini"] {
         let version = output(harness, &["--version"])
