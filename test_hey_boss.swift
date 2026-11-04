@@ -4419,6 +4419,11 @@ import FoundationModels
 @available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let line = "Cut the pocket. Use the saw."
+    let times = ReaderVoice.wordTimings(line, [("cut", 5), ("pocket.", 30), ("use", 46), ("the", 66), ("saw.", 78)], frames: 90)
+    precondition(times.map { (line as NSString).substring(with: $0.1) } == ["Cut", "the", "pocket", "Use", "the", "saw"])
+    precondition(times[0].0 == 5 && (6..<30).contains(times[1].0) && times.dropFirst(2).map(\.0) == [30, 46, 66, 78],
+                 "The omitted first article must not steal the timestamp of the second one")
     func pipeCount() -> Int {
         var files = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)) / MemoryLayout<proc_fdinfo>.stride)
         let bytes = files.withUnsafeMutableBytes { proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
