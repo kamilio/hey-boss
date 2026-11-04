@@ -6,20 +6,7 @@ use hey_boss::{
 use std::path::PathBuf;
 
 #[derive(Args)]
-#[command(
-    about = "Publish a private HTML page or static site to your hey-boss fleet. Nothing is uploaded to a public service.",
-    after_help = "Works offline; files replicate to every fleet machine when connected. Reusing a name replaces that page. Dotfiles are excluded; symlinks are rejected. Site assets should use relative URLs."
-)]
-pub struct Publish {
-    /// HTML file, or directory containing index.html (up to 256 MiB).
-    source: PathBuf,
-    #[arg(long)]
-    name: String,
-    #[arg(long)]
-    pub json: bool,
-}
-#[derive(Args)]
-#[command(about = "List, download, or delete private pages replicated within your hey-boss fleet.")]
+#[command(about = "Publish, list, download, or delete private pages replicated within your hey-boss fleet.")]
 pub struct Options {
     #[arg(long, global = true)]
     pub json: bool,
@@ -28,6 +15,14 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Publish a private HTML page or static site across your fleet; never public.
+    #[command(after_help = "Works offline; files replicate to every fleet machine when connected. Reusing a name replaces that page. Dotfiles are excluded; symlinks are rejected. Site assets should use relative URLs.")]
+    Publish {
+        /// HTML file, or directory containing index.html (up to 256 MiB).
+        source: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
     /// List private pages on this machine, including pages still syncing.
     List {
         #[arg(long, default_value = "0")]
@@ -42,25 +37,20 @@ enum Action {
     /// Remove a page from private web access on every machine as deletion syncs.
     Delete { name: String },
 }
-pub fn publish(options: &Publish) -> Result<()> {
-    let page = pages::publish(&issues::database_path()?, &options.source, &options.name)?;
-    let url = format!("http://hey-boss.test{}", page.path);
-    if options.json {
-        println!(
-            "{}",
-            serde_json::json!({"ok":true,"private":true,"url":url,"page":page,"replication":"Saved locally; fleet copies update when connected"})
-        );
-    } else {
-        println!(
-            "{url}\nPrivate · {} files · {} bytes\nSaved locally; fleet copies update when connected.",
-            page.files, page.size
-        );
-    }
-    Ok(())
-}
 pub fn run(options: &Options) -> Result<()> {
     let database = issues::database_path()?;
     let value = match &options.action {
+        Action::Publish { source, name } => {
+            let page = pages::publish(&database, source, name)?;
+            let url = format!("http://hey-boss.test{}", page.path);
+            if !options.json {
+                println!(
+                    "{url}\nPrivate · {} files · {} bytes\nSaved locally; fleet copies update when connected.",
+                    page.files, page.size
+                );
+            }
+            serde_json::json!({"ok":true,"private":true,"url":url,"page":page,"replication":"Saved locally; fleet copies update when connected"})
+        }
         Action::List { offset } => {
             let entries = pages::list(&database, *offset)?;
             if !options.json {
