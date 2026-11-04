@@ -60,7 +60,10 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         | "scheduled_job_revisions"
         | "scheduled_job_runs"
         | "worker_runs"
-        | "worker_allocations" => "@row",
+        | "worker_allocations"
+        | "published_chunks"
+        | "published_deployments"
+        | "published_pages" => "@row",
         _ => column,
     }
 }
@@ -90,6 +93,7 @@ fn fields(table: &str, row: &Value) -> Result<BTreeMap<String, Value>> {
 }
 
 pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
+    resources::validate_page(fact)?;
     if fact.protocol != PROTOCOL
         || fact.clock < 0
         || fact.origin.is_empty()

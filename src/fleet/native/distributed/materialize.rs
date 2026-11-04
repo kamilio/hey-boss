@@ -154,6 +154,9 @@ pub(super) fn write(
         db.execute("INSERT INTO distributed_job_attempts(id,project_id,job_id,created_at,scheduled_at,state,payload) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET state=excluded.state,payload=excluded.payload",params![row["id"].as_str(),row["project_id"].as_str(),row["job_id"].as_str(),row["created_at"].as_i64(),row["scheduled_at"].as_i64(),row["state"].as_str(),row.to_string()])?;
         return Ok(());
     }
+    if table == "published_pages" && row["deleted"] == 1 {
+        db.execute("DELETE FROM published_live WHERE name=?1", [row["name"].as_str()])?;
+    }
     if table == "scheduled_jobs" {
         let snapshot: crate::jobs::Snapshot = serde_json::from_str(
             row["snapshot"]

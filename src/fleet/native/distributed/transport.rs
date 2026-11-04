@@ -916,7 +916,7 @@ mod tests {
                 .unwrap(),
             "a".repeat(32)
         );
-        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs','scheduled_job_logs','worker_allocations','dictation_vocabulary')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(db.query_row("SELECT count(*) FROM distributed_baseline WHERE table_name NOT IN ('worker_runs','scheduled_job_runs','scheduled_job_logs','worker_allocations','dictation_vocabulary','published_chunks','published_deployments','published_pages')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert_eq!(
             db.query_row("SELECT ready FROM distributed_members", [], |r| r
                 .get::<_, i64>(0))
