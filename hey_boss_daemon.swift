@@ -3,6 +3,7 @@ import AVFoundation
 import Speech
 #if canImport(FoundationModels)
 import FoundationModels
+import NaturalLanguage
 #endif
 import AppKit
 import CryptoKit
@@ -7293,6 +7294,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
     private var stream = "", published = "", lastMessage: String?
     private var messageLabel: NSTextField?
+    private let openingSentence = NLTokenizer(unit: .sentence)
     private var lastTextUpdate = ContinuousClock.now
     private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
     private var reading = false, turnDone = false
@@ -7716,8 +7718,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         return skip == 0 ? session : LanguageModelSession(transcript: Transcript(entries: entries))
     }
-    // Only completed paragraphs are stable enough to narrate. Keep unfinished
-    // Markdown out of the audio queue, and measure offsets in the rendered text.
+    // An opening sentence of plain prose can play before the paragraph ends.
+    // Wait for a paragraph boundary when the opening contains Markdown.
     private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
     private func publish(final: Bool) {
         let text: String
@@ -7729,9 +7731,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         } else {
             let raw = stream as NSString, start = min(published.utf16.count, raw.length)
             let tail = NSRange(location: start, length: raw.length - start)
-            guard let boundary = Self.paragraphBreak.matches(in: stream, range: tail).last,
-                  boundary.range.location > start else { return }
-            text = raw.substring(to: boundary.range.location)
+            if let boundary = Self.paragraphBreak.matches(in: stream, range: tail).last, boundary.range.location > start {
+                text = raw.substring(to: boundary.range.location)
+            } else {
+                guard messageLabel == nil, stream.first?.isLetter == true else { return }
+                openingSentence.string = stream
+                let range = openingSentence.tokenRange(at: stream.startIndex)
+                guard stream[range.upperBound...].contains(where: { !$0.isWhitespace }) else { return }
+                let sentence = stream[range].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard sentence.rangeOfCharacter(from: CharacterSet(charactersIn: "`*_[]<>|\\")) == nil else { return }
+                text = sentence
+            }
         }
         guard !text.isEmpty, text != published else { return }
         let follow = atEndOfChat
@@ -7833,7 +7843,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case "Session":
             thread = data["id"] as? String; save()
         case "TextDelta":
-            if let delta = data["text"] as? String { stream += delta; if audio == nil || delta.contains("\n") { publish(final: false) } }
+            if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.contains("\n") { publish(final: false) } }
         case "Message":
             if let text = data["text"] as? String { finishMessage(text) }
         case "ToolStarted", "ToolCompleted":

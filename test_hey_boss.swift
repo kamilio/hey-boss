@@ -4502,11 +4502,16 @@ func auditConversation(_ root: String) {
     }
     // Hold back completion: a real Supertonic word must light up before
     // the second paragraph or the final Codex message has arrived.
+    ui.event(["TextDelta": ["text": "Read [the guide. It"]])
+    precondition(ui.rows.isEmpty, "Wait for an unfinished Markdown link")
+    ui.event(["Message": ["text": ""]])
     ui.append("Read the reply", from: "You"); ui.state(.thinking, "Thinking…")
-    let first = "**Early words** can play while the rest is still arriving."
-    ui.event(["TextDelta": ["text": first + "\n"]])
+    let opening = "Meet Dr. Rose at noon."
+    let first = opening + " The **early words** can play while the rest is still arriving."
+    ui.event(["TextDelta": ["text": "Meet Dr. "]])
+    ui.event(["TextDelta": ["text": "Rose at noon. "]])
     precondition(ui.rows.count == 1)
-    ui.event(["TextDelta": ["text": "\nAnother paragraph"]])
+    ui.event(["TextDelta": ["text": "The "]])
     func highlighted() -> String? {
         let text = ui.rows.last!.attributedStringValue
         var result: String?
@@ -4516,7 +4521,9 @@ func auditConversation(_ root: String) {
         return result
     }
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
-    precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue.hasPrefix("Early words"))
+    precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
+    ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
+    precondition(ui.rows.last!.stringValue.contains("The early words"))
     let full = first + "\n\nAnother paragraph\n\nLast line."
     ui.event(["TextDelta": ["text": "\n\nLast line."]])
     precondition(ui.rows.last!.stringValue.hasSuffix("Another paragraph"))
