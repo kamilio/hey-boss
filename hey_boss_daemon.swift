@@ -7203,6 +7203,18 @@ final class ConversationMeter: NSButton {
 }
 
 @available(macOS 26, *)
+final class ConversationText: NSTextField {
+    private var paintingWord = false
+    func paintWord(_ styled: NSAttributedString) {
+        paintingWord = true; attributedStringValue = styled; paintingWord = false
+    }
+    override func invalidateIntrinsicContentSize() {
+        // A background color change does not change line breaks or height.
+        if !paintingWord { super.invalidateIntrinsicContentSize() }
+    }
+}
+
+@available(macOS 26, *)
 final class ConversationWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, [36, 76].contains(event.keyCode),
@@ -7253,7 +7265,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let send = NSButton()
     let scroll = NSScrollView()
     let turns = FlippedStack()
-    var rows: [NSTextField] = []
+    var rows: [ConversationText] = []
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
     struct Capture: Codable { let source: String; let text: String? }
@@ -7293,13 +7305,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private let instructions = Bundle.main.url(forResource: "conversation", withExtension: "md")
         .flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines)
     private var stream = "", published = "", lastMessage: String?
-    private var messageLabel: NSTextField?
+    private var messageLabel: ConversationText?
     private let openingSentence = NLTokenizer(unit: .sentence)
     private var lastTextUpdate: TimeInterval = 0
     private var textFlush: Timer?
-    private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
+    private var speech: [(label: ConversationText, span: NSRange, text: String)] = []
     private var reading = false, turnDone = false
-    private var lit: (NSTextField, NSRange)?
+    private var lit: (ConversationText, NSRange)?
 
     init(cli: String, saveURL: URL = URL.applicationSupportDirectory.appending(path: "Hey Boss/Conversation/current.json")) {
         self.cli = cli; self.saveURL = saveURL
@@ -7609,7 +7621,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
         let who = NSTextField(labelWithString: speaker)
         who.font = .systemFont(ofSize: 11, weight: .semibold); who.textColor = mine ? .controlAccentColor : .secondaryLabelColor
-        let label = NSTextField(wrappingLabelWithString: text); label.isSelectable = true
+        let label = ConversationText(wrappingLabelWithString: text); label.isSelectable = true
         label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
         if !mine { label.attributedStringValue = markdown(text, size: 15, color: .labelColor) }
         turns.addArrangedSubview(row); rows.append(label); messages.append(Message(text: text, speaker: speaker, capture: capture))
@@ -7800,7 +7812,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
         turnDone = true; save(); playNext()
     }
-    private func highlight(_ label: NSTextField, _ range: NSRange?) {
+    private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
         if let (_, old) = lit, NSMaxRange(old) <= styled.length { styled.removeAttribute(.backgroundColor, range: old) }
         lit = nil
@@ -7808,7 +7820,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             styled.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.42), range: range)
             lit = (label, range)
         }
-        label.attributedStringValue = styled
+        label.paintWord(styled)
     }
     private func playNext() {
         guard !reading else { return }
