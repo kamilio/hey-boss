@@ -7866,7 +7866,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if first { try startCodex(directory) }
                 try write(["turn": first && thread == nil ? instructions + "\n\n" + question : question])
             } catch {
-                guard process == nil else { stop(error.localizedDescription); return }
+                guard process == nil else { workspaceFailed(error.localizedDescription); return }
                 // Launch failed before Codex could receive the question.
                 if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
                 let notice = "Couldn’t start Codex: " + error.localizedDescription
@@ -8113,17 +8113,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     let line = Data(pending[..<i]); pending.removeSubrange(...i)
                     onMain {
                         guard let self, self.process === child else { return }
-                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.stop("Unreadable response from Codex."); return }
+                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.workspaceFailed("Unreadable response from Codex."); return }
                         self.event(event)
                     }
                 }
             }
             onMain {
                 guard let self, self.process === child else { return }
-                if self.turnDone {
-                    // The helper is idle; the next message can resume its thread.
-                    self.process = nil; try? self.writer?.close(); self.writer = nil
-                } else { self.stop("Codex disconnected before finishing this turn.") }
+                self.workspaceFailed("Codex disconnected before finishing this turn.")
             }
         }
     }
@@ -8132,7 +8129,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var data = try JSONSerialization.data(withJSONObject: command); data.append(10); try writer.write(contentsOf: data)
     }
     func event(_ envelope: [String:Any]) {
-        if let error = envelope["error"] as? String { stop(error); return }
+        if let error = envelope["error"] as? String { workspaceFailed(error); return }
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
         switch kind {
@@ -8162,7 +8159,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if follow { revealLatest() }
             if phase != .speaking { state(.thinking, done ? "Thinking…" : "Using tools…") }
         case "Approval":
-            guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { stop("Incomplete approval request."); return }
+            guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { workspaceFailed("Incomplete approval request."); return }
             approvals.append((id,params)); presentApproval()
         case "RequestCancelled":
             let showing = approvals.first?.0 == id
@@ -8170,7 +8167,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if showing, let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window); presentApproval() }
         case "TurnCompleted":
             if data["status"] as? String == "Completed" { finishTurn(data["output"] as? String ?? "") }
-            else { stop("Codex did not finish this turn.") }
+            else { workspaceFailed("Codex did not finish this turn.") }
         default: break
         }
     }
@@ -8202,13 +8199,24 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         alert.beginSheetModal(for: window) { [weak self] result in
             guard let self, self.approvalSheet === alert, self.approvals.first?.0 == id else { return }
             self.approvalSheet = nil; self.approvals.removeFirst()
-            do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.stop(error.localizedDescription) }
+            do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.workspaceFailed(error.localizedDescription) }
         }
     }
-    private func cancelTurn() {
+    private func workspaceFailed(_ message: String) {
+        if turnDone {
+            // The helper is idle; the next message can resume its thread.
+            process = nil; try? writer?.close(); writer = nil
+            return
+        }
+        interruptPlayback()
+        cancelTurn(failure: message)
+        state(audio == nil ? .idle : .listening, message)
+    }
+    private func cancelTurn(failure: String? = nil) {
         if let localTurn { model = LanguageModelSession(transcript: transcript(localTurn.prior, adding: localTurn.question, reply: published)) }
-        if !published.isEmpty { append("Reply stopped before it finished.", from: "Conversation") }
-        if localTurn != nil || !published.isEmpty { save() }
+        let notice = failure ?? (published.isEmpty ? nil : "Reply stopped before it finished.")
+        if let notice { append(notice, from: "Conversation") }
+        if localTurn != nil || notice != nil { save() }
         localTurn = nil
         textFlush?.invalidate(); textFlush = nil
         if let (field, _) = lit { highlight(field, nil) }
