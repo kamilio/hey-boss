@@ -4415,6 +4415,7 @@ func auditReviewEcho() {
 }
 
 #if canImport(FoundationModels)
+import FoundationModels
 @available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
@@ -4443,6 +4444,21 @@ func auditConversation(_ root: String) {
         let deadline = Date().addingTimeInterval(70)
         while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         precondition(check(), "\(step): \(ui.status.stringValue)")
+    }
+    if #available(macOS 26.4, *) {
+        let longChat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("long/current.json"))
+        let old = String(repeating: " Old material.", count: 6000)
+        let prompt = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier notes"))]))
+        let response = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: old))]))
+        let recent = Transcript.Entry.prompt(.init(segments: [.text(.init(content: captured))]))
+        let ack = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "OK."))]))
+        longChat.model = LanguageModelSession(transcript: Transcript(entries: [prompt, response, recent, ack]))
+        longChat.append(old, from: "Hey Boss")
+        longChat.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
+        longChat.sendTyped()
+        wait("long conversation") { longChat.phase == .idle }
+        precondition(longChat.status.stringValue == "On-device chat" && longChat.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), longChat.status.stringValue)
+        precondition(longChat.rows.first!.stringValue == old)
     }
     // Hold back completion: a real Supertonic word must light up before
     // the second paragraph or the final Codex message has arrived.
