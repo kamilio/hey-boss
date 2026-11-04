@@ -7204,6 +7204,13 @@ final class ConversationMeter: NSButton {
 @available(macOS 26, *)
 final class ConversationWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, [36, 76].contains(event.keyCode),
+           event.modifierFlags.intersection([.command, .option, .control, .shift]) == .shift,
+           let chat = delegate as? VoiceConversation, let editor = chat.input.currentEditor() as? NSTextView,
+           firstResponder === editor, !editor.hasMarkedText() {
+            editor.insertNewlineIgnoringFieldEditor(nil)
+            return
+        }
         if event.type == .keyDown, event.keyCode == 53, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
            attachedSheet == nil, let chat = delegate as? VoiceConversation,
            [.starting, .listening, .recording, .decoding].contains(chat.phase) {
@@ -7215,7 +7222,7 @@ final class ConversationWindow: NSWindow {
 }
 
 @available(macOS 26, *)
-final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let historyList = NSTableView()
@@ -7314,6 +7321,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         welcome.setCustomSpacing(15, after: wave)
         let dock = nativeBackdrop(), panel = NSView(); dock.contentView = panel
         input.isBordered = false; input.drawsBackground = false; input.font = .systemFont(ofSize: 15)
+        input.cell?.wraps = true; input.cell?.isScrollable = false
+        input.maximumNumberOfLines = 5; input.delegate = self
         input.focusRingType = .none; input.target = self; input.action = #selector(sendTyped)
         input.setAccessibilityLabel("Message")
         send.bezelStyle = .accessoryBarAction; send.isBordered = false
@@ -7527,6 +7536,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, modelReady() else { return }
         input.stringValue = ""; respond(text)
+    }
+    func controlTextDidChange(_ notification: Notification) {
+        if (input.currentEditor() as? NSTextView)?.hasMarkedText() == true { return }
+        input.validateEditing(); input.invalidateIntrinsicContentSize()
     }
     @objc func toggle() {
         if phase == .recording { if recording?.isEmpty == false { endRecording("manual") }; return }
