@@ -4608,9 +4608,10 @@ func auditConversation(_ root: String) {
     ui.connect(fresh)
     ui.respond("Hello")
     precondition(ui.phase == .thinking)
-    ui.toggle()
+    ui.input.stringValue = "Follow-up draft"
+    ui.window.sendEvent(escape)
     RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-    precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1)
+    precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1 && ui.input.stringValue == "Follow-up draft")
     print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
 }
 #endif

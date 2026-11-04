@@ -7213,8 +7213,8 @@ final class ConversationWindow: NSWindow {
         }
         if event.type == .keyDown, event.keyCode == 53, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
            attachedSheet == nil, let chat = delegate as? VoiceConversation,
-           [.starting, .listening, .recording, .decoding].contains(chat.phase) {
-            chat.stop("Microphone off")
+           chat.phase != .idle, (firstResponder as? NSTextView)?.hasMarkedText() != true {
+            chat.stop(chat.phase == .thinking || chat.phase == .speaking ? "Reply stopped" : "Microphone off")
             return
         }
         super.sendEvent(event)
