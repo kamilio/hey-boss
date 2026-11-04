@@ -4616,6 +4616,12 @@ func auditConversation(_ root: String) {
     resumed.window.sendEvent(escape); resumed.receive(.ended)
     precondition(cancelled.stopped && resumed.recording == nil && resumed.phase == .idle && resumed.rows.isEmpty)
     precondition(resumed.window.isVisible && resumed.input.stringValue == "Typed draft" && resumed.contextChip.title == "Another Window")
+    let transcribing = ReviewAudio(); resumed.connect(transcribing)
+    resumed.receive(.began); resumed.receive(.pcm(Data(count: 640))); resumed.receive(.ended)
+    precondition(resumed.phase == .decoding)
+    resumed.window.sendEvent(escape)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+    precondition(transcribing.stopped && resumed.reply == nil && resumed.phase == .idle && resumed.rows.isEmpty)
     resumed.input.stringValue = "Hello"; resumed.sendTyped(); wait("second chat") { resumed.phase == .idle }
     precondition(resumed.historyList.numberOfRows == 2)
     resumed.window.close()
