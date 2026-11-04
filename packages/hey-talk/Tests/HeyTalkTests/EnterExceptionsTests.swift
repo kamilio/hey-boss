@@ -27,16 +27,16 @@ final class EnterExceptionsTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = EnterExceptions(defaults: defaults)
-        XCTAssertEqual(try settings.command(["sites"]), ["lattice.com", "latticehq.com"])
-        for host in ["LATTICE.COM.", "team.latticehq.com", "a.b.lattice.com"] {
+        XCTAssertEqual(try settings.command(["sites"]), ["latticehq.com"])
+        for host in ["LATTICEHQ.COM.", "team.latticehq.com", "a.b.latticehq.com"] {
             XCTAssertFalse(settings.shouldPressEnter(requested: true, bundleID: "com.google.Chrome", host: host))
         }
-        for host in ["notlattice.com", "lattice.com.example.org"] {
+        for host in ["lattice.com", "team.lattice.com", "notlatticehq.com", "latticehq.com.example.org"] {
             XCTAssertTrue(settings.shouldPressEnter(requested: true, bundleID: "com.apple.Safari", host: host))
         }
-        _ = try settings.command(["sites", "remove", "Lattice.com"])
+        _ = try settings.command(["sites", "remove", "LatticeHQ.com"])
         _ = try settings.command(["sites", "add", "Example.org"])
-        XCTAssertEqual(try EnterExceptions(defaults: defaults).command(["sites"]), ["example.org", "latticehq.com"])
+        XCTAssertEqual(try EnterExceptions(defaults: defaults).command(["sites"]), ["example.org"])
         for bad in ["https://example.org", "user@example.org", "example.org/path", "a..b", "-bad.org"] {
             XCTAssertThrowsError(try settings.command(["sites", "add", bad]))
         }
