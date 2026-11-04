@@ -7396,7 +7396,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var process: Process?
     private var closingWorkspaces: [String: Task<Void, Never>] = [:]
     var writer: FileHandle?
-    var approvals: [(String, [String: Any])] = []
+    var approvals: [(String, String?, [String: Any])] = []
     var approvalSheet: NSAlert?
     let cli: String
     let recognizer = SFSpeechRecognizer()
@@ -8088,7 +8088,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
-        localTurn = nil; turnDone = true; updateComposerActions(); save(); playNext()
+        dismissApprovals(); localTurn = nil; turnDone = true; updateComposerActions(); save(); playNext()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -8197,7 +8197,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if phase != .speaking { state(.thinking, done ? "Thinking…" : "Using tools…") }
         case "Approval":
             guard let params = (data["payload"] as? [String:Any])?["params"] as? [String:Any] else { workspaceFailed("Incomplete approval request."); return }
-            approvals.append((id,params)); presentApproval()
+            approvals.append((id,data["kind"] as? String,params)); presentApproval()
         case "RequestCancelled":
             let showing = approvals.first?.0 == id
             approvals.removeAll { $0.0 == id }
@@ -8220,18 +8220,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         alert.addButton(withTitle: "Done"); alert.beginSheetModal(for: window)
     }
     func presentApproval() {
-        guard approvalSheet == nil, let (id,params) = approvals.first else { return }
+        guard approvalSheet == nil, let (id,kind,params) = approvals.first else { return }
         let alert = NSAlert(); approvalSheet = alert; alert.messageText = "Allow this Codex action?"
-        let fields = params.filter { !["threadId","turnId","itemId"].contains($0.key) }
-        alert.informativeText = fields["reason"] as? String ?? ""
-        var parts: [String] = []
-        if let item = params["itemId"] as? String, let button = tools[item], let detail = details[button] { parts.append(detail) }
-        for key in fields.keys.sorted() where key != "reason" {
-            guard let value = fields[key] else { continue }
-            let text = (value as? String) ?? (try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted,.sortedKeys,.fragmentsAllowed,.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? String(describing: value)
-            parts.append(key + ": " + text)
+        if kind == "mcpServer/elicitation/request" {
+            alert.informativeText = "Requested by " + (params["serverName"] as? String ?? "MCP server")
+            alert.accessoryView = detailView(params["message"] as? String ?? "")
+        } else {
+            let fields = params.filter { !["threadId","turnId","itemId"].contains($0.key) }
+            alert.informativeText = fields["reason"] as? String ?? ""
+            var parts: [String] = []
+            if let item = params["itemId"] as? String, let button = tools[item], let detail = details[button] { parts.append(detail) }
+            for key in fields.keys.sorted() where key != "reason" {
+                guard let value = fields[key] else { continue }
+                let text = (value as? String) ?? (try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted,.sortedKeys,.fragmentsAllowed,.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? String(describing: value)
+                parts.append(key + ": " + text)
+            }
+            alert.accessoryView = detailView(parts.joined(separator: "\n\n"))
         }
-        alert.accessoryView = detailView(parts.joined(separator: "\n\n"))
         alert.addButton(withTitle: "Decline"); alert.addButton(withTitle: "Allow once")
         alert.beginSheetModal(for: window) { [weak self] result in
             guard let self, self.approvalSheet === alert, self.approvals.first?.0 == id else { return }
@@ -8271,7 +8276,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
-        closeWorkspace()
+        closeWorkspace(); dismissApprovals()
+    }
+    private func dismissApprovals() {
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
     }

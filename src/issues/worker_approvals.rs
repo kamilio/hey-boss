@@ -13,34 +13,9 @@ struct Prompt {
     link: Option<String>,
 }
 
-fn confirmation_schema(params: &Value) -> bool {
-    if params
-        .get("mode")
-        .is_some_and(|mode| !matches!(mode.as_str(), Some("form" | "openai/form")))
-    {
-        return false;
-    }
-    let Some(schema) = params["requestedSchema"].as_object() else {
-        return false;
-    };
-    // An empty form asks only for a decision. Reject fields, defaults and
-    // unrecognized constraints rather than guessing or collecting their values.
-    schema.get("type").is_some_and(|value| value == "object")
-        && schema
-            .get("properties")
-            .is_some_and(|value| value.as_object().is_some_and(|fields| fields.is_empty()))
-        && schema.iter().all(|(key, value)| match key.as_str() {
-            "type" | "properties" => true,
-            "required" => value.as_array().is_some_and(|fields| fields.is_empty()),
-            "additionalProperties" => value.is_boolean(),
-            "$schema" | "title" | "description" => value.is_string(),
-            _ => false,
-        })
-}
-
 fn prompt(method: &str, params: &Value) -> Result<Option<Prompt>> {
     if method == "mcpServer/elicitation/request" {
-        if confirmation_schema(params)
+        if crate::codex_permissions::confirmation_schema(params)
             && let Some(message) = params["message"]
                 .as_str()
                 .filter(|message| !message.trim().is_empty())

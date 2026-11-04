@@ -4912,8 +4912,16 @@ func auditWorkspaceChat(_ root: String) {
         ui.event(["Approval":["id":id,"payload":["params":["command":"pwd","reason":"Inspect the selected folder."]]]])
         precondition(ui.approvalSheet?.informativeText == "Inspect the selected folder.")
     }
+    ui.event(["Approval":["id":"form","kind":"mcpServer/elicitation/request","payload":["params":["serverName":"fixture","message":"Allow access to the test page?","_meta":["private":"metadata"],"requestedSchema":["type":"object"]]]]])
+    let form = ui.approvalSheet!
+    precondition(form.informativeText == "Requested by fixture" && form.buttons.first?.title == "Decline")
+    precondition(((form.accessoryView as? NSScrollView)?.documentView as? NSTextView)?.string == "Allow access to the test page?", "Show only the server and the actual tool question")
+    ui.event(["RequestCancelled":["id":"form"]])
     request("expired"); ui.event(["RequestCancelled":["id":"expired"]])
     precondition(ui.approvalSheet == nil)
+    request("finishing"); request("queued")
+    ui.event(["TurnCompleted":["status":"Completed","output":"Done"]])
+    precondition(ui.approvalSheet == nil && ui.approvals.isEmpty, "A finished turn must dismiss every outstanding decision")
     for (id, response) in [("declined", NSApplication.ModalResponse.alertFirstButtonReturn), ("accepted", .alertSecondButtonReturn)] {
         request(id); ui.window.endSheet(ui.approvalSheet!.window, returnCode: response)
         let deadline = Date().addingTimeInterval(2)
