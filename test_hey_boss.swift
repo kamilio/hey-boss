@@ -4864,7 +4864,16 @@ func auditWorkspaceChat(_ root: String) {
     let messages = String(decoding: decisions.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").map { try! JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String:Any] }
     precondition(messages.count == 2 && messages[0]["decision"] as? String == "declined" && messages[0]["allow"] as? Bool == false && messages[1]["decision"] as? String == "accepted" && messages[1]["allow"] as? Bool == true)
     ui.window.close()
-    print("PASS native workspace chat: real Codex command and file write, tool row, two-turn recall, compact layout and workspace reset")
+    let unavailable = folder.appendingPathComponent("missing-workspace")
+    ui.selectDirectory(unavailable, capture: .init(source: "Test Editor", text: value))
+    let mic = ReviewAudio(); ui.connect(mic)
+    ui.input.stringValue = history[0]; ui.sendTyped()
+    precondition(ui.phase == .listening && ui.audio === mic && ui.process == nil, "Failed launch must leave voice available")
+    let failure = ui.rows.last!.stringValue
+    precondition(failure.contains(unavailable.lastPathComponent) && ui.input.stringValue == history[0] && !ui.contextChip.isHidden)
+    ui.window.close(); ui = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+    precondition(ui.rows.last?.stringValue == failure && ui.input.stringValue == history[0] && !ui.contextChip.isHidden)
+    print("PASS native workspace chat: real Codex command and file write, tool row, two-turn recall, compact layout and workspace recovery")
 }
 #endif
 
