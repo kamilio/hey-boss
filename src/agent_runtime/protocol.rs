@@ -97,6 +97,15 @@ pub(super) fn response(provider: Provider, id: &str, value: &Value) -> Option<Re
         _ => None,
     }
 }
+fn codex_confirmation(value: &Value) -> bool {
+    let params = &value["params"];
+    value["method"] == "mcpServer/elicitation/request"
+        && crate::codex_permissions::confirmation_schema(params)
+        && params["message"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
 pub(super) fn decision(provider: Provider, value: &Value, allow: bool) -> io::Result<Value> {
     match provider {
         Provider::Codex
@@ -116,6 +125,14 @@ pub(super) fn decision(provider: Provider, value: &Value, allow: bool) -> io::Re
                 }
             }
             Ok(json!({"id":value["id"],"result":{"decision":if allow {"accept"} else {"decline"}}}))
+        }
+        Provider::Codex if codex_confirmation(value) => {
+            let result = if allow {
+                json!({"action":"accept","content":{}})
+            } else {
+                json!({"action":"decline","content":null})
+            };
+            Ok(json!({"id":value["id"],"result":result}))
         }
         Provider::Codex if value["method"] == "item/permissions/requestApproval" => {
             let requested = value["params"]
@@ -361,7 +378,7 @@ impl AgentSession {
                 "item/commandExecution/requestApproval"
                     | "item/fileChange/requestApproval"
                     | "item/permissions/requestApproval"
-            );
+            ) || codex_confirmation(&value);
             if approval {
                 required(params, "threadId")?;
                 required(params, "turnId")?;

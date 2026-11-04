@@ -26,7 +26,13 @@ rl.on('line', line=>{
    },150);
  } else if(q.id==='ask'){
    fs.appendFileSync('decisions',q.result.decision+'\\n');
-   send({method:'item/completed',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',status:q.result.decision==='accept'?'completed':'declined'}}});
+   const method='mcpServer/elicitation/request', params={threadId,turnId,serverName:'fixture',mode:'form',message:'Allow access to the test page?',requestedSchema:{type:'object',properties:{}}};
+   send({id:'other-chat',method,params:{...params,threadId:'other'}});
+   send({id:'other-turn',method,params:{...params,turnId:'other'}});
+   send({id:'form',method,params});
+ } else if(q.id==='form'){
+   fs.appendFileSync('forms',JSON.stringify(q.result)+'\\n');
+   send({method:'item/completed',params:{threadId,turnId,item:{id:'cmd',type:'commandExecution',status:n===2?'completed':'declined'}}});
    send({method:'item/agentMessage/delta',params:{threadId,turnId,delta:'reply '+n}});
    send({method:'item/completed',params:{threadId,turnId,item:{type:'agentMessage',text:'reply '+n}}});
    send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}});
@@ -47,7 +53,10 @@ rl.on('line', line=>{
       assert.equal(e.Session.id,'chat-fixture'); assert.equal(e.Session.accepted,true);
     }
     if(e.ToolStarted){assert.equal(e.ToolStarted.input.command,'pwd'); starts++;}
-    if(e.Approval)commands({decision:e.Approval.id,allow:turns===1});
+    if(e.Approval){
+      assert.ok(['ask','form'].includes(e.Approval.payload.id),'Only show requests for the active conversation and turn');
+      commands({decision:e.Approval.id,allow:turns===1});
+    }
     if(e.ToolCompleted){assert.equal(e.ToolCompleted.failed,turns===0); ends++;}
     if(e.TextDelta){assert.equal(e.TextDelta.text,'reply '+(turns+1)); streamed++;}
     if(e.Message){assert.equal(e.Message.text,'reply '+(turns+1)); messages++;}
@@ -55,5 +64,6 @@ rl.on('line', line=>{
   }
   clearTimeout(timeout);
   assert.equal(await exit,0); assert.deepEqual([turns,starts,ends,streamed,messages,recorded],[2,2,2,2,2,2]); assert.equal(await readFile(join(dir,'decisions'),'utf8'),'decline\naccept\n');
+  assert.deepEqual((await readFile(join(dir,'forms'),'utf8')).trim().split('\n').map(JSON.parse),[{action:'decline',content:null},{action:'accept',content:{}}]);
   console.log('PASS workspace cwd, tool events, decline and allow, second turn, disconnect');
 } finally { await rm(dir,{recursive:true,force:true}); }

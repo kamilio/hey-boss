@@ -657,8 +657,7 @@ impl AgentSession {
         }
         Ok(())
     }
-    /// Only command/file Codex requests and Claude can_use_tool requests accept
-    /// boolean decisions. Other input is returned to the caller explicitly.
+    /// Answer one pending permission or confirmation. Forms with fields require separate input.
     pub fn decide(&mut self, id: &str, allow: bool) -> io::Result<()> {
         self.ready()?;
         self.inspect()?;
