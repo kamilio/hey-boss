@@ -71,7 +71,7 @@ pub(super) fn linux_definition(ctx: &Context, role: &str) -> String {
         .replace('"', "\\\"")
         .replace('%', "%%");
     format!(
-        "[Unit]\nDescription=Hey Boss fleet {name}\n[Service]\nExecStart=\"{binary}\" fleet {name}\nEnvironment=HEY_BOSS_FLEET_SUPERVISED=1\nKillMode=process\nRestart=always\nRestartSec=10\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Hey Boss fleet {name}\n[Service]\nExecStart=\"{binary}\" fleet {name}\nEnvironment=\"PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\nEnvironment=HEY_BOSS_FLEET_SUPERVISED=1\nKillMode=process\nRestart=always\nRestartSec=10\n[Install]\nWantedBy=default.target\n"
     )
 }
 // Stage only files; service control remains exclusively in install().
@@ -236,6 +236,7 @@ mod tests {
                 xml(&ctx.home.to_string_lossy())
             )));
             let linux = linux_definition(&ctx, role);
+            assert!(linux.contains("Environment=\"PATH=%h/.local/bin:%h/.cargo/bin:"));
             assert!(linux.contains("KillMode=process\n"));
             assert!(linux.contains("Restart=always\n"));
             assert!(linux.contains("ExecStart=\""));
