@@ -143,6 +143,14 @@ pub fn put(root: &Path, project: &str, blob: &Blob, offset: u64, data: &str) -> 
     if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
+    // The uploader ahead of us may have renamed this inode while we waited.
+    if path.is_file() {
+        if fs::metadata(&path)?.len() != blob.size {
+            return Err(Error::invalid("Execution file size mismatch"));
+        }
+        let _ = fs::remove_file(&stage);
+        return Ok(json!({"offset":blob.size,"complete":true}));
+    }
     let size = f.metadata()?.len();
     if offset > size {
         return Err(Error::conflict(format!(
@@ -317,6 +325,37 @@ pub fn unpack(archive: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exec_concurrent_uploads_of_the_same_input_all_succeed() {
+        let root = std::env::current_dir().unwrap().join(format!(
+            ".exec-file-test-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source");
+        fs::write(&source, vec![42u8; CHUNK]).unwrap();
+        let blob = Blob::of(&source).unwrap();
+        let bytes = STANDARD.encode(fs::read(&source).unwrap());
+        let start = std::sync::Barrier::new(10);
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..10)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        put(&root, "p", &blob, 0, &bytes)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let saved = Blob::of(&blob_path(&root, "p", &blob).unwrap()).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(saved, blob);
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
     #[test]
     fn exec_files_retry_chunks_and_verify_before_publication() {
         let root = std::env::current_dir().unwrap().join(format!(
