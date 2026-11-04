@@ -7667,7 +7667,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         who.font = .systemFont(ofSize: 11, weight: .semibold); who.textColor = mine ? .controlAccentColor : .secondaryLabelColor
         let label = ConversationText(wrappingLabelWithString: text); label.isSelectable = true
         label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
-        if !mine { label.attributedStringValue = markdown(text, size: 15, color: .labelColor) }
+        if !mine {
+            label.allowsEditingTextAttributes = true
+            label.attributedStringValue = markdown(text, size: 15, color: .labelColor)
+        }
         turns.addArrangedSubview(row); rows.append(label); messages.append(Message(text: text, speaker: speaker, capture: capture))
         for v in [card,who,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
         let inset: CGFloat = mine ? 12 : 0
