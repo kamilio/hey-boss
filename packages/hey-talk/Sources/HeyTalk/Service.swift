@@ -41,6 +41,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingReply: (([String: Any]) -> Void)?
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication? { didSet { updateSubmitIndicator() } }
+    private var recordingHost: String?
     private var targetName: String?
     private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
     private var recordingContext: ContextSnapshot?
@@ -69,6 +70,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(updateSubmitIndicator),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        // Switching tabs doesn't activate a new application.
+        let siteTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self, self.overlayEnabled, BrowserPage.isBrowser(NSWorkspace.shared.frontmostApplication) else { return }
+            self.updateSubmitIndicator()
+        }
+        siteTimer.tolerance = 0.2
+        RunLoop.main.add(siteTimer, forMode: .common)
         capture.onFailure = { [weak self] message in self?.fail(message) }
         capture.onReadinessChanged = { [weak self] ready in
             guard let self, self.session.phase == .recording else { return }
@@ -263,7 +271,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let active = session.phase == .recording || session.phase == .processing
         let app = active ? target : NSWorkspace.shared.frontmostApplication
         let requested = !active || (paste && (pressEnter || (automatic != nil && session.phase == .recording)))
-        overlay?.setAutoSubmit(enterExceptions.shouldPressEnter(requested: requested, bundleID: app?.bundleIdentifier))
+        let followsFocus = session.phase == .recording && automatic?.followsFocus == true
+        let host = active && !followsFocus ? recordingHost : BrowserPage.host(in: app)
+        overlay?.setAutoSubmit((!BrowserPage.isBrowser(app) || host != nil) &&
+            enterExceptions.shouldPressEnter(requested: requested, bundleID: app?.bundleIdentifier, host: host))
     }
     private func updateStatusTooltip() {
         let text = "Hey Talk is running · Pill \(overlayEnabled ? "visible" : "hidden")"
@@ -354,9 +365,20 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
     }
     private func toggleAutoSubmit() {
-        guard let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else { return }
         do {
-            _ = try enterExceptions.command([enterExceptions.bundleIDs.contains(bundleID) ? "remove" : "add", bundleID])
+            if BrowserPage.isBrowser(app) {
+                guard !enterExceptions.bundleIDs.contains(bundleID) else {
+                    overlay?.error("Auto Submit is off for the whole browser."); return
+                }
+                guard let host = BrowserPage.host(in: app) else { overlay?.error("No website identified."); return }
+                if let rule = enterExceptions.excludedSite(host), rule != host {
+                    overlay?.error("Excluded by " + rule + ". Remove it in enter-exceptions sites."); return
+                }
+                _ = try enterExceptions.command(["sites", enterExceptions.sites.contains(host) ? "remove" : "add", host])
+            } else {
+                _ = try enterExceptions.command([enterExceptions.bundleIDs.contains(bundleID) ? "remove" : "add", bundleID])
+            }
             updateSubmitIndicator()
         } catch { overlay?.error(error.localizedDescription) }
     }
@@ -376,7 +398,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
             "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "context": "Control+Command+Option+Shift+M"],
-            "enter_exceptions": enterExceptions.bundleIDs,
+            "enter_exceptions": enterExceptions.bundleIDs, "enter_exception_sites": enterExceptions.sites,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,
             "waiting_to_paste": waitingPaste != nil, "auto_recording": autoTarget != nil, "auto_focused": focusMonitor.current != nil,
@@ -489,7 +511,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 guard let arguments = request["arguments"] as? [String] else { throw TalkError("Missing exception arguments") }
                 let exceptions = try enterExceptions.command(arguments)
                 updateSubmitIndicator()
-                reply(["ok": true, "enter_exceptions": exceptions])
+                reply(["ok": true, arguments.first == "sites" ? "enter_exception_sites" : "enter_exceptions": exceptions])
             } catch { reply(failure(error.localizedDescription)) }
         case "start", "stop", "toggle":
             let submit = request["submit"] as? Bool
@@ -588,6 +610,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         clearAutomatic()
         automatic = focusedInput.map { AutoRecording(target: $0, followsFocus: $0.app.bundleIdentifier != "com.t3tools.t3code") }
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
+        recordingHost = BrowserPage.host(in: target)
         targetName = target?.localizedName
         if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && returnToField) {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
@@ -655,6 +678,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard automatic?.followsFocus == false || input != nil else {
                 reply(failure("Focus an allowed input before finishing Auto dictation")); return
             }
+            if automatic?.followsFocus == true {
+                recordingHost = BrowserPage.host(in: input?.app)
+            }
             automatic?.finish(in: input)
             target = autoTarget?.app; targetName = target?.localizedName
         }
@@ -721,6 +747,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         // Detach this result before disk IO: a new recording may start while saving.
         var reply = self.pendingReply; self.pendingReply = nil
         let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
+        let host = recordingHost, browser = BrowserPage.isBrowser(target)
         let targetName = self.targetName
         let focusedInput = self.autoTarget
         let t3 = target?.bundleIdentifier == "com.t3tools.t3code"
@@ -752,9 +779,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 }
             }
             if shouldPaste, self.session.generation == id {
-                let submit = self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier)
+                func submit() -> Bool {
+                    guard self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier, host: host) else { return false }
+                    return !browser || (host != nil && BrowserPage.host(in: target) == host)
+                }
                 let needsField = t3 || self.returnToField
-                Paste.deliver(text, target: target, pressEnter: submit, returnToField: self.returnToField ? originalField : nil,
+                Paste.deliver(text, target: target, shouldPressEnter: submit, returnToField: self.returnToField ? originalField : nil,
                               targetStillFocused: {
                                   originalField?.isFocused() ?? !needsField
                               }, onWait: (!needsField || originalField != nil) ? { timer in

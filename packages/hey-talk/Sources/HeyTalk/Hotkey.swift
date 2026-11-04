@@ -104,7 +104,7 @@ enum Paste {
         retry.invalidate()
         return true
     }
-    static func deliver(_ text: String, target: NSRunningApplication?, pressEnter: Bool, returnToField: FocusedInput?,
+    static func deliver(_ text: String, target: NSRunningApplication?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
         func check() -> PasteBlockReason? {
@@ -117,7 +117,7 @@ enum Paste {
             let board = NSPasteboard.general
             board.clearContents()
             guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
-            send(pressEnter: pressEnter, check: check, isCurrent: isCurrent, post: { key, flags in
+            send(shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: { key, flags in
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
             },
@@ -153,15 +153,16 @@ enum Paste {
         } else { paste() }
     }
 
-    static func send(pressEnter: Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
+    static func send(shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
                      post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
                      completion: @escaping (String, PasteBlockReason?) -> Void) {
         if let reason = check() { completion("clipboard", reason); return }
         guard post(9, .maskCommand) else { completion("clipboard", .eventUnavailable); return }
-        guard pressEnter else { completion("pasted", nil); return }
+        guard shouldPressEnter() else { completion("pasted", nil); return }
         afterPaste {
             guard isCurrent() else { completion("pasted", nil); return }
             if let reason = check() { completion("pasted", reason); return }
+            guard shouldPressEnter() else { completion("pasted", nil); return }
             guard post(36, []) else { completion("pasted", .eventUnavailable); return }
             completion("submitted", nil)
         }

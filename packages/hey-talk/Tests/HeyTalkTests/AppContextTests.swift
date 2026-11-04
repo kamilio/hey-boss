@@ -13,6 +13,18 @@ final class AppContextTests: XCTestCase {
     private func capture(_ root: Node) -> String? {
         AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1) { $0.attributes[$1] }
     }
+    func testWebpageHeadingsRespectScrollPositionAndURLOnlyExposesHost() {
+        let offscreen = Node("AXHeading", frame: CGRect(x: 0, y: -60, width: 100, height: 20), children: [Node("AXStaticText", "earlier heading")])
+        let root = Node("AXWebArea", frame: window, children: [
+            offscreen, Node("AXHeading", children: [Node("AXStaticText", "Visible heading")]),
+            Node("AXStaticText", "Page content")
+        ])
+        XCTAssertEqual(AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1, website: true) { $0.attributes[$1] },
+                       "## Visible text\nVisible heading\nPage content")
+        XCTAssertEqual(BrowserPage.host(URL(string: "https://Team.Lattice.com/review?token=private#draft")), "team.lattice.com")
+        XCTAssertNil(BrowserPage.host(URL(string: "file:///Users/someone/private")))
+    }
+
     func testOnlyVisibleReadOnlyTextIsIncluded() {
         let secret = Node("AXTextField", "password", children: [Node("AXStaticText", "nested password")])
         secret.attributes["AXSubrole"] = "AXSecureTextField"

@@ -1,12 +1,12 @@
 # hey-talk
 
 Native macOS dictation, controlled from the CLI. Press Hyper+R to start;
-press it again to stop and paste. Hyper+E toggles Auto Submit for the focused app:
-on sends Enter after pasting; off only pastes. The choice persists per app.
+press it again to stop and paste. Hyper+E toggles Auto Submit for the focused website or desktop app:
+on sends Enter after pasting; off only pastes. Lattice is paste-only by default.
 Caps Lock must already be mapped
 to Hyper (Control + Command + Option + Shift). Click the pill to toggle recording,
 drag to move it, or press Esc to discard. Clicking the pill follows the same
-per-app Auto Submit setting. CLI commands without `--submit` paste by default.
+Auto Submit setting. CLI commands without `--submit` paste by default.
 
 Brief focus changes are silent. If the original destination is still unfocused after 0.8 seconds, the pill shows **Waiting to paste**.
 Return to the original app to paste automatically. In T3, return to the starting
@@ -39,7 +39,7 @@ Auto starts off and remembers your choice. T3 is the initial allowed app;
 its search and settings fields do not start recording. Other allowed apps use
 editable text fields, excluding password fields. Accessibility permission is
 required. Auto waits for the destination field before pasting or submitting.
-The existing per-app Enter exceptions also apply in Auto.
+The existing app and website Enter exceptions also apply in Auto.
 
 The floating control is a compact glass capsule with an indigo waveform mark.
 It expands to show live teal audio levels while recording, then a thin indigo
@@ -62,9 +62,9 @@ punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. It st
 and remembers your choice. A tiny red brain beside the waveform means AI is off;
 there is no indicator when it is on. `hey-talk correction on|off|toggle` controls the same setting.
 A matching red Return symbol means Auto Submit is off. While idle it follows the
-focused app's Enter exceptions, so an excluded app such as Slack shows red even
+focused app or website’s Enter exceptions, so an excluded app such as Slack shows red even
 before recording. During dictation it also reflects paste-only versus submit;
-Hyper+R and Auto Dictation cannot override an app exception.
+Hyper+R and Auto Dictation cannot override an exception.
 When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing
@@ -224,18 +224,26 @@ and `record`; the stopping command chooses submission when it specifies the flag
 Ordinary `toggle` preserves the current recording's delivery mode. Per-app Enter
 exceptions and focus-change protection still apply. `--submit` rejects `--no-paste`.
 
-Suppress Enter in specific desktop apps, even with Hyper+R:
+Suppress Enter in desktop apps or on websites, even with Hyper+R:
 
 ```sh
 hey-talk enter-exceptions add com.tinyspeck.slackmacgap
 hey-talk enter-exceptions                         # List exceptions
 hey-talk enter-exceptions remove com.tinyspeck.slackmacgap
+hey-talk enter-exceptions sites                   # List excluded websites
+hey-talk enter-exceptions sites add example.org
+hey-talk enter-exceptions sites remove example.org
 ```
 
 Changes apply immediately and persist across restarts in the app's macOS
-preferences. Match the original target app's bundle ID; Slack in a browser is
-not covered by the Slack desktop exception. Hyper+E adds or removes the focused
-app from this same exception list without starting or stopping dictation.
+preferences. Website rules match a hostname and its subdomains across browsers.
+The defaults are `lattice.com` and `latticehq.com`. Hyper+E changes the current
+host; use the CLI to remove a parent-domain or browser-wide rule. On a browser
+page whose host cannot be identified, Hey Talk only pastes.
+
+In Chrome and Safari, AI Correction and Chat with Context read the active
+website’s hostname and visible page text through Accessibility. They omit the
+address bar, other tabs, and the page URL’s path, query, and fragment.
 
 `record` stops on Enter or Ctrl-C. `stop` returns the transcript; `--json` also
 reports capture latency, inference duration, and real-time factor. `status

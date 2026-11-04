@@ -65,7 +65,7 @@ public enum DictationShortcut: Int, CaseIterable {
     public var keyCode: Int { rawValue }
     public var name: String { "Control+Command+Option+Shift+\(self == .autoSubmit ? "E" : "R")" }
     public static let hint = "Caps Lock + R"
-    public static let help = "Hyper+E: toggle Auto Submit for this app · Hyper+R: start / stop dictation"
+    public static let help = "Hyper+E: toggle Auto Submit for this app or website · Hyper+R: start / stop dictation"
 }
 
 public enum HotkeyAction: Equatable { case none, toggle(DictationShortcut), toggleAuto, toggleSpeech, toggleSpeechMode, chatWithContext, cancel }

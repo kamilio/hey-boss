@@ -22,6 +22,29 @@ final class EnterExceptionsTests: XCTestCase {
         XCTAssertTrue(settings.shouldPressEnter(requested: true, bundleID: slack))
     }
 
+    func testSiteDefaultsBoundariesPersistenceAndAppPrecedence() throws {
+        let suite = "hey-talk-test-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = EnterExceptions(defaults: defaults)
+        XCTAssertEqual(try settings.command(["sites"]), ["lattice.com", "latticehq.com"])
+        for host in ["LATTICE.COM.", "team.latticehq.com", "a.b.lattice.com"] {
+            XCTAssertFalse(settings.shouldPressEnter(requested: true, bundleID: "com.google.Chrome", host: host))
+        }
+        for host in ["notlattice.com", "lattice.com.example.org"] {
+            XCTAssertTrue(settings.shouldPressEnter(requested: true, bundleID: "com.apple.Safari", host: host))
+        }
+        _ = try settings.command(["sites", "remove", "Lattice.com"])
+        _ = try settings.command(["sites", "add", "Example.org"])
+        XCTAssertEqual(try EnterExceptions(defaults: defaults).command(["sites"]), ["example.org", "latticehq.com"])
+        for bad in ["https://example.org", "user@example.org", "example.org/path", "a..b", "-bad.org"] {
+            XCTAssertThrowsError(try settings.command(["sites", "add", bad]))
+        }
+        _ = try settings.command(["add", "com.google.Chrome"])
+        XCTAssertFalse(settings.shouldPressEnter(requested: true, bundleID: "com.google.Chrome", host: "allowed.net"))
+        XCTAssertFalse(settings.shouldPressEnter(requested: false, bundleID: "com.apple.Safari", host: "allowed.net"))
+    }
+
     func testInvalidCommandsDoNotChangeExceptions() throws {
         let suite = "hey-talk-test-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!

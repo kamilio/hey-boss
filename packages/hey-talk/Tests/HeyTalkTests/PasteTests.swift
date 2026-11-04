@@ -24,7 +24,7 @@ final class PasteTests: XCTestCase {
 
     func testPasteOnlyNeverSchedulesEnter() {
         var keys: [CGKeyCode] = []
-        Paste.send(pressEnter: false, check: { nil }, isCurrent: { true }, post: { key, _ in keys.append(key); return true }, afterPaste: { _ in
+        Paste.send(shouldPressEnter: { false }, check: { nil }, isCurrent: { true }, post: { key, _ in keys.append(key); return true }, afterPaste: { _ in
             XCTFail("Paste-only must not schedule Enter")
         }) { delivery, reason in
             XCTAssertEqual(delivery, "pasted"); XCTAssertNil(reason)
@@ -36,7 +36,7 @@ final class PasteTests: XCTestCase {
         var keys: [CGKeyCode] = []
         var pending: (() -> Void)?
         var completed = false
-        Paste.send(pressEnter: true, check: { nil }, isCurrent: { true }, post: { key, flags in
+        Paste.send(shouldPressEnter: { true }, check: { nil }, isCurrent: { true }, post: { key, flags in
             keys.append(key)
             XCTAssertEqual(flags, key == 9 ? .maskCommand : [])
             return true
@@ -48,10 +48,20 @@ final class PasteTests: XCTestCase {
         XCTAssertEqual(keys, [9, 36]); XCTAssertTrue(completed)
     }
 
+    func testNavigatingToExcludedSiteAfterPasteSuppressesReturn() {
+        var allowed = true, keys: [CGKeyCode] = []
+        Paste.send(shouldPressEnter: { allowed }, check: { nil }, isCurrent: { true }, post: { key, _ in
+            keys.append(key); return true
+        }, afterPaste: { callback in allowed = false; callback() }) { delivery, reason in
+            XCTAssertEqual(delivery, "pasted"); XCTAssertNil(reason)
+        }
+        XCTAssertEqual(keys, [9])
+    }
+
     func testBlockedOrFailedPasteNeverSendsEnter() {
         for blocked in [true, false] {
             var keys: [CGKeyCode] = []
-            Paste.send(pressEnter: true, check: { blocked ? .focusChanged : nil }, isCurrent: { true }, post: { key, _ in
+            Paste.send(shouldPressEnter: { true }, check: { blocked ? .focusChanged : nil }, isCurrent: { true }, post: { key, _ in
                 keys.append(key); return false
             }, afterPaste: { _ in XCTFail("Failed paste must not schedule Enter") }) { delivery, reason in
                 XCTAssertEqual(delivery, "clipboard")
@@ -67,7 +77,7 @@ final class PasteTests: XCTestCase {
             var pending: (() -> Void)?
             var reason: PasteBlockReason?
             var current = true
-            Paste.send(pressEnter: true, check: { reason }, isCurrent: { current }, post: { key, _ in
+            Paste.send(shouldPressEnter: { true }, check: { reason }, isCurrent: { current }, post: { key, _ in
                 keys.append(key); return true
             }, afterPaste: { pending = $0 }) { delivery, _ in XCTAssertEqual(delivery, "pasted") }
             if changedFocus { reason = .focusChanged } else { current = false }
