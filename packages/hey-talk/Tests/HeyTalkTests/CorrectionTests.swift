@@ -26,12 +26,7 @@ final class CorrectionTests: XCTestCase {
         let correction = client()
         CorrectionProtocol.handle = {
             $0.respond(status: 200, body: #"""
-                event: response.output_text.delta
-                data: {"type":"response.output_text.delta","delta":" Hello, "}
-
-                data: {"type":"response.output_text.delta","delta":"Kamil.\nSecond line. "}
-
-                data: {"type":"response.output_text.done","text":"Hello, Kamil.\nSecond line."}
+                data: {"type":"response.output_item.done","item":{"type":"function_call","name":"paste","arguments":"{\"text\":\" Hello, Kamil.\\nSecond line. \"}"}}
 
                 data: {"type":"response.completed","response":{"status":"completed","output":[]}}
 
@@ -40,10 +35,30 @@ final class CorrectionTests: XCTestCase {
         let done = expectation(description: "corrected")
         correction.correct("hello kamil", vocabulary: ["Kamil"]) { result in
             XCTAssertTrue(Thread.isMainThread)
-            XCTAssertEqual(try? result.get(), "Hello, Kamil.\nSecond line.")
+            XCTAssertEqual(try? result.get(), .paste("Hello, Kamil.\nSecond line."))
             done.fulfill()
         }
         wait(for: [done], timeout: 2)
+    }
+
+    func testRenameRequiresAnEligibleTargetAndExactlyOneCompletedCall() throws {
+        let call = #"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"rename_thread","arguments":"{\"title\":\"Release notes\"}"}}"# + "\n\n"
+        let end = #"data: {"type":"response.completed","response":{"status":"completed"}}"# + "\n\n"
+        for (allowed, body, succeeds) in [(true, call + end, true), (false, call + end, false),
+                                          (true, call + call + end, false), (true, call, false)] {
+            let correction = client()
+            CorrectionProtocol.handle = { $0.respond(status: 200, body: body) }
+            let done = expectation(description: "rename")
+            correction.correct("rename this thread to Release notes", vocabulary: [], canRename: allowed) { result in
+                XCTAssertEqual(try? result.get(), succeeds ? .rename("Release notes") : nil)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+            let request = try Correction.request(text: "speech", vocabulary: [], canRename: allowed)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
+                           allowed ? ["paste", "rename_thread"] : ["paste"])
+        }
     }
 
     func testHTTPFailureAndTimeoutDoNotReturnReplacementText() {

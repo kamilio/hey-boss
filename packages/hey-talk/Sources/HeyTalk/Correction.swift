@@ -18,6 +18,14 @@ struct CorrectionSettings {
     }
 }
 
+enum CorrectionAction: Equatable {
+    case paste(String), rename(String)
+
+    var text: String {
+        switch self { case .paste(let text), .rename(let text): return text }
+    }
+}
+
 // The existing loopback proxy owns OpenAI credentials. Audio never leaves the Mac.
 final class Correction {
     private let session: URLSession
@@ -30,13 +38,23 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, canRename: Bool = false) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
-        guard let url = bundle.url(forResource: "correction", withExtension: "md") else {
-            throw TalkError("Correction prompt is missing. Reinstall Hey Talk.")
+        func prompt(_ name: String) throws -> String {
+            guard let url = bundle.url(forResource: name, withExtension: "md") else {
+                throw TalkError("Correction prompt is missing. Reinstall Hey Talk.")
+            }
+            let text = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { throw TalkError("Correction prompt is empty.") }
+            return text
         }
-        let prompt = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { throw TalkError("Correction prompt is empty.") }
+        func tool(_ name: String, argument: String) throws -> [String: Any] {
+            ["type": "function", "name": name, "description": try prompt(name), "strict": true,
+             "parameters": ["type": "object", "properties": [argument: ["type": "string"]],
+                            "required": [argument], "additionalProperties": false]]
+        }
+        var tools = [try tool("paste", argument: "text")]
+        if canRename { tools.append(try tool("rename_thread", argument: "title")) }
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -51,26 +69,41 @@ final class Correction {
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false, "stream": true,
-            "instructions": prompt, "input": String(decoding: input, as: UTF8.self)
+            "instructions": try prompt("correction"), "tools": tools, "tool_choice": "required", "parallel_tool_calls": false, "input": String(decoding: input, as: UTF8.self)
         ])
         return request
     }
 
-    private static func correctedText(_ bytes: URLSession.AsyncBytes) async throws -> String {
-        var text = ""
+    private static func action(_ bytes: URLSession.AsyncBytes, canRename: Bool) async throws -> CorrectionAction {
+        var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
             let data = Data(line.dropFirst(5).utf8)
             guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw TalkError("Invalid correction event.")
             }
             switch event["type"] as? String {
-            case "response.output_text.delta":
-                guard let delta = event["delta"] as? String else { throw TalkError("Invalid correction text.") }
-                text += delta
+            case "response.output_item.done":
+                guard let item = event["item"] as? [String: Any] else { throw TalkError("Missing correction item.") }
+                if item["type"] as? String == "reasoning" { continue }
+                guard action == nil, item["type"] as? String == "function_call",
+                      let arguments = item["arguments"] as? String,
+                      let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String],
+                      values.count == 1 else { throw TalkError("Invalid correction tool call.") }
+                switch item["name"] as? String {
+                case "paste":
+                    guard let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+                    else { throw TalkError("Correction returned no text.") }
+                    action = .paste(text)
+                case "rename_thread" where canRename:
+                    guard let title = values["title"]?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+                          title.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil
+                    else { throw TalkError("Invalid thread title.") }
+                    action = .rename(title)
+                default: throw TalkError("Unavailable correction tool.")
+                }
             case "response.completed":
-                let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !result.isEmpty else { throw TalkError("Correction returned no text.") }
-                return result
+                guard let action else { throw TalkError("Correction returned no tool call.") }
+                return action
             case "error", "response.failed", "response.incomplete":
                 throw TalkError("Correction did not finish.")
             default: break
@@ -79,17 +112,17 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, completion: @escaping (Result<String, Error>) -> Void) {
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, canRename: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         task = Task { [session] in
-            let result: Result<String, Error>
+            let result: Result<CorrectionAction, Error>
             do {
-                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext)
+                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, canRename: canRename)
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                 guard (200..<300).contains(response.statusCode) else {
                     throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                 }
-                result = .success(try await Self.correctedText(bytes))
+                result = .success(try await Self.action(bytes, canRename: canRename))
             } catch { result = .failure(error) }
             await MainActor.run { completion(result) }
         }

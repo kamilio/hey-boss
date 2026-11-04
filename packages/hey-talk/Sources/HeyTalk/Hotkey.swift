@@ -70,6 +70,7 @@ final class Hotkey {
 
 enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
+    case renameUnavailable = "rename_unavailable"
     case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
 
@@ -85,6 +86,7 @@ enum PasteBlockReason: String {
         let app = name.isEmpty ? "the original app" : name
         if pasted { return "Pasted in \(app). Press Enter there." }
         switch self {
+        case .renameUnavailable: return "Couldn’t finish renaming the thread. Open History for the title."
         case .accessibility: return "Text copied. Allow automatic paste."
         case .targetClosed: return "Reopen \(app). Press ⌘V."
         case .focusChanged: return "Return to \(app). Press ⌘V."
@@ -104,7 +106,7 @@ enum Paste {
         retry.invalidate()
         return true
     }
-    static func deliver(_ text: String, target: NSRunningApplication?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
+    static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
         func check() -> PasteBlockReason? {
@@ -116,14 +118,49 @@ enum Paste {
         func paste() {
             let board = NSPasteboard.general
             board.clearContents()
-            guard board.setString(text, forType: .string) else { completion("history", .clipboardUnavailable); return }
-            send(shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: { key, flags in
+            guard board.setString(action.text, forType: .string) else { completion("history", .clipboardUnavailable); return }
+            let clipboardVersion = board.changeCount
+            func keypress(_ key: CGKeyCode, _ flags: CGEventFlags) -> Bool {
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
-            },
-                 afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
-                if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
-                else { completion(delivery, reason) }
+            }
+            switch action {
+            case .paste:
+                send(shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: keypress,
+                     afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
+                    if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
+                    else { completion(delivery, reason) }
+                }
+            case .rename(let title):
+                guard isCurrent() else { completion("history", nil); return }
+                if let reason = check() {
+                    if reason == .focusChanged, let onWait { retry(onWait) }
+                    else { completion("clipboard", reason) }
+                    return
+                }
+                Task { @MainActor in
+                    guard let field = originalField, await field.openThreadTitle(isCurrent: isCurrent) else {
+                        completion("clipboard", .renameUnavailable); return
+                    }
+                    for _ in 0..<20 {
+                        try? await Task.sleep(nanoseconds: 40_000_000)
+                        guard isCurrent(), field.app.isActive, board.changeCount == clipboardVersion else { break }
+                        guard let editor = field.focusedThreadTitle() else { continue }
+                        send(shouldPressEnter: { true }, check: {
+                            field.focusedThreadTitle() == editor && board.changeCount == clipboardVersion ? nil : .renameUnavailable
+                        }, isCurrent: isCurrent, post: { key, flags in
+                            let value = SpeechAX.string(editor.element, "AXValue")
+                            if key == 9 && SpeechAX.string(editor.element, "AXSelectedText") != value { return false }
+                            if key == 36 && value != title { return false }
+                            return keypress(key, flags)
+                        }, afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, _ in
+                            if delivery == "submitted" { completion("renamed", nil) }
+                            else { completion("clipboard", .renameUnavailable) }
+                        }
+                        return
+                    }
+                    completion("clipboard", .renameUnavailable)
+                }
             }
         }
         func retry(_ onWait: (Timer) -> Void, restoring field: FocusedInput? = nil) {
@@ -168,7 +205,7 @@ enum Paste {
         }
     }
 
-    private static func post(_ key: CGKeyCode, flags: CGEventFlags, to pid: pid_t) -> Bool {
+    static func post(_ key: CGKeyCode, flags: CGEventFlags, to pid: pid_t) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState),
               let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return false }
