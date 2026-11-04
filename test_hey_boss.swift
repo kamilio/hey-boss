@@ -4849,6 +4849,13 @@ func auditWorkspaceChat(_ root: String) {
     precondition(ui.phase == .idle && ui.process == nil)
     let stopped = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
     precondition(stopped.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Reply stopped before it finished."])
+    let activeMic = ReviewAudio(), lost = "Agent disconnected before reporting completion"
+    ui.connect(activeMic); ui.input.stringValue = value; ui.sendTyped()
+    ui.event(["Message": ["text": value]]); ui.input.stringValue = history[0]
+    ui.event(["error": lost])
+    precondition(ui.phase == .listening && ui.audio === activeMic && ui.process == nil, "A lost reply must not end the conversation")
+    let failed = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+    precondition(failed.rows.suffix(2).map(\.stringValue) == [value, lost] && failed.input.stringValue == history[0])
     ui.selectDirectory(nil)
     precondition(ui.rows.isEmpty && ui.process == nil && ui.directory == nil && ui.audio == nil)
     let end = Date().addingTimeInterval(6)
