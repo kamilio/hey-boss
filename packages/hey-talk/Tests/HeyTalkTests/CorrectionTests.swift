@@ -63,9 +63,9 @@ final class CorrectionTests: XCTestCase {
 
     func testNewThreadToolRequiresEligibleComposerAndBothArguments() throws {
         for (arguments, allowed, expected): ([String: String], Bool, CorrectionAction?) in [
-            (["project": "", "message": "Check publishing."], true, .newThread(project: nil, message: "Check publishing.")),
-            (["project": "hey-boss", "message": ""], true, .newThread(project: "hey-boss", message: "")),
-            (["project": "", "message": "Check publishing."], false, nil),
+            (["project": "", "text": "Check publishing."], true, .newThread(project: nil, text: "Check publishing.")),
+            (["project": "hey-boss", "text": ""], true, .newThread(project: "hey-boss", text: "")),
+            (["project": "", "text": "Check publishing."], false, nil),
             (["project": ""], true, nil)
         ] {
             let correction = client()

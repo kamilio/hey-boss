@@ -14,7 +14,7 @@ final class T3NewThreadTests: XCTestCase {
             correction.correct("So start a new thread. And then I want to check whether publishing pages is working.",
                                vocabulary: [], threadActions: true) { continuation.resume(with: $0) }
         }
-        guard case .newThread(nil, let message) = action, message.localizedCaseInsensitiveContains("publishing") else { return XCTFail("Did not route the dictated task") }
+        guard case .newThread(nil, let text) = action, text.localizedCaseInsensitiveContains("publishing") else { return XCTFail("Did not route the dictated task") }
         let done = expectation(description: "pasted in draft")
         Paste.deliver(action, target: field.app, originalField: field, shouldPressEnter: { false }, returnToField: nil,
                       targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
@@ -24,7 +24,7 @@ final class T3NewThreadTests: XCTestCase {
         for _ in 0..<30 {
             try await Task.sleep(nanoseconds: 50_000_000)
             if let draft = FocusedInput.current(bundleIDs: ["com.t3tools.t3code"]), draft.document?.hasPrefix("t3code://app/#/draft/") == true,
-               SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines) == message {
+               SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines) == text {
                 // Undo just the test paste before returning to the source thread.
                 _ = Paste.post(6, flags: .maskCommand, to: draft.app.processIdentifier)
                 try await Task.sleep(nanoseconds: 100_000_000)
