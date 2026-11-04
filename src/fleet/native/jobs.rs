@@ -215,10 +215,23 @@ impl WorkerJobs {
     pub(crate) fn tick(&mut self) -> Result<()> {
         self.idle();
         if self.checked.elapsed() >= Duration::from_secs(60) {
-            self.ctx.db()?.execute(
-                "UPDATE local_job_workers SET readiness=?2 WHERE worker_id=?1",
-                params![self.worker, crate::jobs::ready::inspect().to_string()],
-            )?;
+            // Authentication helpers may wait on the network. Keep worker
+            // heartbeats and dispatch responsive while they run.
+            let ctx = self.ctx.clone();
+            let worker = self.worker.clone();
+            self.handles.push(std::thread::spawn(move || {
+                let readiness = crate::jobs::ready::inspect().to_string();
+                let result = (|| -> Result<()> {
+                    ctx.db()?.execute(
+                        "UPDATE local_job_workers SET readiness=?2 WHERE worker_id=?1",
+                        params![worker, readiness],
+                    )?;
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    eprintln!("Worker readiness check failed: {error}");
+                }
+            }));
             self.checked = std::time::Instant::now();
         }
         self.handles.extend(tick_worker(&self.ctx, &self.worker)?);
