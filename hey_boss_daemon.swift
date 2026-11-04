@@ -7255,6 +7255,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var selected = UUID()
         var draftDirectory: URL?
         var draftCapture: Capture?
+        var draftText: String?
         var chats: [Chat] = []
     }
     private var library = Library()
@@ -7284,6 +7285,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private struct Saved: Codable {
         let messages: [Message]
         var pendingCapture: Capture?
+        var draftText: String?
         let directory: URL?
         let thread: String?
         let transcript: Transcript?
@@ -8002,6 +8004,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func writeLibrary() throws {
         library.draftDirectory = messages.isEmpty ? directory : nil
         library.draftCapture = messages.isEmpty ? pendingCapture : nil
+        library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
     }
     @discardableResult private func save() -> Bool {
@@ -8009,7 +8012,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         do {
             try FileManager.default.createDirectory(at: saveURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if !messages.isEmpty {
-                let saved = Saved(messages: messages, pendingCapture: pendingCapture, directory: directory, thread: thread, transcript: model?.transcript)
+                let saved = Saved(messages: messages, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, transcript: model?.transcript)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
@@ -8017,7 +8020,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func apply(_ saved: Saved) {
         directory = saved.directory; thread = saved.thread; model = saved.transcript.map { LanguageModelSession(transcript: $0) }
-        pendingCapture = saved.pendingCapture
+        pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
         for message in saved.messages { append(message.text, from: message.speaker, capture: message.capture) }
         refreshScope()
         state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "On-device chat" : "Codex workspace")
@@ -8031,7 +8034,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if library.chats.contains(where: { $0.id == library.selected }) {
                     apply(try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(library.selected))))
                 } else {
-                    pendingCapture = library.draftCapture; directory = library.draftDirectory; refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
+                    pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
+                    refreshScope(); state(.idle, directory == nil ? "On-device chat" : "Codex workspace")
                 }
             } else {
                 // Preserve the single conversation saved by earlier versions.
