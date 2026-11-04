@@ -4419,6 +4419,17 @@ import FoundationModels
 @available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    func pipeCount() -> Int {
+        var files = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)) / MemoryLayout<proc_fdinfo>.stride)
+        let bytes = files.withUnsafeMutableBytes { proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
+        return files.prefix(Int(bytes) / MemoryLayout<proc_fdinfo>.stride).filter { $0.proc_fdtype == PROX_FDTYPE_PIPE }.count
+    }
+    let beforeVoice = pipeCount()
+    let stoppedAudio = ReviewAudio()
+    _ = try! stoppedAudio.listen(cli: cli); stoppedAudio.readerVoice = ReaderVoice(); stoppedAudio.stop()
+    let releaseDeadline = Date().addingTimeInterval(5)
+    while pipeCount() > beforeVoice && Date() < releaseDeadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
+    precondition(pipeCount() <= beforeVoice, "Stopping voice must close the detector and speech pipes without waiting for a window event")
     let saved = URL(fileURLWithPath: root).appendingPathComponent("chat.json")
     let ui = VoiceConversation(cli: cli, saveURL: saved)
     ui.state(.thinking, "Thinking…")
