@@ -4428,6 +4428,15 @@ func auditConversation(_ root: String) {
     ui.event(["TurnCompleted": ["status": "Completed", "output": "A moat protects a castle."]])
     precondition(ui.rows.count == 1 && ui.rows[0].stringValue == "A moat protects a castle.")
     ui.clearTurns()
+    ui.window.orderBack(nil)
+    for i in 1...24 { ui.append("Earlier message \(i)", from: "You") }
+    ui.event(["TextDelta": ["text": "Reading position"]])
+    precondition(ui.turns.bounds.maxY <= ui.scroll.documentVisibleRect.maxY + 2, "Follow incoming text while at the end")
+    ui.scroll.contentView.scroll(to: .zero); ui.scroll.reflectScrolledClipView(ui.scroll.contentView)
+    precondition(ui.turns.bounds.height > ui.scroll.documentVisibleRect.height * 2)
+    ui.event(["Message": ["text": "Reading position stays here."]])
+    precondition(ui.scroll.documentVisibleRect.minY < 2, "Streaming must not pull you away from an earlier message")
+    ui.clearTurns()
     let captured = "## Grocery list\nThe fruit on this page is pineapple."
     ui.openWithContext(source: "Test Editor", text: captured)
     precondition(ui.phase == .starting)
