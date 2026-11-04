@@ -69,6 +69,7 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SOL"] { auditSolChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
@@ -4589,53 +4590,16 @@ func auditConversation(_ root: String) {
         let chat = VoiceConversation(cli: cli, saveURL: url), voice = ReviewAudio()
         let capture = VoiceConversation.Capture(source: "Test Editor", text: captured)
         chat.selectDirectory(nil, capture: capture); chat.connect(voice); chat.respond("Hello")
-        let prior = chat.model!.transcript
         chat.reply!.cancel()
-        chat.generationFailed(NSError(domain: "FoundationModels.LanguageModelSession.GenerationError", code: -1),
-                              text: "Hello", capture: capture, question: "Hello", prior: prior)
+        chat.generationFailed(StorageError(description: "Sol couldn’t finish this reply."))
         precondition(chat.rows.last!.stringValue.contains("couldn’t finish") && chat.audio === voice)
-        chat.listenNext.performClick(nil)
-        precondition(chat.phase == .listening && !voice.stopped)
         chat.window.close()
         let reopened = VoiceConversation(cli: cli, saveURL: url)
-        precondition(reopened.input.stringValue == "Hello" && !reopened.contextChip.isHidden && reopened.model?.transcript == prior)
+        precondition(reopened.input.stringValue == "Hello" && !reopened.contextChip.isHidden)
         precondition(reopened.rows.map(\.stringValue) == chat.rows.map(\.stringValue))
-    }
-    if #available(macOS 26.4, *) {
-        let longChat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("long/current.json"))
-        let old = String(repeating: " Old material.", count: 6000)
-        let prompt = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Earlier notes"))]))
-        let response = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: old))]))
-        let recent = Transcript.Entry.prompt(.init(segments: [.text(.init(content: captured))]))
-        let ack = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "OK."))]))
-        let hello = Transcript.Entry.prompt(.init(segments: [.text(.init(content: "Hello"))]))
-        let greeting = Transcript.Entry.response(.init(assetIDs: [], segments: [.text(.init(content: "Hello."))]))
-        longChat.model = LanguageModelSession(transcript: Transcript(entries: [prompt, response, recent, ack, hello, greeting]))
-        longChat.append(old, from: "Hey Boss")
-        longChat.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
-        longChat.sendTyped()
-        wait("long conversation") { longChat.phase == .idle }
-        precondition(longChat.model!.transcript.contains(recent), "Only the first exchange needs to be removed to make room")
-        precondition(longChat.status.stringValue == "On-device chat" && longChat.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), longChat.status.stringValue)
-        precondition(longChat.rows.first!.stringValue == old)
-        let before = longChat.model!.transcript
-        longChat.input.stringValue = old; longChat.sendTyped(); longChat.stop("Reply stopped")
-        longChat.input.stringValue = "Which fruit did I mention earlier? Answer in one word."; longChat.sendTyped()
-        wait("follow-up after stopping an oversized message") { longChat.phase == .idle }
-        precondition(longChat.model!.transcript.starts(with: before), "An unanswered message too large to fit must not evict earlier exchanges")
-        let afterFollowUp = longChat.model!.transcript
-        longChat.input.stringValue = old
-        longChat.sendTyped()
-        wait("oversized message") { longChat.phase == .idle }
-        precondition(longChat.input.stringValue == old && longChat.model?.transcript == afterFollowUp, "An oversized message must leave both the draft and the prior conversation intact")
-        longChat.selectDirectory(nil, capture: .init(source: "Notes", text: old))
-        longChat.input.stringValue = "Earlier notes"; longChat.sendTyped()
-        wait("oversized capture") { longChat.phase == .idle }
-        precondition(longChat.input.stringValue == "Earlier notes" && !longChat.contextChip.isHidden && longChat.contextChip.title == "Notes")
-        precondition(longChat.rows.last?.stringValue.contains("shorter selection") == true, "Keep the reason for the missing reply in the conversation")
-        longChat.sendTyped(); longChat.input.stringValue = "Next draft"
-        wait("keep newer draft") { longChat.phase == .idle }
-        precondition(longChat.input.stringValue == "Next draft")
+        let request = try! JSONSerialization.jsonObject(with: reopened.conversationRequest().httpBody!) as! [String: Any]
+        let history = request["input"] as! [[String: String]]
+        precondition(history.count == 1 && history[0]["role"] == "user" && history[0]["content"]!.contains(captured.components(separatedBy: .newlines).last!))
     }
     // Hold back completion: a real Supertonic word must light up before
     // the second paragraph or the final Codex message has arrived.
@@ -4750,7 +4714,7 @@ func auditConversation(_ root: String) {
     let oldAudio = ReviewAudio(); resumed.connect(oldAudio)
     resumed.openWithContext(source: "Another Window", text: "Different contents.")
     precondition(oldAudio.stopped && resumed.phase == .starting && resumed.contextChip.title == "Another Window")
-    precondition(resumed.rows.isEmpty && resumed.model == nil && resumed.historyList.numberOfRows == 1)
+    precondition(resumed.rows.isEmpty && resumed.historyList.numberOfRows == 1)
     let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: resumed.window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
     resumed.window.sendEvent(escape)
     precondition(resumed.phase == .idle && resumed.audio == nil && resumed.window.isVisible)
@@ -4778,7 +4742,7 @@ func auditConversation(_ root: String) {
     library.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
     library.sendTyped(); wait("recalled from sidebar") { library.phase == .idle }
     precondition(library.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
-    let prior = Array(library.model!.transcript), count = library.rows.count
+    let prior = library.rows.map(\.stringValue), count = library.rows.count
     let question = "Can you tell me about Edge Compute?"
     library.input.stringValue = question; library.sendTyped()
     wait("partial answer to stop") { library.rows.count == count + 2 }
@@ -4786,12 +4750,12 @@ func auditConversation(_ root: String) {
     let partial = library.rows.last!.stringValue
     library.window.sendEvent(escape)
     let stopped = VoiceConversation(cli: cli, saveURL: saved)
-    let history = Array(stopped.model!.transcript)
     precondition(stopped.rows.suffix(2).map(\.stringValue) == [partial, "Reply stopped before it finished."])
-    precondition(history.count == prior.count + 2 && Array(history.dropLast(2)) == prior)
-    guard case .prompt(let asked) = history[prior.count], case .text(let request) = asked.segments.first,
-          case .response(let answer) = history.last, case .text(let written) = answer.segments.first else { preconditionFailure("Missing interrupted exchange") }
-    precondition(request.content == question && markdown(written.content, size: 15, color: .labelColor).string == partial)
+    precondition(stopped.rows.dropLast(3).map(\.stringValue) == prior)
+    let request = try! JSONSerialization.jsonObject(with: stopped.conversationRequest().httpBody!) as! [String: Any]
+    let history = request["input"] as! [[String: String]]
+    precondition(history.suffix(2).map { $0["role"]! } == ["user", "assistant"])
+    precondition(history[history.count - 2]["content"] == question && markdown(history.last!["content"]!, size: 15, color: .labelColor).string == partial)
     library.window.close()
     ui.newConversation()
     let fresh = ReviewAudio()
@@ -4806,10 +4770,9 @@ func auditConversation(_ root: String) {
     precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1 && ui.input.stringValue == "Follow-up draft")
     let reopened = VoiceConversation(cli: cli, saveURL: saved)
     for chat in [interrupted, reopened] {
-        guard case .prompt(let question) = chat.model?.transcript.last, case .text(let submitted) = question.segments.first else {
-            preconditionFailure("A submitted question must be available to the model after relaunch, including before the first reply")
-        }
-        precondition(submitted.content == "Hello")
+        let request = try! JSONSerialization.jsonObject(with: chat.conversationRequest().httpBody!) as! [String: Any]
+        let history = request["input"] as! [[String: String]]
+        precondition(history.last == ["role": "user", "content": "Hello"], "Keep an unanswered message available to Sol after relaunch")
     }
     precondition(reopened.input.stringValue == "Follow-up draft")
     print("PASS conversation: two detected speech turns, local transcription, model recall, played replies, no self-interruption, closed microphone")
@@ -5003,3 +4966,75 @@ func auditQuickIssueController() {
     precondition(voice.count == 3, "Dismissed loading panels cannot start recording")
     print("Passed: controller project frequency, wraparound, remembered selection, voice start/stop, tagged submission, queue placement and errors")
 }
+
+#if canImport(FoundationModels)
+@available(macOS 26, *)
+func auditSolChat(_ root: String) {
+    let saved = URL(fileURLWithPath: root).appendingPathComponent("stream/current.json")
+    let chat = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+    precondition(chat.status.stringValue == "GPT-6.1 Sol", "Ordinary chats must use GPT-6.1 Sol")
+    let audio = ReviewAudio()
+    audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0; try! audio.engine.start()
+    var played = 0
+    chat.connect(audio); chat.state(.thinking, "Thinking…")
+    let started = audio.playbackStarted
+    audio.playbackStarted = { played += 1; started() }
+    func wait(_ description: String, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(90)
+        while !condition(), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(condition(), description)
+    }
+    chat.event(["TextDelta": ["text": "First sentence. Another sentence"]])
+    precondition(chat.rows.last?.stringValue == "First sentence.", "Speak the opening sentence while the rest of the paragraph arrives")
+    wait("Speak the opening sentence before the full response arrives") { played > 0 }
+    chat.event(["TextDelta": ["text": ".\r\n"]])
+    precondition(chat.rows.last?.stringValue == "First sentence.", "Wait for the rest of the first paragraph")
+    chat.event(["TextDelta": ["text": "\r\n"]])
+    precondition(chat.rows.last?.stringValue == "First sentence. Another sentence.", "Recognize a split CRLF paragraph boundary")
+    chat.event(["TextDelta": ["text": "Last paragraph without a trailing newline."]])
+    chat.event(["TurnCompleted": ["status": "Completed", "output": "First sentence. Another sentence.\n\nLast paragraph without a trailing newline."]])
+    precondition(chat.rows.last!.stringValue.contains("Last paragraph"))
+    chat.window.close()
+    print("PASS streaming: opening sentence spoken, split newlines, final paragraph")
+    let legacy = URL(fileURLWithPath: root).appendingPathComponent("legacy.json")
+    let fixture: [String: Any] = ["messages": [
+        ["speaker": "You", "text": "Which fruit is on this page? Answer in one word.", "capture": ["source": "Test Editor", "text": "The fruit on this page is pineapple."]],
+        ["speaker": "Hey Boss", "text": "Pineapple."],
+        ["speaker": "Conversation", "text": "Reply stopped before it finished."]
+    ], "transcript": ["type": "FoundationModels.Transcript", "version": 1]]
+    try! JSONSerialization.data(withJSONObject: fixture).write(to: legacy)
+    let restored = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: legacy)
+    let request = try! restored.conversationRequest()
+    let body = try! JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+    precondition(request.url?.absoluteString == "http://127.0.0.1:8080/v1/responses" && request.httpMethod == "POST")
+    precondition(body["model"] as? String == "gpt-6.1-sol" && body["stream"] as? Bool == true && body["store"] as? Bool == false, "Use the configured alias through Hey Proxy")
+    precondition(body["tools"] == nil)
+    let history = body["input"] as! [[String: String]]
+    precondition(history.map { $0["role"]! } == ["user", "assistant"] && history[0]["content"]!.contains("> The fruit on this page is pineapple."), "Migrate saved chat history and captures without sending UI errors")
+    precondition(try! !restored.responseEvent(["type": "response.output_text.delta", "delta": "A partial reply"]))
+    for kind in ["error", "response.failed", "response.incomplete"] {
+        do { _ = try restored.responseEvent(["type": kind]); preconditionFailure("A failed response must not count as completed") }
+        catch { }
+    }
+    restored.generationFailed(StorageError(description: "Sol disconnected before finishing this reply."))
+    restored.window.close()
+    let recovered = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: legacy)
+    precondition(recovered.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Sol disconnected before finishing this reply."])
+    recovered.window.close()
+    print("PASS Sol proxy request, alias, legacy history, captures, failed streams and partial-reply recovery")
+    if ProcessInfo.processInfo.environment["HEY_BOSS_SOL_LIVE"] == "1" {
+        restored.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
+        restored.sendTyped()
+        wait("Real Sol reply through the configured proxy") { restored.phase == .idle }
+        precondition(restored.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), restored.rows.last!.stringValue)
+        restored.show(); restored.window.displayIfNeeded()
+        let view = restored.window.contentView!
+        let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: root).appendingPathComponent("sol-chat.png"))
+        restored.window.close()
+        print("PASS live proxy conversation: remembered fruit from saved history")
+    }
+}
+#endif
