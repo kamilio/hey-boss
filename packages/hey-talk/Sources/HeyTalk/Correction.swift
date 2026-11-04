@@ -21,7 +21,7 @@ struct CorrectionSettings {
 // The existing loopback proxy owns OpenAI credentials. Audio never leaves the Mac.
 final class Correction {
     private let session: URLSession
-    private var task: URLSessionDataTask?
+    private var task: Task<Void, Never>?
 
     init(session: URLSession = URLSession(configuration: {
         let configuration = URLSessionConfiguration.ephemeral
@@ -44,45 +44,49 @@ final class Correction {
         if let appContext { values["app_context"] = appContext }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false,
+            "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false, "stream": true,
             "instructions": prompt, "input": String(decoding: input, as: UTF8.self)
         ])
         return request
     }
 
-    static func text(from data: Data) throws -> String {
-        guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              response["status"] as? String == "completed",
-              let output = response["output"] as? [[String: Any]] else {
-            throw TalkError("Correction did not finish.")
+    private static func correctedText(_ bytes: URLSession.AsyncBytes) async throws -> String {
+        var text = ""
+        for try await line in bytes.lines where line.hasPrefix("data:") {
+            let data = Data(line.dropFirst(5).utf8)
+            guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw TalkError("Invalid correction event.")
+            }
+            switch event["type"] as? String {
+            case "response.output_text.delta":
+                guard let delta = event["delta"] as? String else { throw TalkError("Invalid correction text.") }
+                text += delta
+            case "response.completed":
+                let result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !result.isEmpty else { throw TalkError("Correction returned no text.") }
+                return result
+            case "error", "response.failed", "response.incomplete":
+                throw TalkError("Correction did not finish.")
+            default: break
+            }
         }
-        let text = output.filter { $0["type"] as? String == "message" && $0["role"] as? String == "assistant" }
-            .flatMap { $0["content"] as? [[String: Any]] ?? [] }
-            .filter { $0["type"] as? String == "output_text" }
-            .compactMap { $0["text"] as? String }.joined()
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw TalkError("Correction returned no text.") }
-        return text
+        throw TalkError("Correction did not finish.")
     }
 
     func correct(_ text: String, vocabulary: [String], appContext: String? = nil, completion: @escaping (Result<String, Error>) -> Void) {
-        do {
-            let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext)
-            task = session.dataTask(with: request) { data, response, error in
-                let result = Result<String, Error> {
-                    if let error { throw error }
-                    guard let response = response as? HTTPURLResponse, let data else {
-                        throw TalkError("Correction is unavailable.")
-                    }
-                    guard (200..<300).contains(response.statusCode) else {
-                        throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
-                    }
-                    return try Self.text(from: data)
+        task = Task { [session] in
+            let result: Result<String, Error>
+            do {
+                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext)
+                let (bytes, response) = try await session.bytes(for: request)
+                guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
+                guard (200..<300).contains(response.statusCode) else {
+                    throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                 }
-                DispatchQueue.main.async { completion(result) }
-            }
-            task?.resume()
-        } catch { completion(.failure(error)) }
+                result = .success(try await Self.correctedText(bytes))
+            } catch { result = .failure(error) }
+            await MainActor.run { completion(result) }
+        }
     }
     func cancel() { task?.cancel(); task = nil }
     deinit { task?.cancel() }
