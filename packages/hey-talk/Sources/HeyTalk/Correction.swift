@@ -33,7 +33,7 @@ final class Correction {
 
     init(session: URLSession = URLSession(configuration: {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForResource = 8
+        configuration.timeoutIntervalForResource = 30
         configuration.connectionProxyDictionary = [:]
         return configuration
     }())) { self.session = session }
