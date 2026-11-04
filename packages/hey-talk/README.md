@@ -2,7 +2,7 @@
 
 Native macOS dictation, controlled from the CLI. Press Hyper+R to start;
 press it again to stop and paste. Hyper+E toggles Auto Submit for the focused website or desktop app:
-on sends Enter after pasting; off only pastes. Lattice is paste-only by default.
+on sends Enter after pasting; off only pastes. `latticehq.com` is paste-only by default.
 Caps Lock must already be mapped
 to Hyper (Control + Command + Option + Shift). Click the pill to toggle recording,
 drag to move it, or press Esc to discard. Clicking the pill follows the same
@@ -237,7 +237,7 @@ hey-talk enter-exceptions sites remove example.org
 
 Changes apply immediately and persist across restarts in the app's macOS
 preferences. Website rules match a hostname and its subdomains across browsers.
-The defaults are `lattice.com` and `latticehq.com`. Hyper+E changes the current
+The default is `latticehq.com`. Hyper+E changes the current
 host; use the CLI to remove a parent-domain or browser-wide rule. On a browser
 page whose host cannot be identified, Hey Talk only pastes.
 

@@ -5,7 +5,7 @@ struct EnterExceptions {
     private let defaults: UserDefaults
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var bundleIDs: [String] { (defaults.stringArray(forKey: "enterExceptions") ?? []).sorted() }
-    var sites: [String] { (defaults.stringArray(forKey: "enterExceptionSites") ?? ["lattice.com", "latticehq.com"]).sorted() }
+    var sites: [String] { (defaults.stringArray(forKey: "enterExceptionSites") ?? ["latticehq.com"]).sorted() }
 
     func excludedSite(_ host: String) -> String? {
         let name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
