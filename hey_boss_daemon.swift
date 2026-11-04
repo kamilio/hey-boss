@@ -983,10 +983,21 @@ func markdownLinkURL(_ link: URL) -> URL? {
 func markdown(_ source: String, size: CGFloat, color: NSColor) -> NSAttributedString {
     let output = NSMutableAttributedString(string: "")
     let lines = source.components(separatedBy: "\n")
-    var fenced = false
+    var fence: (ticks: Int, indent: Int)?
     for (index, original) in lines.enumerated() {
-        if original.hasPrefix("```") { fenced.toggle(); continue }
-        var line = original
+        let indent = original.prefix(while: { $0 == " " }).count
+        let trimmed = original.dropFirst(indent)
+        if trimmed.hasPrefix("```") {
+            let ticks = trimmed.prefix(while: { $0 == "`" }).count, rest = trimmed.dropFirst(ticks)
+            if let open = fence {
+                if ticks >= open.ticks, indent <= max(3, open.indent), rest.allSatisfy(\.isWhitespace) { fence = nil; continue }
+            } else if !rest.contains("`"), indent <= 3 ||
+                        lines[..<index].last(where: { !$0.allSatisfy(\.isWhitespace) })?.range(of: #"^ *(?:[-+*]|\d+[.)])\s+"#, options: .regularExpression) != nil {
+                fence = (ticks, indent); continue
+            }
+        }
+        let fenced = fence != nil
+        var line = fence.map { String(original.dropFirst(min($0.indent, indent))) } ?? original
         var font = NSFont.systemFont(ofSize: size)
         let hashes = line.prefix(while: { $0 == "#" }).count
         if !fenced && hashes > 0 && hashes <= 6 && line.dropFirst(hashes).hasPrefix(" ") {

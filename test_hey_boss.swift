@@ -4439,6 +4439,12 @@ func auditConversation(_ root: String) {
     let selected = ui.rows[0].currentEditor() as! NSTextView
     precondition((selected.attributedString().attribute(.link, at: 0, effectiveRange: nil) as? URL)?.absoluteString == "https://example.com", "The field editor must preserve citation destinations")
     ui.window.makeFirstResponder(nil); ui.clearTurns()
+    ui.append("1. Run the code:\n\n   ````text\n   if ready:\n       print(\"**ok**\")\n   ```\n   ````\nDone.", from: "Hey Boss")
+    let code = ui.rows[0].attributedStringValue
+    precondition(code.string == "1. Run the code:\n\nif ready:\n    print(\"**ok**\")\n```\nDone.")
+    let word = (code.string as NSString).range(of: "print")
+    precondition((code.attribute(.font, at: word.location, effectiveRange: nil) as? NSFont)?.fontDescriptor.symbolicTraits.contains(.monoSpace) == true)
+    ui.clearTurns()
     for i in 1...24 { ui.append("Earlier message \(i)", from: "You") }
     ui.event(["TextDelta": ["text": "Reading position"]])
     precondition(ui.turns.bounds.maxY <= ui.scroll.documentVisibleRect.maxY + 2, "Follow incoming text while at the end")
