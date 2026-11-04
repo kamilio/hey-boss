@@ -4651,7 +4651,8 @@ func auditConversation(_ root: String) {
     precondition(ui.rows.last!.stringValue.contains("The early words"))
     let repeatedList = String(repeating: "* Apples\n* Oranges\n", count: 12)
     let numbered = (1...21).map { "\($0). " + ["Pears", "Limes", "Plums"][($0-1)%3] }.joined(separator: "\n")
-    let full = first + "\n\nAnother paragraph\n\n" + repeatedList + numbered + "\nLast line."
+    let table = "\n| Part | Use |\n|---|---|\n| Servo | Gate |\n```markdown\n|---|---|\n```\n"
+    let full = first + "\n\nAnother paragraph\n\n" + repeatedList + numbered + table + "Last line."
     ui.event(["TextDelta": ["text": "\n\n"]])
     wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
@@ -4659,11 +4660,14 @@ func auditConversation(_ root: String) {
     precondition(ui.listenNext.title == "Skip reading")
     precondition(ui.send.isEnabled, "A typed follow-up can skip the remaining playback once the answer is complete")
     wait("second paragraph highlight") { highlighted() == "Another" }
+    wait("table header") { highlighted() == "Part" }
+    let atHeader = playedPassages
     wait("distinct text after repeated bullets") { highlighted() == "Last" }
+    precondition(playedPassages - atHeader == 3, "Speak the table contents and literal code, not the table divider")
     wait("all streamed speech drained") { ui.phase == .listening }
     precondition(highlighted() == nil && ui.rows.count == 2 && ui.rows.last!.stringValue.hasSuffix("Last line."))
     let visible = ui.rows.last!.stringValue
-    precondition(visible.components(separatedBy: "•  Apples").count == 13 && visible.contains("21. Plums") && playedPassages < 25, "Keep the full list visible without repeatedly speaking the same items")
+    precondition(visible.components(separatedBy: "•  Apples").count == 13 && visible.contains("21. Plums") && playedPassages < 29, "Keep the full list visible without repeatedly speaking the same items")
     audio.playbackStarted = playbackStarted
     let microphone = DispatchQueue(label: "conversation-audit.microphone")
     func feed(_ name: String, finishManually: Bool = false) {
