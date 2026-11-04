@@ -4846,7 +4846,13 @@ func auditWorkspaceChat(_ root: String) {
     ui.stop("Ready")
     for kind in ["TextDelta", "Message"] {
         ui.input.stringValue = "Hello"; ui.sendTyped()
-        ui.event([kind: ["text": "A partial reply"]]); ui.toggle()
+        ui.event([kind: ["text": "A partial reply"]])
+        if kind == "Message" {
+            let reopened = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+            precondition(ui.rows.last?.stringValue == "A partial reply" && reopened.process == nil)
+            precondition(reopened.rows.suffix(2).map(\.stringValue) == ["A partial reply", "No final workspace reply was saved."], "Recover completed progress if the app exits during a workspace turn")
+        }
+        ui.toggle()
         precondition(ui.phase == .idle && ui.process == nil)
         let stopped = VoiceConversation(cli: env["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
         precondition(stopped.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Reply stopped before it finished."], "Keep the interruption after a progress message")
