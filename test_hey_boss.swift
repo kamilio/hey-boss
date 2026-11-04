@@ -4643,6 +4643,20 @@ func auditConversation(_ root: String) {
     library.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
     library.sendTyped(); wait("recalled from sidebar") { library.phase == .idle }
     precondition(library.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"))
+    let prior = Array(library.model!.transcript), count = library.rows.count
+    let question = "Can you tell me about Edge Compute?"
+    library.input.stringValue = question; library.sendTyped()
+    wait("partial answer to stop") { library.rows.count == count + 2 }
+    precondition(library.phase == .thinking)
+    let partial = library.rows.last!.stringValue
+    library.window.sendEvent(escape)
+    let stopped = VoiceConversation(cli: cli, saveURL: saved)
+    let history = Array(stopped.model!.transcript)
+    precondition(stopped.rows.suffix(2).map(\.stringValue) == [partial, "Reply stopped before it finished."])
+    precondition(history.count == prior.count + 2 && Array(history.dropLast(2)) == prior)
+    guard case .prompt(let asked) = history[prior.count], case .text(let request) = asked.segments.first,
+          case .response(let answer) = history.last, case .text(let written) = answer.segments.first else { preconditionFailure("Missing interrupted exchange") }
+    precondition(request.content == question && markdown(written.content, size: 15, color: .labelColor).string == partial)
     library.window.close()
     ui.newConversation()
     let fresh = ReviewAudio()
