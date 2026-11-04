@@ -7992,6 +7992,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         return LanguageModelSession(transcript: Transcript(entries: entries))
     }
+    private static let repeatedDigit = try! NSRegularExpression(pattern: #"([0-9])\1{63,}"#)
     // An opening sentence of plain prose can play before the paragraph ends.
     // Wait for a paragraph boundary when the opening contains Markdown.
     private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
@@ -8048,6 +8049,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         if let (field, range) = lit, field === label { highlight(label, range) }
         if audio != nil {
+            var runs = Self.repeatedDigit.matches(in: rendered.string, range: NSRange(location: offset, length: visible.length - offset)).makeIterator()
+            var run = runs.next()?.range
             var checkedThrough = offset
             while let span = SpokenReview.passage(in: visible, from: offset) {
                 let item = visible.substring(with: span); offset = NSMaxRange(span)
@@ -8073,7 +8076,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                         narratedItems[body, default: 0] += 1
                     } else { narratedItems.removeAll() }
                 }
-                speech.append((label, span, item))
+                while let r = run, NSMaxRange(r) <= span.location { run = runs.next()?.range }
+                if let r = run, r.location < offset {
+                    // A generated URL or numeric identifier can repeat a digit across many passages.
+                    if span.location < r.location {
+                        let prefix = NSRange(location: span.location, length: r.location - span.location)
+                        speech.append((label, prefix, visible.substring(with: prefix)))
+                    }
+                    let digit = visible.substring(with: NSRange(location: r.location, length: 1))
+                    speech.append((label, r, "\(digit) repeated \(r.length) times"))
+                    offset = NSMaxRange(r); run = runs.next()?.range
+                } else { speech.append((label, span, item)) }
             }
         }
         if follow { revealLatest() }
@@ -8105,9 +8118,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let audio, !speech.isEmpty {
             let part = speech.removeFirst()
             reading = true
+            let speaksCount = part.text.utf16.count != part.span.length
             audio.speak(part.text, following: speech.prefix(3).map(\.text), highlight: { [weak self] word in
-                guard NSMaxRange(word) <= part.span.length else { return }
-                self?.highlight(part.label, NSRange(location: part.span.location + word.location, length: word.length))
+                guard let self, NSMaxRange(word) <= part.span.length else { return }
+                let span = speaksCount ? part.span : NSRange(location: part.span.location + word.location, length: word.length)
+                if self.lit?.0 !== part.label || self.lit?.1 != span { self.highlight(part.label, span) }
             }, finished: { [weak self] in
                 guard let self else { return }
                 self.highlight(part.label, nil); self.reading = false; self.playNext()
