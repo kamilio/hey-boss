@@ -4495,6 +4495,24 @@ func auditConversation(_ root: String) {
     audio.conversation = true
     let writer = try! audio.listen(cli: cli)
     ui.connect(audio)
+    // Tail echo alone must not open the microphone. An utterance that continues
+    // past playback, however, should keep the words spoken before Listening.
+    let preRoll = Data(repeating: 1, count: 640 * 20), silence = Data(count: 640 * 30)
+    for continued in [false, true] {
+        ui.state(.speaking, "Speaking")
+        ui.receive(.began); ui.receive(.pcm(preRoll)); ui.receive(.candidate)
+        precondition(ui.phase == .speaking && ui.recording == nil)
+        ui.state(.listening, "Listening"); ui.receive(.pcm(silence))
+        precondition(ui.phase == .listening && ui.recording == nil)
+        if continued {
+            ui.receive(.candidate)
+            precondition(ui.phase == .recording && ui.recording == preRoll + silence)
+            ui.recording = nil; ui.state(.listening, "Listening")
+        } else {
+            ui.receive(.ended); ui.receive(.candidate)
+            precondition(ui.phase == .listening && ui.recording == nil)
+        }
+    }
     func wait(_ step: String, _ check: () -> Bool) {
         let deadline = Date().addingTimeInterval(70)
         while !check(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }

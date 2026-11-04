@@ -7323,6 +7323,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var audio: ReviewAudio?
     var model: LanguageModelSession?
     var recording: Data?
+    private var playbackOverlap: Data?
+    private var bytesBeforeListening = 0
     var decoding: SFSpeechRecognitionTask?
     var timeout: Timer?
     var reply: Task<Void, Never>?
@@ -7549,6 +7551,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func state(_ next: Phase, _ message: String) {
         if phase != next {
+            if phase == .speaking && next == .listening {
+                bytesBeforeListening = playbackOverlap?.count ?? 0
+            } else {
+                playbackOverlap = nil
+            }
             ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): \(String(describing: self.phase), privacy: .public) → \(String(describing: next), privacy: .public)")
         }
         phase = next; status.stringValue = message
@@ -7619,14 +7626,31 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func receive(_ event: ReviewAudio.Event) {
         guard audio != nil else { return }
         switch event {
+        case .began where phase == .speaking: playbackOverlap = Data()
         case .began where phase == .listening:
-            recording = Data(); state(.recording, "Pause or Hyper+R to send · Esc to cancel")
+            beginRecording(Data())
+        case .candidate where phase == .listening:
+            // Echo can trip the detector during playback. Require a fresh voiced
+            // frame at least 560 ms into listening before accepting the overlap.
+            if let playbackOverlap, playbackOverlap.count - bytesBeforeListening >= 560 * 32 {
+                beginRecording(playbackOverlap)
+            }
         case .pcm(let pcm) where phase == .recording:
             recording!.append(pcm); meter.capture(pcm)
             if recording!.count >= 32000 * 120 { endRecording("duration limit") }
+        case .pcm(let pcm) where playbackOverlap != nil:
+            // 16 kHz mono Int16: 32 bytes/ms. Keep the 400 ms detector pre-roll
+            // plus at most 800 ms of playback and 2 seconds waiting for speech.
+            let limit = phase == .speaking ? (400 + 800) * 32 : bytesBeforeListening + 2000 * 32
+            if playbackOverlap!.count + pcm.count <= limit { playbackOverlap!.append(pcm) }
+            else { playbackOverlap = nil }
         case .ended where phase == .recording: endRecording("pause")
+        case .ended: playbackOverlap = nil
         default: break
         }
+    }
+    private func beginRecording(_ samples: Data) {
+        recording = samples; state(.recording, "Pause or Hyper+R to send · Esc to cancel")
     }
     private func endRecording(_ reason: String) {
         guard let audio, let samples = recording, let recognizer else { stop("Dictation unavailable."); return }

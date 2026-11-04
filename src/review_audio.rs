@@ -102,7 +102,8 @@ impl Turn {
 }
 
 // Frames on stdout: little-endian u16 byte count, then that many PCM bytes.
-// 2 bookmarks the first voiced frame before debounce; 0 confirms a turn; 1 ends it.
+// 2 bookmarks speech onset; in chat it also marks sustained speech during a turn.
+// 0 confirms a turn; 1 ends it.
 pub fn stream(
     mut input: impl Read,
     mut output: impl Write,
@@ -196,6 +197,9 @@ pub fn stream(
                 output.write_all(&frame)?;
             }
             None => continue,
+        }
+        if turn.speech_run > 0 && turn.speech_run % 8 == 0 {
+            output.write_all(&2u16.to_le_bytes())?;
         }
         output.flush()?;
     }
