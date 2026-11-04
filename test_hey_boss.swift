@@ -4501,6 +4501,7 @@ func auditConversation(_ root: String) {
         longChat.input.stringValue = "Earlier notes"; longChat.sendTyped()
         wait("oversized capture") { longChat.phase == .idle }
         precondition(longChat.input.stringValue == "Earlier notes" && !longChat.contextChip.isHidden && longChat.contextChip.title == "Notes")
+        precondition(longChat.rows.last?.stringValue.contains("shorter selection") == true, "Keep the reason for the missing reply in the conversation")
         longChat.sendTyped(); longChat.input.stringValue = "Next draft"
         wait("keep newer draft") { longChat.phase == .idle }
         precondition(longChat.input.stringValue == "Next draft")

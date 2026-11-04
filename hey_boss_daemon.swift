@@ -7682,16 +7682,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         if model == nil { model = LanguageModelSession(instructions: instructions) }
         guard let model else { return }
+        let prior = model.transcript
         reply = Task { @MainActor [weak self] in
             do {
                 var session = model
                 if #available(macOS 26.4, *) {
                     guard let fitting = try await Self.sessionWithRoom(for: question, in: model) else {
                         guard !Task.isCancelled, let self else { return }
-                        if self.input.stringValue.isEmpty {
-                            self.input.stringValue = text; self.pendingCapture = capture
-                        }
-                        self.stop(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
+                        self.contextLimit(text, capture: capture, question: question, prior: prior)
                         return
                     }
                     session = fitting
@@ -7704,9 +7702,27 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 }
                 guard !Task.isCancelled, let self else { return }
                 self.reply = nil; self.finishTurn(self.stream)
+            } catch LanguageModelSession.GenerationError.exceededContextWindowSize {
+                guard !Task.isCancelled else { return }
+                self?.contextLimit(text, capture: capture, question: question, prior: prior)
             } catch {
                 guard !Task.isCancelled else { return }; self?.stop(error.localizedDescription)
             }
+        }
+    }
+    private func contextLimit(_ text: String, capture: Capture?, question: String, prior: Transcript) {
+        reply = nil
+        if stream.isEmpty {
+            model = LanguageModelSession(transcript: prior)
+            if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
+            finishTurn(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
+        } else {
+            let partial = stream
+            let entries: [Transcript.Entry] = [.prompt(.init(segments: [.text(.init(content: question))])),
+                                               .response(.init(assetIDs: [], segments: [.text(.init(content: partial))]))]
+            model = LanguageModelSession(transcript: Transcript(entries: Array(prior) + entries))
+            finishMessage(partial)
+            finishTurn("Reply cut short: on-device chat ran out of room.")
         }
     }
     @available(macOS 26.4, *)
