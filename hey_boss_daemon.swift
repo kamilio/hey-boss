@@ -7865,7 +7865,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 let first = process == nil
                 if first { try startCodex(directory) }
                 try write(["turn": first && thread == nil ? instructions + "\n\n" + question : question])
-            } catch { stop(error.localizedDescription) }
+            } catch {
+                guard process == nil else { stop(error.localizedDescription); return }
+                // Launch failed before Codex could receive the question.
+                if input.stringValue.isEmpty { input.stringValue = text; pendingCapture = capture }
+                let notice = "Couldn’t start Codex: " + error.localizedDescription
+                append(notice, from: "Conversation"); save()
+                state(audio == nil ? .idle : .listening, notice)
+            }
             return
         }
         if model == nil { model = LanguageModelSession(instructions: instructions) }
