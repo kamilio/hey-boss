@@ -43,27 +43,31 @@ fn default_route_preserves_models_and_explicit_exceptions() {
     ] {
         assert!(c.route_plan("claude-sonnet-5-5", path, None).is_none());
     }
-    for model in ["gpt-6.1-sol", "gpt-future"] {
+    for model in [
+        "gpt-6.1-sol",
+        "gpt-future",
+        "openai/gpt-6-astra",
+        "openai/gpt-6.1-sol",
+    ] {
         let plan = c.route_plan(model, "/v1/responses", Some("high")).unwrap();
         let (_, leg) = plan.select(0).unwrap();
         assert_eq!(leg.source_model, model);
-        assert_eq!(leg.upstream_model, model);
+        assert_eq!(
+            leg.upstream_model,
+            model.strip_prefix("openai/").unwrap_or(model)
+        );
         assert_eq!(leg.provider, "personal");
+        assert_eq!(leg.billing_mode, BillingMode::IncludedSubscription);
     }
     // An exact route wins regardless of list order. Explicit legacy aliases
-    // and native provider prefixes remain deliberate exceptions to the default.
+    // and other provider prefixes remain deliberate exceptions to the default.
     assert_eq!(
         c.route_plan("logical", "/v1/responses", None)
             .unwrap()
             .len(),
         3
     );
-    for model in [
-        "gpt-6-astra",
-        "openai/gpt-6-luna",
-        "gemini/gemini-test",
-        "claude/claude-test",
-    ] {
+    for model in ["gpt-6-astra", "gemini/gemini-test", "claude/claude-test"] {
         assert!(c.route_plan(model, "/v1/responses", None).is_none());
     }
 }

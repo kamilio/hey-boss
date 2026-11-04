@@ -184,6 +184,37 @@ async fn default_subscription_preserves_requested_model_and_alpha_exception() {
 }
 
 #[tokio::test]
+async fn openai_prefix_uses_default_subscription_without_model_rewrites() {
+    let mut f = Fixture::new().await;
+    let mut config = (*f.proxy.config).clone();
+    config.routes.push(
+        serde_json::from_value(json!({
+            "model":"*", "api_shape":"responses", "legs":[{"provider":"personal"}]
+        }))
+        .unwrap(),
+    );
+    config.aliases = serde_json::from_value(json!([
+        {"from":"gpt-6-astra", "to":"ultima-alpha"},
+        {"from":"gpt-6.1-sol", "to":"aurora-alpha"}
+    ]))
+    .unwrap();
+    f.proxy = Arc::new(local_snapshot(config, f.proxy.service.source.clone()).unwrap());
+    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+        let response = f.request(json!({"model":format!("openai/{model}"),"input":[],"reasoning":{"effort":"medium"}})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-hey-proxy-provider"], "personal");
+    }
+    let seen = f.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    for (request, model) in seen.iter().zip(["gpt-6-astra", "gpt-6.1-sol"]) {
+        assert_eq!(request["auth"], "Bearer oauth-personal");
+        assert_eq!(request["path"], "/backend-api/codex/responses");
+        assert_eq!(request["body"]["model"], model);
+        assert_eq!(request["body"]["reasoning"]["effort"], "medium");
+    }
+}
+
+#[tokio::test]
 async fn default_responses_subscription_leaves_native_claude_on_its_subscription() {
     let mut f = Fixture::new().await;
     f.claude();
