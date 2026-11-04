@@ -7606,7 +7606,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             recording = Data(); state(.recording, "Pause or Hyper+R to send · Esc to cancel")
         case .pcm(let pcm) where phase == .recording:
             recording!.append(pcm); meter.capture(pcm)
-            if recording!.count >= 32000 * 60 { endRecording("duration limit") }
+            if recording!.count >= 32000 * 120 { endRecording("duration limit") }
         case .ended where phase == .recording: endRecording("pause")
         default: break
         }
@@ -7614,7 +7614,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func endRecording(_ reason: String) {
         guard let audio, let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
         ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
-        recording = nil; state(.decoding, "Transcribing…")
+        recording = nil; state(.decoding, reason == "duration limit" ? "Two-minute limit reached · Transcribing…" : "Transcribing…")
         let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
             guard let self, let audio, self.audio === audio else { return }
             self.timeout?.invalidate(); self.decoding = nil
