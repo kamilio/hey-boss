@@ -4425,6 +4425,11 @@ func auditConversation(_ root: String) {
     ui.event(["TextDelta": ["text": "A moat"]])
     precondition(ui.rows.last?.stringValue == "A moat", "Show typed replies before a paragraph or turn ends")
     ui.event(["TextDelta": ["text": " protects a castle."]])
+    let flushDeadline = Date().addingTimeInterval(1)
+    while ui.rows[0].stringValue != "A moat protects a castle." && Date() < flushDeadline {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+    }
+    precondition(ui.rows[0].stringValue == "A moat protects a castle.", "A provider pause must not leave its latest words hidden")
     ui.event(["TurnCompleted": ["status": "Completed", "output": "A moat protects a castle."]])
     precondition(ui.rows.count == 1 && ui.rows[0].stringValue == "A moat protects a castle.")
     ui.clearTurns()
@@ -4526,7 +4531,7 @@ func auditConversation(_ root: String) {
     precondition(ui.rows.last!.stringValue.contains("The early words"))
     let full = first + "\n\nAnother paragraph\n\nLast line."
     ui.event(["TextDelta": ["text": "\n\nLast line."]])
-    precondition(ui.rows.last!.stringValue.hasSuffix("Another paragraph"))
+    wait("next paragraph while streaming") { ui.rows.last!.stringValue.hasSuffix("Another paragraph") }
     ui.event(["Message": ["text": full]])
     ui.event(["TurnCompleted": ["status": "Completed", "output": full]])
     wait("second paragraph highlight") { highlighted() == "Another" }

@@ -7295,7 +7295,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var stream = "", published = "", lastMessage: String?
     private var messageLabel: NSTextField?
     private let openingSentence = NLTokenizer(unit: .sentence)
-    private var lastTextUpdate = ContinuousClock.now
+    private var lastTextUpdate: TimeInterval = 0
+    private var textFlush: Timer?
     private var speech: [(label: NSTextField, span: NSRange, text: String)] = []
     private var reading = false, turnDone = false
     private var lit: (NSTextField, NSRange)?
@@ -7722,11 +7723,21 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     // Wait for a paragraph boundary when the opening contains Markdown.
     private static let paragraphBreak = try! NSRegularExpression(pattern: #"\n[ \t]*\n"#)
     private func publish(final: Bool) {
+        if !final, messageLabel != nil, audio == nil || (reading && !speech.isEmpty) {
+            let delay = lastTextUpdate + 0.1 - ProcessInfo.processInfo.systemUptime
+            if delay > 0 {
+                if textFlush == nil {
+                    let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+                        self?.textFlush = nil; self?.publish(final: false)
+                    }
+                    textFlush = timer; RunLoop.main.add(timer, forMode: .common)
+                }
+                return
+            }
+        }
+        textFlush?.invalidate(); textFlush = nil
         let text: String
         if final || audio == nil {
-            // Re-render at most ten times a second while tokens arrive. Always
-            // show the first fragment immediately and flush the final snapshot.
-            guard final || messageLabel == nil || ContinuousClock.now - lastTextUpdate >= .milliseconds(100) else { return }
             text = stream
         } else {
             let raw = stream as NSString, start = min(published.utf16.count, raw.length)
@@ -7770,7 +7781,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if follow { revealLatest() }
         // Long replies can take longer to lay out than the update interval.
         // Let queued tokens catch up before painting another snapshot.
-        if audio == nil { lastTextUpdate = .now }
+        lastTextUpdate = ProcessInfo.processInfo.systemUptime
         playNext()
     }
     private func finishMessage(_ text: String) {
@@ -7908,6 +7919,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func stop(_ message: String) {
+        textFlush?.invalidate(); textFlush = nil
         if let (field, _) = lit { highlight(field, nil) }
         speech.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
