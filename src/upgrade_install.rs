@@ -50,7 +50,17 @@ fn refresh_shared_api(binary: &Path, companion: bool, home: &Path) -> io::Result
 fn refresh_proxy(launchctl: &Path, systemctl: &Path, home: &Path) -> io::Result<()> {
     if cfg!(target_os = "macos") {
         let registration = home.join("Library/LaunchAgents/com.hey-proxy.plist");
-        if registration.try_exists()? {
+        // Match systemd: preserve a stopped or disabled proxy service.
+        if registration.try_exists()?
+            && Command::new(launchctl)
+                .args([
+                    "print",
+                    &format!("gui/{}/com.hey-proxy", unsafe { libc::getuid() }),
+                ])
+                .output()?
+                .status
+                .success()
+        {
             reload_registration(launchctl, &registration, "com.hey-proxy")?;
         }
     } else if Command::new(systemctl)
@@ -496,7 +506,11 @@ mod tests {
         let calls = temp.0.join("calls");
         script(
             &launchctl,
-            &format!("echo \"launchctl $*\" >> '{}'", calls.display()),
+            &format!(
+                "echo \"launchctl $*\" >> '{}'; if [ \"$1\" = print ] && [ ! -f '{}/active' ]; then exit 113; fi",
+                calls.display(),
+                temp.0.display()
+            ),
         );
         script(
             &systemctl,
@@ -513,6 +527,13 @@ mod tests {
             let registration = temp.0.join("Library/LaunchAgents/com.hey-proxy.plist");
             fs::create_dir_all(registration.parent().unwrap()).unwrap();
             fs::write(&registration, "managed proxy").unwrap();
+            refresh_proxy(&launchctl, &systemctl, &temp.0).unwrap();
+            let logged = fs::read_to_string(&calls).unwrap_or_default();
+            assert!(
+                !logged.contains("bootout") && !logged.contains("bootstrap"),
+                "{logged}"
+            );
+            fs::write(temp.0.join("active"), "").unwrap();
             refresh_proxy(&launchctl, &systemctl, &temp.0).unwrap();
             let logged = fs::read_to_string(&calls).unwrap();
             assert!(logged.contains("bootout") && logged.contains("bootstrap"));
