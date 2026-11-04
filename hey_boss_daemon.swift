@@ -7533,8 +7533,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func sendTyped() {
         guard phase == .idle || phase == .listening else { return }
-        let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, modelReady() else { return }
+        let text = input.stringValue
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, modelReady() else { return }
         input.stringValue = ""; respond(text)
     }
     func controlTextDidChange(_ notification: Notification) {
@@ -7671,7 +7671,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             do {
                 var session = model
                 if #available(macOS 26.4, *) {
-                    session = try await Self.sessionWithRoom(for: question, in: model)
+                    guard let fitting = try await Self.sessionWithRoom(for: question, in: model) else {
+                        guard !Task.isCancelled, let self else { return }
+                        if self.input.stringValue.isEmpty {
+                            self.input.stringValue = text; self.pendingCapture = capture
+                        }
+                        self.stop(capture == nil ? "Message too long for on-device chat. Try a shorter message." : "Message and capture too long for on-device chat. Try a shorter selection.")
+                        return
+                    }
+                    session = fitting
                 }
                 guard !Task.isCancelled else { return }
                 self?.model = session
@@ -7687,20 +7695,24 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     @available(macOS 26.4, *)
-    private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession {
+    private static func sessionWithRoom(for question: String, in session: LanguageModelSession) async throws -> LanguageModelSession? {
         let transcript = session.transcript
         let turns = transcript.indices.filter { if case .prompt = transcript[$0] { return true }; return false }
-        guard let first = turns.first else { return session }
         let model = SystemLanguageModel.default
         let incoming = Transcript.Entry.prompt(.init(segments: [.text(.init(content: question))]))
         let budget = model.contextSize * 3 / 4 // Leave room for the reply.
         var entries = Array(transcript), skip = 0
-        while try await model.tokenCount(for: entries + [incoming]) > budget {
+        while true {
+            let count = try await model.tokenCount(for: entries + [incoming])
+            if count <= budget { break }
+            guard let first = turns.first, skip < turns.count else {
+                if count >= model.contextSize { return nil }
+                break
+            }
             try Task.checkCancellation()
             skip += (turns.count - skip + 1) / 2
             let from = skip == turns.count ? transcript.endIndex : turns[skip]
             entries = Array(transcript[..<first]) + transcript[from...]
-            if skip == turns.count { break }
         }
         return skip == 0 ? session : LanguageModelSession(transcript: Transcript(entries: entries))
     }
