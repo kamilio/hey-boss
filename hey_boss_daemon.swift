@@ -7339,6 +7339,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var refreshingHistory = false
     let status = NSTextField(wrappingLabelWithString: "")
     let meter = ConversationMeter()
+    let skipReading = NSButton()
     let welcome = NSStackView()
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
@@ -7431,6 +7432,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         send.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send message")?.withSymbolConfiguration(.init(pointSize: 23, weight: .medium))
         send.contentTintColor = .controlAccentColor; send.target = self; send.action = #selector(sendTyped); send.toolTip = "Send message"
         status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
+        skipReading.title = "Skip reading"; skipReading.bezelStyle = .accessoryBarAction; skipReading.controlSize = .small
+        skipReading.toolTip = "Stop reading this answer and listen for your next message"
+        skipReading.target = self; skipReading.action = #selector(skipToListening)
+        let voiceStatus = NSStackView(views: [status, skipReading])
+        voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
         for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
         contextChip.bezelStyle = .accessoryBarAction; contextChip.imagePosition = .imageLeading
@@ -7439,7 +7445,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         contextChip.target = self; contextChip.action = #selector(inspectCapture); contextChip.isHidden = true
         let entry = NSStackView(views: [contextChip, input])
         entry.orientation = .vertical; entry.alignment = .leading; entry.spacing = 6
-        for view in [entry,send,meter,status] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
+        for view in [entry,send,meter,voiceStatus] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
             turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
@@ -7448,8 +7454,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             entry.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16), entry.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), entry.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8), input.widthAnchor.constraint(equalTo: entry.widthAnchor), contextChip.widthAnchor.constraint(lessThanOrEqualTo: entry.widthAnchor),
             send.centerYAnchor.constraint(equalTo: input.centerYAnchor), send.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
             meter.leadingAnchor.constraint(equalTo: input.leadingAnchor), meter.heightAnchor.constraint(equalToConstant: 36),
-            status.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), status.centerYAnchor.constraint(equalTo: meter.centerYAnchor), status.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
-            meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), status.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
+            voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
+            meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
         refreshScope(); state(.idle, "On-device chat"); window.initialFirstResponder = input; window.center(); restore()
     }
@@ -7624,7 +7630,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         meter.toolTip = meter.isEnabled ? voiceAction + " (Hyper+R)" : message
         meter.setAccessibilityLabel(meter.isEnabled ? voiceAction : message)
         meter.setAccessibilityValue(message)
-        send.isEnabled = acceptsTypedMessage
+        updateComposerActions()
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
     func modelReady() -> Bool {
@@ -7640,6 +7646,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private var acceptsTypedMessage: Bool {
         phase == .idle || phase == .listening || (turnDone && (phase == .speaking || phase == .thinking))
+    }
+    private func updateComposerActions() {
+        send.isEnabled = acceptsTypedMessage
+        skipReading.isHidden = phase != .speaking || !turnDone
+    }
+    @objc private func skipToListening() {
+        guard phase == .speaking, turnDone, audio != nil else { return }
+        interruptPlayback(); state(.listening, "Listening")
     }
     @objc func sendTyped() {
         guard acceptsTypedMessage else { return }
@@ -8001,7 +8015,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if lastMessage != text || !stream.isEmpty { finishMessage(text) }
-        localTurn = nil; turnDone = true; send.isEnabled = acceptsTypedMessage; save(); playNext()
+        localTurn = nil; turnDone = true; updateComposerActions(); save(); playNext()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
