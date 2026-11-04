@@ -6750,12 +6750,50 @@ final class ReaderVoice {
         }
         throw CocoaError(.fileReadCorruptFile)
     }
-    static func wordTimings(_ text: String, _ spoken: [(String, Int)], frames: Int) -> [(Int, NSRange)] {
-        var ranges: [NSRange] = [], written: [String] = []
-        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .byWords) { word, range, _, _ in
-            guard let word else { return }
-            written.append(word.lowercased()); ranges.append(NSRange(range, in: text))
+    private static let measuredFraction = try! NSRegularExpression(pattern: #"""
+        (?ix) (?<![\w./⁄"'“])
+        (?:(\d+)(?:\h+|(?=[¼½¾⅐-⅞])))? (\d+[/⁄]\d+|[¼½¾⅐-⅞]) \h*-?\h*
+        (inch(?:es)?\b | in\b(?=\h*(?:[),;×=]|\.?$)) | cups?\b | tsp\b | tbsp\b | teaspoons?\b | tablespoons?\b | ["″])
+        """#)
+    static func spokenMeasurements(_ text: String) -> (text: String, fractions: [NSRange]) {
+        let source = text as NSString
+        let matches = measuredFraction.matches(in: text, range: NSRange(location: 0, length: source.length))
+        guard !matches.isEmpty else { return (text, []) }
+        let result = NSMutableString(string: text)
+        var fractions: [NSRange] = []
+        for match in matches.reversed() {
+            let parts = source.substring(with: match.range(at: 2)).decomposedStringWithCompatibilityMapping.split { $0 == "/" || $0 == "⁄" }
+            guard parts.count == 2, let n = Int(parts[0]), let d = Int(parts[1]), n > 0, d > 0 else { continue }
+            let unit = source.substring(with: match.range(at: 3)).lowercased()
+            if unit == "\"" || unit == "″" {
+                if let language = NLLanguageRecognizer.dominantLanguage(for: text), language != .english { continue }
+                // A closing quote after a date is not an inch mark.
+                if unit == "\"", source.substring(to: match.range.location).range(of: #"(?:^|[\s(])["“][^"”]*$"#, options: .regularExpression) != nil { continue }
+            }
+            let whole = match.range(at: 1)
+            let name = [2: n == 1 ? "half" : "halves", 3: n == 1 ? "third" : "thirds",
+                        4: n == 1 ? "quarter" : "quarters", 8: n == 1 ? "eighth" : "eighths"][d]
+            let numerator = n == 1 ? (whole.location == NSNotFound ? "one" : "a") : String(n)
+            var quantity = name.map { numerator + " " + $0 } ?? "\(n) over \(d)"
+            if whole.location != NSNotFound { quantity = source.substring(with: whole) + " and " + quantity }
+            let suffix = ["\"": "inch", "″": "inch", "in": "inch", "tsp": whole.location == NSNotFound ? "teaspoon" : "teaspoons",
+                          "tbsp": whole.location == NSNotFound ? "tablespoon" : "tablespoons"][unit] ?? unit
+            result.replaceCharacters(in: match.range, with: quantity + " " + suffix)
+            fractions.append(match.range(at: 2))
         }
+        return (result as String, fractions)
+    }
+    static func wordTimings(_ text: String, _ spoken: [(String, Int)], frames: Int, fractions: [NSRange]) -> [(Int, NSRange)] {
+        var ranges: [NSRange] = []
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byWords, .substringNotRequired]) { _, range, _, _ in
+            ranges.append(NSRange(range, in: text))
+        }
+        // The word tokenizer splits 1/4 and skips ¼. Highlight either as one quantity.
+        if !fractions.isEmpty {
+            ranges.removeAll { word in fractions.contains { NSIntersectionRange(word, $0).length > 0 } }
+            ranges.append(contentsOf: fractions); ranges.sort { $0.location < $1.location }
+        }
+        let source = text as NSString, written = ranges.map { source.substring(with: $0).lowercased() }
         // Match the whole passage: a missing word must not consume a later repetition.
         let heard = spoken.map { $0.0.trimmingCharacters(in: .punctuationCharacters) }
         var missing = IndexSet(), extra = IndexSet()
@@ -6793,7 +6831,8 @@ final class ReaderVoice {
                     guard try message()["ready"] as? Bool == true else { throw CocoaError(.fileReadCorruptFile) }
                     ready = true
                 }
-                var request = try JSONSerialization.data(withJSONObject: ["text": text, "speaker": 7]); request.append(10)
+                let reading = Self.spokenMeasurements(text)
+                var request = try JSONSerialization.data(withJSONObject: ["text": reading.text, "speaker": 7]); request.append(10)
                 try input.fileHandleForWriting.write(contentsOf: request)
                 let header = try message()
                 guard header["rate"] as? Int == 44100, let count = header["count"] as? Int, (1...44100*120).contains(count),
@@ -6825,7 +6864,7 @@ final class ReaderVoice {
                     if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
                     buffer.frameLength = AVAudioFrameCount(end - first)
                 } else { first = 0 }
-                let words = Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength))
+                let words = Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength), fractions: reading.fractions)
                 onMain { timeout.cancel(); completion(buffer, words) }
             } catch { onMain { timeout.cancel(); completion(nil, []) } }
         }

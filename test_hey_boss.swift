@@ -4419,8 +4419,16 @@ import FoundationModels
 @available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let measured = "Use a ¼-inch bit and 5/16\" coils.", reading = ReaderVoice.spokenMeasurements(measured)
+    precondition(reading.text == "Use a one quarter inch bit and 5 over 16 inch coils.")
+    let shown = ReaderVoice.wordTimings(measured, [("use", 0), ("inch", 30), ("coils", 80)], frames: 90, fractions: reading.fractions)
+    precondition(shown.map { (measured as NSString).substring(with: $0.1) } == ["Use", "a", "¼", "inch", "bit", "and", "5/16", "coils"])
+    precondition(ReaderVoice.spokenMeasurements("Mix 1 1/2 tsp cumin into 1¼ cups.").text == "Mix 1 and a half teaspoons cumin into 1 and a quarter cups.")
+    precondition(ReaderVoice.spokenMeasurements("White acrylic is 3 mm / 1⁄8\" thick.").text == "White acrylic is 3 mm / one eighth inch thick.")
+    let literal = #"Meet on 1/4 in Madrid. Read "/etc/1/4-inch/file" and "scheduled on 1/4"."#
+    precondition(ReaderVoice.spokenMeasurements(literal).text == literal)
     let line = "Cut the pocket. Use the saw."
-    let times = ReaderVoice.wordTimings(line, [("cut", 5), ("pocket.", 30), ("use", 46), ("the", 66), ("saw.", 78)], frames: 90)
+    let times = ReaderVoice.wordTimings(line, [("cut", 5), ("pocket.", 30), ("use", 46), ("the", 66), ("saw.", 78)], frames: 90, fractions: [])
     precondition(times.map { (line as NSString).substring(with: $0.1) } == ["Cut", "the", "pocket", "Use", "the", "saw"])
     precondition(times[0].0 == 5 && (6..<30).contains(times[1].0) && times.dropFirst(2).map(\.0) == [30, 46, 66, 78],
                  "The omitted first article must not steal the timestamp of the second one")
