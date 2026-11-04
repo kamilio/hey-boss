@@ -8038,6 +8038,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             var checkedThrough = offset
             while let span = SpokenReview.passage(in: visible, from: offset) {
                 let item = visible.substring(with: span); offset = NSMaxRange(span)
+                if item.first == "|", item.range(of: #"^\|(?:[ \t]*:?-+:?[ \t]*\|)+$"#, options: .regularExpression) != nil {
+                    let line = visible.lineRange(for: span)
+                    let font = rendered.attribute(.font, at: span.location, effectiveRange: nil) as? NSFont
+                    if line.location > 0, font?.fontDescriptor.symbolicTraits.contains(.monoSpace) != true {
+                        let header = visible.lineRange(for: NSRange(location: line.location - 1, length: 0))
+                        if visible.substring(with: header).contains("|") { continue }
+                    }
+                }
                 if directory == nil, span.location >= checkedThrough {
                     let line = visible.lineRange(for: span)
                     checkedThrough = NSMaxRange(line)
