@@ -116,6 +116,11 @@ final class AudioCapture {
     private var signalSince: TimeInterval?
     private var acceptingAudio = false
     private var keepingAlive = false
+    private var detector: SpeechDetector?
+    private var speechStarted = false
+    private var speechEnded = false
+    var onSpeechBegan: (() -> Void)?
+    var onSpeechEnded: (() -> Void)?
     var onFailure: ((String) -> Void)?
     var onReadinessChanged: ((Bool) -> Void)?
     var level: Double { lock.lock(); defer { lock.unlock() }; return rms }
@@ -127,6 +132,7 @@ final class AudioCapture {
     var isReady: Bool { lock.lock(); defer { lock.unlock() }; return ready }
     var restartCount: Int { lock.lock(); defer { lock.unlock() }; return restarts }
     var isKeepingAlive: Bool { lock.lock(); defer { lock.unlock() }; return keepingAlive }
+    var speechComplete: Bool { lock.lock(); defer { lock.unlock() }; return speechEnded }
 
     init(resolveInput: @escaping (String?) throws -> InputDevice = AudioDevices.input,
          fallbackInput: @escaping (InputDevice) -> InputDevice? = AudioDevices.builtInFallback,
@@ -135,7 +141,7 @@ final class AudioCapture {
         self.resolveInput = resolveInput; self.fallbackInput = fallbackInput; self.makeStream = makeStream; self.now = now
     }
 
-    func start(uid: String?, completion: @escaping (Result<Void, Error>) -> Void) {
+    func start(uid: String?, detectSpeech: Bool = false, completion: @escaping (Result<Void, Error>) -> Void) {
         lock.lock(); token &+= 1; acceptingAudio = false; let ticket = token; lock.unlock()
         control.async {
             guard self.isCurrent(ticket) else { DispatchQueue.main.async { completion(.failure(TalkError("Recording cancelled"))) }; return }
@@ -145,6 +151,7 @@ final class AudioCapture {
             if !reuse { self.endCapture() }
             // Drain queued idle buffers before accepting a new recording.
             self.processing.sync {}
+            self.stopDetector()
             self.idleUntil = nil
             self.recordingToken = ticket; self.requestedUID = uid
             self.fallbackRoute = nil; self.triedFallback = false
@@ -156,9 +163,23 @@ final class AudioCapture {
             self.samples = []; self.samples.reserveCapacity(PCMFrame.maxSamples)
             self.fallbackDevice = nil
             self.rms = 0; self.peak = 0; self.fault = nil; self.ready = false; self.restarts = 0
-            self.acceptingAudio = true; self.keepingAlive = false
+            self.acceptingAudio = !detectSpeech; self.keepingAlive = false
+            self.speechStarted = false; self.speechEnded = false
             self.lastSignalAt = self.now(); self.signalSince = nil
             self.lock.unlock()
+            if detectSpeech {
+                do {
+                    let detector = try SpeechDetector(receive: { [weak self] in self?.speech($0, token: ticket) },
+                        failed: { [weak self] in self?.fail($0, token: ticket) })
+                    self.lock.lock()
+                    self.detector = detector
+                    if self.token == ticket { self.acceptingAudio = true }
+                    self.lock.unlock()
+                } catch {
+                    self.fail(error.localizedDescription, token: ticket)
+                    DispatchQueue.main.async { completion(.failure(error)) }; return
+                }
+            }
             self.recoveryStartedAt = nil; self.nextAttemptAt = 0; self.attempts = reuse ? 1 : 0
             if self.watchdog == nil {
                 self.inputObserver = AudioInputObserver(queue: self.control) { [weak self] in self?.refresh() }
@@ -327,7 +348,9 @@ final class AudioCapture {
         guard samples.count + count <= PCMFrame.maxSamples else {
             lock.unlock(); fail("Five-minute recording limit reached. Stop and start a new dictation.", token: token); return
         }
-        samples.append(contentsOf: values); rms = Double(level); peak = max(peak, level)
+        let detector = self.detector
+        if detector == nil { samples.append(contentsOf: values) }
+        rms = Double(level); peak = max(peak, level)
         let time = now(), becameReady = !ready && level > 0
         lastAudioAt = time
         if level > 0 {
@@ -335,10 +358,41 @@ final class AudioCapture {
             lastSignalAt = time; ready = true
         } else if time - lastSignalAt >= 1 { signalSince = nil }
         lock.unlock()
+        if let detector {
+            do { try detector.send(values) } catch { fail(error.localizedDescription, token: token) }
+        }
         if becameReady {
             logger.info("Microphone is delivering nonzero audio")
             notifyReadiness(true, token: token)
         }
+    }
+    private func speech(_ event: SpeechDetector.Event, token: UInt64) {
+        lock.lock()
+        guard self.token == token, acceptingAudio, fault == nil, !speechEnded else { lock.unlock(); return }
+        switch event {
+        case .began: speechStarted = true
+        case .ended: speechEnded = true
+        case .samples(let values):
+            guard speechStarted else { lock.unlock(); return }
+            guard samples.count + values.count <= PCMFrame.maxSamples else {
+                lock.unlock(); fail("Five-minute recording limit reached.", token: token); return
+            }
+            samples.append(contentsOf: values)
+            lock.unlock(); return
+        }
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isCurrent(token) else { return }
+            switch event {
+            case .began: self.onSpeechBegan?()
+            case .ended: self.onSpeechEnded?()
+            case .samples: break
+            }
+        }
+    }
+    private func stopDetector() {
+        lock.lock(); let detector = self.detector; self.detector = nil; lock.unlock()
+        detector?.stop()
     }
     private func notifyReadiness(_ ready: Bool, token: UInt64) {
         DispatchQueue.main.async { [weak self] in
@@ -364,11 +418,13 @@ final class AudioCapture {
         processing.sync {} // Reject and drain old-route callbacks before reopening.
     }
     private func endCapture() {
+        stopDetector()
         watchdog?.cancel(); watchdog = nil; inputObserver = nil
         recordingToken = nil; idleUntil = nil
         closeStream()
     }
     private func keepConnectionAlive() {
+        stopDetector()
         recordingToken = nil
         lock.lock()
         let healthy = stream != nil && fault == nil && now() - lastAudioAt < 3

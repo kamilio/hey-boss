@@ -6,14 +6,14 @@ public struct TalkError: LocalizedError {
     public var errorDescription: String? { message }
 }
 
-public enum Phase: String, Codable { case idle, recording, processing, failed }
+public enum Phase: String, Codable { case idle, listening, recording, processing, failed }
 
 /// One app-side decision: callers never race a separate status read against a toggle.
 public enum DictationToggle: Equatable {
     case start(submit: Bool), stop(submit: Bool), busy
     public static func resolve(phase: Phase, currentSubmit: Bool, requestedSubmit: Bool?) -> Self {
         switch phase {
-        case .idle, .failed: return .start(submit: requestedSubmit ?? false)
+        case .idle, .failed, .listening: return .start(submit: requestedSubmit ?? false)
         case .recording: return .stop(submit: requestedSubmit ?? currentSubmit)
         case .processing: return .busy
         }
@@ -25,11 +25,16 @@ public struct RecordingSession {
     public private(set) var generation: UInt64 = 0
     public private(set) var lastText: String = ""
     public init() {}
-    public mutating func begin() throws -> UInt64 {
+    public mutating func begin(listening: Bool = false) throws -> UInt64 {
         guard phase == .idle || phase == .failed else { throw TalkError("Already \(phase.rawValue)") }
         generation &+= 1
-        phase = .recording
+        phase = listening ? .listening : .recording
         return generation
+    }
+    @discardableResult public mutating func speechBegan(_ id: UInt64) -> Bool {
+        guard id == generation, phase == .listening else { return false }
+        phase = .recording
+        return true
     }
     public mutating func processing(_ id: UInt64) throws {
         guard id == generation, phase == .recording else { throw TalkError("Recording ended") }

@@ -23,7 +23,7 @@ enum CLI {
     hey-talk history show                      Open history with Copy buttons
     hey-talk devices                           List microphone names and UIDs
     hey-talk input UID|default                  Select microphone
-    hey-talk auto [on|off|toggle|add BUNDLE_ID|remove BUNDLE_ID]  Focus-to-record mode
+    hey-talk auto [on|off|toggle|add BUNDLE_ID|remove BUNDLE_ID]  Hands-free dictation
     hey-talk correction [on|off|toggle]         Fix punctuation and typos with Luna
     hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
@@ -37,7 +37,7 @@ enum CLI {
     hey-talk doctor                            Check permissions, model, and hotkey
     hey-talk quit                              Stop only Hey Talk and its worker
 
-    Hyper+V toggles Auto mode. In Auto: focus a message field, speak, Enter to submit.
+    Hyper+V toggles Auto mode. In Auto: focus a message field, speak, and pause to submit.
     Press Hyper+R to start; press again to finish. Esc cancels.
     \(DictationShortcut.help).
     Commands start the app on demand. No login service or account is required.

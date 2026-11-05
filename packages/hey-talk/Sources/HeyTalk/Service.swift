@@ -78,8 +78,20 @@ final class TalkService: NSObject, NSApplicationDelegate {
         siteTimer.tolerance = 0.2
         RunLoop.main.add(siteTimer, forMode: .common)
         capture.onFailure = { [weak self] message in self?.fail(message) }
+        capture.onSpeechBegan = { [weak self] in
+            guard let self, self.session.phase == .listening else { return }
+            let input = FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs)
+            guard input == self.autoTarget else { self.focusedInputChanged(input); return }
+            guard self.session.speechBegan(self.session.generation) else { return }
+            self.captureReady = true
+            self.recordingBegan()
+        }
+        capture.onSpeechEnded = { [weak self] in
+            guard let self, self.session.phase == .recording, self.autoTarget != nil else { return }
+            self.stop { _ in }
+        }
         capture.onReadinessChanged = { [weak self] ready in
-            guard let self, self.session.phase == .recording else { return }
+            guard let self, self.session.phase == .recording || self.session.phase == .listening else { return }
             if ready { self.updateRecordingOverlay() } else { self.overlay?.preparing() }
         }
         hotkey = Hotkey()
@@ -118,7 +130,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         speech.onNotice = { [weak self] message in self?.showOverlay(true); self?.overlay?.error(message) }
         speech.onActivityChanged = { [weak self] active in
             guard let self else { return }
-            self.hotkey?.captureEscape(active || self.waitingPaste != nil || self.session.phase == .recording || self.session.phase == .processing)
+            self.hotkey?.captureEscape(active || self.waitingPaste != nil || self.session.phase == .listening || self.session.phase == .recording || self.session.phase == .processing)
             let ended = self.speechWasActive && !active
             self.speechWasActive = active
             if ended {
@@ -158,7 +170,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 if input != target { self.autoSubmitKey.passNextEnter = false }
                 return self.automatic?.followsFocus == true ? input != nil : input == target
             }
-            if self.session.phase == .idle && !self.autoSubmitKey.passNextEnter { return false }
+            if self.session.phase == .listening || (self.session.phase == .idle && !self.autoSubmitKey.passNextEnter) { return false }
             return self.autoDeliveryValid && target.isFocused()
         }
         autoSubmitKey.onSubmit = { [weak self] in
@@ -313,12 +325,17 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func focusedInputChanged(_ input: FocusedInput?, notice: String? = nil) {
         if input != autoTarget { autoSubmitKey.passNextEnter = false }
+        if session.phase == .listening, input != autoTarget {
+            cancel()
+            focusTrigger.reset()
+        }
         if automatic != nil {
             automatic?.focusChanged(input, at: ProcessInfo.processInfo.systemUptime)
             if session.phase == .recording {
                 if input != nil && (automatic?.followsFocus == true || input == autoTarget) {
                     focusGrace?.cancel(); focusGrace = nil
                     target = autoTarget?.app; targetName = target?.localizedName
+                    if capture.speechComplete { stop { _ in } }
                 } else if focusGrace == nil {
                     let id = session.generation
                     let timeout = DispatchWorkItem { [weak self] in
@@ -335,7 +352,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         let available = waitingPaste == nil && !speech.active && autoSettings.enabled && autoTarget == nil && autoRestart == nil && (session.phase == .idle || session.phase == .failed)
         guard focusTrigger.update(input, available: available), let input, autoSubmitKey.start() else { return }
-        start(showOverlay: true, paste: true, focusedInput: input) { [weak self] result in
+        start(showOverlay: true, paste: true, pressEnter: true, focusedInput: input) { [weak self] result in
             if result["ok"] as? Bool == true, let notice { self?.overlay?.error(notice) }
         }
     }
@@ -401,7 +418,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "enter_exceptions": enterExceptions.bundleIDs, "enter_exception_sites": enterExceptions.sites,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,
-            "waiting_to_paste": waitingPaste != nil, "auto_recording": autoTarget != nil, "auto_focused": focusMonitor.current != nil,
+            "waiting_to_paste": waitingPaste != nil, "auto_recording": autoTarget != nil && session.phase == .recording,
+            "auto_listening": session.phase == .listening, "auto_focused": focusMonitor.current != nil,
             "escape_registered": hotkey?.escapeRegistered ?? false, "hotkey_events": hotkey?.eventsReceived ?? 0,
             "overlay": overlayEnabled, "input": inputUID ?? "default",
             "sample_count": capture.sampleCount, "rms": capture.level,
@@ -601,8 +619,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func start(showOverlay: Bool, paste: Bool, pressEnter: Bool = false, focusedInput: FocusedInput? = nil,
                        reply: @escaping ([String: Any]) -> Void) {
+        if session.phase == .listening { cancel() }
         let id: UInt64
-        do { id = try session.begin() } catch { reply(failure(error.localizedDescription)); return }
+        do { id = try session.begin(listening: focusedInput != nil) } catch { reply(failure(error.localizedDescription)); return }
         speech.stop()
         pendingStartReply = reply
         error = nil; captureReady = false; captureMilliseconds = 0
@@ -619,38 +638,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
         idleRelease?.cancel(); self.showOverlay(showOverlay)
         overlay?.preparing(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
-            guard self.session.generation == id, self.session.phase == .recording else { return }
+            guard self.session.generation == id, self.session.phase == .recording || self.session.phase == .listening else { return }
             let start = ProcessInfo.processInfo.systemUptime
             self.inference.warm()
-            self.capture.start(uid: self.inputUID) { result in
-                guard self.session.generation == id, self.session.phase == .recording else { return }
+            self.capture.start(uid: self.inputUID, detectSpeech: focusedInput != nil) { result in
+                guard self.session.generation == id, self.session.phase == .recording || self.session.phase == .listening else { return }
                 switch result {
                 case .failure(let error): self.fail(error.localizedDescription)
                 case .success:
                 self.captureMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
                 self.captureReady = true
                 self.updateRecordingOverlay(); self.hotkey?.captureEscape(true)
-                if self.correctionSettings.enabled, let target = self.target {
-                    let pid = target.processIdentifier
-                    let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
-                    self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput] in
-                        guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                              !isT3 || startingInput?.isFocused() == true else { return (nil, 0) }
-                        let started = ProcessInfo.processInfo.systemUptime
-                        let text = AppContext.capture(pid: pid)
-                        let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                        guard !isT3 || startingInput?.isFocused() == true else { return (nil, elapsed) }
-                        return (text, elapsed)
-                    }
-                }
-                let limit = DispatchWorkItem { [weak self] in
-                    guard let self, self.session.generation == id, self.session.phase == .recording else { return }
-                    if self.autoTarget != nil {
-                        self.cancel(); self.overlay?.error("Auto timed out. Focus the message field again.")
-                    } else { self.stop { _ in } }
-                }
-                self.maximumDuration = limit
-                DispatchQueue.main.asyncAfter(deadline: .now() + 299, execute: limit)
+                if focusedInput == nil { self.recordingBegan() }
                 self.pendingStartReply?(self.status()); self.pendingStartReply = nil
                 }
             }
@@ -659,13 +658,39 @@ final class TalkService: NSObject, NSApplicationDelegate {
             AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async(execute: begin) }
         } else { begin() }
     }
+    private func recordingBegan() {
+        let id = session.generation
+        updateRecordingOverlay()
+        if self.correctionSettings.enabled, let target = self.target {
+            let pid = target.processIdentifier
+            let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
+            self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput] in
+                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                      !isT3 || startingInput?.isFocused() == true else { return (nil, 0) }
+                let started = ProcessInfo.processInfo.systemUptime
+                let text = AppContext.capture(pid: pid)
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                guard !isT3 || startingInput?.isFocused() == true else { return (nil, elapsed) }
+                return (text, elapsed)
+            }
+        }
+        let limit = DispatchWorkItem { [weak self] in
+            guard let self, self.session.generation == id, self.session.phase == .recording else { return }
+            if self.autoTarget != nil {
+                self.cancel(); self.overlay?.error("Auto timed out. Focus the message field again.")
+            } else { self.stop { _ in } }
+        }
+        self.maximumDuration = limit
+        DispatchQueue.main.asyncAfter(deadline: .now() + 299, execute: limit)
+    }
     private func updateRecordingOverlay() {
-        overlay?.update(.recording)
+        overlay?.update(session.phase)
         if capture.fallbackSource != nil, let input = capture.activeInput {
             overlay?.error("Using \(input.name). Bluetooth microphone unavailable.")
         }
     }
     private func stop(_ reply: @escaping ([String: Any]) -> Void) {
+        if session.phase == .listening { cancel(); reply(status()); return }
         guard session.phase == .recording else { reply(failure("No recording is active")); return }
         guard captureReady else {
             // An early Enter must not cancel Auto while the microphone opens.

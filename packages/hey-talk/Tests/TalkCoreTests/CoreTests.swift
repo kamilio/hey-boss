@@ -2,6 +2,24 @@ import XCTest
 @testable import TalkCore
 
 final class CoreTests: XCTestCase {
+    func testAutomaticSessionWaitsForSpeechAndRejectsStaleOnsets() throws {
+        var session = RecordingSession()
+        let id = try session.begin(listening: true)
+        XCTAssertEqual(session.phase, .listening)
+        XCTAssertThrowsError(try session.processing(id))
+        XCTAssertThrowsError(try session.begin())
+        XCTAssertTrue(session.speechBegan(id))
+        XCTAssertFalse(session.speechBegan(id))
+        try session.processing(id)
+        XCTAssertTrue(session.finish(id, text: "First turn"))
+        let next = try session.begin(listening: true)
+        XCTAssertFalse(session.speechBegan(id))
+        XCTAssertEqual(session.phase, .listening)
+        session.cancel()
+        XCTAssertFalse(session.speechBegan(next))
+        XCTAssertEqual(session.phase, .idle)
+    }
+
     func testCancelInvalidatesInFlightWork() throws {
         var session = RecordingSession()
         let first = try session.begin()

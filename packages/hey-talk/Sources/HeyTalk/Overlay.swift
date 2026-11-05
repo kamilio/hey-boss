@@ -456,7 +456,7 @@ final class Overlay {
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
         wave.color = autoMode ? TalkDesign.automatic : TalkDesign.active
         pillContent.toolTip = autoMode
-            ? "Auto · Focus a message field · Enter to submit · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
+            ? "Auto · Speak to record · Pause to submit · Enter to send now · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
             : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
         pillContent.toolTip = "AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
@@ -466,7 +466,7 @@ final class Overlay {
             pillContent.setAccessibilityLabel(pasteWait.accessibilityLabel())
             return
         }
-        let action = waitingForAudio ? "Opening microphone" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
+        let action = waitingForAudio ? "Opening microphone" : phase == .listening ? "Listening · Speak to record" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
         pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + " · AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off")")
     }
     private func layout(animated: Bool) {
