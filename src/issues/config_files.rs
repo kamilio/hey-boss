@@ -402,7 +402,14 @@ pub(crate) fn reconcile(path: &Path) -> Result<()> {
     let configs = path.parent().unwrap().join("project-configs");
     let projects = store.db.prepare("SELECT p.id,p.name FROM projects p JOIN project_name_keys k ON k.project_id=p.id WHERE p.hidden_at IS NULL")?
         .query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for project in projects {
+    let ids: Vec<_> = projects.iter().map(|p| p.id.as_str()).collect();
+    let visible = super::store::project_names::saved_work(&store.db, &ids)?;
+    // Old service versions registered automatic copies for discovery-only rows.
+    // Keep explicit checkout registrations independent of project visibility.
+    rows.retain(|root, (project, _)| {
+        root.parent() != Some(&configs) || visible.contains(&project.id)
+    });
+    for project in projects.into_iter().filter(|p| visible.contains(&p.id)) {
         let slug = project
             .id
             .split(|c: char| !c.is_ascii_alphanumeric())
@@ -444,6 +451,101 @@ pub(crate) fn reconcile(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_copies_follow_project_visibility_without_disabling_checkout_sync() {
+        let root = std::env::current_dir().unwrap().join(format!(
+            ".config-visibility-{}",
+            worker::random_id().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        let mut store = Store::open(&path).unwrap();
+        let legacy = Project {
+            id: "named:Legacy".into(),
+            name: "Legacy".into(),
+        };
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,next_number) VALUES(?1,?2,1)",
+                params![legacy.id, legacy.name],
+            )
+            .unwrap();
+        reconcile(&path).unwrap();
+        let configs = root.join("project-configs");
+        assert!(
+            !configs.exists(),
+            "Legacy discovery alone must not create a config copy"
+        );
+
+        // Also ignore copies registered by older versions of the service.
+        fs::create_dir(&configs).unwrap();
+        let old_copy = configs.join("legacy");
+        fs::create_dir(&old_copy).unwrap();
+        sync_root(&path, &old_copy, &legacy).unwrap();
+        fs::remove_dir_all(&old_copy).unwrap();
+        reconcile(&path).unwrap();
+        assert!(!old_copy.exists());
+
+        let project = Project {
+            id: "named:Manual".into(),
+            name: "Manual".into(),
+        };
+        let actor = identity::resolve_inspection(Some("human:test"), "test", &root).unwrap();
+        let init = serde_json::from_value(
+            json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}}),
+        )
+        .unwrap();
+        store.execute(&request(&project, &actor, init)).unwrap();
+        reconcile(&path).unwrap();
+        let copies = fs::read_dir(&configs)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copies.len(),
+            1,
+            "An explicitly initialized empty project is visible"
+        );
+        let copy = &copies[0];
+        sync_root(&path, &root, &project).unwrap();
+        store
+            .execute(&request(&project, &actor, Operation::HideProject))
+            .unwrap();
+        fs::remove_dir_all(copy).unwrap();
+        let yaml = root.join(".hey-boss/config.yaml");
+        fs::write(
+            &yaml,
+            fs::read_to_string(&yaml)
+                .unwrap()
+                .replace("prs_enabled: false", "prs_enabled: true"),
+        )
+        .unwrap();
+        reconcile(&path).unwrap();
+        assert!(
+            !copy.exists(),
+            "Hidden automatic copies must not be recreated"
+        );
+        assert_eq!(
+            store
+                .execute(&request(&project, &actor, Operation::ProjectSettings))
+                .unwrap()["prs_enabled"],
+            true,
+            "Manually registered checkout copies still sync"
+        );
+        store
+            .execute(&request(&project, &actor, Operation::RestoreProject))
+            .unwrap();
+        reconcile(&path).unwrap();
+        assert!(
+            fs::read_to_string(copy.join(".hey-boss/config.yaml"))
+                .unwrap()
+                .contains("prs_enabled: true")
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn service_materializes_projects_without_workers_or_checkouts() {
         let root = std::env::current_dir()

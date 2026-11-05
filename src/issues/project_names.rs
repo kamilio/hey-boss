@@ -192,7 +192,7 @@ pub(super) fn pending_discoveries(
 }
 
 /// Batch visibility checks while preserving saved work and explicit worker setup.
-pub(super) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<String>> {
+pub(in crate::issues) fn saved_work(db: &Connection, projects: &[&str]) -> Result<BTreeSet<String>> {
     if projects.is_empty() {
         return Ok(BTreeSet::new());
     }
