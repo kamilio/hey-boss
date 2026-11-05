@@ -456,7 +456,14 @@ enum Action {
         if_version: Option<i64>,
     },
     /// Make a draft runnable.
-    Undraft { number: i64 },
+    #[command(
+        after_help = "Uses the supervisor tunnel on companions. Requires unassigned, unreserved work and issue_undraft support. The CLI captures the current version; reuse --request-id after an uncertain response."
+    )]
+    Undraft {
+        number: i64,
+        #[arg(long, hide = true)]
+        if_version: Option<i64>,
+    },
 
     /// Show the calling session identity and resolved project.
     Whoami,
@@ -1293,7 +1300,10 @@ impl Options {
                     }
                 }
             }
-            Action::Undraft { number } => Operation::Undraft { number: *number },
+            Action::Undraft { number, if_version } => Operation::Undraft {
+                number: *number,
+                if_version: *if_version,
+            },
             Action::Claim { number, force } => Operation::Claim {
                 number: *number,
                 force: *force,
@@ -1506,9 +1516,10 @@ pub fn run(options: &Options) -> Result<()> {
                     command: PrAction::Add { .. } | PrAction::List { .. },
                 }
                 | Action::Edit { .. }
+                | Action::Undraft { .. }
         ) {
             return Err(Error::invalid(
-                "--supervisor supports view, status, status-history, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
+                "--supervisor supports view, status, status-history, request, allocation, PR add/list, guarded moves, guarded metadata edits, guarded undrafting, guarded blocked-by edits, guarded Ready, close, reopen and label-only batches; this command is not supported",
             ));
         }
     }

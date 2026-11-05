@@ -29,6 +29,10 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
         Operation::Reopen {
             if_version: Some(version),
             ..
+        }
+        | Operation::Undraft {
+            if_version: Some(version),
+            ..
         } if *version > 0 => {}
         Operation::SetBlockers {
             if_version: Some(version),
@@ -61,7 +65,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
             .all(|edit| matches!(edit.assignment, BatchAssignment::Keep)) => {}
         _ => {
             return Err(Error::invalid(
-                "--supervisor supports view, status, status-history, allocation, PR add/list, queue-version-guarded moves, version-guarded title/body/label edits, drafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
+                "--supervisor supports view, status, status-history, allocation, PR add/list, queue-version-guarded moves, version-guarded title/body/label edits, drafting, undrafting, reopening and blocked-by edits on unassigned, unreserved issues, guarded Ready handoffs and close, and label-only batches with assignment: keep. PR add preserves existing purposes and ownership; PR classify/remove and commit URLs are not supported. Dependency edits and guarded close do not support --force. Other lifecycle, claim, assignment and reservation changes are not supported; nothing was saved. Inspect support with hey-boss fleet capabilities",
             ));
         }
     }
@@ -86,7 +90,7 @@ pub(super) fn guard_unowned(
     )?;
     if protected {
         return Err(Error::conflict(
-            "Supervisor reopen and dependency edits require an unassigned, unreserved issue with no unfinished worker attempt. Ownership and reservations were preserved; inspect issue allocation through --supervisor",
+            "Supervisor undraft, reopen and dependency edits require an unassigned, unreserved issue with no unfinished worker attempt. Ownership and reservations were preserved; inspect issue allocation through --supervisor",
         ));
     }
     Ok(())

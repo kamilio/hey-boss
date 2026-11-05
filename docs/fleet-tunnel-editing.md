@@ -28,8 +28,12 @@ Repeat the identical command after an uncertain response. A different edit is a 
 
 Drafting requires open or blocked, unassigned work with no active worker
 reservation. It retains the original actor and all normal project and label
-authorization. It never claims work or takes over a reservation. Undrafting
-is not added to the metadata route.
+authorization. It never claims work or takes over a reservation.
+
+`issue undraft NUMBER` also routes automatically, requiring `issue_undraft`
+support and unassigned, unreserved work with no unfinished attempt. The CLI
+captures the current version; stale edits fail. Reuse `--request-id` after an
+uncertain response. Undrafting preserves lifecycle state and dependencies.
 
 `issue close NUMBER --supervisor --request-id ID` closes completed work when
 `issue_close` is advertised. The CLI captures the authoritative version, owner
