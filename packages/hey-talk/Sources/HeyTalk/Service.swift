@@ -93,7 +93,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         capture.onReadinessChanged = { [weak self] ready in
             guard let self, self.session.phase == .recording || self.session.phase == .listening else { return }
-            if ready { self.updateRecordingOverlay() } else { self.overlay?.preparing() }
+            if ready { self.updateRecordingOverlay() } else { self.overlay?.preparing(self.session.phase) }
         }
         hotkey = Hotkey()
         hotkey?.onAction = { [weak self] action in
@@ -639,7 +639,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
         idleRelease?.cancel(); self.showOverlay(showOverlay)
-        overlay?.preparing(); hotkey?.captureEscape(true)
+        overlay?.preparing(session.phase); hotkey?.captureEscape(true)
         let begin: () -> Void = {
             guard self.session.generation == id, self.session.phase == .recording || self.session.phase == .listening else { return }
             let start = ProcessInfo.processInfo.systemUptime

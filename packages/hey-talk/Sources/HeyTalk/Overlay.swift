@@ -396,9 +396,9 @@ final class Overlay {
         identity.isHidden = true; correctionIndicator.isHidden = true; submitIndicator.isHidden = true
         updateAccessibilityLabel(); layout(animated: true)
     }
-    func preparing() {
+    func preparing(_ phase: Phase = .recording) {
         guard !waitingForAudio else { return }
-        update(.recording, waitingForAudio: true)
+        update(phase, waitingForAudio: true)
         let delay = DispatchWorkItem { [weak self] in
             guard let self, self.waitingForAudio else { return }
             self.connecting.isHidden = false
