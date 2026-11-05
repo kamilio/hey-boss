@@ -6,7 +6,10 @@ final class T3RenameTests: XCTestCase {
     @MainActor
     func testLiveRenameKeepsTheComposerDraft() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_T3_TEST"] == "1" else { throw XCTSkip("Requires a focused T3 thread") }
-        let field = try XCTUnwrap(FocusedInput.current(bundleIDs: ["com.t3tools.t3code"]))
+        let app = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.t3tools.t3code").first)
+        app.activate(options: [])
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let field = try XCTUnwrap(FocusedInput.read(app: app, forAuto: false))
         let label = try XCTUnwrap(field.composerLabel)
         XCTAssertTrue(label.hasPrefix("Message "))
         let title = String(label.dropFirst("Message ".count))
@@ -19,7 +22,7 @@ final class T3RenameTests: XCTestCase {
         }
         await fulfillment(of: [done], timeout: 5)
         try await Task.sleep(nanoseconds: 150_000_000)
-        XCTAssertNil(field.focusedThreadTitle())
+        XCTAssertTrue(field.isFocused())
         XCTAssertEqual(SpeechAX.string(field.element, "AXValue"), draft)
     }
 }

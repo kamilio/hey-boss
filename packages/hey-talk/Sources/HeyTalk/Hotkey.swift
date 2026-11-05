@@ -70,8 +70,9 @@ final class Hotkey {
 
 enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
-    case renameUnavailable = "rename_unavailable", newThreadUnavailable = "new_thread_unavailable"
+    case newThreadUnavailable = "new_thread_unavailable"
     case clearUnavailable = "clear_unavailable"
+    case t3Unavailable = "t3_unavailable"
     case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
 
@@ -91,8 +92,8 @@ enum PasteBlockReason: String {
         }
         switch self {
         case .clearUnavailable: return "Couldn’t clear the original field."
+        case .t3Unavailable: return "Couldn’t finish the T3 action. Check the selected chat."
         case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
-        case .renameUnavailable: return "Couldn’t finish renaming the thread. Open History for the title."
         case .accessibility: return "Text copied. Allow automatic paste."
         case .targetClosed: return "Reopen \(app). Press ⌘V."
         case .focusChanged: return "Return to \(app). Press ⌘V."
@@ -114,7 +115,7 @@ enum Paste {
     }
     static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
-                        isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil,
+                        isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil, listedThreads: [T3ThreadRow]? = nil,
                         completion: @escaping (String, PasteBlockReason?) -> Void) {
         func check() -> PasteBlockReason? {
             PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
@@ -153,6 +154,43 @@ enum Paste {
             return
         }
         func paste() {
+            switch action {
+            case .switchThread(let position):
+                Task { @MainActor in
+                    guard isCurrent(), check() == nil, let field = originalField,
+                          let selected = await field.switchThread(position: position, listed: listedThreads, isCurrent: isCurrent) else {
+                        completion("history", .t3Unavailable); return
+                    }
+                    onNewField?(selected)
+                    completion("switched", nil)
+                }
+                return
+            case .pinThread, .settleThread, .rename:
+                Task { @MainActor in
+                    guard isCurrent(), check() == nil, let field = originalField,
+                          let id = field.t3ThreadID, let environment = field.t3EnvironmentID else {
+                        completion("history", .t3Unavailable); return
+                    }
+                    do {
+                        try await T3Server.shared.apply(action, thread: id, environment: environment, isCurrent: { isCurrent() && field.isFocused() })
+                        if case .rename(let title) = action {
+                            var renamed: FocusedInput?
+                            for _ in 0..<40 {
+                                guard isCurrent(), field.app.isActive else { break }
+                                if let fresh = FocusedInput.read(app: field.app, forAuto: false), fresh.document == field.document,
+                                   fresh.composerLabel == "Message " + title { renamed = fresh; break }
+                                try? await Task.sleep(nanoseconds: 40_000_000)
+                            }
+                            guard let renamed else { completion("history", .t3Unavailable); return }
+                            onNewField?(renamed)
+                        }
+                        completion(action == .settleThread ? "settled" : action == .pinThread(true) ? "pinned" : action == .pinThread(false) ? "unpinned" : "renamed", nil)
+                    } catch { completion("history", .t3Unavailable) }
+                }
+                return
+            case .listThreads: completion("history", .t3Unavailable); return
+            default: break
+            }
             if case .newThread(let project, let text) = action {
                 Task { @MainActor in
                     guard isCurrent(), check() == nil, let field = originalField,
@@ -172,7 +210,6 @@ enum Paste {
             let board = NSPasteboard.general
             board.clearContents()
             guard board.setString(action.text, forType: .string) else { completion("history", .clipboardUnavailable); return }
-            let clipboardVersion = board.changeCount
             func keypress(_ key: CGKeyCode, _ flags: CGEventFlags) -> Bool {
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
@@ -182,36 +219,6 @@ enum Paste {
                      afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
                     if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
                     else { completion(delivery, reason) }
-                }
-            } else if case .rename(let title) = action {
-                guard isCurrent() else { completion("history", nil); return }
-                if let reason = check() {
-                    if reason == .focusChanged, let onWait { retry(onWait) }
-                    else { completion("clipboard", reason) }
-                    return
-                }
-                Task { @MainActor in
-                    guard let field = originalField, await field.openThreadTitle(isCurrent: isCurrent) else {
-                        completion("clipboard", .renameUnavailable); return
-                    }
-                    for _ in 0..<20 {
-                        try? await Task.sleep(nanoseconds: 40_000_000)
-                        guard isCurrent(), field.app.isActive, board.changeCount == clipboardVersion else { break }
-                        guard let editor = field.focusedThreadTitle() else { continue }
-                        send(shouldPressEnter: { true }, check: {
-                            field.focusedThreadTitle() == editor && board.changeCount == clipboardVersion ? nil : .renameUnavailable
-                        }, isCurrent: isCurrent, post: { key, flags in
-                            let value = SpeechAX.string(editor.element, "AXValue")
-                            if key == 9 && SpeechAX.string(editor.element, "AXSelectedText") != value { return false }
-                            if key == 36 && value != title { return false }
-                            return keypress(key, flags)
-                        }, afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, _ in
-                            if delivery == "submitted" { completion("renamed", nil) }
-                            else { completion("clipboard", .renameUnavailable) }
-                        }
-                        return
-                    }
-                    completion("clipboard", .renameUnavailable)
                 }
             }
         }

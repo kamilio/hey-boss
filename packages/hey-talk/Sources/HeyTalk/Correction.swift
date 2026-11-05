@@ -20,11 +20,16 @@ struct CorrectionSettings {
 
 enum CorrectionAction: Equatable {
     case paste(String), rename(String), clearInput, newThread(project: String?, text: String)
+    case listThreads, switchThread(Int), settleThread, pinThread(Bool)
 
     var text: String {
         switch self {
         case .paste(let text), .rename(let text): return text
         case .clearInput: return "Clear input"
+        case .listThreads: return "List T3 threads"
+        case .switchThread(let position): return "Go to T3 chat \(position)"
+        case .settleThread: return "Settle T3 thread"
+        case .pinThread(let pinned): return pinned ? "Pin T3 thread" : "Unpin T3 thread"
         case .newThread(let project, let text):
             if !text.isEmpty { return text }
             return project.map { "New thread in " + $0 } ?? "New thread"
@@ -44,7 +49,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, threadActions: Bool = false, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -61,10 +66,7 @@ final class Correction {
         }
         var tools = [try tool("paste", "text")]
         if canClear { tools.append(try tool("clear_input")) }
-        if threadActions {
-            tools.append(try tool("rename_thread", "title"))
-            tools.append(try tool("new_thread", "project", "text"))
-        }
+        if threadActions { tools += try T3Tools.definitions(prompt: prompt) }
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -76,6 +78,7 @@ final class Correction {
         }
         var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
         if let appContext { values["app_context"] = appContext }
+        if let app { values["app"] = app }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         let message = String(decoding: input, as: UTF8.self)
         let conversation: Any = history.isEmpty ? message as Any : [["role": "user", "content": message]] + history
@@ -103,24 +106,15 @@ final class Correction {
                 if item["type"] as? String == "reasoning" { continue }
                 guard action == nil, item["type"] as? String == "function_call",
                       let arguments = item["arguments"] as? String,
-                      let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String] else { throw TalkError("Invalid correction tool call.") }
+                      let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any] else { throw TalkError("Invalid correction tool call.") }
                 switch item["name"] as? String {
                 case "clear_input" where canClear && values.isEmpty: action = .clearInput
                 case "paste" where values.count == 1:
-                    guard let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+                    guard let text = (values["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
                     else { throw TalkError("Correction returned no text.") }
                     action = .paste(text)
-                case "rename_thread" where threadActions && values.count == 1:
-                    guard let title = values["title"]?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
-                          title.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil
-                    else { throw TalkError("Invalid thread title.") }
-                    action = .rename(title)
-                case "new_thread" where threadActions && values.count == 2:
-                    guard let project = values["project"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-                          project.rangeOfCharacter(from: .controlCharacters) == nil,
-                          let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    else { throw TalkError("Invalid new thread request.") }
-                    action = .newThread(project: project.isEmpty ? nil : project, text: text)
+                case let name? where threadActions && name.hasPrefix("t3_"):
+                    action = try T3Tools.action(name, values: values)
                 default: throw TalkError("Unavailable correction tool.")
                 }
             case "response.completed":
@@ -133,13 +127,13 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false,
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, threadActions: Bool = false, canClear: Bool = false,
                  perform: ((CorrectionAction, @escaping (String) -> Void) -> Void)? = nil,
                  completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         func turn(_ history: [[String: Any]], last: CorrectionAction?, count: Int) {
             task = Task { @MainActor in
                 do {
-                    let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext,
+                    let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, app: app?(),
                                                    threadActions: threadActions, canClear: canClear, history: history)
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
@@ -150,6 +144,7 @@ final class Correction {
                     try Task.checkCancellation()
                     guard let action else {
                         guard let last else { throw TalkError("Correction returned no tool call.") }
+                        guard last != .listThreads else { throw TalkError("No matching T3 thread was selected.") }
                         completion(.success(last)); return
                     }
                     guard let perform else { completion(.success(action)); return }

@@ -780,7 +780,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
             else if let error = info["error"] as? String { overlay?.error(error) }
-            if delivery == "submitted", automatic != nil { restartAutomatic(id: id) }
+            if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled"].contains(delivery) {
+                restartAutomatic(id: id)
+            }
         }
         // Keep each tool's text recoverable before touching the original field.
         func save(_ action: CorrectionAction, then: @escaping () -> Void) {
@@ -797,8 +799,21 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
 
         var lastDelivery: String?
+        var listedThreads: [T3ThreadRow]?
         func perform(_ action: CorrectionAction, next: @escaping (String) -> Void) {
             guard current() else { return }
+            if action == .listThreads {
+                guard let rows = field?.threadRows() else {
+                    save(.paste(original)) { finish("history", .t3Unavailable) }; return
+                }
+                listedThreads = rows
+                let context: [String: Any] = ["current_thread": field?.composerLabel?.replacingOccurrences(of: "Message ", with: "", options: .anchored) ?? "",
+                    "threads": rows.enumerated().map { index, row in
+                        ["position": index + 1, "title": row.title, "description": row.label, "current": row.current] as [String: Any]
+                    }]
+                guard let data = try? JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]) else { return }
+                next(String(decoding: data, as: UTF8.self)); return
+            }
             let originalField = field
             save(action) {
                 guard self.paste else { finish("stdout"); return }
@@ -811,7 +826,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                   self.hotkey?.captureEscape(true)
                                   self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(self.targetName ?? "the original app")", while: timer)
                                   report("waiting")
-                              } : nil, isCurrent: current, onNewField: { field = $0 }) { delivery, reason in
+                              } : nil, isCurrent: current, onNewField: { field = $0; listedThreads = nil }, listedThreads: listedThreads) { delivery, reason in
                     guard current() else { return }
                     if self.waitingPaste != nil {
                         self.waitingPaste = nil
@@ -825,6 +840,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         guard correctionEnabled else { perform(.paste(original)) { _ in }; return }
         correction.correct(original, vocabulary: (try? Vocabulary().words()) ?? [], appContext: context?.text,
+                           app: {
+                               guard self.transcriptionSource == "microphone", let target else { return nil }
+                               var app = ["name": target.localizedName ?? "", "bundle_id": target.bundleIdentifier ?? ""]
+                               if field?.canUseThreadActions == true {
+                                   app["thread"] = field?.composerLabel?.replacingOccurrences(of: "Message ", with: "", options: .anchored)
+                               }
+                               return app
+                           },
                            threadActions: paste && field?.canUseThreadActions == true, canClear: paste && field != nil,
                            perform: paste ? perform : nil) { result in
             guard current() else { return }
