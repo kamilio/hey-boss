@@ -1,9 +1,9 @@
 use crate::{issues::Store, pages};
 use std::{fs, io::Read, path::PathBuf};
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::current_dir().unwrap().join("out").join(format!(
             "publish-{}",
             crate::issues::worker::random_id().unwrap()

@@ -1,4 +1,5 @@
 //! Private static sites with publication-scoped, reclaimable fleet storage.
+pub mod publishing;
 mod storage;
 use crate::{
     database::Connection,
@@ -29,7 +30,8 @@ CREATE TABLE IF NOT EXISTS published_live(name TEXT PRIMARY KEY,deployment TEXT 
 CREATE INDEX IF NOT EXISTS published_page_list ON published_pages(deleted,updated_at DESC,name);";
 
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
-    storage::migrate(db)
+    storage::migrate(db)?;
+    publishing::migrate(db)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +52,7 @@ pub struct Page {
     pub stored_size: u64,
     pub syncing: bool,
     pub path: String,
+    pub publications: Vec<publishing::Publication>,
 }
 
 pub(crate) fn valid_hash(hash: &str) -> bool {
@@ -220,6 +223,15 @@ pub(crate) fn write_chunk(database: &Path, hash: &str, bytes: &[u8]) -> Result<(
 }
 
 pub fn publish(database: &Path, source: &Path, name: &str) -> Result<Page> {
+    let page = publish_local(database, source, name)?;
+    if page.publications.iter().any(|p| p.auto_sync && !p.synced) {
+        publishing::sync_automatic(database, name)
+    } else {
+        Ok(page)
+    }
+}
+
+fn publish_local(database: &Path, source: &Path, name: &str) -> Result<Page> {
     valid_name(name)?;
     let db = Store::open(database)?.into_database();
     let _lock = lock(database)?;
@@ -444,6 +456,7 @@ pub(crate) fn view_in(db: &Connection, name: &str) -> Result<Page> {
             .map(|m| complete(db, m))
             .transpose()?
             .unwrap_or(false);
+    let publications = publishing::list_in(db, name, &wanted)?;
     let (deployment, files) = if ready {
         if previous.as_deref() != Some(wanted.as_str()) {
             db.execute("INSERT INTO published_live VALUES(?1,?2) ON CONFLICT(name) DO UPDATE SET deployment=excluded.deployment WHERE published_live.deployment<>excluded.deployment", params![name,wanted])?;
@@ -474,6 +487,7 @@ pub(crate) fn view_in(db: &Connection, name: &str) -> Result<Page> {
             .unwrap_or(0),
         syncing: !ready,
         path: format!("/pages/{name}"),
+        publications,
     })
 }
 pub fn view(database: &Path, name: &str) -> Result<Page> {
