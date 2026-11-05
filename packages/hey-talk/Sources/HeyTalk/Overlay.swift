@@ -610,11 +610,11 @@ final class Overlay {
         }
         let label = NSTextField(labelWithString: message)
         label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.sizeToFit()
+        label.textColor = .white; label.sizeToFit()
         let bounds = NSRect(x: 0, y: 0, width: ceil(label.frame.width) + 42, height: 30)
-        let content = NSVisualEffectView(frame: bounds)
-        content.material = .popover; content.blendingMode = .behindWindow; content.state = .active
+        let content = NSView(frame: bounds)
         content.wantsLayer = true; content.layer?.cornerRadius = bounds.height / 2; content.layer?.masksToBounds = true
+        content.layer?.backgroundColor = NSColor(white: 0.14, alpha: 0.97).cgColor
         let check = NSImageView(frame: NSRect(x: 10, y: 8, width: 14, height: 14))
         check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
         check.contentTintColor = TalkDesign.active
@@ -622,15 +622,15 @@ final class Overlay {
         content.addSubview(check); content.addSubview(label)
 
         let toast = RecordingPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        toast.title = "Hey Talk — T3 action"; toast.level = .statusBar
+        toast.title = "Hey Talk — T3 action"; toast.level = .popUpMenu
         toast.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         toast.backgroundColor = .clear; toast.isOpaque = false; toast.hasShadow = true
         toast.ignoresMouseEvents = true; toast.hidesOnDeactivate = false; toast.contentView = content
         let visible = screen.visibleFrame
-        toast.setFrameOrigin(NSPoint(x: round(visible.midX - bounds.width / 2), y: visible.maxY - bounds.height - 8))
+        toast.setFrameOrigin(NSPoint(x: round(visible.midX - bounds.width / 2), y: min(visible.maxY, screen.frame.maxY - screen.safeAreaInsets.top) - bounds.height - 8))
         t3Confirmation?.orderOut(nil); t3Confirmation = toast
         toast.orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self, weak toast] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self, weak toast] in
             guard let self, let toast, self.t3Confirmation === toast else { return }
             toast.orderOut(nil); self.t3Confirmation = nil
         }

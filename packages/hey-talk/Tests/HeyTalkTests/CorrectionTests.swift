@@ -26,18 +26,15 @@ final class CorrectionTests: XCTestCase {
             XCTAssertEqual(values["app"] as? [String: String], app)
             let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
             XCTAssertEqual(tools.compactMap { $0["name"] as? String }, allowed
-                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread"] : ["paste"])
+                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
         }
     }
 
     func testT3NavigationRequiresAValidPositionAndNoUnexpectedArguments() throws {
         XCTAssertEqual(try T3Tools.action("t3_switch_thread", values: ["position": 8]), .switchThread(8))
-        XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: ["pinned": true]), .pinThread(true))
-        XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: ["pinned": false]), .pinThread(false))
-        for pinned: Any in [0, 1, "true", NSNull()] {
-            XCTAssertThrowsError(try T3Tools.action("t3_pin_thread", values: ["pinned": pinned]))
-        }
-        XCTAssertThrowsError(try T3Tools.action("t3_pin_thread", values: [:]))
+        XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: [:]), .pinThread(true))
+        XCTAssertEqual(try T3Tools.action("t3_unpin_thread", values: [:]), .pinThread(false))
+        XCTAssertThrowsError(try T3Tools.action("t3_unpin_thread", values: ["thread": "other"]))
         XCTAssertEqual(try T3Tools.action("t3_settle_thread", values: [:]), .settleThread)
         XCTAssertEqual(try T3Tools.action("t3_list_threads", values: [:]), .listThreads)
         for position: Any in [0, 10, 1.5, true, "8"] {
@@ -88,7 +85,7 @@ final class CorrectionTests: XCTestCase {
             case 2:
                 let input = try! JSONSerialization.jsonObject(with: Data((history![0]["content"] as! String).utf8)) as! [String: Any]
                 XCTAssertEqual((input["app"] as? [String: String])?["thread"], "Publish Artifacts Publicly")
-                item = ["type": "function_call", "name": "t3_pin_thread", "arguments": #"{"pinned":true}"#, "call_id": "pin"]
+                item = ["type": "function_call", "name": "t3_pin_thread", "arguments": "{}", "call_id": "pin"]
             default: item = ["type": "message"]
             }
             rounds += 1
@@ -245,7 +242,7 @@ final class CorrectionTests: XCTestCase {
             let request = try Correction.request(text: "speech", vocabulary: [], threadActions: allowed)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
-                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread"] : ["paste"])
+                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
         }
     }
 

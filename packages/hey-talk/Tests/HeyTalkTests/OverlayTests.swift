@@ -16,13 +16,15 @@ final class OverlayTests: XCTestCase {
         XCTAssertFalse(notice.canBecomeKey)
         XCTAssertLessThanOrEqual(notice.frame.height, 32)
         XCTAssertLessThanOrEqual(notice.frame.width, 160)
-        let display = try XCTUnwrap(notice.screen).visibleFrame
+        let screen = try XCTUnwrap(notice.screen), display = screen.visibleFrame
         XCTAssertEqual(notice.frame.midX, display.midX, accuracy: 1)
-        XCTAssertEqual(notice.frame.maxY, display.maxY - 8, accuracy: 1)
+        XCTAssertEqual(notice.frame.maxY, min(display.maxY, screen.frame.maxY - screen.safeAreaInsets.top) - 8, accuracy: 1)
         overlay.confirmT3Action(.pinThread(false))
         overlay.finishProcessing()
         XCTAssertEqual(confirmations().count, 1)
         try await Task.sleep(nanoseconds: 2_200_000_000)
+        XCTAssertEqual(confirmations().count, 1)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
         XCTAssertTrue(confirmations().isEmpty)
     }
 
