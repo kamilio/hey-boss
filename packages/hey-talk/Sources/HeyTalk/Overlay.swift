@@ -16,7 +16,7 @@ private final class DockMotion: NSAnimation {
         self.panel = panel; startY = panel.frame.minY; self.destination = destination
         super.init(duration: 0.18, animationCurve: .easeOut)
         animationBlockingMode = .nonblocking
-        frameRate = 60
+        frameRate = Float(panel.screen?.maximumFramesPerSecond ?? 60)
     }
     required init?(coder: NSCoder) { fatalError("DockMotion is not archived") }
     override var runLoopModesForAnimating: [RunLoop.Mode]? { [.common] }
@@ -29,13 +29,42 @@ private final class DockMotion: NSAnimation {
 }
 
 private final class WaveView: NSView {
-    var color = TalkDesign.active { didSet { needsDisplay = true } }
-    var heights = Array(repeating: 4.0, count: Waveform.count) { didSet { needsDisplay = true } }
-    override func draw(_ dirtyRect: NSRect) {
-        color.setFill()
-        for (index, height) in heights.enumerated() {
-            NSBezierPath(roundedRect: NSRect(x: CGFloat(index * 5), y: (bounds.height - height) / 2, width: 2, height: height), xRadius: 1, yRadius: 1).fill()
+    static let interval: TimeInterval = 0.08
+    private let bars = (0..<Waveform.count).map { _ in CALayer() }
+    var color = TalkDesign.active { didSet { updateColors() } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        for (index, bar) in bars.enumerated() {
+            bar.position = CGPoint(x: index * 5 + 1, y: 12)
+            bar.bounds = CGRect(x: 0, y: 0, width: 2, height: 4)
+            bar.cornerRadius = 1
+            layer?.addSublayer(bar)
         }
+        updateColors()
+    }
+    required init?(coder: NSCoder) { fatalError("WaveView is not archived") }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateColors() }
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            for bar in bars { bar.backgroundColor = color.cgColor }
+        }
+    }
+    func update(level: Double?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(level == nil || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        CATransaction.setAnimationDuration(Self.interval)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .linear))
+        for (i, bar) in bars.enumerated() {
+            if let level {
+                bar.bounds.size.height = i + 1 < bars.count ? bars[i + 1].bounds.height : Waveform.height(level)
+            } else {
+                bar.removeAnimation(forKey: "bounds")
+                bar.bounds.size.height = 4
+            }
+        }
+        CATransaction.commit()
     }
 }
 
@@ -118,6 +147,9 @@ final class Overlay {
     private let halo = CAShapeLayer()
     private var timer: Timer?
     private var dockTimer: Timer?
+    private let dockQueue = DispatchQueue(label: "hey-talk.dock-geometry", qos: .utility)
+    private var dockReadPending = false
+    private var layoutRevision = 0
     private var dockList: AXUIElement?
     private var dockRestY: CGFloat?
     private var dockMotion: DockMotion?
@@ -272,18 +304,26 @@ final class Overlay {
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
         dockTimer?.invalidate(); dockTimer = nil
         if visible {
-            avoidDock(dockFrame())
-            let ticker = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                guard let self, !self.pillContent.dragged else { return }
-                self.avoidDock(self.dockFrame())
+            let ticker = Timer(timeInterval: 0.1, repeats: true) { [weak self] timer in
+                guard let self, !self.pillContent.dragged, !self.dockReadPending,
+                      let top = NSScreen.screens.first?.frame.maxY else { return }
+                self.dockReadPending = true
+                self.dockQueue.async {
+                    let frame = self.dockFrame(screenTop: top)
+                    DispatchQueue.main.async {
+                        self.dockReadPending = false
+                        guard timer.isValid, !self.pillContent.dragged else { return }
+                        self.avoidDock(frame)
+                    }
+                }
             }
             ticker.tolerance = 0.02
             RunLoop.main.add(ticker, forMode: .common); dockTimer = ticker
         }
         updateTimer()
     }
-    private func dockFrame() -> NSRect? {
-        guard AXIsProcessTrusted(), let top = NSScreen.screens.first?.frame.maxY else { return nil }
+    private func dockFrame(screenTop top: CGFloat) -> NSRect? {
+        guard AXIsProcessTrusted() else { return nil }
         if dockList == nil {
             guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
             let app = AXUIElementCreateApplication(dock.processIdentifier)
@@ -325,7 +365,7 @@ final class Overlay {
         dockMotion?.stop(); dockMotion = nil
         dockRestY = restingY
         if !panel.isVisible || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || destination == frame.minY {
-            panel.setFrameOrigin(NSPoint(x: frame.minX, y: destination))
+            if frame.minY != destination { panel.setFrameOrigin(NSPoint(x: frame.minX, y: destination)) }
             if destination == restingY { dockRestY = nil }
         } else {
             let motion = DockMotion(panel: panel, destination: destination)
@@ -347,7 +387,7 @@ final class Overlay {
         connecting.isHidden = true
         phase = next; expanded = next == .recording
         updateModeAppearance()
-        wave.heights = Array(repeating: 4, count: Waveform.count)
+        wave.update(level: nil)
         wave.isHidden = next != .recording
         wave.alphaValue = waitingForAudio ? 0.35 : 1
         identity.layer?.removeAllAnimations()
@@ -368,6 +408,7 @@ final class Overlay {
     }
     func processing(audioSeconds: Double, correction: Bool) {
         progress = TranscriptionProgress(audioSeconds: audioSeconds, correction: correction)
+        guard phase != .processing else { return }
         update(.processing)
     }
     func finishProcessing() {
@@ -498,7 +539,15 @@ final class Overlay {
         let rightExtension = status?.frame.width ?? 0
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
-        resizePanel(for: size, extensionWidth: max(leftExtension, rightExtension))
+        let target = NSSize(width: max(200, size.width + 96, size.width + 2 * max(leftExtension, rightExtension) + 16), height: size.height + 48)
+        layoutRevision += 1
+        let revision = layoutRevision
+        let shrinking = animated && panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion &&
+            (target.width < panel.frame.width || target.height < panel.frame.height)
+        if shrinking {
+            // Keep closing glass inside the transparent window until its last frame.
+            resizePanel(to: NSSize(width: max(target.width, panel.frame.width), height: max(target.height, panel.frame.height)))
+        } else { resizePanel(to: target) }
         let width = size.width + leftExtension + rightExtension, height = size.height
         let center = root.bounds.midX + (rightExtension - leftExtension) / 2
         let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
@@ -545,6 +594,9 @@ final class Overlay {
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
             connecting.frame = NSRect(x: contentOrigin + 102, y: 10, width: 90, height: 17)
+        } completionHandler: { [weak self] in
+            guard shrinking, self?.layoutRevision == revision else { return }
+            self?.layout(animated: false)
         }
         pillContent.frame = NSRect(origin: .zero, size: frame.size)
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -558,8 +610,7 @@ final class Overlay {
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
     }
-    private func resizePanel(for size: NSSize, extensionWidth: CGFloat) {
-        let windowSize = NSSize(width: max(200, size.width + 96, size.width + 2 * extensionWidth + 16), height: size.height + 48)
+    private func resizePanel(to windowSize: NSSize) {
         guard panel.frame.size != windowSize else { return }
         let delta = (windowSize.width - root.bounds.width) / 2
         var frame = NSRect(x: panel.frame.midX - windowSize.width / 2, y: panel.frame.minY, width: windowSize.width, height: windowSize.height)
@@ -585,7 +636,7 @@ final class Overlay {
                 CATransaction.begin()
                 CATransaction.setDisableActions(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
                 CATransaction.setAnimationDuration(0.1)
-                self.glow.strokeEnd = max(0.02, self.progress.fraction(elapsed: ProcessInfo.processInfo.systemUptime - self.processingStarted))
+                self.glow.strokeEnd = max(self.glow.strokeEnd, self.progress.fraction(elapsed: ProcessInfo.processInfo.systemUptime - self.processingStarted))
                 CATransaction.commit()
             }
             ticker.tolerance = 0.01
@@ -593,10 +644,9 @@ final class Overlay {
             return
         }
         guard phase == .recording, !waitingForAudio, enabled else { return }
-        let ticker = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+        let ticker = Timer(timeInterval: WaveView.interval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.wave.heights.removeFirst()
-            self.wave.heights.append(Waveform.height(self.level()))
+            self.wave.update(level: self.level())
         }
         ticker.tolerance = 0.01
         RunLoop.main.add(ticker, forMode: .common); timer = ticker
