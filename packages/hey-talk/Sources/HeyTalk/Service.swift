@@ -772,7 +772,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
 
         var lastDelivery: String?
-        var pastedValue: String?
         func perform(_ action: CorrectionAction, next: @escaping (String) -> Void) {
             guard current() else { return }
             let originalField = field
@@ -780,7 +779,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 guard self.paste else { finish("stdout"); return }
                 let focused = { originalField?.isFocused() ?? !needsField }
                 Paste.deliver(action, target: target, originalField: originalField,
-                              shouldPressEnter: { !correctionEnabled && allowsSubmit() },
+                              shouldPressEnter: allowsSubmit,
                               returnToField: self.returnToField ? originalField : nil, targetStillFocused: focused,
                               onWait: lastDelivery == nil && (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = (timer, action.text)
@@ -795,16 +794,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     }
                     guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason); return }
                     lastDelivery = delivery
-                    if delivery == "pasted", allowsSubmit(), let destination = field {
-                        // The paste key is posted asynchronously. Remember the resulting draft
-                        // so a later model turn cannot submit edits made in the meantime.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            guard current() else { return }
-                            guard destination.isFocused() else { finish(delivery, .focusChanged); return }
-                            pastedValue = SpeechAX.value(destination.element, "AXValue") as? String
-                            next(delivery)
-                        }
-                    } else { next(delivery) }
+                    next(delivery)
                 }
             }
         }
@@ -815,14 +805,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard current() else { return }
             switch result {
             case .success(let action):
-                guard let delivery = lastDelivery else { save(action) { finish("stdout") }; return }
-                guard delivery == "pasted", allowsSubmit(), let target else { finish(delivery); return }
-                guard target.isActive, field?.isFocused() ?? !needsField else { finish(delivery, .focusChanged); return }
-                if let field, let pastedValue, SpeechAX.value(field.element, "AXValue") as? String != pastedValue {
-                    finish(delivery, .focusChanged); return
-                }
-                if Paste.post(36, flags: [], to: target.processIdentifier) { finish("submitted") }
-                else { finish(delivery, .eventUnavailable) }
+                if let delivery = lastDelivery { finish(delivery) }
+                else { save(action) { finish("stdout") } }
             case .failure(let error):
                 info["error"] = error.localizedDescription
                 info["status"] = lastDelivery == nil ? "fallback" : "partial"

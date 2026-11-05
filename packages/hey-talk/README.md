@@ -81,8 +81,9 @@ opens a thread in the current project and puts the request in its composer. Auto
 controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
 In any recognized editable field, say “clear this input” to select and delete its contents without submitting.
 Hey Talk gives each tool result back to the model so it can take the next requested action. For example,
-“clear this input, then paste Check publishing” clears the field before inserting the new text. Auto Submit
-waits until the model finishes. A blocked action stops the sequence; completed actions stay in History.
+“clear this input, then paste Check publishing” clears the field before inserting the new text. With Auto Submit on,
+the paste tool presses Enter before the model chooses its next action. With it off, the text stays in the field.
+A blocked action stops the sequence; completed actions stay in History.
 With `--no-paste`, only the paste result is available.
 
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one

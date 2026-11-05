@@ -85,7 +85,10 @@ enum PasteBlockReason: String {
     func message(targetName: String? = nil, pasted: Bool = false) -> String {
         let name = targetName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let app = name.isEmpty ? "the original app" : name
-        if pasted { return "Pasted in \(app). Press Enter there." }
+        if pasted {
+            return self == .focusChanged || self == .unidentifiedField
+                ? "Pasted in \(app). Focus changed before submit." : "Pasted in \(app). Couldn’t send Enter."
+        }
         switch self {
         case .clearUnavailable: return "Couldn’t clear the original field."
         case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
