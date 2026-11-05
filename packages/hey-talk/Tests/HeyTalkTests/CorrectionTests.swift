@@ -16,6 +16,101 @@ private final class CorrectionProtocol: URLProtocol {
 }
 
 final class CorrectionTests: XCTestCase {
+    func testT3ToolsAndAppIdentityAreScopedToTheDictationTarget() throws {
+        let app = ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"]
+        for allowed in [false, true] {
+            let request = try Correction.request(text: "Go to Publish Artifact", vocabulary: [], app: app, threadActions: allowed)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let input = try XCTUnwrap(body["input"] as? String)
+            let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+            XCTAssertEqual(values["app"] as? [String: String], app)
+            let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+            XCTAssertEqual(tools.compactMap { $0["name"] as? String }, allowed
+                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread"] : ["paste"])
+        }
+    }
+
+    func testT3NavigationRequiresAValidPositionAndNoUnexpectedArguments() throws {
+        XCTAssertEqual(try T3Tools.action("t3_switch_thread", values: ["position": 8]), .switchThread(8))
+        XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: ["pinned": true]), .pinThread(true))
+        XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: ["pinned": false]), .pinThread(false))
+        for pinned: Any in [0, 1, "true", NSNull()] {
+            XCTAssertThrowsError(try T3Tools.action("t3_pin_thread", values: ["pinned": pinned]))
+        }
+        XCTAssertThrowsError(try T3Tools.action("t3_pin_thread", values: [:]))
+        XCTAssertEqual(try T3Tools.action("t3_settle_thread", values: [:]), .settleThread)
+        XCTAssertEqual(try T3Tools.action("t3_list_threads", values: [:]), .listThreads)
+        for position: Any in [0, 10, 1.5, true, "8"] {
+            XCTAssertThrowsError(try T3Tools.action("t3_switch_thread", values: ["position": position]))
+        }
+        XCTAssertThrowsError(try T3Tools.action("t3_switch_thread", values: ["position": 1, "title": "wrong"]))
+        XCTAssertThrowsError(try T3Tools.action("t3_pin_thread", values: ["thread": "other"]))
+        XCTAssertThrowsError(try T3Tools.action("t3_delete_thread", values: [:]))
+    }
+
+    func testT3ActionsAreRejectedOutsideT3AndAnUnresolvedListDoesNotPaste() {
+        for allowed in [false, true] {
+            let correction = client()
+            var rounds = 0, actions: [CorrectionAction] = []
+            CorrectionProtocol.handle = { stub in
+                rounds += 1
+                let item = rounds == 1
+                    ? #"{"type":"function_call","name":"t3_list_threads","arguments":"{}","call_id":"list"}"#
+                    : #"{"type":"message"}"#
+                stub.respond(status: 200, body: "data: {\"type\":\"response.output_item.done\",\"item\":" + item + "}\n\ndata: {\"type\":\"response.completed\"}\n\n")
+            }
+            let done = expectation(description: "no navigation")
+            correction.correct("Go to missing chat", vocabulary: [], threadActions: allowed, perform: { action, next in
+                actions.append(action); next(#"{"threads":[]}"#)
+            }) { result in
+                if case .success = result { XCTFail("Should preserve the original when no thread is selected") }
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+            XCTAssertEqual(actions, allowed ? [.listThreads] : [])
+        }
+    }
+
+    func testT3ListCanResolveANameBeforeSwitchingAndContextTracksTheDestination() throws {
+        let correction = client()
+        var actions: [CorrectionAction] = [], rounds = 0, title = "Voice tools"
+        CorrectionProtocol.handle = { stub in
+            let stream = stub.request.httpBody.map(InputStream.init(data:)) ?? stub.request.httpBodyStream!
+            stream.open(); defer { stream.close() }
+            let body = try! JSONSerialization.jsonObject(with: stream) as! [String: Any]
+            let history = body["input"] as? [[String: Any]]
+            let item: [String: Any]
+            switch rounds {
+            case 0: item = ["type": "function_call", "name": "t3_list_threads", "arguments": "{}", "call_id": "list"]
+            case 1:
+                XCTAssertEqual(history?.last?["output"] as? String, #"{"threads":[{"position":8,"title":"Publish Artifacts Publicly"}]}"#)
+                item = ["type": "function_call", "name": "t3_switch_thread", "arguments": #"{"position":8}"#, "call_id": "switch"]
+            case 2:
+                let input = try! JSONSerialization.jsonObject(with: Data((history![0]["content"] as! String).utf8)) as! [String: Any]
+                XCTAssertEqual((input["app"] as? [String: String])?["thread"], "Publish Artifacts Publicly")
+                item = ["type": "function_call", "name": "t3_pin_thread", "arguments": #"{"pinned":true}"#, "call_id": "pin"]
+            default: item = ["type": "message"]
+            }
+            rounds += 1
+            let event = try! JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
+            stub.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n")
+        }
+        let done = expectation(description: "navigated and pinned")
+        correction.correct("Go to Publish Artifact and pin it.", vocabulary: [], app: { ["name": "T3 Code", "thread": title] }, threadActions: true, perform: { action, next in
+            actions.append(action)
+            switch action {
+            case .listThreads: next(#"{"threads":[{"position":8,"title":"Publish Artifacts Publicly"}]}"#)
+            case .switchThread: title = "Publish Artifacts Publicly"; next("switched")
+            default: next("pinned")
+            }
+        }) { result in
+            XCTAssertEqual(try? result.get(), .pinThread(true)); done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(actions, [.listThreads, .switchThread(8), .pinThread(true)])
+        XCTAssertEqual(rounds, 4)
+    }
+
     private func client() -> Correction {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [CorrectionProtocol.self]
@@ -135,7 +230,7 @@ final class CorrectionTests: XCTestCase {
     }
 
     func testRenameRequiresAnEligibleTargetAndOneCompletedCallPerTurn() throws {
-        let call = #"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"rename_thread","arguments":"{\"title\":\"Release notes\"}"}}"# + "\n\n"
+        let call = #"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"t3_rename_thread","arguments":"{\"title\":\"Release notes\"}"}}"# + "\n\n"
         let end = #"data: {"type":"response.completed","response":{"status":"completed"}}"# + "\n\n"
         for (allowed, body, succeeds) in [(true, call + end, true), (false, call + end, false),
                                           (true, call + call + end, false), (true, call, false)] {
@@ -150,7 +245,7 @@ final class CorrectionTests: XCTestCase {
             let request = try Correction.request(text: "speech", vocabulary: [], threadActions: allowed)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
-                           allowed ? ["paste", "rename_thread", "new_thread"] : ["paste"])
+                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread"] : ["paste"])
         }
     }
 
@@ -163,7 +258,7 @@ final class CorrectionTests: XCTestCase {
         ] {
             let correction = client()
             let json = try JSONSerialization.data(withJSONObject: arguments)
-            let item = ["type": "function_call", "name": "new_thread", "arguments": String(decoding: json, as: UTF8.self)]
+            let item = ["type": "function_call", "name": "t3_new_thread", "arguments": String(decoding: json, as: UTF8.self)]
             let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
             CorrectionProtocol.handle = { $0.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n") }
             let done = expectation(description: "new thread")

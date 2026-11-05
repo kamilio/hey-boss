@@ -1,10 +1,22 @@
 import AppKit
 
+struct T3ThreadRow {
+    let title: String
+    let label: String
+    let element: AXUIElement
+    var current: Bool {
+        (SpeechAX.value(element, "AXDOMClassList") as? [String] ?? []).contains("bg-sidebar-row-active")
+    }
+}
+
 extension FocusedInput {
     var canUseThreadActions: Bool {
         app.bundleIdentifier == "com.t3tools.t3code" && composerLabel != nil &&
             document.flatMap(Self.threadLink) != nil
     }
+
+    var t3ThreadID: String? { document.flatMap(Self.threadLink)?.lastPathComponent }
+    var t3EnvironmentID: String? { document.flatMap(Self.threadLink)?.pathComponents.dropFirst().first }
 
     private var webArea: AXUIElement? {
         var node: AXUIElement? = element
@@ -20,55 +32,52 @@ extension FocusedInput {
         return SpeechAX.parameter(root, "AXUIElementsForSearchPredicate", query as CFDictionary) as? [AXUIElement] ?? []
     }
 
-    func focusedThreadTitle() -> FocusedInput? {
-        guard canUseThreadActions, app.isActive, let field = Self.read(app: app, forAuto: false),
-              field.document == document, let window, let current = field.window, CFEqual(window, current),
-              SpeechAX.string(field.element, "AXRole") == "AXTextField",
-              SpeechAX.string(field.element, "AXDescription") == "Thread title" else { return nil }
-        var ancestor = SpeechAX.element(field.element, "AXParent")
-        while let node = ancestor {
-            if SpeechAX.string(node, "AXDescription") == "Thread breadcrumb" { return field }
-            ancestor = SpeechAX.element(node, "AXParent")
+    func threadRows() -> [T3ThreadRow]? {
+        guard canUseThreadActions, isFocused(), let area = webArea,
+              let sidebar = search(area, "AXLandmarkSearchKey").first(where: { SpeechAX.string($0, "AXDescription") == "Threads" }) else { return nil }
+        let rows = search(sidebar, "AXButtonSearchKey").filter {
+            (SpeechAX.value($0, "AXDOMClassList") as? [String] ?? []).contains("group/sidebar-row")
         }
-        return nil
+        let result = rows.prefix(9).compactMap { row -> T3ThreadRow? in
+            guard let text = search(row, "AXStaticTextSearchKey").first else { return nil }
+            return T3ThreadRow(title: SpeechAX.string(text, "AXValue"), label: SpeechAX.string(row, "AXDescription"), element: row)
+        }
+        return result.count == min(rows.count, 9) ? result : nil
     }
 
     @MainActor
-    func openThreadTitle(isCurrent: () -> Bool) async -> Bool {
-        guard canUseThreadActions, isCurrent(), app.isActive, let composer = Self.read(app: app, forAuto: false), composer == self else { return false }
-        guard let area = composer.webArea else { return false }
-        guard let breadcrumb = search(area, "AXLandmarkSearchKey").first(where: {
-            SpeechAX.string($0, "AXDescription") == "Thread breadcrumb"
-        }) else { return false }
-        let buttons = search(breadcrumb, "AXButtonSearchKey")
-        let matches = buttons.filter { SpeechAX.string($0, "AXDescription").hasPrefix("Thread actions for ") }
-        guard matches.count == 1, let button = matches.first, isFocused(),
-              AXUIElementPerformAction(button, "AXPress" as CFString) == .success else { return false }
-        let application = AXUIElementCreateApplication(app.processIdentifier)
+    func switchThread(position: Int, listed: [T3ThreadRow]?, isCurrent: () -> Bool) async -> FocusedInput? {
+        guard isCurrent(), (1...9).contains(position), let rows = threadRows(), rows.count >= position else { return nil }
+        let selected = rows[position - 1]
+        if let listed {
+            guard listed.count >= position, CFEqual(listed[position - 1].element, selected.element),
+                  listed[position - 1].title == selected.title else { return nil }
+        }
+        var expectedID: String?
+        if listed != nil {
+            guard let environment = t3EnvironmentID,
+                  let threads = try? await T3Server.shared.threads(environment: environment) else { return nil }
+            let matches = threads.filter { $0["title"] as? String == selected.title }
+            guard matches.count == 1, let id = matches.first?["id"] as? String, UUID(uuidString: id) != nil,
+                  let url = URL(string: "t3code://threads/\(environment)/\(id)"), let bundle = app.bundleURL,
+                  isCurrent(), isFocused(), let fresh = threadRows(), fresh.count >= position,
+                  CFEqual(fresh[position - 1].element, selected.element), fresh[position - 1].title == selected.title else { return nil }
+            expectedID = id
+            NSWorkspace.shared.open([url], withApplicationAt: bundle, configuration: .init(), completionHandler: nil)
+        } else {
+            let keys: [CGKeyCode] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+            guard isCurrent(), isFocused(), Paste.post(keys[position - 1], flags: .maskCommand, to: app.processIdentifier) else { return nil }
+        }
         for _ in 0..<40 {
             try? await Task.sleep(nanoseconds: 40_000_000)
-            guard isCurrent(), app.isActive else { return false }
-            guard let focused = SpeechAX.element(application, "AXFocusedUIElement"), CFEqual(button, focused),
-                  let window, let menu = (SpeechAX.value(window, "AXChildren") as? [AXUIElement])?.first(where: {
-                      SpeechAX.string($0, "AXRole") == "AXMenu"
-                  }), let items = SpeechAX.value(menu, "AXChildren") as? [AXUIElement],
-                  let rename = items.first(where: { SpeechAX.string($0, "AXTitle") == "Rename thread" }),
-                  SpeechAX.value(rename, "AXEnabled") as? Bool == true else { continue }
-            guard Self.identify(composer.element, app: app) == self else { return false }
-            // Use the live key equivalent when one exists; current T3 exposes
-            // Rename thread as a menu action with no default shortcut.
-            if !SpeechAX.string(rename, "AXMenuItemCmdChar").isEmpty,
-               let key = SpeechAX.value(rename, "AXMenuItemCmdVirtualKey") as? UInt16,
-               let modifiers = SpeechAX.value(rename, "AXMenuItemCmdModifiers") as? Int {
-                var flags: CGEventFlags = modifiers & 8 == 0 ? .maskCommand : []
-                if modifiers & 1 != 0 { flags.insert(.maskShift) }
-                if modifiers & 2 != 0 { flags.insert(.maskAlternate) }
-                if modifiers & 4 != 0 { flags.insert(.maskControl) }
-                return Paste.post(key, flags: flags, to: app.processIdentifier)
-            }
-            return AXUIElementPerformAction(rename, "AXPress" as CFString) == .success
+            guard isCurrent(), app.isActive else { return nil }
+            guard let field = Self.read(app: app), field.canUseThreadActions,
+                  let window, let active = field.window, CFEqual(window, active),
+                  selected.current, field.composerLabel == "Message " + selected.title,
+                  expectedID == nil || field.t3ThreadID == expectedID else { continue }
+            return field
         }
-        return false
+        return nil
     }
 }
 

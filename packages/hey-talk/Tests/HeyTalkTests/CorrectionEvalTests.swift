@@ -3,6 +3,35 @@ import XCTest
 @testable import HeyTalk
 
 final class CorrectionEvalTests: XCTestCase {
+    func testLiveT3NavigationAndCurrentThreadActions() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
+        let correction = Correction()
+        for (speech, expected): (String, [CorrectionAction]) in [
+            ("Go to Publish Artifact conversation.", [.listThreads, .switchThread(8)]),
+            ("Go to chat three.", [.switchThread(3)]),
+            ("Let's settle this thread.", [.settleThread]),
+            ("Let's pin this thread.", [.pinThread(true)]),
+            ("Unpin this thread.", [.pinThread(false)])
+        ] {
+            var actions: [CorrectionAction] = []
+            let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
+                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"] }, threadActions: true, perform: { action, next in
+                    actions.append(action)
+                    if action == .listThreads {
+                        next(#"{"current_thread":"Voice tools","threads":[{"position":1,"title":"Voice tools","current":true},{"position":8,"title":"Publish Artifacts Publicly","current":false}]}"#)
+                    } else { next("done") }
+                }) { continuation.resume(with: $0) }
+            }
+            XCTAssertEqual(actions, expected, speech)
+        }
+        for speech in ["Add a button that pins the current thread.", "How do I settle a thread?"] {
+            let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
+                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code"] }, threadActions: true) { continuation.resume(with: $0) }
+            }
+            guard case .paste = action else { XCTFail("Unexpected action for \(speech)"); continue }
+        }
+    }
+
     func testLiveSequentialTools() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
         let correction = Correction()

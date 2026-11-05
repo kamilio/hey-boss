@@ -77,11 +77,19 @@ Audio stays local. Correction applies before History, copy, paste, or submission
 including file transcription. A response can stream for up to 30 seconds, with at most eight seconds
 between updates. If correction fails, a notice explains why and the original transcript is kept. Escape discards pending correction too.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
-to change the title. Hey Talk waits for the original chat just as it does for paste,
-opens T3’s Rename thread action, and confirms the title without submitting a message.
+to change the title. Hey Talk identifies the original chat through Accessibility and
+uses T3’s local server API without submitting a message or touching the clipboard.
 Ask for a new thread in your own words. “Start a new thread and check whether publishing works”
 opens a thread in the current project and puts the request in its composer. Auto Submit
 controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
+“Go to chat three” switches to sidebar position 3 (the same slot as ⌘3). “Go to Publish Artifact conversation”
+reads the current sidebar first and resolves the title among positions 1–9. If the list changes before navigation, the action stops.
+“Settle this thread”, “Pin this thread”, and “Unpin this thread” check the current state, so repeating a command is safe.
+Rename, pin/unpin, and settle use T3’s protocol-2 API with five-minute credentials from `~/.t3/bin/t3`, held only in memory.
+Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts. Server actions currently support local T3 threads.
+These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
+name and bundle identifier, plus the current T3 thread title, refreshed after navigation. Auto Dictation resumes listening
+after switching, pinning, unpinning, or settling.
 In any recognized editable field, say “clear this input” to select and delete its contents without submitting.
 Hey Talk gives preparatory tool results back to the model so it can take the next requested action. For example,
 “clear this input, then paste Check publishing” clears the field before inserting the new text. With Auto Submit on,
@@ -385,6 +393,8 @@ swift test
 HEY_TALK_EVAL=1 swift test --filter CorrectionEvalTests # Live Luna, requires the saved mini/context evals under output/
 HEY_TALK_T3_NEW_TEST=1 swift test --filter T3NewThreadTests # Focus a T3 composer; set HEY_TALK_T3_PROJECT to test another project
 HEY_TALK_T3_TEST=1 swift test --filter T3RenameTests # Focus a T3 composer; confirms its existing title
+HEY_TALK_T3_TOOLS_TEST=1 swift test --filter T3ToolsTests.testLiveNavigationPreservesDraftAndClipboard # Auto off; restores navigation
+HEY_TALK_T3_SERVER_THREAD=THREAD_UUID swift test --filter T3ToolsTests.testLiveServerPinUnpinAndSettleState # Restores pin state; checks an already settled thread
 ./test-context.sh # Installed app: change visible text during microphone dictation
 ./test-login.sh # Installed app: login startup and explicit quit, while idle
 swift test --sanitize=thread
