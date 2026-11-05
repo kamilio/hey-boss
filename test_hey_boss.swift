@@ -70,6 +70,11 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENT"] {
+        app.setActivationPolicy(.regular)
+        DispatchQueue.main.async { auditConversationAgent(root); exit(0) }
+        app.run(); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SOL"] { auditSolChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
@@ -4650,9 +4655,7 @@ func auditConversation(_ root: String) {
         let reopened = VoiceConversation(cli: cli, saveURL: url)
         precondition(reopened.input.stringValue == "Hello" && !reopened.contextChip.isHidden)
         precondition(reopened.rows.map(\.stringValue) == chat.rows.map(\.stringValue))
-        let request = try! JSONSerialization.jsonObject(with: reopened.conversationRequest().httpBody!) as! [String: Any]
-        precondition((request["text"] as? [String: String])?["verbosity"] == "low")
-        let history = request["input"] as! [[String: String]]
+        let history = reopened.conversationHistory
         precondition(history.count == 1 && history[0]["role"] == "user" && history[0]["content"]!.contains(captured.components(separatedBy: .newlines).last!))
     }
     // Hold back completion: a real Supertonic word must light up before
@@ -4813,8 +4816,7 @@ func auditConversation(_ root: String) {
     let stopped = VoiceConversation(cli: cli, saveURL: saved)
     precondition(stopped.rows.suffix(2).map(\.stringValue) == [partial, "Reply stopped before it finished."])
     precondition(stopped.rows.dropLast(3).map(\.stringValue) == prior)
-    let request = try! JSONSerialization.jsonObject(with: stopped.conversationRequest().httpBody!) as! [String: Any]
-    let history = request["input"] as! [[String: String]]
+    let history = stopped.conversationHistory
     precondition(history.suffix(2).map { $0["role"]! } == ["user", "assistant"])
     precondition(history[history.count - 2]["content"] == question && markdown(history.last!["content"]!, size: 15, color: .labelColor).string == partial)
     library.window.close()
@@ -4831,8 +4833,7 @@ func auditConversation(_ root: String) {
     precondition(ui.phase == .idle && fresh.stopped && ui.rows.count == 1 && ui.input.stringValue == "Follow-up draft")
     let reopened = VoiceConversation(cli: cli, saveURL: saved)
     for chat in [interrupted, reopened] {
-        let request = try! JSONSerialization.jsonObject(with: chat.conversationRequest().httpBody!) as! [String: Any]
-        let history = request["input"] as! [[String: String]]
+        let history = chat.conversationHistory
         precondition(history.last == ["role": "user", "content": "Hello"], "Keep an unanswered message available to Sol after relaunch")
     }
     precondition(reopened.input.stringValue == "Follow-up draft")
@@ -5030,6 +5031,97 @@ func auditQuickIssueController() {
 
 #if canImport(FoundationModels)
 @available(macOS 26, *)
+func auditConversationAgent(_ root: String) {
+    let files = FileManager.default, folder = URL(fileURLWithPath: root)
+    try! files.createDirectory(at: folder, withIntermediateDirectories: true)
+    let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let saved = folder.appendingPathComponent("history/current.json")
+    let chat = VoiceConversation(cli: cli, saveURL: saved)
+    func wait(_ description: String, seconds: TimeInterval = 180, _ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition(), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(condition(), description + ": " + chat.status.stringValue)
+    }
+    func layout(_ ui: VoiceConversation) {
+        ui.show(); ui.window.contentView!.layoutSubtreeIfNeeded()
+        precondition(ui.tools.values.allSatisfy { $0.bounds.width > 0 && $0.bounds.width <= ui.scroll.bounds.width }, "Tool descriptions fit the conversation width")
+    }
+    // The real speech queue should speak a start once, not the command, result, or restored row.
+    let audio = ReviewAudio()
+    audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0; try! audio.engine.start()
+    chat.connect(audio)
+    var spoken = 0
+    let playback = audio.playbackStarted
+    audio.playbackStarted = { spoken += 1; playback() }
+    chat.respond("Create a note and check it."); chat.reply!.cancel(); chat.reply = nil
+    let item = ["command": "printf hello > note.txt", "description": "Creating a note."]
+    chat.event(["ToolStarted": ["id": "note", "input": item]])
+    chat.event(["ToolStarted": ["id": "note", "input": item]])
+    wait("Tool description is spoken") { spoken == 1 }
+    chat.event(["ToolCompleted": ["id": "note", "output": item.merging(["aggregatedOutput": "hello"]) { _, new in new }, "failed": false]])
+    precondition(chat.tools.count == 1 && chat.tools["note"]!.title.contains("Creating a note."))
+    chat.event(["TurnCompleted": ["status": "Completed", "output": ""]])
+    wait("Narration completes") { chat.phase == .listening }
+    precondition(spoken == 1, "Only the start description is spoken")
+    layout(chat)
+    chat.tools["note"]!.performClick(nil)
+    layout(chat)
+    chat.window.close()
+    let reopened = VoiceConversation(cli: cli, saveURL: saved)
+    precondition(reopened.tools.count == 1 && reopened.details[reopened.tools["note"]!]?.contains("hello") == true)
+    precondition(spoken == 1, "Restoring tool history must not replay narration")
+    reopened.window.close()
+    print("PASS native tool descriptions, one-time TTS, disclosure and persisted activity")
+    guard ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_LIVE"] == "1" else { return }
+    let home = files.homeDirectoryForCurrentUser
+    let sandboxHome = folder.appendingPathComponent("home")
+    try! files.createDirectory(at: sandboxHome.appendingPathComponent(".hey-boss/proxy"), withIntermediateDirectories: true)
+    if let key = try? Data(contentsOf: home.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")) {
+        try! key.write(to: sandboxHome.appendingPathComponent(".hey-boss/proxy/config.access-keys.json"), options: .atomic)
+        try! files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: sandboxHome.appendingPathComponent(".hey-boss/proxy/config.access-keys.json").path)
+    }
+    defer { try? files.removeItem(at: sandboxHome.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")) }
+    let work = sandboxHome.appendingPathComponent("Workspace/root")
+    try! files.createDirectory(at: work, withIntermediateDirectories: true)
+    try! Data(contentsOf: home.appendingPathComponent("Workspace/root/AGENTS.md")).write(to: work.appendingPathComponent("AGENTS.md"))
+    let prompts = try! String(contentsOf: URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_PROMPTS"]!), encoding: .utf8).components(separatedBy: "\n---\n")
+    let liveSave = folder.appendingPathComponent("live/current.json")
+    func send(_ ui: VoiceConversation, _ prompt: String) {
+        let previousHome = ProcessInfo.processInfo.environment["HOME"]
+        setenv("HOME", sandboxHome.path, 1)
+        ui.input.stringValue = prompt.trimmingCharacters(in: .whitespacesAndNewlines); ui.sendTyped()
+        wait("Agent starts") { ui.process != nil || ui.phase == .idle }
+        if let previousHome { setenv("HOME", previousHome, 1) } else { unsetenv("HOME") }
+        wait("Complex live agent turn finishes", seconds: 240) { ui.phase == .idle }
+        precondition(ui.rows.last?.stringValue.isEmpty == false && !ui.tools.isEmpty, ui.rows.last?.stringValue ?? "No reply")
+        print("LIVE reply: " + ui.rows.last!.stringValue)
+    }
+    let live = VoiceConversation(cli: cli, saveURL: liveSave)
+    live.show(); send(live, prompts[0]); layout(live)
+    precondition(files.fileExists(atPath: work.appendingPathComponent("conversation-agent-check/report.json").path), "Agent created and verified the expense report")
+    live.window.close()
+    // Wait for the previous process to release its state before constructing a new window.
+    RunLoop.main.run(until: Date().addingTimeInterval(1))
+    let resumed = VoiceConversation(cli: cli, saveURL: liveSave)
+    let oldTools = resumed.tools.count
+    send(resumed, prompts[1])
+    precondition(resumed.rows.last!.stringValue.localizedCaseInsensitiveContains("orchard"), "Resumed agent remembers information absent from files")
+    precondition(resumed.tools.count > oldTools, "Second turn performs new work")
+    layout(resumed)
+    if let button = resumed.tools.values.first { button.performClick(nil) }
+    resumed.window.appearance = NSAppearance(named: .darkAqua)
+    layout(resumed)
+    resumed.window.setContentSize(NSSize(width: 450, height: 610))
+    layout(resumed)
+    resumed.window.close()
+    print("PASS complex live shell task, batch execution, file verification, restart and remembered context")
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_INSPECT"] == "1" {
+        resumed.show(); withExtendedLifetime(resumed) { NSApp.run() }
+    }
+}
+
+@available(macOS 26, *)
 func auditSolChat(_ root: String) {
     let saved = URL(fileURLWithPath: root).appendingPathComponent("stream/current.json")
     let chat = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
@@ -5066,24 +5158,15 @@ func auditSolChat(_ root: String) {
     ], "transcript": ["type": "FoundationModels.Transcript", "version": 1]]
     try! JSONSerialization.data(withJSONObject: fixture).write(to: legacy)
     let restored = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: legacy)
-    let request = try! restored.conversationRequest()
-    let body = try! JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
-    precondition(request.url?.absoluteString == "http://127.0.0.1:8080/v1/responses" && request.httpMethod == "POST")
-    precondition(body["model"] as? String == "gpt-6.1-sol" && body["stream"] as? Bool == true && body["store"] as? Bool == false, "Use the configured alias through Hey Proxy")
-    precondition(body["tools"] == nil)
-    let history = body["input"] as! [[String: String]]
+    let history = restored.conversationHistory
     precondition(history.map { $0["role"]! } == ["user", "assistant"] && history[0]["content"]!.contains("> The fruit on this page is pineapple."), "Migrate saved chat history and captures without sending UI errors")
-    precondition(try! !restored.responseEvent(["type": "response.output_text.delta", "delta": "A partial reply"]))
-    for kind in ["error", "response.failed", "response.incomplete"] {
-        do { _ = try restored.responseEvent(["type": kind]); preconditionFailure("A failed response must not count as completed") }
-        catch { }
-    }
+    restored.event(["TextDelta": ["text": "A partial reply"]])
     restored.generationFailed(StorageError(description: "Sol disconnected before finishing this reply."))
     restored.window.close()
     let recovered = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: legacy)
     precondition(recovered.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Sol disconnected before finishing this reply."])
     recovered.window.close()
-    print("PASS Sol proxy request, alias, legacy history, captures, failed streams and partial-reply recovery")
+    print("PASS legacy history, captures and partial-reply recovery")
     if ProcessInfo.processInfo.environment["HEY_BOSS_SOL_LIVE"] == "1" {
         restored.input.stringValue = "Which fruit did I mention earlier? Answer in one word."
         restored.sendTyped()

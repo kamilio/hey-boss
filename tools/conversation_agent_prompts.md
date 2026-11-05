@@ -1,0 +1,5 @@
+Create a small expense report in a new folder named conversation-agent-check in your working folder. Remember the project nickname “orchard” in this conversation, but do not write the nickname into a file. First read the applicable AGENTS.md and list available skills. Use a batch for independent checks. Create expenses.csv with columns id,category,amount and these rows: a,travel,12.50; b,food,8.25; c,travel,7.50; b,food,8.25; d,books,21.00. Write a script that removes duplicate IDs, calculates totals by category and the grand total using exact cents, and writes report.json. Run it, then independently check the result. Keep your final reply to two short sentences. All files you create must stay inside conversation-agent-check.
+
+---
+
+Continue the expense report from earlier. Change the unique food expense from 8.25 to 9.75, rerun the script, and check that the grand total increased by exactly 1.50. Save the corrected report. Tell me the project nickname I asked you to remember, the original total, and the corrected total. Use the earlier conversation and the files, and keep your answer short.
